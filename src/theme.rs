@@ -99,6 +99,12 @@ pub struct Palette {
     pub pie_title_text: Color,
     pub pie_section_text: Color,
     pub pie_legend_text: Color,
+    /// mermaid's `cScale0..11`: section colours for timeline, mindmap, kanban, journey, git, ...
+    pub scale: Vec<Color>,
+    /// Text colour readable on each `scale` entry.
+    pub scale_text: Vec<Color>,
+    /// Whether this is a dark theme.
+    pub dark: bool,
 }
 
 fn c(s: &str) -> Color {
@@ -165,6 +171,9 @@ fn default_palette() -> Palette {
         pie_title_text: c("black"),
         pie_section_text: c("#333"),
         pie_legend_text: c("black"),
+        scale: Vec::new(),
+        scale_text: Vec::new(),
+        dark: false,
     }
 }
 
@@ -372,10 +381,53 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
         | ThemeName::ReduxColor
         | ThemeName::Null => default_palette(),
     };
+    p.dark = matches!(
+        theme,
+        ThemeName::Dark | ThemeName::NeoDark | ThemeName::ReduxDark | ThemeName::ReduxDarkColor
+    ) || color::parse(p.background.css()).is_some_and(Rgba::is_dark);
+    p.scale = color_scale(&p);
     for (k, v) in vars {
         apply_variable(&mut p, k, v);
     }
+    p.scale_text = p
+        .scale
+        .iter()
+        .map(|c| match color::parse(c.css()) {
+            Some(rgb) if rgb.is_dark() => Color::new("#ffffff"),
+            _ => Color::new("#333333"),
+        })
+        .collect();
     p
+}
+
+/// 12 section colours: hue steps from the theme's primary colour.
+fn color_scale(p: &Palette) -> Vec<Color> {
+    let base = color::parse(p.main_bkg.css()).unwrap_or(Rgba {
+        r: 0xec,
+        g: 0xec,
+        b: 0xff,
+        a: 1.0,
+    });
+    let (h, s, _) = base.to_hsl();
+    let (sat, light) = if p.dark {
+        (s.clamp(40.0, 60.0), 30.0)
+    } else {
+        (s.clamp(60.0, 90.0), 80.0)
+    };
+    (0..12)
+        .map(|i| hex(Rgba::from_hsl(h + i as f64 * 30.0, sat, light, 1.0)))
+        .collect()
+}
+
+impl Palette {
+    /// Section colour `i` (wraps around).
+    pub fn scale_color(&self, i: usize) -> &Color {
+        &self.scale[i % self.scale.len()]
+    }
+    /// Readable text colour on section colour `i`.
+    pub fn scale_text_color(&self, i: usize) -> &Color {
+        &self.scale_text[i % self.scale_text.len()]
+    }
 }
 
 fn apply_variable(p: &mut Palette, key: &str, value: &str) {
@@ -442,6 +494,16 @@ fn apply_variable(p: &mut Palette, key: &str, value: &str) {
             p.pie_outer_stroke_width = num().unwrap_or(p.pie_outer_stroke_width)
         }
         "pieOpacity" => p.pie_opacity = num().unwrap_or(p.pie_opacity),
+        k if k.starts_with("cScale")
+            && !k.starts_with("cScaleLabel")
+            && !k.starts_with("cScalePeer") =>
+        {
+            if let Some(i) = k[6..].parse::<usize>().ok().filter(|i| *i < 12) {
+                if p.scale.len() == 12 {
+                    p.scale[i] = v;
+                }
+            }
+        }
         k => {
             if let Some(i) = k.strip_prefix("pie").and_then(|n| n.parse::<usize>().ok()) {
                 if (1..=12).contains(&i) {

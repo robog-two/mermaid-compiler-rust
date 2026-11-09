@@ -14,6 +14,7 @@
 
 use crate::geom::{Point, Rect};
 
+pub mod boxes;
 pub mod rank;
 
 /// Flow direction.

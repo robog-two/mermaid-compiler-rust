@@ -165,6 +165,9 @@ pub struct MermaidConfig {
     pub class: GraphConfig,
     pub sequence: SequenceConfig,
     pub pie: PieConfig,
+    /// Every JSON layer applied, in order, for diagram-specific options that
+    /// have no typed field (read with [`MermaidConfig::section`]).
+    pub raw: Vec<Json>,
 }
 
 impl Default for MermaidConfig {
@@ -180,6 +183,7 @@ impl Default for MermaidConfig {
             class: GraphConfig::class(),
             sequence: SequenceConfig::default(),
             pie: PieConfig::default(),
+            raw: Vec::new(),
         }
     }
 }
@@ -240,11 +244,39 @@ impl MermaidConfig {
         if let Some(f) = j.get("sequence") {
             self.sequence.apply(f);
         }
+        self.raw.push(j.clone());
         if let Some(f) = j.get("pie") {
             set_f64(f, "textPosition", &mut self.pie.text_position);
             set_bool(f, "useMaxWidth", &mut self.pie.use_max_width);
         }
         Ok(self)
+    }
+
+    /// Latest value of `section.key` across all layers (e.g. `("gantt", "barHeight")`).
+    pub fn section(&self, section: &str, key: &str) -> Option<&Json> {
+        self.raw
+            .iter()
+            .rev()
+            .find_map(|j| j.get(section).and_then(|s| s.get(key)))
+    }
+
+    /// Numeric `section.key`, or `default`.
+    pub fn section_f64(&self, section: &str, key: &str, default: f64) -> f64 {
+        self.section(section, key)
+            .and_then(Json::as_f64)
+            .unwrap_or(default)
+    }
+
+    /// Boolean `section.key`, or `default`.
+    pub fn section_bool(&self, section: &str, key: &str, default: bool) -> bool {
+        self.section(section, key)
+            .and_then(Json::as_bool)
+            .unwrap_or(default)
+    }
+
+    /// mermaid's per-diagram `useMaxWidth` (default true).
+    pub fn use_max_width(&self, section: &str) -> bool {
+        self.section_bool(section, "useMaxWidth", true)
     }
 
     /// Resolve theme + variables + top-level font overrides into concrete colours.

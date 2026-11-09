@@ -1,11 +1,30 @@
 //! Diagram detection, shared preprocessing and per-diagram parsers/renderers.
 
+pub mod architecture;
+pub mod block;
+pub mod c4;
 pub mod class;
+pub mod er;
 pub mod flowchart;
+pub mod gantt;
+pub mod gitgraph;
 pub mod graph;
+pub mod info;
+pub mod journey;
+pub mod kanban;
+pub mod mindmap;
+pub mod packet;
 pub mod pie;
+pub mod quadrant;
+pub mod radar;
+pub mod requirement;
+pub mod sankey;
 pub mod sequence;
 pub mod state;
+pub mod timeline;
+pub mod treemap;
+pub mod xychart;
+pub mod zenuml;
 
 use crate::config::parse_yaml_subset;
 use crate::error::{Error, Result};
@@ -31,6 +50,25 @@ pub enum DiagramType {
     Pie,
     State,
     Class,
+    Er,
+    Gantt,
+    Journey,
+    GitGraph,
+    Mindmap,
+    Timeline,
+    Quadrant,
+    Requirement,
+    C4,
+    Sankey,
+    XyChart,
+    Block,
+    Packet,
+    Architecture,
+    Kanban,
+    Radar,
+    Treemap,
+    ZenUml,
+    Info,
 }
 
 /// Strip front-matter, directives, comments and accessibility statements.
@@ -171,47 +209,33 @@ pub fn detect(body: &str) -> Result<DiagramType> {
         .chars()
         .take_while(|c| !c.is_whitespace() && *c != ';' && *c != ':')
         .collect();
-    let unsupported = [
-        "erDiagram",
-        "gantt",
-        "journey",
-        "gitGraph",
-        "mindmap",
-        "timeline",
-        "quadrantChart",
-        "requirementDiagram",
-        "requirement",
-        "C4Context",
-        "C4Container",
-        "C4Component",
-        "C4Dynamic",
-        "C4Deployment",
-        "sankey-beta",
-        "sankey",
-        "xychart-beta",
-        "xychart",
-        "block-beta",
-        "block",
-        "packet-beta",
-        "packet",
-        "architecture-beta",
-        "architecture",
-        "kanban",
-        "radar-beta",
-        "treemap-beta",
-        "treemap",
-        "zenuml",
-        "info",
-    ];
     match word.as_str() {
         "graph" | "flowchart" | "flowchart-v2" | "flowchart-elk" => Ok(DiagramType::Flowchart),
         "sequenceDiagram" => Ok(DiagramType::Sequence),
         "pie" => Ok(DiagramType::Pie),
         "stateDiagram" | "stateDiagram-v2" => Ok(DiagramType::State),
         "classDiagram" | "classDiagram-v2" => Ok(DiagramType::Class),
-        w if unsupported.contains(&w) => Err(Error::UnsupportedDiagram {
-            kind: w.to_string(),
-        }),
+        "erDiagram" => Ok(DiagramType::Er),
+        "gantt" => Ok(DiagramType::Gantt),
+        "journey" => Ok(DiagramType::Journey),
+        "gitGraph" => Ok(DiagramType::GitGraph),
+        "mindmap" => Ok(DiagramType::Mindmap),
+        "timeline" => Ok(DiagramType::Timeline),
+        "quadrantChart" => Ok(DiagramType::Quadrant),
+        "requirementDiagram" | "requirement" => Ok(DiagramType::Requirement),
+        "C4Context" | "C4Container" | "C4Component" | "C4Dynamic" | "C4Deployment" => {
+            Ok(DiagramType::C4)
+        }
+        "sankey-beta" | "sankey" => Ok(DiagramType::Sankey),
+        "xychart-beta" | "xychart" => Ok(DiagramType::XyChart),
+        "block-beta" | "block" => Ok(DiagramType::Block),
+        "packet-beta" | "packet" => Ok(DiagramType::Packet),
+        "architecture-beta" | "architecture" => Ok(DiagramType::Architecture),
+        "kanban" => Ok(DiagramType::Kanban),
+        "radar-beta" | "radar" => Ok(DiagramType::Radar),
+        "treemap-beta" | "treemap" => Ok(DiagramType::Treemap),
+        "zenuml" => Ok(DiagramType::ZenUml),
+        "info" => Ok(DiagramType::Info),
         _ => Err(Error::UnknownDiagram {
             text: body.trim().to_string(),
         }),
@@ -272,10 +296,10 @@ mod tests {
         );
         assert_eq!(detect("pie title X").unwrap(), DiagramType::Pie);
         assert_eq!(detect("graph;A-->B").unwrap(), DiagramType::Flowchart);
-        assert!(matches!(
-            detect("gantt\n"),
-            Err(Error::UnsupportedDiagram { .. })
-        ));
+        assert_eq!(detect("gantt\n").unwrap(), DiagramType::Gantt);
+        assert_eq!(detect("C4Container\n").unwrap(), DiagramType::C4);
+        assert_eq!(detect("gitGraph:\n").unwrap(), DiagramType::GitGraph);
+        assert_eq!(detect("xychart-beta\n").unwrap(), DiagramType::XyChart);
         assert!(matches!(detect("hello"), Err(Error::UnknownDiagram { .. })));
     }
 

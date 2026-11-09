@@ -20,10 +20,12 @@ path = "src/main.rs"
 [features]
 default = ["png"]
 # PNG rasterisation via resvg (pure Rust). Disable with --no-default-features
-# for a zero-dependency build that supports SVG, PDF and Markdown output.
+# for a minimal build (only taffy) that supports SVG, PDF and Markdown output.
 png = ["dep:resvg"]
 
 [dependencies]
+# CSS flexbox / grid / block layout for box-shaped diagrams (block, kanban, C4, ...).
+taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "block_layout"] }
 resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts"], optional = true }
 
 [[bench]]

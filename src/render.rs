@@ -71,6 +71,82 @@ pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
                 cfg.pie.use_max_width,
             )
         }
+        DiagramType::Er => (
+            diagram::er::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("er"),
+        ),
+        DiagramType::Gantt => (
+            diagram::gantt::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("gantt"),
+        ),
+        DiagramType::Journey => (
+            diagram::journey::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("journey"),
+        ),
+        DiagramType::GitGraph => (
+            diagram::gitgraph::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("gitGraph"),
+        ),
+        DiagramType::Mindmap => (
+            diagram::mindmap::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("mindmap"),
+        ),
+        DiagramType::Timeline => (
+            diagram::timeline::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("timeline"),
+        ),
+        DiagramType::Quadrant => (
+            diagram::quadrant::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("quadrantChart"),
+        ),
+        DiagramType::Requirement => (
+            diagram::requirement::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("requirement"),
+        ),
+        DiagramType::C4 => (
+            diagram::c4::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("c4"),
+        ),
+        DiagramType::Sankey => (
+            diagram::sankey::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("sankey"),
+        ),
+        DiagramType::XyChart => (
+            diagram::xychart::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("xyChart"),
+        ),
+        DiagramType::Block => (
+            diagram::block::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("block"),
+        ),
+        DiagramType::Packet => (
+            diagram::packet::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("packet"),
+        ),
+        DiagramType::Architecture => (
+            diagram::architecture::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("architecture"),
+        ),
+        DiagramType::Kanban => (
+            diagram::kanban::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("kanban"),
+        ),
+        DiagramType::Radar => (
+            diagram::radar::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("radar"),
+        ),
+        DiagramType::Treemap => (
+            diagram::treemap::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("treemap"),
+        ),
+        DiagramType::ZenUml => (
+            diagram::zenuml::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("zenuml"),
+        ),
+        DiagramType::Info => (
+            diagram::info::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("info"),
+        ),
     };
     scene.acc_title = pre.acc_title;
     scene.acc_descr = pre.acc_descr;
