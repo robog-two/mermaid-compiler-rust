@@ -238,11 +238,11 @@ fn parse_relation(s: &str) -> Option<(String, String, Edge)> {
     let (left, start) = if let Some(l) = left.strip_suffix("<|") {
         (l, Head::Triangle)
     } else if let Some(l) = left.strip_suffix("()") {
-        (l, Head::Circle)
+        (l, Head::Lollipop)
     } else if let Some(l) = left.strip_suffix('*') {
         (l, Head::DiamondFilled)
     } else if let Some(l) = left.strip_suffix('<') {
-        (l, Head::Arrow)
+        (l, Head::Dependency)
     } else if left.len() > 1 && left.ends_with('o') && left[..left.len() - 1].ends_with([' ', '"'])
     {
         (&left[..left.len() - 1], Head::Diamond)
@@ -254,13 +254,13 @@ fn parse_relation(s: &str) -> Option<(String, String, Edge)> {
         Head::Triangle
     } else if let Some(r) = right.strip_prefix("()") {
         right = r;
-        Head::Circle
+        Head::Lollipop
     } else if let Some(r) = right.strip_prefix('*') {
         right = r;
         Head::DiamondFilled
     } else if let Some(r) = right.strip_prefix('>') {
         right = r;
-        Head::Arrow
+        Head::Dependency
     } else if right.starts_with("o ") || right.starts_with("o\"") {
         right = &right[1..];
         Head::Diamond
@@ -285,7 +285,7 @@ fn parse_relation(s: &str) -> Option<(String, String, Edge)> {
     }
     let mut e = Edge::new(Endpoint::Node(NodeId(0)), Endpoint::Node(NodeId(0)));
     e.line = if dotted {
-        LineKind::Dotted
+        LineKind::Dashed
     } else {
         LineKind::Solid
     };
@@ -466,7 +466,7 @@ mod tests {
         assert_eq!(zoo.label.as_deref(), Some("contains"));
         assert_eq!(
             (g.edges[2].line, g.edges[2].end),
-            (LineKind::Dotted, Head::Arrow)
+            (LineKind::Dashed, Head::Dependency)
         );
         assert_eq!(g.edges[3].start, Head::Diamond);
     }

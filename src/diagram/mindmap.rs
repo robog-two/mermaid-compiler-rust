@@ -260,11 +260,20 @@ fn measure(n: &Node, font: f64, padding: f64, max_w: f64) -> (Vec<String>, f64, 
     let tb = TextBlock::new(lines.clone(), font, false);
     let (tw, th) = (tb.width, tb.height.max(font * 1.5));
     let (w, h) = match n.shape {
-        NodeShape::Default => (tw + 2.0 * padding, th + 2.0 * padding),
-        NodeShape::Square | NodeShape::Rounded => (tw + 4.0 * padding, th + 2.0 * padding),
-        NodeShape::Hexagon => (tw + 4.0 * padding + th, th + 2.0 * padding),
+        // defaultMindmapNode.ts: w = tw + 8·(p/2), h = th + 2·(p/2).
+        NodeShape::Default => (tw + 4.0 * padding, th + padding),
+        // mindmapDb doubles the padding for rect / rounded / hexagon, then
+        // squareRect (tw + 4p', th + 2p'), roundedRect (tw + 2p', th + 2p') and
+        // hexagon (h = th + p', w = tw + p' + h/2) apply it.
+        NodeShape::Square => (tw + 8.0 * padding, th + 4.0 * padding),
+        NodeShape::Rounded => (tw + 4.0 * padding, th + 4.0 * padding),
+        NodeShape::Hexagon => {
+            let h = th + 2.0 * padding;
+            (tw + 2.0 * padding + h / 2.0, h)
+        }
+        // mindmapCircle → circle.ts with options.padding: r = hypot(tw, th)/2 + p.
         NodeShape::Circle => {
-            let d = tw.max(th) + 2.0 * padding;
+            let d = tw.hypot(th) + 2.0 * padding;
             (d, d)
         }
         NodeShape::Cloud => (tw + 4.0 * padding, th + 3.0 * padding),
@@ -507,7 +516,7 @@ fn shape_elements(shape: NodeShape, r: Rect, fill: &Color, pal: &Palette) -> Vec
             ]
         }
         NodeShape::Square => vec![Element::rect(r, 0.0, paint)],
-        NodeShape::Rounded => vec![Element::rect(r, 10.0_f64.min(r.h / 2.0), paint)],
+        NodeShape::Rounded => vec![Element::rect(r, 5.0, paint)],
         NodeShape::Circle => vec![Element::shape(Geometry::Circle { c, r: r.w / 2.0 }, paint)],
         NodeShape::Hexagon => {
             let m = r.h / 4.0;

@@ -1,6 +1,8 @@
 //! Graph IR shared by flowcharts, state diagrams and class diagrams, plus the
 //! pure renderer `GraphDiagram -> Scene` (layout → shapes → edges → labels).
 
+use super::markers::{self, End, MarkerColors};
+use super::shapes::{self, Boundary, PartStyle, ShapeMetrics};
 use crate::config::{Curve, GraphConfig};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::layout::{self, Direction, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode};
@@ -28,6 +30,8 @@ pub enum Endpoint {
 pub enum Shape {
     Rect,
     Rounded,
+    /// State-diagram state: `squareRect` sizing with 5px corners (`rect.basic { rx: 5px }`).
+    State,
     Stadium,
     Subroutine,
     Cylinder,
@@ -56,6 +60,43 @@ pub enum Shape {
     /// above the bold `label`; `sections[1]` (optional) holds the field lines
     /// drawn below a divider.
     Requirement,
+    // Extended flowchart shapes (`A@{ shape: … }`), see `shapes.rs`.
+    /// `text`: label only, no border.
+    Text,
+    /// `notch-rect` / `card`.
+    Card,
+    /// `lin-rect` / `shaded-process`.
+    LinedRect,
+    /// `delay` / `half-rounded-rectangle`.
+    Delay,
+    /// `tri` / `extract`.
+    Triangle,
+    /// `flip-tri` / `manual-file`.
+    FlippedTriangle,
+    /// `hourglass` / `collate`.
+    Hourglass,
+    /// `cross-circ` / `summary`.
+    CrossedCircle,
+    /// `sl-rect` / `manual-input`.
+    SlopedRect,
+    /// `win-pane` / `internal-storage`.
+    WindowPane,
+    /// `div-rect` / `divided-process`.
+    DividedRect,
+    /// `notch-pent` / `loop-limit`.
+    NotchedPentagon,
+    /// `st-rect` / `processes`.
+    StackedRect,
+    /// `tag-rect` / `tagged-process`.
+    TaggedRect,
+    /// `doc` / `document`.
+    Document,
+    /// `lin-cyl` / `disk`.
+    LinedCylinder,
+    /// `h-cyl` / `das`.
+    HorizontalCylinder,
+    /// `curv-trap` / `display`.
+    CurvedTrapezoid,
 }
 
 /// Inline style overrides (`style`, `classDef`, `linkStyle`).
@@ -170,6 +211,8 @@ impl Node {
 pub enum LineKind {
     Solid,
     Dotted,
+    /// `edge-pattern-dashed` (class `..`, ER non-identifying, requirement relations).
+    Dashed,
     Thick,
     Invisible,
 }
@@ -186,8 +229,14 @@ pub enum Head {
     Diamond,
     /// Filled diamond (composition).
     DiamondFilled,
-    /// Open `>` arrow (association / lollipop-free dependency).
+    /// Open chevron (requirement `requirement_arrow`).
     OpenArrow,
+    /// Filled barb (state transitions, `barbEnd`).
+    Barb,
+    /// Class `<` / `>` (`dependency` marker).
+    Dependency,
+    /// Class `()` (`lollipop` marker).
+    Lollipop,
     /// ER crow's-foot: exactly one (`||`).
     ErOnlyOne,
     /// ER crow's-foot: zero or one (`|o` / `o|`).
@@ -256,51 +305,104 @@ struct Look {
     edge_width: f64,
     thick_width: f64,
     dotted_dash: Vec<f64>,
+    dashed_dash: Vec<f64>,
     node_stroke_width: f64,
 }
 
 fn look(kind: DiagramKind) -> Look {
-    match kind {
-        DiagramKind::Flowchart => Look {
-            edge_width: 2.0,
-            thick_width: 3.5,
-            dotted_dash: vec![3.0],
-            node_stroke_width: 1.0,
-        },
-        _ => Look {
-            edge_width: 1.0,
-            thick_width: 2.5,
-            dotted_dash: vec![3.0],
-            node_stroke_width: 1.0,
-        },
+    // Global styles.ts: `.edge-thickness-normal { stroke-width: strokeWidth (1) }`,
+    // `.edge-thickness-thick { 3.5px }`, `.edge-pattern-dashed { 3 }`,
+    // `.edge-pattern-dotted { 2 }`; diagram styles override the patterns.
+    let (dotted_dash, dashed_dash) = match kind {
+        // er/styles.ts: `.edge-pattern-dashed { stroke-dasharray: 8,8 }`.
+        DiagramKind::Er => (vec![2.0], vec![8.0, 8.0]),
+        // state/styles.js: `.note-edge { stroke-dasharray: 5 }`.
+        DiagramKind::State => (vec![5.0], vec![3.0]),
+        _ => (vec![2.0], vec![3.0]),
+    };
+    Look {
+        edge_width: 1.0,
+        thick_width: 3.5,
+        dotted_dash,
+        dashed_dash,
+        node_stroke_width: 1.0,
     }
 }
 
-/// Clipping boundary of a drawn node.
-enum Boundary {
-    Rect(Rect),
-    Ellipse(Point, f64, f64),
-    Polygon(Point, Vec<Point>),
-}
-
-impl Boundary {
-    fn clip(&self, toward: Point) -> Point {
-        match self {
-            Boundary::Rect(r) => geom::clip_rect(r, toward),
-            Boundary::Ellipse(c, rx, ry) => geom::clip_ellipse(*c, *rx, *ry, toward),
-            Boundary::Polygon(c, pts) => geom::clip_polygon(*c, pts, toward),
-        }
-    }
+/// Rows of a `Shape::Compartments` node: height of every section, where its
+/// text block starts inside it, and the inset of left-aligned text.
+struct CompartmentLayout {
+    heights: Vec<f64>,
+    text_top: Vec<f64>,
+    inset: f64,
+    rx: f64,
 }
 
 struct Measured {
     block: TextBlock,
     sections: Vec<TextBlock>,
+    compartments: Option<CompartmentLayout>,
+    table: Option<TableMetrics>,
+    label_offset: Point,
+    metrics: ShapeMetrics,
     w: f64,
     h: f64,
 }
 
-fn measure_node(node: &Node, pad: f64, font: f64, horizontal: bool) -> Measured {
+fn compartment_layout(
+    kind: DiagramKind,
+    blocks: &[TextBlock],
+    pad: f64,
+) -> (CompartmentLayout, f64, f64) {
+    let content = |b: &TextBlock| if b.is_empty() { 0.0 } else { b.height };
+    let max_w = blocks.iter().map(|b| b.width).fold(0.0, f64::max);
+    if kind == DiagramKind::State {
+        // rectWithTitle.ts: box = labels + padding; title 3px below the top,
+        // divider `title + padding/2` down, description 5px below it.
+        let hp = pad / 2.0;
+        let title = blocks.first().map(content).unwrap_or(0.0);
+        let rest: f64 = blocks.iter().skip(1).map(content).sum();
+        let layout = CompartmentLayout {
+            heights: vec![title + hp, rest + 5.0 + pad],
+            text_top: vec![3.0, hp + 5.0 + 3.0],
+            inset: hp,
+            rx: 5.0,
+        };
+        let h = layout.heights.iter().sum();
+        return (layout, max_w + pad, h);
+    }
+    // classBox.ts / shapeUtil.ts: every compartment is its text plus PADDING
+    // above and below; an empty members box is GAP/2 + 2·GAP (2·GAP for empty
+    // methods), and a class with neither gets two 1.5·GAP boxes.
+    let all_empty = blocks.iter().skip(1).all(|b| b.is_empty());
+    let heights: Vec<f64> = blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| match (i, b.is_empty()) {
+            (0, _) | (_, false) => content(b) + 2.0 * pad,
+            _ if all_empty => 1.5 * pad,
+            (1, true) => 2.5 * pad,
+            _ => 2.0 * pad,
+        })
+        .collect();
+    let layout = CompartmentLayout {
+        text_top: vec![pad; heights.len()],
+        heights,
+        inset: pad,
+        rx: 0.0,
+    };
+    let h = layout.heights.iter().sum();
+    (layout, max_w + 2.0 * pad, h)
+}
+
+fn measure_node(
+    node: &Node,
+    kind: DiagramKind,
+    pad: f64,
+    cell_pad: f64,
+    font: f64,
+    horizontal: bool,
+) -> Measured {
     let mut block = TextBlock::label(&node.label, font);
     if node.style.bold == Some(true) {
         block = TextBlock::new(block.lines, font, true);
@@ -311,76 +413,54 @@ fn measure_node(node: &Node, pad: f64, font: f64, horizontal: bool) -> Measured 
             .height
             .max(if block.is_empty() { 0.0 } else { font * 1.5 }),
     );
+    // Notes carry their own padding: classDb `config.class.padding ?? 6`,
+    // state dataFetcher `config.flowchart.padding` (15).
+    let node_pad = match (node.shape, kind) {
+        (Shape::Note, DiagramKind::Class) => 6.0,
+        (Shape::Note, DiagramKind::State) => 15.0,
+        _ => pad,
+    };
+    let metrics = ShapeMetrics::classic(node.shape, node_pad);
     let mut sections = Vec::new();
-    let (w, h) = match node.shape {
-        Shape::Rect | Shape::Rounded | Shape::Note => (tw + 2.0 * pad, th + 2.0 * pad),
-        Shape::Stadium => (tw + th + 2.0 * pad, th + 2.0 * pad),
-        Shape::Subroutine => (tw + 2.0 * pad + 16.0, th + 2.0 * pad),
-        Shape::Cylinder => {
-            let w = tw + 2.0 * pad;
-            let ry = w / 2.0 / (2.5 + w / 50.0);
-            (w, th + 2.0 * pad + 2.0 * ry)
+    let mut compartments = None;
+    let mut table = None;
+    let mut label_offset = Point::default();
+    let (w, h) = match shapes::size(node.shape, tw, th, &metrics, horizontal) {
+        Some(s) => {
+            label_offset = s.label_offset;
+            (s.w, s.h)
         }
-        Shape::Circle => {
-            let d = tw.max(th) + pad;
-            (d, d)
-        }
-        Shape::DoubleCircle => {
-            let d = tw.max(th) + pad + 10.0;
-            (d, d)
-        }
-        Shape::Asymmetric => {
-            let h = th + 2.0 * pad;
-            (tw + 2.0 * pad + h / 4.0, h)
-        }
-        Shape::Diamond => {
-            let s = tw + th + 2.0 * pad;
-            (s, s)
-        }
-        Shape::Hexagon => {
-            let h = th + 2.0 * pad;
-            (tw + 2.0 * pad + h / 2.0, h)
-        }
-        Shape::LeanRight | Shape::LeanLeft | Shape::Trapezoid | Shape::InvTrapezoid => {
-            let h = th + 2.0 * pad;
-            (tw + 2.0 * pad + 2.0 * h / 3.0, h)
-        }
-        Shape::StateStart | Shape::StateEnd => (14.0, 14.0),
-        Shape::ForkBar => {
-            if horizontal {
-                (8.0, 70.0)
-            } else {
-                (70.0, 8.0)
+        None => match node.shape {
+            Shape::Compartments => {
+                sections = node
+                    .sections
+                    .iter()
+                    .map(|s| TextBlock::new(s.lines.clone(), font, s.bold))
+                    .collect();
+                let (layout, w, h) = compartment_layout(kind, &sections, pad);
+                compartments = Some(layout);
+                (w, h)
             }
-        }
-        Shape::Choice => (28.0, 28.0),
-        Shape::Compartments => {
-            sections = node
-                .sections
-                .iter()
-                .map(|s| TextBlock::new(s.lines.clone(), font, s.bold))
-                .collect();
-            let w = sections.iter().map(|b| b.width).fold(tw, f64::max) + 2.0 * pad;
-            let h: f64 = sections
-                .iter()
-                .map(|b| b.height.max(font * 0.5) + pad)
-                .sum::<f64>()
-                .max(th + pad);
-            (w.max(60.0), h.max(30.0))
-        }
-        Shape::Invisible => (tw.max(20.0), th.max(10.0)),
-        Shape::EntityTable => {
-            let t = table_metrics(node, pad, font);
-            (t.w, t.h)
-        }
-        Shape::Requirement => {
-            let r = requirement_metrics(node, pad, font);
-            (r.w, r.h)
-        }
+            Shape::EntityTable => {
+                let t = table_metrics(node, pad, cell_pad, font);
+                let size = (t.w, t.h);
+                table = Some(t);
+                size
+            }
+            Shape::Requirement => {
+                let r = requirement_metrics(node, font);
+                (r.w, r.h)
+            }
+            _ => (tw.max(20.0), th.max(10.0)),
+        },
     };
     Measured {
         block,
         sections,
+        compartments,
+        table,
+        label_offset,
+        metrics,
         w,
         h,
     }
@@ -409,7 +489,16 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
 
     let measured: Vec<Measured> = nodes
         .iter()
-        .map(|n| measure_node(n, cfg.padding, font, horizontal))
+        .map(|n| {
+            measure_node(
+                n,
+                g.kind,
+                cfg.padding,
+                cfg.diagram_padding,
+                font,
+                horizontal,
+            )
+        })
         .collect();
     let cluster_titles: Vec<TextBlock> = g
         .clusters
@@ -544,7 +633,7 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
     let mut boundaries = Vec::with_capacity(nodes.len());
     for (i, (n, m)) in nodes.iter().zip(&measured).enumerate() {
         let c = out.nodes[i];
-        let (els, boundary) = node_elements(n, m, c, pal, &lk, cfg.padding, font);
+        let (els, boundary) = node_elements(n, m, c, pal, &lk, font);
         bounds.add_rect(Rect::centered(c, m.w, m.h));
         boundaries.push(boundary);
         if n.shape != Shape::Invisible {
@@ -605,13 +694,28 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
         let mut heads = Vec::new();
         let last = pts.len() - 1;
         let end_dir = pts[last].minus(pts[last - 1]).norm();
-        let (end_els, end_back) =
-            head_elements(e.end, pts[last], end_dir, &stroke, &pal.background, width);
-        heads.extend(end_els);
         let start_dir = pts[0].minus(pts[1]).norm();
-        let (start_els, start_back) =
-            head_elements(e.start, pts[0], start_dir, &stroke, &pal.background, width);
-        heads.extend(start_els);
+        let colors = MarkerColors {
+            line: &stroke,
+            background: &pal.main_bkg,
+        };
+        heads.extend(markers::elements(
+            e.end,
+            End::End,
+            pts[last],
+            end_dir,
+            colors,
+            width,
+        ));
+        heads.extend(markers::elements(
+            e.start,
+            End::Start,
+            pts[0],
+            start_dir,
+            colors,
+            width,
+        ));
+        let (end_back, start_back) = (markers::pullback(e.end), markers::pullback(e.start));
         if end_back > 0.0 && pts[last].dist(pts[last - 1]) > end_back {
             pts[last] = pts[last].minus(end_dir.scale(end_back));
         }
@@ -627,11 +731,11 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
             Curve::Step => geom::polyline(&step_points(&pts, horizontal)),
         };
         let mut paint = Paint::stroke(&stroke, width);
-        paint.dash = e
-            .style
-            .dash
-            .clone()
-            .or_else(|| (e.line == LineKind::Dotted).then(|| lk.dotted_dash.clone()));
+        paint.dash = e.style.dash.clone().or_else(|| match e.line {
+            LineKind::Dotted => Some(lk.dotted_dash.clone()),
+            LineKind::Dashed => Some(lk.dashed_dash.clone()),
+            _ => None,
+        });
         let from_id = endpoint_id(g, e.from);
         let to_id = endpoint_id(g, e.to);
         let mut children = vec![Element::classed_shape(
@@ -785,206 +889,98 @@ fn step_points(pts: &[Point], horizontal: bool) -> Vec<Point> {
     out
 }
 
-/// Arrowhead geometry with its tip at `tip`, pointing along `dir`.
-/// Returns the elements and how far the line should be pulled back.
-fn head_elements(
-    head: Head,
-    tip: Point,
-    dir: Point,
-    stroke: &Color,
-    bg: &Color,
-    width: f64,
-) -> (Vec<Element>, f64) {
-    let perp = Point::new(-dir.y, dir.x);
-    let at = |back: f64, side: f64| tip.minus(dir.scale(back)).plus(perp.scale(side));
-    match head {
-        Head::None => (vec![], 0.0),
-        Head::Arrow => {
-            let (len, hw) = (8.0 + width, 4.0 + width / 2.0);
-            (
-                vec![Element::classed_shape(
-                    Geometry::Path(geom::polygon(&[tip, at(len, hw), at(len, -hw)])),
-                    Paint::fill(stroke),
-                    "arrowheadPath",
-                )],
-                len * 0.8,
-            )
-        }
-        Head::Circle => {
-            let r = 4.5;
-            (
-                vec![Element::shape(
-                    Geometry::Circle { c: at(r, 0.0), r },
-                    Paint::both(stroke, stroke, 1.0),
-                )],
-                2.0 * r,
-            )
-        }
-        Head::Cross => {
-            let s = 4.5;
-            let c = at(s, 0.0);
-            let p = Paint::stroke(stroke, 2.0);
-            let d1 = dir.plus(perp).scale(s / 2f64.sqrt());
-            let d2 = dir.minus(perp).scale(s / 2f64.sqrt());
-            (
-                vec![
-                    Element::line(c.minus(d1), c.plus(d1), p.clone()),
-                    Element::line(c.minus(d2), c.plus(d2), p),
-                ],
-                s,
-            )
-        }
-        Head::Triangle => {
-            let (len, hw) = (16.0, 8.0);
-            (
-                vec![Element::shape(
-                    Geometry::Path(geom::polygon(&[tip, at(len, hw), at(len, -hw)])),
-                    Paint::both(bg, stroke, 1.0),
-                )],
-                len,
-            )
-        }
-        Head::Diamond | Head::DiamondFilled => {
-            let (len, hw) = (18.0, 6.0);
-            let fill = if head == Head::DiamondFilled {
-                stroke
-            } else {
-                bg
-            };
-            (
-                vec![Element::shape(
-                    Geometry::Path(geom::polygon(&[
-                        tip,
-                        at(len / 2.0, hw),
-                        at(len, 0.0),
-                        at(len / 2.0, -hw),
-                    ])),
-                    Paint::both(fill, stroke, 1.0),
-                )],
-                len,
-            )
-        }
-        Head::OpenArrow => {
-            let (len, hw) = (10.0, 6.0);
-            let cmds = vec![
-                PathCmd::MoveTo(at(len, hw)),
-                PathCmd::LineTo(tip),
-                PathCmd::LineTo(at(len, -hw)),
-            ];
-            (vec![Element::path(cmds, Paint::stroke(stroke, 1.0))], 0.0)
-        }
-        Head::ErOnlyOne | Head::ErZeroOrOne | Head::ErOneOrMore | Head::ErZeroOrMore => {
-            let hw = 8.0;
-            let p = Paint::stroke(stroke, width.max(1.0));
-            let bar = |back: f64| Element::line(at(back, hw), at(back, -hw), p.clone());
-            let foot = |apex: f64| {
-                Element::path(
-                    vec![
-                        PathCmd::MoveTo(at(0.0, hw)),
-                        PathCmd::LineTo(at(apex, 0.0)),
-                        PathCmd::LineTo(at(0.0, -hw)),
-                    ],
-                    p.clone(),
-                )
-            };
-            let ring = |back: f64| {
-                Element::shape(
-                    Geometry::Circle {
-                        c: at(back, 0.0),
-                        r: 5.0,
-                    },
-                    Paint::both(bg, stroke, width.max(1.0)),
-                )
-            };
-            let els = match head {
-                Head::ErOnlyOne => vec![bar(8.0), bar(14.0)],
-                Head::ErZeroOrOne => vec![bar(8.0), ring(19.0)],
-                Head::ErOneOrMore => vec![foot(15.0), bar(19.0)],
-                _ => vec![foot(15.0), ring(25.0)],
-            };
-            (els, 0.0)
-        }
-        Head::CirclePlus => {
-            let r = 7.0;
-            let c = at(r, 0.0);
-            let p = Paint::stroke(stroke, 1.0);
-            (
-                vec![
-                    Element::shape(Geometry::Circle { c, r }, Paint::both(bg, stroke, 1.0)),
-                    Element::line(c.minus(dir.scale(r)), c.plus(dir.scale(r)), p.clone()),
-                    Element::line(c.minus(perp.scale(r)), c.plus(perp.scale(r)), p),
-                ],
-                2.0 * r,
-            )
-        }
-    }
-}
-
 /// Column geometry of a `Shape::EntityTable` node.
 struct TableMetrics {
     cols: Vec<f64>,
     header_h: f64,
     row_h: f64,
+    /// Left inset of cell text (`PADDING / 2`).
+    text_inset: f64,
     w: f64,
     h: f64,
 }
 
-/// Horizontal padding inside an entity-table cell.
-const CELL_PAD: f64 = 8.0;
-
-fn table_metrics(node: &Node, pad: f64, font: f64) -> TableMetrics {
+/// `erBox.ts`: `text_pad` is `er.entityPadding` (TEXT_PADDING, row/header
+/// slack) and `cell_pad` is `er.diagramPadding` (PADDING, per-column slack).
+fn table_metrics(node: &Node, text_pad: f64, cell_pad: f64, font: f64) -> TableMetrics {
     let ncols = node
         .sections
         .iter()
         .map(|s| s.lines.len())
         .max()
         .unwrap_or(0);
-    let mut cols = vec![0.0f64; ncols];
+    let label = TextBlock::label(&node.label, font);
+    let line_h = font * 1.5;
+    if node.sections.is_empty() {
+        // drawRect with labelPaddingX = PADDING, labelPaddingY = 1.5·PADDING,
+        // widened to er.minEntityWidth (100).
+        return TableMetrics {
+            cols: Vec::new(),
+            header_h: 0.0,
+            row_h: 0.0,
+            text_inset: cell_pad / 2.0,
+            w: (label.width + 2.0 * cell_pad).max(100.0),
+            h: label.height.max(line_h) + 3.0 * cell_pad,
+        };
+    }
+    // Type and name columns are always present; keys / comment only when used.
+    let mut cols: Vec<f64> = (0..ncols)
+        .map(|j| {
+            let used = node
+                .sections
+                .iter()
+                .any(|r| r.lines.get(j).is_some_and(|c| !c.is_empty()));
+            if j < 2 || used { cell_pad } else { 0.0 }
+        })
+        .collect();
+    let mut widest: f64 = label.width;
     for row in &node.sections {
         for (j, cell) in row.lines.iter().enumerate() {
             if !cell.is_empty() {
-                cols[j] = cols[j].max(crate::text::line_width(cell, font, false) + 2.0 * CELL_PAD);
+                let tw = crate::text::line_width(cell, font, false);
+                widest = widest.max(tw);
+                cols[j] = cols[j].max(tw + cell_pad);
             }
         }
     }
-    let label = TextBlock::label(&node.label, font);
-    let line_h = font * 1.5;
-    let header_h = label.height.max(line_h) + pad;
-    let row_h = line_h + 6.0;
-    let header_w = label.width + 2.0 * pad;
     let sum: f64 = cols.iter().sum();
-    let w = sum.max(header_w).max(100.0);
     let used = cols.iter().filter(|c| **c > 0.0).count();
-    if used > 0 && w > sum {
-        let extra = (w - sum) / used as f64;
+    let need = label.width + 2.0 * cell_pad;
+    if used > 0 && need > sum {
+        let extra = (need - sum) / used as f64;
         for c in cols.iter_mut().filter(|c| **c > 0.0) {
             *c += extra;
         }
     }
-    let h = if node.sections.is_empty() {
-        (label.height + 2.0 * pad).max(60.0)
-    } else {
-        header_h + row_h * node.sections.len() as f64
-    };
+    let sum: f64 = cols.iter().sum();
+    let header_h = label.height.max(line_h) + text_pad;
+    let row_h = line_h + text_pad;
     TableMetrics {
+        w: sum.max(widest + 2.0 * cell_pad),
+        h: header_h + row_h * node.sections.len() as f64,
         cols,
         header_h,
         row_h,
-        w,
-        h,
+        text_inset: cell_pad / 2.0,
     }
 }
+
+/// `requirementBox.ts`: fixed `padding = 20` and `gap = 20`.
+const REQ_PADDING: f64 = 20.0;
+const REQ_GAP: f64 = 20.0;
 
 /// Text blocks and size of a `Shape::Requirement` node.
 struct RequirementMetrics {
     stereo: TextBlock,
     name: TextBlock,
     body: TextBlock,
+    /// Top of the first text line below the box top (and below the divider).
+    top: f64,
     w: f64,
     h: f64,
 }
 
-fn requirement_metrics(node: &Node, pad: f64, font: f64) -> RequirementMetrics {
+fn requirement_metrics(node: &Node, font: f64) -> RequirementMetrics {
     let section = |i: usize| -> Vec<String> {
         node.sections
             .get(i)
@@ -998,16 +994,19 @@ fn requirement_metrics(node: &Node, pad: f64, font: f64) -> RequirementMetrics {
         true,
     );
     let body = TextBlock::new(section(1), font, false);
-    let w = stereo.width.max(name.width).max(body.width) + 2.0 * pad;
-    let mut h = pad + stereo.height + name.height + pad;
+    let w = stereo.width.max(name.width).max(body.width) + REQ_PADDING;
+    // Labels are centred on their y offset, so the content box starts half a
+    // line above the first one; the box adds `padding` to that content box.
+    let mut h = stereo.height + name.height + REQ_GAP;
     if !body.is_empty() {
-        h += body.height + pad / 2.0;
+        h += body.height + REQ_PADDING;
     }
     RequirementMetrics {
+        top: REQ_PADDING - font * 0.75,
         stereo,
         name,
         body,
-        w: w.max(120.0),
+        w,
         h,
     }
 }
@@ -1018,12 +1017,11 @@ fn node_elements(
     c: Point,
     pal: &Palette,
     lk: &Look,
-    pad: f64,
     font: f64,
 ) -> (Vec<Element>, Boundary) {
     let (w, h) = (m.w, m.h);
     let r = Rect::centered(c, w, h);
-    let (x0, y0, x1, y1) = (r.x, r.y, r.right(), r.bottom());
+    let (x0, y0, x1) = (r.x, r.y, r.right());
     let default_fill = match n.shape {
         Shape::Note => &pal.note_bkg,
         Shape::StateStart | Shape::ForkBar => &pal.special_state,
@@ -1053,393 +1051,272 @@ fn node_elements(
             pal.node_text.clone()
         }
     });
-    let poly = |pts: Vec<Point>, paint: &Paint| {
-        (
-            Element::classed_shape(
-                Geometry::Path(geom::polygon(&pts)),
-                paint.clone(),
-                "label-container",
-            ),
-            Boundary::Polygon(c, pts),
-        )
-    };
 
     let mut els = Vec::new();
-    let boundary = match n.shape {
-        Shape::Rect | Shape::Note | Shape::Invisible => {
-            els.push(Element::classed_shape(
-                Geometry::Rect { rect: r, rx: 0.0 },
-                paint.clone(),
-                "basic label-container",
-            ));
-            Boundary::Rect(r)
+    let boundary = if let Some(o) = shapes::outline(n.shape, c, w, h, &m.metrics) {
+        for part in o.parts {
+            match part.style {
+                PartStyle::Body => {
+                    let class = match part.geom {
+                        Geometry::Path(_) if n.shape != Shape::Cylinder => "label-container",
+                        _ => "basic label-container",
+                    };
+                    els.push(Element::classed_shape(part.geom, paint.clone(), class));
+                }
+                PartStyle::Line => els.push(Element::shape(
+                    part.geom,
+                    Paint::stroke(&stroke, paint.stroke_width),
+                )),
+                PartStyle::Hidden => {}
+            }
         }
-        Shape::Rounded => {
-            els.push(Element::classed_shape(
-                Geometry::Rect { rect: r, rx: 5.0 },
-                paint.clone(),
-                "basic label-container",
-            ));
-            Boundary::Rect(r)
-        }
-        Shape::Stadium => {
-            els.push(Element::classed_shape(
-                Geometry::Rect {
-                    rect: r,
-                    rx: h / 2.0,
-                },
-                paint.clone(),
-                "basic label-container",
-            ));
-            Boundary::Rect(r)
-        }
-        Shape::Subroutine => {
-            els.push(Element::classed_shape(
-                Geometry::Rect { rect: r, rx: 0.0 },
-                paint.clone(),
-                "basic label-container",
-            ));
-            let lp = Paint::stroke(&stroke, paint.stroke_width);
-            els.push(Element::line(
-                Point::new(x0 + 8.0, y0),
-                Point::new(x0 + 8.0, y1),
-                lp.clone(),
-            ));
-            els.push(Element::line(
-                Point::new(x1 - 8.0, y0),
-                Point::new(x1 - 8.0, y1),
-                lp,
-            ));
-            Boundary::Rect(r)
-        }
-        Shape::Cylinder => {
-            let rx = w / 2.0;
-            let ry = rx / (2.5 + w / 50.0);
-            let pi = std::f64::consts::PI;
-            let top_c = Point::new(c.x, y0 + ry);
-            let bot_c = Point::new(c.x, y1 - ry);
-            let mut body = vec![
-                PathCmd::MoveTo(Point::new(x0, y0 + ry)),
-                PathCmd::LineTo(Point::new(x0, y1 - ry)),
-            ];
-            body.extend(geom::elliptic_arc_cubics(bot_c, rx, ry, pi, 0.0));
-            body.push(PathCmd::LineTo(Point::new(x1, y0 + ry)));
-            body.extend(geom::elliptic_arc_cubics(top_c, rx, ry, 0.0, -pi));
-            body.push(PathCmd::Close);
-            els.push(Element::classed_shape(
-                Geometry::Path(body),
-                paint.clone(),
-                "basic label-container",
-            ));
-            let mut front = vec![PathCmd::MoveTo(Point::new(x0, y0 + ry))];
-            front.extend(geom::elliptic_arc_cubics(top_c, rx, ry, pi, 0.0));
-            els.push(Element::path(
-                front,
-                Paint::stroke(&stroke, paint.stroke_width),
-            ));
-            Boundary::Rect(r)
-        }
-        Shape::Circle => {
-            els.push(Element::classed_shape(
-                Geometry::Circle { c, r: w / 2.0 },
-                paint.clone(),
-                "basic label-container",
-            ));
-            Boundary::Ellipse(c, w / 2.0, h / 2.0)
-        }
-        Shape::DoubleCircle => {
-            els.push(Element::classed_shape(
-                Geometry::Circle { c, r: w / 2.0 },
-                paint.clone(),
-                "outer-circle",
-            ));
-            els.push(Element::classed_shape(
-                Geometry::Circle {
-                    c,
-                    r: w / 2.0 - 5.0,
-                },
-                paint.clone(),
-                "inner-circle",
-            ));
-            Boundary::Ellipse(c, w / 2.0, h / 2.0)
-        }
-        Shape::Asymmetric => {
-            let (e, b) = poly(
-                vec![
-                    Point::new(x0, y0),
-                    Point::new(x1, y0),
-                    Point::new(x1, y1),
-                    Point::new(x0, y1),
-                    Point::new(x0 + h / 4.0, c.y),
-                ],
-                &paint,
-            );
-            els.push(e);
-            b
-        }
-        Shape::Diamond | Shape::Choice => {
-            let (e, b) = poly(
-                vec![
-                    Point::new(c.x, y0),
-                    Point::new(x1, c.y),
-                    Point::new(c.x, y1),
-                    Point::new(x0, c.y),
-                ],
-                &paint,
-            );
-            els.push(e);
-            b
-        }
-        Shape::Hexagon => {
-            let m4 = h / 4.0;
-            let (e, b) = poly(
-                vec![
-                    Point::new(x0 + m4, y0),
-                    Point::new(x1 - m4, y0),
-                    Point::new(x1, c.y),
-                    Point::new(x1 - m4, y1),
-                    Point::new(x0 + m4, y1),
-                    Point::new(x0, c.y),
-                ],
-                &paint,
-            );
-            els.push(e);
-            b
-        }
-        Shape::LeanRight | Shape::LeanLeft | Shape::Trapezoid | Shape::InvTrapezoid => {
-            let s = h / 3.0;
-            let pts = match n.shape {
-                Shape::LeanRight => vec![
-                    Point::new(x0 + s, y0),
-                    Point::new(x1, y0),
-                    Point::new(x1 - s, y1),
-                    Point::new(x0, y1),
-                ],
-                Shape::LeanLeft => vec![
-                    Point::new(x0, y0),
-                    Point::new(x1 - s, y0),
-                    Point::new(x1, y1),
-                    Point::new(x0 + s, y1),
-                ],
-                Shape::Trapezoid => vec![
-                    Point::new(x0 + s, y0),
-                    Point::new(x1 - s, y0),
-                    Point::new(x1, y1),
-                    Point::new(x0, y1),
-                ],
-                _ => vec![
-                    Point::new(x0, y0),
-                    Point::new(x1, y0),
-                    Point::new(x1 - s, y1),
-                    Point::new(x0 + s, y1),
-                ],
-            };
-            let (e, b) = poly(pts, &paint);
-            els.push(e);
-            b
-        }
-        Shape::StateStart => {
-            els.push(Element::shape(
-                Geometry::Circle { c, r: 7.0 },
-                Paint::both(&fill, &stroke, 1.0),
-            ));
-            Boundary::Ellipse(c, 7.0, 7.0)
-        }
-        Shape::StateEnd => {
-            els.push(Element::shape(
-                Geometry::Circle { c, r: 7.0 },
-                Paint::both(&pal.background, &stroke, 1.5),
-            ));
-            els.push(Element::shape(
-                Geometry::Circle { c, r: 4.0 },
-                Paint::fill(&stroke),
-            ));
-            Boundary::Ellipse(c, 7.0, 7.0)
-        }
-        Shape::ForkBar => {
-            els.push(Element::shape(
-                Geometry::Rect { rect: r, rx: 0.0 },
-                Paint::both(&fill, &stroke, 1.0),
-            ));
-            Boundary::Rect(r)
-        }
-        Shape::Compartments => {
-            els.push(Element::classed_shape(
-                Geometry::Rect {
-                    rect: r,
-                    rx: if lk.edge_width > 1.5 { 0.0 } else { 3.0 },
-                },
-                paint.clone(),
-                "basic label-container",
-            ));
-            let mut y = y0;
-            for (i, (sec, block)) in n.sections.iter().zip(&m.sections).enumerate() {
-                let sh = block.height.max(font * 0.5) + pad;
-                if i > 0 {
+        o.boundary
+    } else {
+        match n.shape {
+            // stateStart.ts: r = 7.
+            Shape::StateStart => {
+                els.push(Element::shape(
+                    Geometry::Circle { c, r: 7.0 },
+                    Paint::both(&fill, &stroke, 1.0),
+                ));
+                Boundary::Ellipse(c, 7.0, 7.0)
+            }
+            // stateEnd.ts: rough circles of diameter 14 and 14·5/14 = 5, both
+            // stroked 2px.
+            Shape::StateEnd => {
+                els.push(Element::shape(
+                    Geometry::Circle { c, r: 7.0 },
+                    Paint::both(&pal.background, &stroke, 2.0),
+                ));
+                els.push(Element::shape(
+                    Geometry::Circle { c, r: 2.5 },
+                    Paint::both(&stroke, &stroke, 2.0),
+                ));
+                Boundary::Ellipse(c, 7.0, 7.0)
+            }
+            Shape::ForkBar => {
+                els.push(Element::shape(
+                    Geometry::Rect { rect: r, rx: 0.0 },
+                    Paint::both(&fill, &stroke, 1.0),
+                ));
+                Boundary::Rect(r)
+            }
+            Shape::Compartments => {
+                let Some(layout) = &m.compartments else {
+                    return (els, Boundary::Rect(r));
+                };
+                els.push(Element::classed_shape(
+                    Geometry::Rect {
+                        rect: r,
+                        rx: layout.rx,
+                    },
+                    paint.clone(),
+                    "basic label-container",
+                ));
+                let mut y = y0;
+                for (i, (sec, block)) in n.sections.iter().zip(&m.sections).enumerate() {
+                    let sh = layout.heights.get(i).copied().unwrap_or(0.0);
+                    if i > 0 {
+                        els.push(Element::classed_shape(
+                            Geometry::Path(vec![
+                                PathCmd::MoveTo(Point::new(x0, y)),
+                                PathCmd::LineTo(Point::new(x1, y)),
+                            ]),
+                            Paint::stroke(&stroke, 1.0),
+                            "divider",
+                        ));
+                    }
+                    if !block.is_empty() {
+                        let top = y + layout.text_top.get(i).copied().unwrap_or(0.0);
+                        let center = Point::new(c.x, top + block.height / 2.0);
+                        let mut t = Text::centered(
+                            center,
+                            &block.lines,
+                            font,
+                            block.line_height,
+                            &text_color,
+                        );
+                        t.bold = sec.bold;
+                        if !sec.centered {
+                            t = t.anchored(Anchor::Start, x0 + layout.inset);
+                        }
+                        els.push(Element::classed_text(t, "label"));
+                    }
+                    y += sh;
+                }
+                return (els, Boundary::Rect(r));
+            }
+            Shape::EntityTable => {
+                let colors = TableColors {
+                    paint: &paint,
+                    stroke: &stroke,
+                    text: &text_color,
+                    odd_row: &pal.background,
+                };
+                return (
+                    entity_table_elements(n, m, r, colors, font),
+                    Boundary::Rect(r),
+                );
+            }
+            Shape::Requirement => {
+                let rm = requirement_metrics(n, font);
+                els.push(Element::classed_shape(
+                    Geometry::Rect { rect: r, rx: 0.0 },
+                    paint.clone(),
+                    "basic label-container",
+                ));
+                let mut y = y0 + rm.top;
+                for (block, class) in [(&rm.stereo, "stereotype"), (&rm.name, "nodeLabel")] {
+                    if !block.is_empty() {
+                        let mut t = Text::centered(
+                            Point::new(c.x, y + block.height / 2.0),
+                            &block.lines,
+                            font,
+                            block.line_height,
+                            &text_color,
+                        );
+                        t.bold = block.bold;
+                        els.push(Element::classed_text(t, class));
+                    }
+                    y += block.height;
+                }
+                if !rm.body.is_empty() {
+                    let divider = y0 + rm.stereo.height + rm.name.height + REQ_GAP;
                     els.push(Element::classed_shape(
                         Geometry::Path(vec![
-                            PathCmd::MoveTo(Point::new(x0, y)),
-                            PathCmd::LineTo(Point::new(x1, y)),
+                            PathCmd::MoveTo(Point::new(x0, divider)),
+                            PathCmd::LineTo(Point::new(x1, divider)),
                         ]),
                         Paint::stroke(&stroke, 1.0),
                         "divider",
                     ));
-                }
-                if !block.is_empty() {
-                    let center = Point::new(c.x, y + sh / 2.0);
-                    let mut t =
-                        Text::centered(center, &block.lines, font, block.line_height, &text_color);
-                    t.bold = sec.bold;
-                    if !sec.centered {
-                        t = t.anchored(Anchor::Start, x0 + pad);
-                    }
+                    // Body lines are left-aligned `padding / 2` in from the edge.
+                    let top = divider + rm.top;
+                    let t = Text::centered(
+                        Point::new(c.x, top + rm.body.height / 2.0),
+                        &rm.body.lines,
+                        font,
+                        rm.body.line_height,
+                        &text_color,
+                    )
+                    .anchored(Anchor::Start, x0 + REQ_PADDING / 2.0);
                     els.push(Element::classed_text(t, "label"));
                 }
-                y += sh;
+                return (els, Boundary::Rect(r));
             }
-            return (els, Boundary::Rect(r));
-        }
-        Shape::EntityTable => {
-            let t = table_metrics(n, pad, font);
-            els.push(Element::classed_shape(
-                Geometry::Rect { rect: r, rx: 0.0 },
-                paint.clone(),
-                "basic label-container",
-            ));
-            let header_center = if n.sections.is_empty() {
-                c
-            } else {
-                Point::new(c.x, y0 + t.header_h / 2.0)
-            };
-            els.push(Element::classed_text(
-                Text::centered(
-                    header_center,
-                    &m.block.lines,
-                    font,
-                    m.block.line_height,
-                    &text_color,
-                ),
-                "nodeLabel",
-            ));
-            let line_paint = Paint::stroke(&stroke, 1.0);
-            let odd = pal.background.clone();
-            for (i, row) in n.sections.iter().enumerate() {
-                let ry = y0 + t.header_h + t.row_h * i as f64;
-                if i % 2 == 0 {
-                    els.push(Element::classed_shape(
-                        Geometry::Rect {
-                            rect: Rect::new(x0, ry, w, t.row_h),
-                            rx: 0.0,
-                        },
-                        Paint::fill(&odd),
-                        "row-rect-odd",
-                    ));
-                }
-                els.push(Element::line(
-                    Point::new(x0, ry),
-                    Point::new(x1, ry),
-                    line_paint.clone(),
-                ));
-                let mut x = x0;
-                for (j, cw) in t.cols.iter().enumerate() {
-                    if *cw <= 0.0 {
-                        continue;
-                    }
-                    if let Some(cell) = row.lines.get(j).filter(|s| !s.is_empty()) {
-                        let center = Point::new(x, ry + t.row_h / 2.0);
-                        let tx = Text::centered(
-                            center,
-                            std::slice::from_ref(cell),
-                            font,
-                            font * 1.5,
-                            &text_color,
-                        )
-                        .anchored(Anchor::Start, x + CELL_PAD);
-                        els.push(Element::classed_text(tx, "label"));
-                    }
-                    x += cw;
-                }
-            }
-            if !n.sections.is_empty() {
-                // Column dividers below the header.
-                let used: Vec<f64> = t.cols.iter().copied().filter(|c| *c > 0.0).collect();
-                let mut x = x0;
-                for cw in used.iter().take(used.len().saturating_sub(1)) {
-                    x += cw;
-                    els.push(Element::line(
-                        Point::new(x, y0 + t.header_h),
-                        Point::new(x, y1),
-                        line_paint.clone(),
-                    ));
-                }
-                // Redraw the outline on top of the row fills.
-                els.push(Element::shape(
-                    Geometry::Rect { rect: r, rx: 0.0 },
-                    Paint::stroke(&stroke, paint.stroke_width),
-                ));
-            }
-            return (els, Boundary::Rect(r));
-        }
-        Shape::Requirement => {
-            let rm = requirement_metrics(n, pad, font);
-            els.push(Element::classed_shape(
-                Geometry::Rect { rect: r, rx: 0.0 },
-                paint.clone(),
-                "basic label-container",
-            ));
-            let mut y = y0 + pad;
-            for (block, class) in [(&rm.stereo, "stereotype"), (&rm.name, "nodeLabel")] {
-                if !block.is_empty() {
-                    let mut t = Text::centered(
-                        Point::new(c.x, y + block.height / 2.0),
-                        &block.lines,
-                        font,
-                        block.line_height,
-                        &text_color,
-                    );
-                    t.bold = block.bold;
-                    els.push(Element::classed_text(t, class));
-                }
-                y += block.height;
-            }
-            if !rm.body.is_empty() {
-                y += pad / 2.0;
-                els.push(Element::classed_shape(
-                    Geometry::Path(vec![
-                        PathCmd::MoveTo(Point::new(x0, y)),
-                        PathCmd::LineTo(Point::new(x1, y)),
-                    ]),
-                    Paint::stroke(&stroke, 1.0),
-                    "divider",
-                ));
-                y += pad / 2.0;
-                let centered = n.sections.get(1).map(|s| s.centered).unwrap_or(true);
-                let mut t = Text::centered(
-                    Point::new(c.x, y + rm.body.height / 2.0),
-                    &rm.body.lines,
-                    font,
-                    rm.body.line_height,
-                    &text_color,
-                );
-                if !centered {
-                    t = t.anchored(Anchor::Start, x0 + pad);
-                }
-                els.push(Element::classed_text(t, "label"));
-            }
-            return (els, Boundary::Rect(r));
+            _ => Boundary::Rect(r),
         }
     };
-    if !m.block.is_empty()
-        && !matches!(
-            n.shape,
-            Shape::StateStart | Shape::StateEnd | Shape::ForkBar | Shape::Choice | Shape::Invisible
-        )
-    {
-        let mut t = Text::centered(c, &m.block.lines, font, m.block.line_height, &text_color);
+    if !m.block.is_empty() && shapes::shows_label(n.shape) {
+        let mut t = Text::centered(
+            c.plus(m.label_offset),
+            &m.block.lines,
+            font,
+            m.block.line_height,
+            &text_color,
+        );
         t.bold = m.block.bold;
         els.push(Element::classed_text(t, "nodeLabel"));
     }
     (els, boundary)
+}
+
+/// Paints of an entity table.
+struct TableColors<'a> {
+    paint: &'a Paint,
+    stroke: &'a Color,
+    text: &'a Color,
+    odd_row: &'a Color,
+}
+
+fn entity_table_elements(
+    n: &Node,
+    m: &Measured,
+    r: Rect,
+    colors: TableColors<'_>,
+    font: f64,
+) -> Vec<Element> {
+    let (x0, y0, x1, y1) = (r.x, r.y, r.right(), r.bottom());
+    let mut els = vec![Element::classed_shape(
+        Geometry::Rect { rect: r, rx: 0.0 },
+        colors.paint.clone(),
+        "basic label-container",
+    )];
+    let Some(t) = &m.table else {
+        return els;
+    };
+    let header_center = if n.sections.is_empty() {
+        r.center()
+    } else {
+        Point::new(r.center().x, y0 + t.header_h / 2.0)
+    };
+    els.push(Element::classed_text(
+        Text::centered(
+            header_center,
+            &m.block.lines,
+            font,
+            m.block.line_height,
+            colors.text,
+        ),
+        "nodeLabel",
+    ));
+    let line_paint = Paint::stroke(colors.stroke, 1.0);
+    for (i, row) in n.sections.iter().enumerate() {
+        let ry = y0 + t.header_h + t.row_h * i as f64;
+        if i % 2 == 0 {
+            els.push(Element::classed_shape(
+                Geometry::Rect {
+                    rect: Rect::new(x0, ry, r.w, t.row_h),
+                    rx: 0.0,
+                },
+                Paint::fill(colors.odd_row),
+                "row-rect-odd",
+            ));
+        }
+        els.push(Element::line(
+            Point::new(x0, ry),
+            Point::new(x1, ry),
+            line_paint.clone(),
+        ));
+        let mut x = x0;
+        for (j, cw) in t.cols.iter().enumerate() {
+            if *cw <= 0.0 {
+                continue;
+            }
+            if let Some(cell) = row.lines.get(j).filter(|s| !s.is_empty()) {
+                let center = Point::new(x, ry + t.row_h / 2.0);
+                let tx = Text::centered(
+                    center,
+                    std::slice::from_ref(cell),
+                    font,
+                    font * 1.5,
+                    colors.text,
+                )
+                .anchored(Anchor::Start, x + t.text_inset);
+                els.push(Element::classed_text(tx, "label"));
+            }
+            x += cw;
+        }
+    }
+    if !n.sections.is_empty() {
+        // Column dividers below the header.
+        let used: Vec<f64> = t.cols.iter().copied().filter(|c| *c > 0.0).collect();
+        let mut x = x0;
+        for cw in used.iter().take(used.len().saturating_sub(1)) {
+            x += cw;
+            els.push(Element::line(
+                Point::new(x, y0 + t.header_h),
+                Point::new(x, y1),
+                line_paint.clone(),
+            ));
+        }
+        // Redraw the outline on top of the row fills.
+        els.push(Element::shape(
+            Geometry::Rect { rect: r, rx: 0.0 },
+            Paint::stroke(colors.stroke, colors.paint.stroke_width),
+        ));
+    }
+    els
 }
 
 #[cfg(test)]

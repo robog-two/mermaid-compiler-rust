@@ -141,6 +141,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
             let a = b.endpoint(from, true);
             let c = b.endpoint(to, false);
             let mut e = Edge::new(a, c);
+            e.end = Head::Barb;
             e.label = label;
             b.edges.push(e);
             continue;
@@ -204,7 +205,7 @@ impl Builder {
         if let Some(&i) = self.index.get(id) {
             return i;
         }
-        let mut n = Node::new(id, id, Shape::Rounded);
+        let mut n = Node::new(id, id, Shape::State);
         n.cluster = self.stack.last().copied();
         self.nodes.push(n);
         self.index.insert(id.to_string(), self.nodes.len() - 1);
@@ -296,7 +297,7 @@ impl Builder {
         for (id, lines) in &self.descriptions {
             if let Some(&i) = self.index.get(id) {
                 let n = &mut self.nodes[i];
-                if n.shape == Shape::Rounded {
+                if n.shape == Shape::State {
                     n.shape = Shape::Compartments;
                     n.sections = vec![
                         Section {

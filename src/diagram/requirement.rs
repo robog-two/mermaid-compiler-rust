@@ -7,7 +7,9 @@
 //! quoted names/values, `direction`, `classDef`, `class`, `style` and `:::class`.
 
 use super::graph::StyleOverrides;
-use super::graph::{self, Edge, Endpoint, GraphDiagram, Head, Node, NodeId, Section, Shape};
+use super::graph::{
+    self, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId, Section, Shape,
+};
 use crate::config::{Curve, GraphConfig, MermaidConfig};
 use crate::error::{Error, Result};
 use crate::layout::Direction;
@@ -531,7 +533,7 @@ pub fn to_graph(d: &RequirementDiagram) -> GraphDiagram {
                 e.end = Head::None;
             } else {
                 e.end = Head::OpenArrow;
-                e.style.dash = Some(vec![10.0, 7.0]);
+                e.line = LineKind::Dashed;
             }
             Some(e)
         })
