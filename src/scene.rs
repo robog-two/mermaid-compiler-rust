@@ -81,6 +81,30 @@ pub enum Geometry {
     Path(Vec<PathCmd>),
 }
 
+impl Geometry {
+    /// The same geometry moved by `(dx, dy)`.
+    pub fn translated(&self, dx: f64, dy: f64) -> Geometry {
+        let mv = |p: &Point| Point::new(p.x + dx, p.y + dy);
+        match self {
+            Geometry::Rect { rect, rx } => Geometry::Rect {
+                rect: Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h),
+                rx: *rx,
+            },
+            Geometry::Circle { c, r } => Geometry::Circle { c: mv(c), r: *r },
+            Geometry::Path(cmds) => Geometry::Path(
+                cmds.iter()
+                    .map(|c| match c {
+                        PathCmd::MoveTo(p) => PathCmd::MoveTo(mv(p)),
+                        PathCmd::LineTo(p) => PathCmd::LineTo(mv(p)),
+                        PathCmd::CubicTo(a, b, p) => PathCmd::CubicTo(mv(a), mv(b), mv(p)),
+                        PathCmd::Close => PathCmd::Close,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
 /// Horizontal text alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Anchor {

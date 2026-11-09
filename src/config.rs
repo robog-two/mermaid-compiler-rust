@@ -23,8 +23,149 @@ impl Curve {
     }
 }
 
+/// mermaid's `look`. `HandDrawn` is accepted but drawn like `Classic` (no rough.js).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Look {
+    #[default]
+    Classic,
+    Neo,
+    HandDrawn,
+}
+
+impl Look {
+    /// Parse a schema value (`classic` / `neo` / `handDrawn`); anything else is not usable.
+    pub fn from_name(s: &str) -> Option<Look> {
+        match s {
+            "classic" => Some(Look::Classic),
+            "neo" => Some(Look::Neo),
+            "handDrawn" => Some(Look::HandDrawn),
+            _ => None,
+        }
+    }
+}
+
+/// `theme` / `look` given by one config section (top level or one diagram's section).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Appearance {
+    pub theme: Option<ThemeName>,
+    pub look: Option<Look>,
+}
+
+impl Appearance {
+    /// Fold the usable `theme` / `look` of `j` over `self`. Unusable values are passed
+    /// over (mermaid's `isUsableAppearance`); an explicit `null` clears the key.
+    fn merge(&mut self, j: &Json) {
+        match j.get("theme") {
+            Some(Json::String(s)) => {
+                if let Ok(t) = s.parse() {
+                    self.theme = Some(t);
+                }
+            }
+            Some(Json::Null) => self.theme = None,
+            _ => {}
+        }
+        match j.get("look") {
+            Some(Json::String(s)) => {
+                if let Some(l) = Look::from_name(s) {
+                    self.look = Some(l);
+                }
+            }
+            Some(Json::Null) => self.look = None,
+            _ => {}
+        }
+    }
+}
+
+/// The appearance settings of one config layer (mermaid's directives, or the site config
+/// mermaid-cli hands to `initialize`): the top-level keys plus every diagram section's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AppearanceLayer {
+    pub global: Appearance,
+    pub sections: Vec<(String, Appearance)>,
+}
+
+/// Diagram sections whose schema defaults are `theme: redux-color`, `look: neo`
+/// (mermaid 12, `config.schema.yaml`; of those, the ones this implementation renders).
+pub const NEO_DEFAULT_SECTIONS: [&str; 6] = [
+    "flowchart",
+    "sequence",
+    "class",
+    "state",
+    "er",
+    "requirement",
+];
+
+impl AppearanceLayer {
+    /// Deep-merge `j` (assignWithDepth semantics for these keys).
+    pub fn merge(&mut self, j: &Json) {
+        self.global.merge(j);
+        for (k, v) in j.as_object().into_iter().flatten() {
+            if v.as_object().is_none() || (v.get("theme").is_none() && v.get("look").is_none()) {
+                continue;
+            }
+            match self.sections.iter_mut().find(|(n, _)| n == k) {
+                Some((_, a)) => a.merge(v),
+                None => {
+                    let mut a = Appearance::default();
+                    a.merge(v);
+                    self.sections.push((k.clone(), a));
+                }
+            }
+        }
+    }
+
+    fn section(&self, key: &str) -> Appearance {
+        self.sections
+            .iter()
+            .find(|(n, _)| n == key)
+            .map(|(_, a)| *a)
+            .unwrap_or_default()
+    }
+
+    /// mermaid's `defaultConfig`: `default` / `classic`, except the sections listed in
+    /// [`NEO_DEFAULT_SECTIONS`].
+    pub fn defaults() -> AppearanceLayer {
+        AppearanceLayer {
+            global: Appearance {
+                theme: Some(ThemeName::Default),
+                look: Some(Look::Classic),
+            },
+            sections: NEO_DEFAULT_SECTIONS
+                .iter()
+                .map(|k| {
+                    (
+                        k.to_string(),
+                        Appearance {
+                            theme: Some(ThemeName::ReduxColor),
+                            look: Some(Look::Neo),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// mermaid's `resolveAppearance` / `readAppearance`: for each key, walk the layers from
+/// highest to lowest and, within a layer, take the diagram section's value before the
+/// top-level one. The first usable value wins. `layers` should end with
+/// [`AppearanceLayer::defaults`]; if nothing is found the result is `default` / `classic`.
+pub fn resolve_appearance(section: &str, layers: &[&AppearanceLayer]) -> (ThemeName, Look) {
+    let theme = layers
+        .iter()
+        .find_map(|l| l.section(section).theme.or(l.global.theme))
+        .unwrap_or(ThemeName::Default);
+    let look = layers
+        .iter()
+        .find_map(|l| l.section(section).look.or(l.global.look))
+        .unwrap_or(Look::Classic);
+    (theme, look)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphConfig {
+    /// Resolved `look` for the diagram being rendered.
+    pub look: Look,
     pub node_spacing: f64,
     pub rank_spacing: f64,
     pub padding: f64,
@@ -37,6 +178,7 @@ pub struct GraphConfig {
 impl GraphConfig {
     fn flowchart() -> Self {
         GraphConfig {
+            look: Look::Classic,
             node_spacing: 50.0,
             rank_spacing: 50.0,
             padding: 15.0,
@@ -74,6 +216,8 @@ impl GraphConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SequenceConfig {
+    /// Resolved `look` for the diagram being rendered.
+    pub look: Look,
     pub diagram_margin_x: f64,
     pub diagram_margin_y: f64,
     pub actor_margin: f64,
@@ -95,6 +239,7 @@ pub struct SequenceConfig {
 impl Default for SequenceConfig {
     fn default() -> Self {
         SequenceConfig {
+            look: Look::Classic,
             diagram_margin_x: 50.0,
             diagram_margin_y: 10.0,
             actor_margin: 50.0,
@@ -155,7 +300,15 @@ impl Default for PieConfig {
 /// as mermaid does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MermaidConfig {
+    /// The effective theme. Outside a diagram scope this is the top-level setting (or
+    /// `default`); [`MermaidConfig::scoped`] resolves it per diagram type.
     pub theme: ThemeName,
+    /// The effective look (see `theme`).
+    pub look: Look,
+    /// Appearance given by the site config (`-t`, then `--configFile`).
+    pub site: AppearanceLayer,
+    /// Appearance given by the diagram's front-matter and `%%{init}%%` directives.
+    pub directives: AppearanceLayer,
     pub theme_variables: Vec<(String, String)>,
     pub theme_css: Option<String>,
     pub font_family: Option<String>,
@@ -174,6 +327,9 @@ impl Default for MermaidConfig {
     fn default() -> Self {
         MermaidConfig {
             theme: ThemeName::Default,
+            look: Look::Classic,
+            site: AppearanceLayer::default(),
+            directives: AppearanceLayer::default(),
             theme_variables: Vec::new(),
             theme_css: None,
             font_family: None,
@@ -203,19 +359,74 @@ fn set_bool(j: &Json, key: &str, slot: &mut bool) {
 impl MermaidConfig {
     /// Return a new config with `j` layered on top. Unknown theme names are an error
     /// (mermaid silently falls back; we warn the user instead of guessing).
-    pub fn with_json(mut self, j: &Json) -> Result<Self, String> {
+    /// This is a *site* layer (mermaid-cli's `--configFile`); see
+    /// [`MermaidConfig::with_directive`] for front-matter and `%%{init}%%`.
+    pub fn with_json(self, j: &Json) -> Result<Self, String> {
+        self.with_layer(j, false)
+    }
+
+    /// Layer a front-matter `config:` block or an `%%{init}%%` directive on top.
+    pub fn with_directive(self, j: &Json) -> Result<Self, String> {
+        self.with_layer(j, true)
+    }
+
+    /// `-t/--theme`: the site config's top-level theme.
+    pub fn with_cli_theme(mut self, t: ThemeName) -> Self {
+        self.site.global.theme = Some(t);
+        self.refresh_global_appearance();
+        self
+    }
+
+    /// Resolve `theme` and `look` for one diagram section (mermaid's `resolveAppearance`)
+    /// and hand the look to that diagram's typed config.
+    pub fn scoped(mut self, section: &str) -> Self {
+        let (theme, look) = resolve_appearance(
+            section,
+            &[&self.directives, &self.site, &AppearanceLayer::defaults()],
+        );
+        self.theme = theme;
+        self.look = look;
+        self.flowchart.look = look;
+        self.state.look = look;
+        self.class.look = look;
+        self.sequence.look = look;
+        self
+    }
+
+    fn refresh_global_appearance(&mut self) {
+        let (theme, look) = resolve_appearance(
+            "",
+            &[
+                &self.directives,
+                &self.site,
+                &AppearanceLayer {
+                    global: AppearanceLayer::defaults().global,
+                    sections: Vec::new(),
+                },
+            ],
+        );
+        self.theme = theme;
+        self.look = look;
+    }
+
+    fn with_layer(mut self, j: &Json, directive: bool) -> Result<Self, String> {
         if j.as_object().is_none() {
             return Err("configuration must be a JSON object".into());
         }
-        if let Some(t) = j.get("theme") {
-            match t {
-                Json::Null => self.theme = ThemeName::Default,
-                Json::String(s) => {
-                    self.theme = s.parse().map_err(|_| format!("unknown theme \"{s}\""))?;
-                }
-                _ => return Err("\"theme\" must be a string".into()),
+        match j.get("theme") {
+            None | Some(Json::Null) => {}
+            Some(Json::String(s)) => {
+                s.parse::<ThemeName>()
+                    .map_err(|_| format!("unknown theme \"{s}\""))?;
             }
+            _ => return Err("\"theme\" must be a string".into()),
         }
+        if directive {
+            self.directives.merge(j);
+        } else {
+            self.site.merge(j);
+        }
+        self.refresh_global_appearance();
         if let Some(vars) = j.get("themeVariables").and_then(Json::as_object) {
             for (k, v) in vars {
                 if let Some(s) = v.to_scalar_string() {
@@ -375,6 +586,80 @@ mod tests {
         assert_eq!(c.flowchart.node_spacing, 80.0);
         assert_eq!(c.flowchart.curve, Curve::Linear);
         assert_eq!(c.palette().main_bkg.css(), "#f00");
+    }
+
+    fn json(s: &str) -> Json {
+        crate::json::parse(s).unwrap()
+    }
+
+    #[test]
+    fn appearance_defaults_per_diagram() {
+        let c = MermaidConfig::default();
+        for key in NEO_DEFAULT_SECTIONS {
+            let s = c.clone().scoped(key);
+            assert_eq!(
+                (s.theme, s.look),
+                (ThemeName::ReduxColor, Look::Neo),
+                "{key}"
+            );
+        }
+        let s = c.clone().scoped("flowchart");
+        assert_eq!((s.flowchart.look, s.sequence.look), (Look::Neo, Look::Neo));
+        for key in ["pie", "gantt", "mindmap", "zenuml", "info"] {
+            let s = c.clone().scoped(key);
+            assert_eq!(
+                (s.theme, s.look),
+                (ThemeName::Default, Look::Classic),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn appearance_layers_resolve_like_mermaid() {
+        // -t default wins over the diagram default; look is untouched by it.
+        let s = MermaidConfig::default()
+            .with_cli_theme(ThemeName::Default)
+            .scoped("er");
+        assert_eq!((s.theme, s.look), (ThemeName::Default, Look::Neo));
+
+        // Within one layer the diagram section beats the top level...
+        let site = MermaidConfig::default()
+            .with_json(&json(
+                r#"{"theme":"dark","look":"classic","er":{"theme":"neutral"}}"#,
+            ))
+            .unwrap();
+        let s = site.clone().scoped("er");
+        assert_eq!((s.theme, s.look), (ThemeName::Neutral, Look::Classic));
+        assert_eq!(site.clone().scoped("class").theme, ThemeName::Dark);
+
+        // ...but a directive's top-level value beats the site's section value.
+        let s = site
+            .clone()
+            .with_directive(&json(r#"{"theme":"forest"}"#))
+            .unwrap()
+            .scoped("er");
+        assert_eq!(s.theme, ThemeName::Forest);
+
+        // Unusable values are passed over; null clears an earlier value.
+        let s = MermaidConfig::default()
+            .with_directive(&json(r#"{"look":"sketchy","flowchart":{"theme":"nope"}}"#))
+            .unwrap()
+            .scoped("flowchart");
+        assert_eq!((s.theme, s.look), (ThemeName::ReduxColor, Look::Neo));
+        let s = MermaidConfig::default()
+            .with_cli_theme(ThemeName::Dark)
+            .with_json(&json(r#"{"theme":null}"#))
+            .unwrap()
+            .scoped("state");
+        assert_eq!(s.theme, ThemeName::ReduxColor);
+
+        // A handDrawn look is accepted.
+        let s = MermaidConfig::default()
+            .with_directive(&json(r#"{"look":"handDrawn"}"#))
+            .unwrap()
+            .scoped("pie");
+        assert_eq!(s.look, Look::HandDrawn);
     }
 
     #[test]

@@ -139,7 +139,7 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
     // Configuration: -t, then --configFile (assigned over it), then --cssFile.
     let mut config = MermaidConfig::default();
     if let Some(t) = opts.theme {
-        config.theme = t;
+        config = config.with_cli_theme(t);
     }
     let mut has_theme_css = false;
     if let Some(path) = &opts.config_file {

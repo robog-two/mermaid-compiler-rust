@@ -31,10 +31,14 @@ pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
     let pre = diagram::preprocess(source)?;
     let mut cfg = base.clone();
     for layer in &pre.config_layers {
-        cfg = cfg.with_json(layer).map_err(Error::Config)?;
+        cfg = cfg.with_directive(layer).map_err(Error::Config)?;
     }
-    let pal = cfg.palette();
     let kind = diagram::detect(&pre.body)?;
+    // mermaid 12 resolves `theme` / `look` per diagram type: flowchart, sequence, class,
+    // state, ER and requirement default to `redux-color` + `neo` unless a directive or
+    // the site config (`-t`, `--configFile`) says otherwise.
+    let cfg = cfg.scoped(kind.config_key());
+    let pal = cfg.palette();
     let (mut scene, use_max_width) = match kind {
         DiagramType::Flowchart => {
             let g = diagram::flowchart::parse(&pre.body, pre.title.clone())?;

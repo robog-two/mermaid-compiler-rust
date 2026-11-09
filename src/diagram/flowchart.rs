@@ -13,6 +13,7 @@ use super::statements;
 use crate::error::{Error, Result};
 use crate::layout::Direction;
 use crate::scene::DiagramKind;
+use crate::theme::ColorSlot;
 use std::collections::HashMap;
 
 /// Parse a preprocessed flowchart body.
@@ -160,6 +161,9 @@ impl Builder {
                     title,
                     parent,
                     style: StyleOverrides::default(),
+                    // Subgraphs take palette slots in declaration (pre-order) order,
+                    // as flowDb's `declarationIndex` assigns `colorIndex`.
+                    color_slot: Some(ColorSlot(self.clusters.len())),
                 });
                 self.cluster_index.insert(id, self.clusters.len() - 1);
                 self.clusters.len() - 1

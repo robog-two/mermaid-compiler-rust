@@ -1,12 +1,12 @@
 //! Graph IR shared by flowcharts, state diagrams and class diagrams, plus the
 //! pure renderer `GraphDiagram -> Scene` (layout → shapes → edges → labels).
 
-use crate::config::{Curve, GraphConfig};
+use crate::config::{Curve, GraphConfig, Look as ConfigLook};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::layout::{self, Direction, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
-use crate::theme::Palette;
+use crate::theme::{ColorSlot, DropShadow, Palette, SlotColors};
 
 /// Index into `GraphDiagram::nodes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -150,6 +150,8 @@ pub struct Node {
     pub style: StyleOverrides,
     pub classes: Vec<String>,
     pub sections: Vec<Section>,
+    /// Categorical palette slot (`colorIndex`), painted only by the colour themes.
+    pub color_slot: Option<ColorSlot>,
 }
 
 impl Node {
@@ -162,6 +164,7 @@ impl Node {
             style: StyleOverrides::default(),
             classes: Vec::new(),
             sections: Vec::new(),
+            color_slot: None,
         }
     }
 }
@@ -238,6 +241,8 @@ pub struct Cluster {
     pub title: String,
     pub parent: Option<ClusterId>,
     pub style: StyleOverrides,
+    /// Categorical palette slot (`colorIndex`), painted only by the colour themes.
+    pub color_slot: Option<ColorSlot>,
 }
 
 /// A fully parsed graph-shaped diagram.
@@ -257,6 +262,10 @@ struct Look {
     thick_width: f64,
     dotted_dash: Vec<f64>,
     node_stroke_width: f64,
+    /// Corner radius of `Shape::Rounded` (mermaid's `roundedRect`: theme `radius` ?? 5).
+    rounded_rx: f64,
+    /// Corner radius of `Shape::Compartments` boxes.
+    compartment_rx: f64,
 }
 
 fn look(kind: DiagramKind) -> Look {
@@ -266,14 +275,81 @@ fn look(kind: DiagramKind) -> Look {
             thick_width: 3.5,
             dotted_dash: vec![3.0],
             node_stroke_width: 1.0,
+            rounded_rx: 5.0,
+            compartment_rx: 0.0,
         },
         _ => Look {
             edge_width: 1.0,
             thick_width: 2.5,
             dotted_dash: vec![3.0],
             node_stroke_width: 1.0,
+            rounded_rx: 5.0,
+            compartment_rx: 3.0,
         },
     }
+}
+
+/// Apply the theme's `strokeWidth` / `radius` the way each diagram's stylesheet reads them:
+/// flowchart nodes `strokeWidth ?? 1` and edges `?? 2`; class and state `strokeWidth || 1`
+/// for both; ER and requirement use `strokeWidth` only under the neo look (1px otherwise).
+/// `radius` reaches flowchart rounded nodes (`roundedRect.ts`).
+fn themed_look(mut lk: Look, kind: DiagramKind, look: ConfigLook, pal: &Palette) -> Look {
+    let Some(sw) = pal.stroke_width else {
+        if kind == DiagramKind::Flowchart {
+            lk.rounded_rx = pal.radius.unwrap_or(lk.rounded_rx);
+        }
+        return lk;
+    };
+    match kind {
+        DiagramKind::Flowchart => {
+            lk.node_stroke_width = sw;
+            lk.edge_width = sw;
+            lk.rounded_rx = pal.radius.unwrap_or(lk.rounded_rx);
+        }
+        DiagramKind::Class | DiagramKind::State => {
+            lk.node_stroke_width = sw;
+            lk.edge_width = sw;
+        }
+        DiagramKind::Er | DiagramKind::Requirement if look == ConfigLook::Neo => {
+            lk.node_stroke_width = sw;
+            lk.edge_width = sw;
+        }
+        _ => {}
+    }
+    lk
+}
+
+/// The palette slot colours of an item, if the theme is a colour theme.
+fn slot_colors(slot: Option<ColorSlot>, pal: &Palette) -> Option<SlotColors> {
+    Some(pal.color_slots.as_ref()?.slot(slot?))
+}
+
+/// `style` with the slot's border / fill filled in where the author set none: user
+/// `style` / `classDef` declarations are inline and keep winning over the theme palette.
+fn slot_styled(style: &StyleOverrides, slot: Option<&SlotColors>) -> StyleOverrides {
+    let Some(sc) = slot else {
+        return style.clone();
+    };
+    StyleOverrides {
+        stroke: style.stroke.clone().or_else(|| Some(sc.border.clone())),
+        fill: style.fill.clone().or_else(|| sc.fill.clone()),
+        ..style.clone()
+    }
+}
+
+/// The neo look's drop shadow: an offset translucent copy of `el`'s silhouette.
+fn drop_shadow(el: &Element, sh: &DropShadow) -> Option<Element> {
+    let Element::Shape { geom, paint, .. } = el else {
+        return None;
+    };
+    if paint.fill.is_none() && paint.stroke.is_none() {
+        return None;
+    }
+    Some(Element::classed_shape(
+        geom.translated(sh.dx, sh.dy),
+        Paint::fill(&sh.color).with_opacity(sh.opacity),
+        "drop-shadow",
+    ))
 }
 
 /// Clipping boundary of a drawn node.
@@ -388,7 +464,15 @@ fn measure_node(node: &Node, pad: f64, font: f64, horizontal: bool) -> Measured 
 
 /// Pure renderer for graph diagrams.
 pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
-    let lk = look(g.kind);
+    let lk = themed_look(look(g.kind), g.kind, cfg.look, pal);
+    let shadow = pal
+        .drop_shadow
+        .as_ref()
+        .filter(|_| cfg.look == ConfigLook::Neo);
+    let edge_label_bg = match (g.kind, &pal.er_edge_label_background) {
+        (DiagramKind::Er, Some(bg)) => bg,
+        _ => &pal.edge_label_background,
+    };
     let font = pal.font_size;
     let horizontal = g.direction.is_horizontal();
 
@@ -502,24 +586,60 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
         let c = &g.clusters[ci];
         let r = cluster_rects[ci];
         bounds.add_rect(r);
-        let fill = c
-            .style
+        let slot = slot_colors(c.color_slot, pal);
+        let is_state = g.kind == DiagramKind::State;
+        // Flowchart subgraphs take the slot's border and fill; state composites take the
+        // border, and the fill only as a tint behind the title (`state/styles.js`).
+        let style = if is_state {
+            slot_styled(
+                &c.style,
+                slot.as_ref()
+                    .map(|sc| SlotColors {
+                        border: sc.border.clone(),
+                        fill: None,
+                    })
+                    .as_ref(),
+            )
+        } else {
+            slot_styled(&c.style, slot.as_ref())
+        };
+        let fill = style
             .fill
             .clone()
             .unwrap_or_else(|| pal.cluster_bkg.clone());
-        let stroke = c
-            .style
+        let stroke = style
             .stroke
             .clone()
             .unwrap_or_else(|| pal.cluster_border.clone());
-        let mut paint = Paint::both(&fill, &stroke, c.style.stroke_width.unwrap_or(1.0));
-        paint.dash = c.style.dash.clone();
-        let rx = if g.kind == DiagramKind::State {
-            5.0
-        } else {
-            0.0
+        let default_width = if is_state { lk.node_stroke_width } else { 1.0 };
+        let mut paint = Paint::both(&fill, &stroke, style.stroke_width.unwrap_or(default_width));
+        paint.dash = style.dash.clone();
+        let rx = match (is_state, cfg.look) {
+            (true, ConfigLook::Neo) => pal.radius.unwrap_or(5.0),
+            (true, _) => 5.0,
+            _ => 0.0,
         };
-        let mut children = vec![Element::rect(r, rx, paint)];
+        let body = Element::rect(r, rx, paint.clone());
+        let mut children: Vec<Element> = shadow
+            .and_then(|sh| drop_shadow(&body, sh))
+            .into_iter()
+            .collect();
+        children.push(body);
+        let band = slot
+            .as_ref()
+            .and_then(|sc| sc.fill.as_ref())
+            .filter(|_| is_state && c.style.fill.is_none() && !cluster_titles[ci].is_empty());
+        if let Some(tint) = band {
+            let h = (cluster_titles[ci].height + 8.0).min(r.h);
+            children.push(Element::rect(
+                Rect::new(r.x, r.y, r.w, h),
+                0.0,
+                Paint::fill(tint),
+            ));
+            let mut outline = Paint::stroke(&stroke, paint.stroke_width);
+            outline.dash = paint.dash.clone();
+            children.push(Element::rect(r, rx, outline));
+        }
         let t = &cluster_titles[ci];
         if !t.is_empty() {
             let color = c
@@ -544,7 +664,23 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
     let mut boundaries = Vec::with_capacity(nodes.len());
     for (i, (n, m)) in nodes.iter().zip(&measured).enumerate() {
         let c = out.nodes[i];
-        let (els, boundary) = node_elements(n, m, c, pal, &lk, cfg.padding, font);
+        let slot = slot_colors(n.color_slot, pal);
+        let painted;
+        let n = if slot.is_some() {
+            painted = Node {
+                style: slot_styled(&n.style, slot.as_ref()),
+                ..n.clone()
+            };
+            &painted
+        } else {
+            n
+        };
+        let (mut els, boundary) = node_elements(n, m, c, pal, &lk, cfg.padding, font);
+        if let Some(sh) = shadow.filter(|_| n.shape != Shape::Invisible) {
+            if let Some(s) = els.first().and_then(|e| drop_shadow(e, sh)) {
+                els.insert(0, s);
+            }
+        }
         bounds.add_rect(Rect::centered(c, m.w, m.h));
         boundaries.push(boundary);
         if n.shape != Shape::Invisible {
@@ -657,7 +793,7 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
             label_els.push(Element::group(
                 "edgeLabel",
                 vec![
-                    Element::rect(r, 0.0, Paint::fill(&pal.edge_label_background)),
+                    Element::rect(r, 0.0, Paint::fill(edge_label_bg)),
                     Element::text(Text::centered(
                         at,
                         &block.lines,
@@ -1076,7 +1212,10 @@ fn node_elements(
         }
         Shape::Rounded => {
             els.push(Element::classed_shape(
-                Geometry::Rect { rect: r, rx: 5.0 },
+                Geometry::Rect {
+                    rect: r,
+                    rx: lk.rounded_rx,
+                },
                 paint.clone(),
                 "basic label-container",
             ));
@@ -1267,7 +1406,7 @@ fn node_elements(
             els.push(Element::classed_shape(
                 Geometry::Rect {
                     rect: r,
-                    rx: if lk.edge_width > 1.5 { 0.0 } else { 3.0 },
+                    rx: lk.compartment_rx,
                 },
                 paint.clone(),
                 "basic label-container",
@@ -1322,16 +1461,19 @@ fn node_elements(
                 "nodeLabel",
             ));
             let line_paint = Paint::stroke(&stroke, 1.0);
-            let odd = pal.background.clone();
+            // Rows are striped with `rowOdd`; the colour themes paint every row path with
+            // the slot fill instead (`er/styles.ts` `.node path`), i.e. no stripe at all.
+            let slot_fill = slot_colors(n.color_slot, pal).and_then(|s| s.fill);
+            let odd = pal.er_row_odd.clone().filter(|_| slot_fill.is_none());
             for (i, row) in n.sections.iter().enumerate() {
                 let ry = y0 + t.header_h + t.row_h * i as f64;
-                if i % 2 == 0 {
+                if let Some(odd) = odd.as_ref().filter(|_| i % 2 == 0) {
                     els.push(Element::classed_shape(
                         Geometry::Rect {
                             rect: Rect::new(x0, ry, w, t.row_h),
                             rx: 0.0,
                         },
-                        Paint::fill(&odd),
+                        Paint::fill(odd),
                         "row-rect-odd",
                     ));
                 }

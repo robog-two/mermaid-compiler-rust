@@ -14,7 +14,7 @@ use crate::config::{Curve, GraphConfig, MermaidConfig};
 use crate::error::{Error, Result};
 use crate::layout::Direction;
 use crate::scene::{DiagramKind, Scene};
-use crate::theme::Palette;
+use crate::theme::{ColorSlot, Palette};
 use std::collections::HashMap;
 
 /// How many instances of an entity may take part in a relationship.
@@ -108,6 +108,7 @@ pub fn render(
 /// Layout settings from the `er` config section.
 fn graph_config(cfg: &MermaidConfig) -> GraphConfig {
     GraphConfig {
+        look: cfg.look,
         node_spacing: cfg.section_f64("er", "nodeSpacing", 60.0),
         rank_spacing: cfg.section_f64("er", "rankSpacing", 70.0),
         padding: cfg.section_f64("er", "entityPadding", 12.0),
@@ -707,12 +708,15 @@ pub fn to_graph(d: &ErDiagram) -> GraphDiagram {
     let nodes = d
         .entities
         .iter()
-        .map(|e| {
+        .enumerate()
+        .map(|(i, e)| {
             let mut n = Node::new(
                 e.name.clone(),
                 e.alias.clone().unwrap_or_else(|| e.name.clone()),
                 Shape::EntityTable,
             );
+            // erDb: every entity takes the next slot, in first-mention order.
+            n.color_slot = Some(ColorSlot(i));
             n.style = e.style.clone();
             n.classes = e.classes.clone();
             n.sections = e
