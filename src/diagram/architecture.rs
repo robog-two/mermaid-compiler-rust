@@ -393,7 +393,8 @@ fn parse_edge(d: &Architecture, s: &str, line: usize) -> Result<ArchEdge> {
 
 const ICON: f64 = 80.0;
 const GAP: f64 = 70.0;
-const GROUP_PAD: f64 = 28.0;
+/// `architecture.padding` (cytoscape compound-node padding; the title sits inside it).
+const GROUP_PAD: f64 = 40.0;
 const JUNCTION: f64 = 4.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -537,7 +538,7 @@ fn layout(d: &Architecture, font: f64) -> Layout {
         let w = (grid.w + 2.0 * GROUP_PAD)
             .max(tw + 2.0 * GROUP_PAD)
             .max(ICON);
-        let h = grid.h + 2.0 * GROUP_PAD + th;
+        let h = (grid.h + 2.0 * GROUP_PAD).max(th + 2.0 * GROUP_PAD);
         sizes.insert(Item::Group(gi), (w, h));
         grids.insert(Some(gi), grid);
     }
@@ -560,7 +561,6 @@ fn layout(d: &Architecture, font: f64) -> Layout {
         &grids,
         &sizes,
         &mut out,
-        font,
     );
     out
 }
@@ -643,17 +643,13 @@ fn place(
     grids: &HashMap<Option<usize>, Grid>,
     sizes: &HashMap<Item, (f64, f64)>,
     out: &mut Layout,
-    font: f64,
 ) {
     let Some(grid) = grids.get(&container) else {
         return;
     };
     let origin = match container {
         None => Point::new(0.0, 0.0),
-        Some(g) => {
-            let (_, th) = group_title_size(&d.groups[g], font);
-            Point::new(frame.x + (frame.w - grid.w) / 2.0, frame.y + th + GROUP_PAD)
-        }
+        Some(_) => Point::new(frame.x + (frame.w - grid.w) / 2.0, frame.y + GROUP_PAD),
     };
     let col_x: Vec<f64> = grid
         .col_w
@@ -718,7 +714,7 @@ fn place(
             Item::Group(g) => {
                 let r = Rect::new(x0 + (cw - w) / 2.0, y0 + (ch - h) / 2.0, w, h);
                 out.group_box[g] = r;
-                place(d, Some(g), r, grids, sizes, out, font);
+                place(d, Some(g), r, grids, sizes, out);
             }
         }
     }
@@ -795,14 +791,18 @@ fn midpoint(pts: &[Point]) -> Point {
     pts[0]
 }
 
-fn arrow(tip: Point, dir: Point, color: &Color) -> Element {
+/// svgDraw.ts: arrowSize = iconSize / 6, base as wide as it is long, tip 2px
+/// past the edge end (`ArchitectureDirectionArrowShift`).
+fn arrow(end: Point, dir: Point, color: &Color) -> Element {
+    let size = ICON / 6.0;
     let perp = Point::new(-dir.y, dir.x);
-    let base = tip.minus(dir.scale(12.0));
+    let tip = end.plus(dir.scale(2.0));
+    let base = tip.minus(dir.scale(size));
     Element::classed_shape(
         Geometry::Path(geom::polygon(&[
             tip,
-            base.plus(perp.scale(6.0)),
-            base.minus(perp.scale(6.0)),
+            base.plus(perp.scale(size / 2.0)),
+            base.minus(perp.scale(size / 2.0)),
         ])),
         Paint::fill(color),
         "arrow",
@@ -956,7 +956,8 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
         bounds.add_rect(r);
         let mut children = vec![Element::classed_shape(
             Geometry::Rect { rect: r, rx: 0.0 },
-            Paint::stroke(&pal.cluster_border, 2.0).dashed(vec![8.0, 4.0]),
+            // `.node-bkg { stroke-width: 2px; stroke-dasharray: 8 }`.
+            Paint::stroke(&pal.cluster_border, 2.0).dashed(vec![8.0]),
             "node-bkg",
         )];
         let mut x = r.x + 8.0;
@@ -1056,23 +1057,21 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
         };
         let p0 = end_point(&e.lhs, &ra);
         let p1 = end_point(&e.rhs, &rb);
-        let mut pts = route(p0, e.lhs.side, p1, e.rhs.side);
+        let pts = route(p0, e.lhs.side, p1, e.rhs.side);
         for p in &pts {
             bounds.add_point(*p);
         }
         let mut heads = Vec::new();
         if e.lhs.arrow {
             heads.push(arrow(p0, e.lhs.side.out().scale(-1.0), &pal.line_color));
-            pts[0] = p0.plus(e.lhs.side.out().scale(8.0));
         }
         if e.rhs.arrow {
-            let last = pts.len() - 1;
             heads.push(arrow(p1, e.rhs.side.out().scale(-1.0), &pal.line_color));
-            pts[last] = p1.plus(e.rhs.side.out().scale(8.0));
         }
         let mut children = vec![Element::classed_shape(
             Geometry::Path(geom::polyline(&pts)),
-            Paint::stroke(&pal.line_color, 2.0),
+            // architectureStyles.ts: `.edge { stroke-width: archEdgeWidth (3) }`.
+            Paint::stroke(&pal.line_color, 3.0),
             "edge",
         )];
         children.extend(heads);

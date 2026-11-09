@@ -9,7 +9,9 @@
 //! `direction`, `classDef`, `class`, `style`, `:::class` and `title`.
 
 use super::graph::StyleOverrides;
-use super::graph::{self, Edge, Endpoint, GraphDiagram, Head, Node, NodeId, Section, Shape};
+use super::graph::{
+    self, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId, Section, Shape,
+};
 use crate::config::{Curve, GraphConfig, MermaidConfig};
 use crate::error::{Error, Result};
 use crate::layout::Direction;
@@ -111,7 +113,7 @@ fn graph_config(cfg: &MermaidConfig) -> GraphConfig {
         look: cfg.look,
         node_spacing: cfg.section_f64("er", "nodeSpacing", 140.0),
         rank_spacing: cfg.section_f64("er", "rankSpacing", 80.0),
-        padding: cfg.section_f64("er", "entityPadding", 12.0),
+        padding: cfg.section_f64("er", "entityPadding", 15.0),
         diagram_padding: cfg.section_f64("er", "diagramPadding", 20.0),
         curve: Curve::Basis,
         use_max_width: cfg.use_max_width("er"),
@@ -747,7 +749,7 @@ pub fn to_graph(d: &ErDiagram) -> GraphDiagram {
             e.end = r.to_card.head();
             e.label = Some(r.label.clone()).filter(|l| !l.trim().is_empty());
             if !r.identifying {
-                e.style.dash = Some(vec![8.0, 8.0]);
+                e.line = LineKind::Dashed;
             }
             Some(e)
         })

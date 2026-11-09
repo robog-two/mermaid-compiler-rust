@@ -603,35 +603,7 @@ impl Scanner {
             let v = v.trim().trim_matches(['"', '\'']);
             match k.trim() {
                 "shape" => {
-                    shape = match v {
-                        "rect" | "proc" | "process" | "rectangle" => Shape::Rect,
-                        "rounded" | "event" => Shape::Rounded,
-                        "stadium" | "pill" | "terminal" => Shape::Stadium,
-                        "subproc" | "subprocess" | "subroutine" | "fr-rect"
-                        | "framed-rectangle" => Shape::Subroutine,
-                        "cyl" | "cylinder" | "database" | "db" => Shape::Cylinder,
-                        "circle" | "circ" => Shape::Circle,
-                        "dbl-circ" | "double-circle" => Shape::DoubleCircle,
-                        "diam" | "diamond" | "decision" | "question" => Shape::Diamond,
-                        "hex" | "hexagon" | "prepare" => Shape::Hexagon,
-                        "lean-r" | "lean-right" | "in-out" => Shape::LeanRight,
-                        "lean-l" | "lean-left" | "out-in" => Shape::LeanLeft,
-                        "trap-b" | "trapezoid" | "priority" | "trapezoid-bottom" => {
-                            Shape::Trapezoid
-                        }
-                        "trap-t" | "inv-trapezoid" | "manual" | "trapezoid-top" => {
-                            Shape::InvTrapezoid
-                        }
-                        "odd" => Shape::Asymmetric,
-                        "f-circ" | "filled-circle" | "junction" | "sm-circ" | "small-circle"
-                        | "start" => Shape::StateStart,
-                        "fr-circ" | "framed-circle" | "stop" => Shape::StateEnd,
-                        "fork" | "join" => Shape::ForkBar,
-                        "doc" | "document" | "notch-rect" | "card" | "notched-rectangle" => {
-                            Shape::Rect
-                        }
-                        other => return Err(format!("Unknown shape '{other}'")),
-                    }
+                    shape = shape_by_name(v).ok_or_else(|| format!("No such shape: {v}."))?;
                 }
                 "label" => label = v.to_string(),
                 _ => {}
@@ -829,6 +801,67 @@ impl Scanner {
                 .to_string(),
         )
     }
+}
+
+/// `@{ shape: … }` names → shapes, following the alias table in mermaid's
+/// `rendering-util/rendering-elements/shapes.ts`. Valid names we do not draw
+/// yet fall back to a rectangle; unknown names are an error, as upstream.
+fn shape_by_name(name: &str) -> Option<Shape> {
+    Some(match name {
+        "rect" | "proc" | "process" | "rectangle" | "squareRect" => Shape::Rect,
+        "rounded" | "event" | "roundedRect" => Shape::Rounded,
+        "stadium" | "pill" | "terminal" => Shape::Stadium,
+        "fr-rect" | "subproc" | "subprocess" | "subroutine" | "framed-rectangle" => {
+            Shape::Subroutine
+        }
+        "cyl" | "cylinder" | "database" | "db" => Shape::Cylinder,
+        "circle" | "circ" => Shape::Circle,
+        "dbl-circ" | "double-circle" | "doublecircle" => Shape::DoubleCircle,
+        "diam" | "diamond" | "decision" | "question" => Shape::Diamond,
+        "hex" | "hexagon" | "prepare" => Shape::Hexagon,
+        "lean-r" | "lean-right" | "in-out" | "lean_right" => Shape::LeanRight,
+        "lean-l" | "lean-left" | "out-in" | "lean_left" => Shape::LeanLeft,
+        "trap-b" | "trapezoid" | "priority" | "trapezoid-bottom" => Shape::Trapezoid,
+        "trap-t" | "inv-trapezoid" | "manual" | "trapezoid-top" | "inv_trapezoid" => {
+            Shape::InvTrapezoid
+        }
+        "odd" | "rect_left_inv_arrow" => Shape::Asymmetric,
+        "f-circ" | "filled-circle" | "junction" | "sm-circ" | "small-circle" | "start"
+        | "stateStart" => Shape::StateStart,
+        "fr-circ" | "framed-circle" | "stop" | "stateEnd" => Shape::StateEnd,
+        "fork" | "join" | "forkJoin" => Shape::ForkBar,
+        "text" => Shape::Text,
+        "notch-rect" | "card" | "notched-rectangle" => Shape::Card,
+        "lin-rect" | "lined-rectangle" | "lined-process" | "lin-proc" | "shaded-process" => {
+            Shape::LinedRect
+        }
+        "delay" | "half-rounded-rectangle" => Shape::Delay,
+        "tri" | "extract" | "triangle" => Shape::Triangle,
+        "flip-tri" | "manual-file" | "flipped-triangle" => Shape::FlippedTriangle,
+        "hourglass" | "collate" => Shape::Hourglass,
+        "cross-circ" | "summary" | "crossed-circle" => Shape::CrossedCircle,
+        "sl-rect" | "manual-input" | "sloped-rectangle" => Shape::SlopedRect,
+        "win-pane" | "internal-storage" | "window-pane" => Shape::WindowPane,
+        "div-rect" | "div-proc" | "divided-rectangle" | "divided-process" => Shape::DividedRect,
+        "notch-pent" | "loop-limit" | "notched-pentagon" => Shape::NotchedPentagon,
+        "st-rect" | "procs" | "processes" | "stacked-rectangle" => Shape::StackedRect,
+        "tag-rect" | "tagged-rectangle" | "tag-proc" | "tagged-process" => Shape::TaggedRect,
+        "doc" | "document" => Shape::Document,
+        "lin-cyl" | "disk" | "lined-cylinder" => Shape::LinedCylinder,
+        "h-cyl" | "das" | "horizontal-cylinder" => Shape::HorizontalCylinder,
+        "curv-trap" | "curved-trapezoid" | "display" => Shape::CurvedTrapezoid,
+        // Valid upstream shapes not drawn yet.
+        "datastore" | "data-store" | "folder" | "directory" | "bucket" | "console" | "browser"
+        | "person" | "bang" | "cloud" | "brace" | "comment" | "brace-l" | "brace-r" | "braces"
+        | "bolt" | "com-link" | "lightning-bolt" | "docs" | "documents" | "st-doc"
+        | "stacked-document" | "bow-rect" | "stored-data" | "bow-tie-rectangle" | "tag-doc"
+        | "tagged-document" | "flag" | "paper-tape" | "lin-doc" | "lined-document" | "state"
+        | "choice" | "note" | "composite" | "rectWithTitle" | "labelRect" | "block_arrow"
+        | "collapsedGroup" | "iconSquare" | "iconCircle" | "icon" | "iconRounded"
+        | "imageSquare" | "anchor" | "kanbanItem" | "mindmapCircle" | "defaultMindmapNode"
+        | "classBox" | "erBox" | "requirementBox" => Shape::Rect,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

@@ -237,3 +237,17 @@ fn sequence_actors_cycle_through_the_palette() {
         assert!(svg.contains(c), "{c} missing");
     }
 }
+
+/// The theme's `radius` reaches flowchart rounded nodes (`roundedRect.ts`), through
+/// the shape metrics: 12 under the mermaid 12 default (`redux-color`), 5 classically.
+#[test]
+fn rounded_node_radius_follows_the_theme() {
+    let svg_with = |cfg: &MermaidConfig| {
+        let r = render::render("flowchart LR\n  A(round)\n", cfg).expect("renders");
+        mmdc::output::encode_svg(&r, &mmdc::output::EncodeOptions::default())
+    };
+    let neo = svg_with(&MermaidConfig::default());
+    assert!(neo.contains("rx=\"12\""), "redux-color radius");
+    let classic = svg_with(&MermaidConfig::default().with_cli_theme(ThemeName::Default));
+    assert!(classic.contains("rx=\"5\"") && !classic.contains("rx=\"12\""));
+}

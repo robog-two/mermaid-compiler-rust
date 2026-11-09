@@ -1,0 +1,25 @@
+---
+title: Flowchart shapes
+---
+flowchart LR
+    subgraph classic [Classic syntax]
+        direction LR
+        a1[Rect] ~~~ a2(Rounded) ~~~ a3([Stadium]) ~~~ a4[[Subroutine]]
+        b1[(Cylinder)] ~~~ b2((Circle)) ~~~ b3(((Double))) ~~~ b4>Odd]
+        c1{Diamond} ~~~ c2{{Hexagon}} ~~~ c3[/Lean right/] ~~~ c4[\Lean left\]
+        d1[/Trapezoid\] ~~~ d2[\Inv trapezoid/]
+    end
+    subgraph expanded [Expanded @-syntax]
+        direction LR
+        e1@{ shape: notch-rect, label: "Card" } ~~~ e2@{ shape: lin-rect, label: "Lined" } ~~~ e3@{ shape: delay, label: "Delay" } ~~~ e4@{ shape: doc, label: "Document" }
+        f1@{ shape: tri, label: "Extract" } ~~~ f2@{ shape: flip-tri, label: "Manual file" } ~~~ f3@{ shape: sl-rect, label: "Manual input" } ~~~ f4@{ shape: win-pane, label: "Storage" }
+        g1@{ shape: div-rect, label: "Divided" } ~~~ g2@{ shape: notch-pent, label: "Loop limit" } ~~~ g3@{ shape: st-rect, label: "Processes" } ~~~ g4@{ shape: tag-rect, label: "Tagged" }
+        h1@{ shape: lin-cyl, label: "Disk" } ~~~ h2@{ shape: h-cyl, label: "DAS" } ~~~ h3@{ shape: curv-trap, label: "Display" } ~~~ h4@{ shape: text, label: "Just text" }
+        i1@{ shape: hourglass } ~~~ i2@{ shape: cross-circ } ~~~ i3@{ shape: sm-circ } ~~~ i4@{ shape: fr-circ } ~~~ i5@{ shape: fork }
+    end
+    a1 --> b1
+    b2 -.-> c1
+    c2 ==> d1
+    d2 --o e1
+    e2 --x f1
+    f2 <--> g1
