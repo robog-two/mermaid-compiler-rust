@@ -1,0 +1,24 @@
+architecture-beta
+    title Web platform
+    group public(cloud)[Public cloud]
+    group api(server)[API tier] in public
+    group storage[Storage] in public
+
+    service internet(internet)[Internet]
+    service gateway(internet)[Gateway] in public
+    service server(server)[Server] in api
+    service worker(server)[Worker] in api
+    service db(database)[Database] in storage
+    service disk(disk)[Disk] in storage
+    service bucket(logos:aws-s3)[Bucket] in storage
+    service ext("API")[Partner API]
+    junction hub in api
+
+    internet:R --> L:gateway
+    gateway:R -[HTTPS]-> L:server
+    server:B -- T:hub
+    hub:R -- L:worker
+    server{group}:B --> T:db{group}
+    db:R -- L:disk
+    disk:R -- L:bucket
+    ext:B <--> T:internet

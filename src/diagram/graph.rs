@@ -49,6 +49,13 @@ pub enum Shape {
     Compartments,
     /// Takes up space but draws nothing (placeholder for empty clusters).
     Invisible,
+    /// ER entity: `label` is the header, every `Section` is one attribute row
+    /// whose `lines` are the cells (type, name, keys, comment).
+    EntityTable,
+    /// Requirement-diagram box: `sections[0]` holds the «stereotype» lines drawn
+    /// above the bold `label`; `sections[1]` (optional) holds the field lines
+    /// drawn below a divider.
+    Requirement,
 }
 
 /// Inline style overrides (`style`, `classDef`, `linkStyle`).
@@ -181,6 +188,16 @@ pub enum Head {
     DiamondFilled,
     /// Open `>` arrow (association / lollipop-free dependency).
     OpenArrow,
+    /// ER crow's-foot: exactly one (`||`).
+    ErOnlyOne,
+    /// ER crow's-foot: zero or one (`|o` / `o|`).
+    ErZeroOrOne,
+    /// ER crow's-foot: one or more (`}|` / `|{`).
+    ErOneOrMore,
+    /// ER crow's-foot: zero or more (`}o` / `o{`).
+    ErZeroOrMore,
+    /// Circle with a plus inside (requirement `contains`).
+    CirclePlus,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -352,6 +369,14 @@ fn measure_node(node: &Node, pad: f64, font: f64, horizontal: bool) -> Measured 
             (w.max(60.0), h.max(30.0))
         }
         Shape::Invisible => (tw.max(20.0), th.max(10.0)),
+        Shape::EntityTable => {
+            let t = table_metrics(node, pad, font);
+            (t.w, t.h)
+        }
+        Shape::Requirement => {
+            let r = requirement_metrics(node, pad, font);
+            (r.w, r.h)
+        }
     };
     Measured {
         block,
@@ -706,6 +731,8 @@ fn node_prefix(kind: DiagramKind) -> &'static str {
     match kind {
         DiagramKind::State => "state",
         DiagramKind::Class => "classId",
+        DiagramKind::Er => "entity",
+        DiagramKind::Requirement => "requirement",
         _ => "flowchart",
     }
 }
@@ -846,6 +873,142 @@ fn head_elements(
             ];
             (vec![Element::path(cmds, Paint::stroke(stroke, 1.0))], 0.0)
         }
+        Head::ErOnlyOne | Head::ErZeroOrOne | Head::ErOneOrMore | Head::ErZeroOrMore => {
+            let hw = 8.0;
+            let p = Paint::stroke(stroke, width.max(1.0));
+            let bar = |back: f64| Element::line(at(back, hw), at(back, -hw), p.clone());
+            let foot = |apex: f64| {
+                Element::path(
+                    vec![
+                        PathCmd::MoveTo(at(0.0, hw)),
+                        PathCmd::LineTo(at(apex, 0.0)),
+                        PathCmd::LineTo(at(0.0, -hw)),
+                    ],
+                    p.clone(),
+                )
+            };
+            let ring = |back: f64| {
+                Element::shape(
+                    Geometry::Circle {
+                        c: at(back, 0.0),
+                        r: 5.0,
+                    },
+                    Paint::both(bg, stroke, width.max(1.0)),
+                )
+            };
+            let els = match head {
+                Head::ErOnlyOne => vec![bar(8.0), bar(14.0)],
+                Head::ErZeroOrOne => vec![bar(8.0), ring(19.0)],
+                Head::ErOneOrMore => vec![foot(15.0), bar(19.0)],
+                _ => vec![foot(15.0), ring(25.0)],
+            };
+            (els, 0.0)
+        }
+        Head::CirclePlus => {
+            let r = 7.0;
+            let c = at(r, 0.0);
+            let p = Paint::stroke(stroke, 1.0);
+            (
+                vec![
+                    Element::shape(Geometry::Circle { c, r }, Paint::both(bg, stroke, 1.0)),
+                    Element::line(c.minus(dir.scale(r)), c.plus(dir.scale(r)), p.clone()),
+                    Element::line(c.minus(perp.scale(r)), c.plus(perp.scale(r)), p),
+                ],
+                2.0 * r,
+            )
+        }
+    }
+}
+
+/// Column geometry of a `Shape::EntityTable` node.
+struct TableMetrics {
+    cols: Vec<f64>,
+    header_h: f64,
+    row_h: f64,
+    w: f64,
+    h: f64,
+}
+
+/// Horizontal padding inside an entity-table cell.
+const CELL_PAD: f64 = 8.0;
+
+fn table_metrics(node: &Node, pad: f64, font: f64) -> TableMetrics {
+    let ncols = node
+        .sections
+        .iter()
+        .map(|s| s.lines.len())
+        .max()
+        .unwrap_or(0);
+    let mut cols = vec![0.0f64; ncols];
+    for row in &node.sections {
+        for (j, cell) in row.lines.iter().enumerate() {
+            if !cell.is_empty() {
+                cols[j] = cols[j].max(crate::text::line_width(cell, font, false) + 2.0 * CELL_PAD);
+            }
+        }
+    }
+    let label = TextBlock::label(&node.label, font);
+    let line_h = font * 1.5;
+    let header_h = label.height.max(line_h) + pad;
+    let row_h = line_h + 6.0;
+    let header_w = label.width + 2.0 * pad;
+    let sum: f64 = cols.iter().sum();
+    let w = sum.max(header_w).max(100.0);
+    let used = cols.iter().filter(|c| **c > 0.0).count();
+    if used > 0 && w > sum {
+        let extra = (w - sum) / used as f64;
+        for c in cols.iter_mut().filter(|c| **c > 0.0) {
+            *c += extra;
+        }
+    }
+    let h = if node.sections.is_empty() {
+        (label.height + 2.0 * pad).max(60.0)
+    } else {
+        header_h + row_h * node.sections.len() as f64
+    };
+    TableMetrics {
+        cols,
+        header_h,
+        row_h,
+        w,
+        h,
+    }
+}
+
+/// Text blocks and size of a `Shape::Requirement` node.
+struct RequirementMetrics {
+    stereo: TextBlock,
+    name: TextBlock,
+    body: TextBlock,
+    w: f64,
+    h: f64,
+}
+
+fn requirement_metrics(node: &Node, pad: f64, font: f64) -> RequirementMetrics {
+    let section = |i: usize| -> Vec<String> {
+        node.sections
+            .get(i)
+            .map(|s| s.lines.clone())
+            .unwrap_or_default()
+    };
+    let stereo = TextBlock::new(section(0), font, false);
+    let name = TextBlock::new(
+        crate::text::split_lines(&crate::text::normalize_label(&node.label)),
+        font,
+        true,
+    );
+    let body = TextBlock::new(section(1), font, false);
+    let w = stereo.width.max(name.width).max(body.width) + 2.0 * pad;
+    let mut h = pad + stereo.height + name.height + pad;
+    if !body.is_empty() {
+        h += body.height + pad / 2.0;
+    }
+    RequirementMetrics {
+        stereo,
+        name,
+        body,
+        w: w.max(120.0),
+        h,
     }
 }
 
@@ -1133,6 +1296,135 @@ fn node_elements(
                     els.push(Element::classed_text(t, "label"));
                 }
                 y += sh;
+            }
+            return (els, Boundary::Rect(r));
+        }
+        Shape::EntityTable => {
+            let t = table_metrics(n, pad, font);
+            els.push(Element::classed_shape(
+                Geometry::Rect { rect: r, rx: 0.0 },
+                paint.clone(),
+                "basic label-container",
+            ));
+            let header_center = if n.sections.is_empty() {
+                c
+            } else {
+                Point::new(c.x, y0 + t.header_h / 2.0)
+            };
+            els.push(Element::classed_text(
+                Text::centered(
+                    header_center,
+                    &m.block.lines,
+                    font,
+                    m.block.line_height,
+                    &text_color,
+                ),
+                "nodeLabel",
+            ));
+            let line_paint = Paint::stroke(&stroke, 1.0);
+            let odd = pal.background.clone();
+            for (i, row) in n.sections.iter().enumerate() {
+                let ry = y0 + t.header_h + t.row_h * i as f64;
+                if i % 2 == 0 {
+                    els.push(Element::classed_shape(
+                        Geometry::Rect {
+                            rect: Rect::new(x0, ry, w, t.row_h),
+                            rx: 0.0,
+                        },
+                        Paint::fill(&odd),
+                        "row-rect-odd",
+                    ));
+                }
+                els.push(Element::line(
+                    Point::new(x0, ry),
+                    Point::new(x1, ry),
+                    line_paint.clone(),
+                ));
+                let mut x = x0;
+                for (j, cw) in t.cols.iter().enumerate() {
+                    if *cw <= 0.0 {
+                        continue;
+                    }
+                    if let Some(cell) = row.lines.get(j).filter(|s| !s.is_empty()) {
+                        let center = Point::new(x, ry + t.row_h / 2.0);
+                        let tx = Text::centered(
+                            center,
+                            std::slice::from_ref(cell),
+                            font,
+                            font * 1.5,
+                            &text_color,
+                        )
+                        .anchored(Anchor::Start, x + CELL_PAD);
+                        els.push(Element::classed_text(tx, "label"));
+                    }
+                    x += cw;
+                }
+            }
+            if !n.sections.is_empty() {
+                // Column dividers below the header.
+                let used: Vec<f64> = t.cols.iter().copied().filter(|c| *c > 0.0).collect();
+                let mut x = x0;
+                for cw in used.iter().take(used.len().saturating_sub(1)) {
+                    x += cw;
+                    els.push(Element::line(
+                        Point::new(x, y0 + t.header_h),
+                        Point::new(x, y1),
+                        line_paint.clone(),
+                    ));
+                }
+                // Redraw the outline on top of the row fills.
+                els.push(Element::shape(
+                    Geometry::Rect { rect: r, rx: 0.0 },
+                    Paint::stroke(&stroke, paint.stroke_width),
+                ));
+            }
+            return (els, Boundary::Rect(r));
+        }
+        Shape::Requirement => {
+            let rm = requirement_metrics(n, pad, font);
+            els.push(Element::classed_shape(
+                Geometry::Rect { rect: r, rx: 0.0 },
+                paint.clone(),
+                "basic label-container",
+            ));
+            let mut y = y0 + pad;
+            for (block, class) in [(&rm.stereo, "stereotype"), (&rm.name, "nodeLabel")] {
+                if !block.is_empty() {
+                    let mut t = Text::centered(
+                        Point::new(c.x, y + block.height / 2.0),
+                        &block.lines,
+                        font,
+                        block.line_height,
+                        &text_color,
+                    );
+                    t.bold = block.bold;
+                    els.push(Element::classed_text(t, class));
+                }
+                y += block.height;
+            }
+            if !rm.body.is_empty() {
+                y += pad / 2.0;
+                els.push(Element::classed_shape(
+                    Geometry::Path(vec![
+                        PathCmd::MoveTo(Point::new(x0, y)),
+                        PathCmd::LineTo(Point::new(x1, y)),
+                    ]),
+                    Paint::stroke(&stroke, 1.0),
+                    "divider",
+                ));
+                y += pad / 2.0;
+                let centered = n.sections.get(1).map(|s| s.centered).unwrap_or(true);
+                let mut t = Text::centered(
+                    Point::new(c.x, y + rm.body.height / 2.0),
+                    &rm.body.lines,
+                    font,
+                    rm.body.line_height,
+                    &text_color,
+                );
+                if !centered {
+                    t = t.anchored(Anchor::Start, x0 + pad);
+                }
+                els.push(Element::classed_text(t, "label"));
             }
             return (els, Boundary::Rect(r));
         }
