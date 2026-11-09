@@ -26,7 +26,10 @@ fn main() {
     #[cfg(feature = "png")]
     let rast = mmdc::output::png::Rasterizer::new();
     let cfg = MermaidConfig::default();
-    let enc = EncodeOptions { scale: 1.5, ..EncodeOptions::default() };
+    let enc = EncodeOptions {
+        scale: 1.5,
+        ..EncodeOptions::default()
+    };
 
     let mut md = String::from(
         "# Gallery\n\nEvery example in `examples/diagrams/`, rendered by this implementation (no browser).\n\
@@ -34,7 +37,11 @@ fn main() {
     );
     let mut failures = 0;
     for path in &files {
-        let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let name = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         let source = std::fs::read_to_string(path).expect("read example");
         let t = Instant::now();
         let rendered = match render::render(&source, &cfg) {
@@ -47,7 +54,11 @@ fn main() {
             }
         };
         let took = t.elapsed();
-        std::fs::write(out_dir.join(format!("{name}.svg")), output::encode_svg(&rendered, &enc)).expect("write svg");
+        std::fs::write(
+            out_dir.join(format!("{name}.svg")),
+            output::encode_svg(&rendered, &enc),
+        )
+        .expect("write svg");
         #[cfg(feature = "png")]
         {
             let png = output::encode_png(&rendered, &enc, &rast).expect("png");
@@ -63,7 +74,10 @@ fn main() {
         );
     }
     std::fs::write(root.join("docs/GALLERY.md"), md).expect("write GALLERY.md");
-    println!("wrote docs/GALLERY.md ({} diagrams, {failures} failures)", files.len());
+    println!(
+        "wrote docs/GALLERY.md ({} diagrams, {failures} failures)",
+        files.len()
+    );
     if failures > 0 {
         std::process::exit(1);
     }

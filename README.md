@@ -26,17 +26,50 @@ achievable without embedding a browser, which is what this project exists to avo
 
 ### Diagram support
 
-| Diagram | Status |
-|---|---|
-| Flowchart (`graph`, `flowchart`) | All directions, every classic node shape, `A@{ shape: … }` (common shapes), all link types (`-->`, `---`, `-.->`, `==>`, `--o`, `--x`, `<-->`, `~~~`, longer links), both label syntaxes, `&` chains, subgraphs (nested, edges to subgraphs), `classDef`/`class`/`:::`/`style`/`linkStyle`, front-matter titles |
-| Sequence (`sequenceDiagram`) | participants/actors, aliases, all arrow types incl. bidirectional, activations (`+`/`-`, `activate`), notes (left/right/over), `loop`/`alt`/`else`/`opt`/`par`/`and`/`critical`/`option`/`break`/`rect`, `box`, `autonumber`, `title` |
-| State (`stateDiagram`, `-v2`) | `[*]`, transitions with labels, composite states, `<<fork>>`/`<<join>>`/`<<choice>>`, descriptions, notes, `direction`, `classDef` |
-| Class (`classDiagram`) | classes, members, generics, annotations, all relation types and cardinalities, namespaces, notes, `cssClass`/`style` |
-| Pie (`pie`) | `showData`, `title`, mermaid's geometry and legend |
-| erDiagram, gantt, gitGraph, mindmap, timeline, journey, C4, sankey, xychart, block, packet, architecture, kanban, radar, treemap, quadrant, requirement, zenuml | **Not implemented.** These are detected and fail with a clear message and exit code 1, never with silent garbage. |
+Every mermaid diagram family is implemented. See **[docs/GALLERY.md](docs/GALLERY.md)** for a rendered screenshot of
+each example. Each entry has its source in a collapsible block, which GitHub renders with real mermaid, so you can
+compare the two directly.
+
+| Diagram | Layout engine | Notes |
+|---|---|---|
+| Flowchart (`graph`, `flowchart`) | layered graph | all shapes, link types, subgraphs, styling |
+| Sequence (`sequenceDiagram`) | sequence | actors, activations, notes, all frames, boxes, autonumber |
+| State (`stateDiagram[-v2]`) | layered graph | composite states, fork/join/choice, notes |
+| Class (`classDiagram`) | layered graph | members, generics, relations, cardinalities, namespaces |
+| ER (`erDiagram`) | layered graph | attribute tables, keys, crow's-foot cardinalities |
+| Requirement (`requirementDiagram`) | layered graph | all requirement/element types and relationships |
+| Architecture (`architecture-beta`) | grid from side hints | groups, services, junctions. Generic icon glyphs only |
+| Pie (`pie`) | geometry | `showData`, mermaid's geometry |
+| Gantt (`gantt`) | time axis | date formats, `after`/`until`, excludes, milestones, markers |
+| Timeline (`timeline`) | **Taffy** flex | sections, multi-event periods |
+| User journey (`journey`) | **Taffy** flex | scores as faces, actors |
+| Kanban (`kanban`) | **Taffy** flex | columns, cards, ticket/assignee/priority |
+| Block (`block-beta`) | **Taffy** CSS grid | columns, spans, nested blocks, edges, block arrows |
+| Packet (`packet-beta`) | **Taffy** CSS grid | bit ranges, `+N`, row splitting |
+| C4 (`C4Context/Container/Component/Dynamic/Deployment`) | **Taffy** flex/wrap | boundaries, all element/rel kinds, style updates |
+| xychart (`xychart-beta`) | geometry | bars/lines, horizontal, auto "nice" axes |
+| Quadrant (`quadrantChart`) | geometry | points with styles/classes |
+| Radar (`radar-beta`) | geometry | circle/polygon graticule, legend |
+| Sankey (`sankey-beta`) | sankey (d3-style) | CSV input, relaxation, link colouring |
+| gitGraph (`gitGraph`) | lanes | branches, merges, cherry-picks, tags, LR/TB/BT |
+| Mindmap (`mindmap`) | two-sided tree | all node shapes |
+| Treemap (`treemap-beta`) | squarified | sections, values, classDef |
+| ZenUML (`zenuml`) | sequence (lowered) | translated into the sequence engine |
+| `info` | — | prints the implementation version |
 
 Shared features: front-matter (`title`, `config`), `%%{init: …}%%` directives, `%%` comments, `accTitle`/`accDescr`
 (emitted as `<title>`/`<desc>` and used for Markdown alt text and titles, as upstream does), themes and `themeVariables`.
+
+### Where Taffy is used, and where it isn't
+
+[Taffy](https://github.com/DioxusLabs/taffy) implements the CSS box-layout algorithms (flexbox, grid, block). Diagrams
+that are nested rectangles in rows, columns or grids are built as a box tree and laid out by Taffy through a small
+pure wrapper (`src/layout/boxes.rs`): block, packet, kanban, timeline, journey, C4 boundaries and chart legends.
+
+Taffy cannot lay out node-link graphs. CSS has no concept of ranking nodes, minimising edge crossings or routing
+edges. Flowchart, state, class, ER and requirement diagrams therefore use the purpose-built layered engine
+(`src/layout/`: network-simplex ranking, barycentric ordering, least-squares coordinates), just as mermaid uses
+dagre rather than CSS for them.
 
 ### Flags
 
@@ -63,6 +96,12 @@ Shared features: front-matter (`title`, `config`), `%%{init: …}%%` directives,
   least-squares coordinate assignment. Results are comparable to dagre but not identical. Network simplex recomputes the
   tree on every pivot (O(V·E)); graphs above 4,000 nodes fall back to a greedy ranker.
 - `click`/`href`/callbacks are parsed and ignored (static images have no interactivity).
+- **No rotated text** in the scene model, so the xychart y-axis title, gitGraph commit labels and quadrant
+  y-labels are drawn horizontally.
+- **Icons** (architecture, mindmap `::icon`, C4 sprites) are generic glyphs; icon packs are not loaded.
+- **Gantt is deterministic:** no today-marker (it would need the clock), and times are UTC.
+- **Approximate layouts** where mermaid uses force-directed or browser layout: architecture (grid from side hints),
+  mindmap (two-sided tree rather than force layout), and C4 relationships (straight lines that can pass behind cards).
 
 ## Design
 
@@ -77,7 +116,7 @@ src/
   render.rs          pure: text + config → Scene
   diagram/           parsers (text → typed IR) and renderers (IR → Scene)
     graph.rs         shared graph IR + renderer for flowchart/state/class
-  layout/            layered layout engine; rank.rs = network simplex
+  layout/            layered graph engine (rank.rs = network simplex) + boxes.rs = Taffy wrapper
   scene.rs           backend-neutral drawing model (arrowheads/arcs pre-resolved)
   output/            Scene → SVG / PDF (hand-written) / PNG (resvg)
   config.rs theme.rs text.rs color.rs json.rs geom.rs
@@ -90,8 +129,9 @@ Every stage is a function from immutable input to new output. Only `main.rs` tou
 enums (`Format`, `ThemeName`, `Paper`, `Shape`, `Head`, `Direction`, …), and parse failures are typed `Error` values with line
 numbers, never panics.
 
-**Dependencies:** none by default except `resvg` for PNG. Build with `--no-default-features` for a **zero-dependency**
-binary that writes SVG, PDF and Markdown (no PNG).
+**Dependencies:** `taffy` (box layout; with only the flexbox/grid/block features it pulls in `slotmap` and
+`smallvec`), plus `resvg` for PNG. Build with `--no-default-features` for a three-crate dependency tree that writes SVG,
+PDF and Markdown (no PNG).
 
 ## Building (macOS Apple Silicon is the primary target)
 
@@ -110,6 +150,7 @@ cargo test                                    # unit + end-to-end CLI tests + pe
 cargo test --release --test perf -- --nocapture   # speed tests with release budgets
 cargo bench                                   # benchmark table (no external bench crate)
 cargo run --release --example scaling         # layout scaling report
+cargo run --release --example gallery         # re-render docs/gallery + docs/GALLERY.md
 ```
 
 `tests/perf.rs` asserts time budgets per diagram type and checks *scaling*: a 4× larger graph must take well under 16× the
@@ -129,5 +170,8 @@ Typical release-build numbers (x86_64 Linux container; per diagram, parse + layo
 | state, 300 states | 5.3 ms |
 | class, 150 classes | 2.0 ms |
 | pie, 100 slices | 0.5 ms |
+
+Every example in the gallery, across all 25 diagram types, renders in under 0.5 ms; the speed suite checks each one
+stays under a budget, plus large inputs for gantt, ER, kanban (Taffy) and sankey.
 
 A whole `mmdc -i flowchart.mmd -o out.svg` process takes about 2 ms. Upstream starts a Chromium instance per run.
