@@ -1,0 +1,38 @@
+---
+title: Order management
+---
+erDiagram
+    %% Symbolic cardinalities, identifying (--) and non-identifying (..) links
+    CUSTOMER ||--o{ ORDER : places
+    CUSTOMER }|..|{ DELIVERY-ADDRESS : uses
+    ORDER ||--|{ LINE-ITEM : contains
+    PRODUCT |o--o{ LINE-ITEM : "ordered in"
+    %% Word cardinalities and an alias
+    p[Person] one or more optionally to zero or one CUSTOMER : "acts as"
+
+    CUSTOMER {
+        string id PK "customer number"
+        string name
+        string email UK
+    }
+    ORDER {
+        int orderNumber PK
+        string customerId FK
+        date placed
+    }
+    LINE-ITEM {
+        string productCode FK
+        int quantity
+        decimal(10,2) pricePerUnit
+    }
+    PRODUCT {
+        string code PK
+        string description
+    }
+    p {
+        string firstName
+        string lastName
+    }
+
+    classDef highlight fill:#fff5ad,stroke:#aaaa33
+    class PRODUCT highlight
