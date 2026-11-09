@@ -1,0 +1,37 @@
+[package]
+name = "mmdc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A browser-free, pure-Rust reimplementation of the mermaid-cli `mmdc` command"
+license = "MIT"
+readme = "README.md"
+keywords = ["mermaid", "diagram", "svg", "cli", "flowchart"]
+categories = ["command-line-utilities", "visualization"]
+
+[lib]
+name = "mmdc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mmdc"
+path = "src/main.rs"
+
+[features]
+default = ["png"]
+# PNG rasterisation via resvg (pure Rust). Disable with --no-default-features
+# for a zero-dependency build that supports SVG, PDF and Markdown output.
+png = ["dep:resvg"]
+
+[dependencies]
+resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts"], optional = true }
+
+[[bench]]
+name = "render"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = 3

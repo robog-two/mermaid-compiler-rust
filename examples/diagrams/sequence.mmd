@@ -1,0 +1,22 @@
+sequenceDiagram
+    title Login flow
+    autonumber
+    actor U as User
+    participant B as Browser
+    participant S as Server
+    participant D as Database
+    U->>B: Enter credentials
+    B->>+S: POST /login
+    S->>+D: SELECT user
+    D-->>-S: row
+    alt valid password
+        S-->>B: 200 OK + cookie
+    else invalid
+        S--xB: 401 Unauthorized
+    end
+    deactivate S
+    Note over B,S: TLS everywhere
+    loop every 5 minutes
+        B-)S: heartbeat
+    end
+    Note right of D: replicated

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-14 runners are Apple Silicon (aarch64-apple-darwin), the primary target.
+        os: [macos-14, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit + CLI tests (debug)
+        run: cargo test
+      - name: Speed tests (release budgets)
+        run: cargo test --release --test perf -- --nocapture
+      - name: Zero-dependency build
+        run: cargo test --no-default-features
+      - name: Benchmarks (report only)
+        run: cargo bench --bench render
+      - name: Release build
+        run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mmdc-${{ matrix.os }}
+          path: target/release/mmdc

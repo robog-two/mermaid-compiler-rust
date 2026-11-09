@@ -1,0 +1,15 @@
+stateDiagram-v2
+    [*] --> Still
+    Still --> [*]
+    Still --> Moving : push
+    Moving --> Still : stop
+    Moving --> Crash
+    Crash --> [*]
+    state Moving {
+        [*] --> Slow
+        Slow --> Fast : accelerate
+        Fast --> Slow : brake
+    }
+    state check <<choice>>
+    Crash --> check
+    check --> Still : repaired

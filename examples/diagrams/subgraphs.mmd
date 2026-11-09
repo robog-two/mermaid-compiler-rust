@@ -1,0 +1,18 @@
+flowchart LR
+    subgraph frontend [Frontend]
+        ui[Web UI] --> api_client[API client]
+    end
+    subgraph backend [Backend]
+        direction TB
+        api[REST API] --> svc[Service]
+        svc --> db[(Postgres)]
+        subgraph workers [Workers]
+            q[/Queue/] --> w1[Worker 1]
+            q --> w2[Worker 2]
+        end
+        svc --> q
+    end
+    api_client --> api
+    w1 --> db
+    w2 --> db
+    user((User)) --> ui
