@@ -1,12 +1,12 @@
 //! Sequence diagrams: parser, layout and renderer.
 
 use crate::color;
-use crate::config::SequenceConfig;
+use crate::config::{Look, SequenceConfig};
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
-use crate::theme::Palette;
+use crate::theme::{ColorSlot, Palette, SlotColors};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -535,9 +535,15 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
                 10.0,
                 (y1 - y0).max(4.0),
             );
+            // Colour themes paint an activation in its actor's slot, falling back to
+            // `mainBkg` for the fill (svgDraw.js `drawActivation`).
+            let paint = match actor_slot(pal, a) {
+                Some(sc) => Paint::both(sc.fill.as_ref().unwrap_or(&pal.main_bkg), &sc.border, 1.0),
+                None => Paint::both(&pal.activation_bkg, &pal.activation_border, 1.0),
+            };
             els.push(Element::classed_shape(
                 Geometry::Rect { rect: r, rx: 0.0 },
-                Paint::both(&pal.activation_bkg, &pal.activation_border, 1.0),
+                paint,
                 format!("activation{}", depth % 3),
             ));
         };
@@ -838,11 +844,11 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
             Paint::stroke(&pal.actor_line, 0.5),
             "actor-line",
         ));
-        actors_el.push(actor_elements(p, r_top, &labels[i], pal, cfg));
+        actors_el.push(actor_elements(p, i, r_top, &labels[i], pal, cfg));
         if cfg.mirror_actors {
             let r_bot = Rect::new(r_top.x, bottom_top, widths[i], actor_h);
             bounds.add_rect(r_bot);
-            actors_el.push(actor_elements(p, r_bot, &labels[i], pal, cfg));
+            actors_el.push(actor_elements(p, i, r_bot, &labels[i], pal, cfg));
         }
     }
     let mut boxes_el = Vec::new();
@@ -1040,19 +1046,47 @@ fn frame_elements(f: &Frame, r: Rect, pal: &Palette, font: f64) -> Element {
     Element::group("frame", els)
 }
 
+/// Palette slot of the `index`-th participant (svgDraw.js `paletteColor(palette,
+/// actorIndexMap.get(name))`, the index being the participant's declaration order).
+fn actor_slot(pal: &Palette, index: usize) -> Option<SlotColors> {
+    Some(pal.color_slots.as_ref()?.slot(ColorSlot(index)))
+}
+
 fn actor_elements(
     p: &Participant,
+    index: usize,
     r: Rect,
     label: &TextBlock,
     pal: &Palette,
     cfg: &SequenceConfig,
 ) -> Element {
     let mut els = Vec::new();
+    // `.actor { stroke-width: strokeWidth ?? 1 }`; an empty background palette leaves the
+    // stylesheet's `actorBkg` in charge (d3 removes the inline fill).
+    let slot = actor_slot(pal, index);
+    let actor_border = slot.as_ref().map_or(&pal.actor_border, |s| &s.border);
+    let actor_bkg = slot
+        .as_ref()
+        .and_then(|s| s.fill.as_ref())
+        .unwrap_or(&pal.actor_bkg);
+    let box_width = pal.stroke_width.unwrap_or(1.0);
+    let rx = if cfg.look == Look::Neo { 6.0 } else { 3.0 };
     match p.kind {
         ParticipantKind::Participant => {
+            // The neo look gives actor boxes the theme's drop shadow.
+            if let Some(sh) = pal.drop_shadow.as_ref().filter(|_| cfg.look == Look::Neo) {
+                els.push(Element::classed_shape(
+                    Geometry::Rect {
+                        rect: Rect::new(r.x + sh.dx, r.y + sh.dy, r.w, r.h),
+                        rx,
+                    },
+                    Paint::fill(&sh.color).with_opacity(sh.opacity),
+                    "drop-shadow",
+                ));
+            }
             els.push(Element::classed_shape(
-                Geometry::Rect { rect: r, rx: 3.0 },
-                Paint::both(&pal.actor_bkg, &pal.actor_border, 1.0),
+                Geometry::Rect { rect: r, rx },
+                Paint::both(actor_bkg, actor_border, box_width),
                 "actor",
             ));
             els.push(Element::classed_text(
@@ -1069,8 +1103,8 @@ fn actor_elements(
         ParticipantKind::Actor => {
             let cx = r.center().x;
             let y = r.y;
-            let stroke = Paint::both(&pal.actor_bkg, &pal.actor_border, 2.0);
-            let line = Paint::stroke(&pal.actor_border, 2.0);
+            let stroke = Paint::both(actor_bkg, actor_border, 2.0);
+            let line = Paint::stroke(actor_border, 2.0);
             els.push(Element::shape(
                 Geometry::Circle {
                     c: Point::new(cx, y + 8.0),

@@ -96,7 +96,7 @@ dagre rather than CSS for them.
 | Flag | Behaviour |
 |---|---|
 | `-i/--input`, `-o/--output`, `-e/--outputFormat`, `-a/--artefacts`, `-q/--quiet` | Same as upstream, including `-` for stdin/stdout and Markdown mode |
-| `-t/--theme` | All 12 upstream names accepted. `default`, `forest`, `dark`, `neutral` and `base` are implemented. `neo*`/`redux*` map to `default`/`dark` palettes |
+| `-t/--theme` | All 12 upstream names implemented, including `neo`, `neo-dark`, `redux`, `redux-dark`, `redux-color` and `redux-dark-color` (colours derived with khroma's HSL maths, plus `strokeWidth`, `radius`, fonts and the categorical palettes). Without `-t`, mermaid 12's per-diagram defaults apply: flowchart, sequence, class, state, ER and requirement diagrams render in `redux-color` with the `neo` look, everything else in `default` (resolved as mermaid's `resolveAppearance`: directives, then site config, then defaults; a diagram section's `theme`/`look` beats the top-level one within a layer) |
 | `-c/--configFile`, `-C/--cssFile` | Layered exactly as upstream (config file assigned over `-t`, CSS becomes `themeCSS`) |
 | `-b/--backgroundColor`, `-I/--svgId`, `-s/--scale`, `--size`, `--pdf-paper-format`, `-j/--jobs` | Same semantics |
 | `--no-font-embed` | Accepted. This implementation never embeds fonts |
@@ -121,6 +121,14 @@ dagre rather than CSS for them.
 - **No rotated text** in the scene model, so the xychart y-axis title, gitGraph commit labels and quadrant
   y-labels are drawn horizontally.
 - **Icons** (architecture, mindmap `::icon`, C4 sprites) are generic glyphs; icon packs are not loaded.
+- **Themes / looks:** the colour themes' per-item palette (`data-color-id`) is resolved to concrete colours for flowchart
+  subgraphs, state composites, class boxes, ER entities, requirement boxes and sequence actors/activations, in upstream's
+  `colorIndex` order. Gitgraph, mindmap, journey and the other diagrams use the theme's colours but not its
+  diagram-specific palette rules. `look: neo` currently changes paint only (stroke widths, corner radii, the drop
+  shadow); its node padding/geometry is not applied yet. `look: handDrawn` is accepted and drawn as `classic`.
+  The redux drop shadow (hard 4px offset, 6% opacity) is exact; the neo themes' blurred `drop-shadow()` is drawn
+  without blur, and the `neo`/`neo-dark` gradient node borders (`useGradient`) are drawn with the solid `nodeBorder`.
+  `borderColorArray`/`bkgColorArray` cannot be overridden through `themeVariables`.
 - **Gantt is deterministic:** no today-marker (it would need the clock), and times are UTC.
 - **Approximate layouts** where mermaid uses force-directed or browser layout: architecture (grid from side hints),
   mindmap (two-sided tree rather than force layout), and C4 relationships (straight lines that can pass behind cards).
@@ -141,7 +149,8 @@ src/
   layout/            layered graph engine (rank.rs = network simplex) + boxes.rs = Taffy wrapper
   scene.rs           backend-neutral drawing model (arrowheads/arcs pre-resolved)
   output/            Scene → SVG / PDF (hand-written) / PNG (resvg)
-  config.rs theme.rs text.rs color.rs json.rs geom.rs
+  theme/             palettes (mod.rs: classic themes; neo.rs: neo/redux family)
+  config.rs text.rs color.rs json.rs geom.rs
 ```
 
 Every stage is a function from immutable input to new output. Only `main.rs` touches the filesystem, and only

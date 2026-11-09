@@ -110,6 +110,23 @@ impl Rgba {
         Rgba::from_hsl(h, s, l + delta, self.a)
     }
 
+    /// khroma's `darken(c, amount)`: lower HSL lightness by `amount` points (clamped at 0).
+    pub fn darken(self, amount: f64) -> Rgba {
+        self.lighten(-amount)
+    }
+
+    /// khroma's `adjust(c, { h, s, l })`: shift the HSL channels. Hue wraps, saturation and
+    /// lightness clamp to `0..=100` (khroma's channel clamps).
+    pub fn adjust_hsl(self, dh: f64, ds: f64, dl: f64) -> Rgba {
+        let (h, s, l) = self.to_hsl();
+        Rgba::from_hsl(
+            h + dh,
+            (s + ds).clamp(0.0, 100.0),
+            (l + dl).clamp(0.0, 100.0),
+            self.a,
+        )
+    }
+
     /// Rotate hue by `deg` degrees.
     pub fn rotate_hue(self, deg: f64) -> Rgba {
         let (h, s, l) = self.to_hsl();

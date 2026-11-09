@@ -71,6 +71,39 @@ pub enum DiagramType {
     Info,
 }
 
+impl DiagramType {
+    /// The `MermaidConfig` section holding this diagram's settings (mermaid's
+    /// `getDiagramConfigKey`), which also scopes its `theme` / `look` resolution.
+    pub fn config_key(self) -> &'static str {
+        match self {
+            DiagramType::Flowchart => "flowchart",
+            DiagramType::Sequence => "sequence",
+            DiagramType::Pie => "pie",
+            DiagramType::State => "state",
+            DiagramType::Class => "class",
+            DiagramType::Er => "er",
+            DiagramType::Gantt => "gantt",
+            DiagramType::Journey => "journey",
+            DiagramType::GitGraph => "gitGraph",
+            DiagramType::Mindmap => "mindmap",
+            DiagramType::Timeline => "timeline",
+            DiagramType::Quadrant => "quadrantChart",
+            DiagramType::Requirement => "requirement",
+            DiagramType::C4 => "c4",
+            DiagramType::Sankey => "sankey",
+            DiagramType::XyChart => "xyChart",
+            DiagramType::Block => "block",
+            DiagramType::Packet => "packet",
+            DiagramType::Architecture => "architecture",
+            DiagramType::Kanban => "kanban",
+            DiagramType::Radar => "radar",
+            DiagramType::Treemap => "treemap",
+            DiagramType::ZenUml => "zenuml",
+            DiagramType::Info => "info",
+        }
+    }
+}
+
 /// Strip front-matter, directives, comments and accessibility statements.
 pub fn preprocess(src: &str) -> Result<Preprocessed> {
     let src = src.replace("\r\n", "\n");

@@ -11,6 +11,7 @@ use super::statements;
 use crate::error::{Error, Result};
 use crate::layout::Direction;
 use crate::scene::DiagramKind;
+use crate::theme::ColorSlot;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
@@ -220,6 +221,8 @@ impl Builder {
             title: id.to_string(),
             parent: self.stack.last().copied(),
             style: StyleOverrides::default(),
+            // Composites take slots in the order dataFetcher inserts them (pre-order).
+            color_slot: Some(ColorSlot(self.clusters.len())),
         });
         self.cluster_index
             .insert(id.to_string(), self.clusters.len() - 1);

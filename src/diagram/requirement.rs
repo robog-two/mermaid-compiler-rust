@@ -12,7 +12,7 @@ use crate::config::{Curve, GraphConfig, MermaidConfig};
 use crate::error::{Error, Result};
 use crate::layout::Direction;
 use crate::scene::{DiagramKind, Scene};
-use crate::theme::Palette;
+use crate::theme::{ColorSlot, Palette};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +149,7 @@ pub fn render(
     let d = parse(body, title)?;
     let g = to_graph(&d);
     let gc = GraphConfig {
+        look: cfg.look,
         node_spacing: cfg.section_f64("requirement", "nodeSpacing", 50.0),
         rank_spacing: cfg.section_f64("requirement", "rankSpacing", 50.0),
         padding: cfg.section_f64("requirement", "padding", 14.0),
@@ -443,6 +444,22 @@ fn parse_relation(s: &str) -> Option<Relation> {
     None
 }
 
+/// Palette slots in requirementDb's `getData` order: every requirement first (in
+/// declaration order), then every element, each taking `nodes.length`.
+fn requirement_slots(items: &[Item]) -> Vec<ColorSlot> {
+    let is_req = |i: &Item| matches!(i.kind, ItemKind::Requirement { .. });
+    let reqs = items.iter().filter(|i| is_req(i)).count();
+    let (mut r, mut e) = (0, reqs);
+    items
+        .iter()
+        .map(|i| {
+            let n = if is_req(i) { &mut r } else { &mut e };
+            *n += 1;
+            ColorSlot(*n - 1)
+        })
+        .collect()
+}
+
 /// Lower to the shared graph IR. Relationship endpoints that were never defined
 /// become plain elements, as in mermaid.
 pub fn to_graph(d: &RequirementDiagram) -> GraphDiagram {
@@ -462,10 +479,13 @@ pub fn to_graph(d: &RequirementDiagram) -> GraphDiagram {
             }
         }
     }
+    let slots = requirement_slots(&items);
     let nodes = items
         .iter()
-        .map(|i| {
+        .zip(slots)
+        .map(|(i, slot)| {
             let mut n = Node::new(i.name.clone(), i.name.clone(), Shape::Requirement);
+            n.color_slot = Some(slot);
             n.style = i.style.clone();
             n.classes = i.classes.clone();
             let (stereo, fields) = match &i.kind {

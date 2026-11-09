@@ -6,6 +6,7 @@
 use mmdc::config::MermaidConfig;
 use mmdc::output::{self, EncodeOptions};
 use mmdc::render;
+use mmdc::theme::ThemeName;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
@@ -73,6 +74,53 @@ fn main() {
             source.trim_end()
         );
     }
+    // Theme showcase: the same examples under explicit `-t` themes.
+    let theme_dir = out_dir.join("themes");
+    std::fs::create_dir_all(&theme_dir).expect("create docs/gallery/themes");
+    let _ = writeln!(
+        md,
+        "# Themes\n\nWithout `-t`, flowchart, sequence, class, state, ER and requirement diagrams use mermaid 12's \
+         per-diagram defaults (`redux-color` theme, `neo` look), as above. These are the same sources with an explicit \
+         theme (`mmdc -t <theme>`).\n"
+    );
+    for (name, theme) in [
+        ("subgraphs", ThemeName::ReduxDarkColor),
+        ("er", ThemeName::ReduxDarkColor),
+        ("sequence", ThemeName::ReduxDarkColor),
+        ("class", ThemeName::Neo),
+        ("state", ThemeName::Redux),
+        ("flowchart", ThemeName::Default),
+    ] {
+        let source = std::fs::read_to_string(src_dir.join(format!("{name}.mmd"))).expect("read");
+        let tname = theme.name();
+        let rendered = match render::render(&source, &cfg.clone().with_cli_theme(theme)) {
+            Ok(r) => r,
+            Err(e) => {
+                failures += 1;
+                eprintln!("{name} ({tname}): {e}");
+                continue;
+            }
+        };
+        // Dark themes are meant for a dark page: render them as `-b '#333'` would.
+        let dark = tname.contains("dark");
+        let bg_flag = if dark { " -b '#333'" } else { "" };
+        #[cfg(feature = "png")]
+        {
+            let theme_enc = EncodeOptions {
+                background: if dark { "#333".into() } else { "white".into() },
+                ..enc.clone()
+            };
+            let png = output::encode_png(&rendered, &theme_enc, &rast).expect("png");
+            std::fs::write(theme_dir.join(format!("{name}-{tname}.png")), png).expect("write png");
+        }
+        #[cfg(not(feature = "png"))]
+        let _ = rendered;
+        let _ = writeln!(
+            md,
+            "## {name} · `-t {tname}{bg_flag}`\n\n![{name} in {tname}](gallery/themes/{name}-{tname}.png)\n"
+        );
+    }
+
     std::fs::write(root.join("docs/GALLERY.md"), md).expect("write GALLERY.md");
     println!(
         "wrote docs/GALLERY.md ({} diagrams, {failures} failures)",

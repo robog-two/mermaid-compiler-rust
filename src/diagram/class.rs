@@ -8,6 +8,7 @@ use super::statements;
 use crate::error::{Error, Result};
 use crate::layout::Direction;
 use crate::scene::DiagramKind;
+use crate::theme::ColorSlot;
 use std::collections::HashMap;
 
 #[derive(Default, Clone)]
@@ -77,6 +78,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
                 title: name,
                 parent: b.ns_stack.last().copied(),
                 style: StyleOverrides::default(),
+                color_slot: None, // namespaces are not part of the colour cycle
             });
             b.ns_stack.push(ClusterId(b.clusters.len() - 1));
             continue;
@@ -377,6 +379,8 @@ impl Builder {
             });
             header.push(display);
             let mut n = Node::new(name.clone(), String::new(), Shape::Compartments);
+            // Only classes consume a palette slot (classDb: `classColorIndex++`); notes do not.
+            n.color_slot = Some(ColorSlot(nodes.len()));
             n.cluster = info.namespace;
             n.sections = vec![
                 Section {

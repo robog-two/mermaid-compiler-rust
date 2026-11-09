@@ -1,5 +1,7 @@
 //! mermaid themes and `themeVariables`.
 
+mod neo;
+
 use crate::color::{self, Rgba};
 use crate::scene::Color;
 use std::str::FromStr;
@@ -105,6 +107,67 @@ pub struct Palette {
     pub scale_text: Vec<Color>,
     /// Whether this is a dark theme.
     pub dark: bool,
+    /// Theme `strokeWidth` (neo/redux family). `None` means each diagram's own default.
+    pub stroke_width: Option<f64>,
+    /// Theme `radius`: corner radius of flowchart rounded nodes (`None` = mermaid's 5) and,
+    /// under the neo look, of state composites.
+    pub radius: Option<f64>,
+    /// Categorical palette of the colour themes (`redux-color`, `redux-dark-color`);
+    /// `None` for every other theme (mermaid's `isColorTheme` gate).
+    pub color_slots: Option<CategoricalPalette>,
+    /// ER attribute-row stripe (`rowOdd`); `None` when the theme leaves rows unfilled.
+    pub er_row_odd: Option<Color>,
+    /// ER edge-label background used by the colour themes (`erEdgeLabelBackground`).
+    pub er_edge_label_background: Option<Color>,
+    /// The drop shadow the neo look applies to nodes and clusters (`dropShadow`).
+    pub drop_shadow: Option<DropShadow>,
+}
+
+/// A palette slot (`colorIndex` upstream): the n-th participant of a diagram that takes
+/// part in the colour cycle. Wraps modulo the palette length when resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ColorSlot(pub usize);
+
+/// `borderColorArray` / `bkgColorArray`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CategoricalPalette {
+    /// Never empty (an empty border palette disables per-item colour upstream).
+    pub border: Vec<Color>,
+    /// May be empty (`redux-dark-color`): then only outlines take colour.
+    pub bkg: Vec<Color>,
+}
+
+/// Concrete colours of one slot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlotColors {
+    pub border: Color,
+    /// `None` when the theme has no background palette (keep the diagram's own fill).
+    pub fill: Option<Color>,
+}
+
+/// A hard drop shadow: an offset, translucent copy of the shape's silhouette.
+///
+/// The redux themes' `feDropShadow` has `stdDeviation="0"`, so a solid offset copy
+/// reproduces it exactly in every backend. The neo themes use a CSS `drop-shadow()`
+/// with a 2px blur, which is approximated without the blur.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropShadow {
+    pub dx: f64,
+    pub dy: f64,
+    pub color: Color,
+    pub opacity: f64,
+}
+
+impl CategoricalPalette {
+    /// Colours of `slot`: `colorIndex % len` for each array independently, exactly as
+    /// `stampColorSlot` + the per-diagram `genColor` stylesheets (and the sequence
+    /// diagram's `paletteColor`) resolve it.
+    pub fn slot(&self, slot: ColorSlot) -> SlotColors {
+        SlotColors {
+            border: self.border[slot.0 % self.border.len()].clone(),
+            fill: (!self.bkg.is_empty()).then(|| self.bkg[slot.0 % self.bkg.len()].clone()),
+        }
+    }
 }
 
 fn c(s: &str) -> Color {
@@ -174,6 +237,12 @@ fn default_palette() -> Palette {
         scale: Vec::new(),
         scale_text: Vec::new(),
         dark: false,
+        stroke_width: None,
+        radius: None,
+        color_slots: None,
+        er_row_odd: Some(c("white")),
+        er_edge_label_background: None,
+        drop_shadow: None,
     }
 }
 
@@ -370,22 +439,28 @@ fn base_palette(vars: &[(String, String)]) -> Palette {
 pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
     let mut p = match theme {
         ThemeName::Base => base_palette(vars),
-        ThemeName::Dark | ThemeName::NeoDark | ThemeName::ReduxDark | ThemeName::ReduxDarkColor => {
-            dark_palette()
-        }
+        ThemeName::Dark => dark_palette(),
         ThemeName::Forest => forest_palette(),
         ThemeName::Neutral => neutral_palette(),
-        ThemeName::Default
-        | ThemeName::Neo
+        ThemeName::Default | ThemeName::Null => default_palette(),
+        ThemeName::Neo
+        | ThemeName::NeoDark
         | ThemeName::Redux
+        | ThemeName::ReduxDark
         | ThemeName::ReduxColor
-        | ThemeName::Null => default_palette(),
+        | ThemeName::ReduxDarkColor => neo::palette(theme, default_palette()),
     };
+    if p.er_row_odd.is_some() {
+        // The classic themes stripe odd ER rows with (nearly) the canvas colour.
+        p.er_row_odd = Some(p.background.clone());
+    }
     p.dark = matches!(
         theme,
         ThemeName::Dark | ThemeName::NeoDark | ThemeName::ReduxDark | ThemeName::ReduxDarkColor
     ) || color::parse(p.background.css()).is_some_and(Rgba::is_dark);
-    p.scale = color_scale(&p);
+    if p.scale.is_empty() {
+        p.scale = color_scale(&p);
+    }
     for (k, v) in vars {
         apply_variable(&mut p, k, v);
     }
@@ -494,6 +569,8 @@ fn apply_variable(p: &mut Palette, key: &str, value: &str) {
             p.pie_outer_stroke_width = num().unwrap_or(p.pie_outer_stroke_width)
         }
         "pieOpacity" => p.pie_opacity = num().unwrap_or(p.pie_opacity),
+        "strokeWidth" => p.stroke_width = num().or(p.stroke_width),
+        "radius" => p.radius = num().or(p.radius),
         k if k.starts_with("cScale")
             && !k.starts_with("cScaleLabel")
             && !k.starts_with("cScalePeer") =>
