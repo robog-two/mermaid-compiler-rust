@@ -473,6 +473,7 @@ fn measure_node(
     cell_pad: f64,
     font: f64,
     horizontal: bool,
+    look: ConfigLook,
 ) -> Measured {
     let mut block = TextBlock::label(&node.label, font);
     if node.style.bold == Some(true) {
@@ -491,7 +492,7 @@ fn measure_node(
         (Shape::Note, DiagramKind::State) => 15.0,
         _ => pad,
     };
-    let metrics = ShapeMetrics::classic(node.shape, node_pad);
+    let metrics = ShapeMetrics::for_look(node.shape, node_pad, look);
     let mut sections = Vec::new();
     let mut compartments = None;
     let mut table = None;
@@ -576,6 +577,7 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
                 cfg.diagram_padding,
                 font,
                 horizontal,
+                cfg.look,
             )
         })
         .collect();
@@ -837,6 +839,7 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
             end_dir,
             colors,
             width,
+            cfg.look == ConfigLook::Neo,
         ));
         heads.extend(markers::elements(
             e.start,
@@ -845,6 +848,7 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
             start_dir,
             colors,
             width,
+            cfg.look == ConfigLook::Neo,
         ));
         let (end_back, start_back) = (markers::pullback(e.end), markers::pullback(e.start));
         if end_back > 0.0 && pts[last].dist(pts[last - 1]) > end_back {

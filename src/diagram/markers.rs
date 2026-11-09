@@ -99,13 +99,18 @@ const FOOT_END: &[Seg] = &[
     Seg::Q(27.0, 0.0, 45.0, 18.0),
     Seg::Q(27.0, 36.0, 9.0, 18.0),
 ];
+const FOOT_MANY_END: &[Seg] = &[
+    Seg::M(21.0, 18.0),
+    Seg::Q(39.0, 0.0, 57.0, 18.0),
+    Seg::Q(39.0, 36.0, 21.0, 18.0),
+];
 const FOOT_START: &[Seg] = &[
     Seg::M(0.0, 18.0),
     Seg::Q(18.0, 0.0, 36.0, 18.0),
     Seg::Q(18.0, 36.0, 0.0, 18.0),
 ];
 
-fn marker(head: Head) -> Option<Marker> {
+fn marker(head: Head, neo: bool) -> Option<Marker> {
     let def = |ref_x, ref_y, parts| Def {
         ref_x,
         ref_y,
@@ -315,19 +320,21 @@ fn marker(head: Head) -> Option<Marker> {
             end: def(
                 39.0,
                 18.0,
-                &[
-                    Part::Circle(9.0, 18.0, 6.0),
-                    Part::Path(&[
-                        Seg::M(21.0, 18.0),
-                        Seg::Q(39.0, 0.0, 57.0, 18.0),
-                        Seg::Q(39.0, 36.0, 21.0, 18.0),
-                    ]),
-                ],
+                // zero_or_more_neo moves the circles: cx 11 (end), 45.5 (start).
+                if neo {
+                    &[Part::Circle(11.0, 18.0, 6.0), Part::Path(FOOT_MANY_END)]
+                } else {
+                    &[Part::Circle(9.0, 18.0, 6.0), Part::Path(FOOT_MANY_END)]
+                },
             ),
             start: Some(def(
                 18.0,
                 18.0,
-                &[Part::Circle(48.0, 18.0, 6.0), Part::Path(FOOT_START)],
+                if neo {
+                    &[Part::Circle(45.5, 18.0, 6.0), Part::Path(FOOT_START)]
+                } else {
+                    &[Part::Circle(48.0, 18.0, 6.0), Part::Path(FOOT_START)]
+                },
             )),
             scale: Scale::StrokeWidth,
             pullback: 0.0,
@@ -384,11 +391,13 @@ pub struct MarkerColors<'a> {
 
 /// Distance the edge line is shortened at an end carrying `head`.
 pub fn pullback(head: Head) -> f64 {
-    marker(head).map_or(0.0, |m| m.pullback)
+    marker(head, false).map_or(0.0, |m| m.pullback)
 }
 
 /// Marker geometry for `head` at the node boundary point `tip`, with `dir`
 /// the unit direction pointing into the node. `width` is the edge stroke.
+/// Under the neo look the ER and requirement markers are the `*_neo` variants:
+/// `markerUnits="userSpaceOnUse"` (no stroke scaling) stroked with `strokeWidth`.
 pub fn elements(
     head: Head,
     end: End,
@@ -396,13 +405,17 @@ pub fn elements(
     dir: Point,
     colors: MarkerColors<'_>,
     width: f64,
+    neo: bool,
 ) -> Vec<Element> {
-    let Some(m) = marker(head) else {
+    let Some(m) = marker(head, neo) else {
         return Vec::new();
     };
-    let s = match m.scale {
-        Scale::Fixed(r) => r.value(),
-        Scale::StrokeWidth => width,
+    let (s, stroke) = match m.scale {
+        Scale::Fixed(r) => (r.value(), m.stroke * r.value()),
+        // requirement_arrow_neo draws its 20-unit chevron in a 25×20 viewBox: 0.8.
+        Scale::StrokeWidth if neo && head == Head::OpenArrow => (0.8, width * 0.8),
+        Scale::StrokeWidth if neo => (1.0, width),
+        Scale::StrokeWidth => (width, m.stroke * width),
     };
     let (def, sign) = match (end, m.start) {
         (End::Start, Some(d)) => (d, -1.0),
@@ -419,7 +432,7 @@ pub fn elements(
         Fill::Background => colors.background.clone(),
         Fill::None => Color::none(),
     };
-    let paint = Paint::both(&fill, colors.line, m.stroke * s);
+    let paint = Paint::both(&fill, colors.line, stroke);
     def.parts
         .iter()
         .map(|part| {
@@ -435,7 +448,7 @@ pub fn elements(
                 Part::Path(segs) => Geometry::Path(path(segs, &at)),
             };
             let paint = match part {
-                Part::Path(_) => Paint::stroke(colors.line, m.stroke * s),
+                Part::Path(_) => Paint::stroke(colors.line, stroke),
                 _ => paint.clone(),
             };
             Element::classed_shape(geom, paint, "marker")
@@ -500,6 +513,10 @@ mod tests {
     }
 
     fn draw(head: Head, end: End) -> Vec<Element> {
+        draw_with(head, end, 1.0, false)
+    }
+
+    fn draw_with(head: Head, end: End, width: f64, neo: bool) -> Vec<Element> {
         let c = Color::new("#333");
         let colors = MarkerColors {
             line: &c,
@@ -512,8 +529,30 @@ mod tests {
             Point::new(100.0, 0.0),
             Point::new(1.0, 0.0),
             colors,
-            1.0,
+            width,
+            neo,
         )
+    }
+
+    /// Classic ER/requirement markers scale with the stroke (`markerUnits` default);
+    /// the `*_neo` ones are fixed in user space and stroked with `strokeWidth`.
+    #[test]
+    fn neo_markers_do_not_scale_with_the_stroke() {
+        let classic = bounds(&draw_with(Head::ErOnlyOne, End::End, 2.0, false));
+        assert_eq!(classic.3 - classic.1, 36.0);
+        let neo = bounds(&draw_with(Head::ErOnlyOne, End::End, 2.0, true));
+        assert_eq!(neo.3 - neo.1, 18.0);
+        let widths: Vec<f64> = draw_with(Head::ErOnlyOne, End::End, 2.0, true)
+            .iter()
+            .filter_map(|e| match e {
+                Element::Shape { paint, .. } => Some(paint.stroke_width),
+                _ => None,
+            })
+            .collect();
+        assert!(widths.iter().all(|&w| w == 2.0), "{widths:?}");
+        // requirement_arrow_neo: 20-unit chevron in a 25×20 viewBox → 16 × 16.
+        let (x0, y0, x1, y1) = bounds(&draw_with(Head::OpenArrow, End::End, 2.0, true));
+        assert!((x1 - x0 - 16.0).abs() < 1e-9 && (y1 - y0 - 16.0).abs() < 1e-9);
     }
 
     #[test]

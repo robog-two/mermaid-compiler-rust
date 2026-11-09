@@ -6,6 +6,7 @@
 //! outer box, and [`outline`] draws the shape inside that box.
 
 use super::graph::Shape;
+use crate::config::Look;
 use crate::geom::{self, PathCmd, Point, Rect};
 use crate::scene::Geometry;
 use std::f64::consts::PI;
@@ -78,6 +79,81 @@ impl ShapeMetrics {
             stack_offset: 5.0,
             wave_ratio: 1.0 / 8.0,
             corner_radius: 5.0,
+        }
+    }
+}
+
+impl ShapeMetrics {
+    /// The metrics for `look` (`HandDrawn` sizes like `Classic`).
+    pub fn for_look(shape: Shape, p: f64, look: Look) -> Self {
+        match look {
+            Look::Neo => Self::neo(shape, p),
+            Look::Classic | Look::HandDrawn => Self::classic(shape, p),
+        }
+    }
+
+    /// `node.look === 'neo'` values from the upstream shape files. `pad` holds the
+    /// total extra width / height each shape adds around its label.
+    pub fn neo(shape: Shape, p: f64) -> Self {
+        let pad = |x: f64, y: f64| LabelPad { x, y };
+        let classic = Self::classic(shape, p);
+        let pad = match shape {
+            // squareRect.ts: labelPaddingX 16, labelPaddingY 12, on each side.
+            Shape::Rect | Shape::State => pad(32.0, 24.0),
+            // stadium.ts: paddingX 40, paddingY 24 (totals).
+            Shape::Stadium => pad(40.0, 24.0),
+            // subroutine.ts: 28 / 12 (totals, besides the two frames).
+            Shape::Subroutine => pad(28.0, 12.0),
+            // cylinder.ts: 24 / 24.
+            Shape::Cylinder => pad(24.0, 24.0),
+            // circle.ts: radius = labelRadius + 16; doubleCircle.ts: inner ring the same.
+            Shape::Circle | Shape::DoubleCircle => pad(32.0, 32.0),
+            // rectLeftInvArrow.ts: 21 / 12, applied on both sides.
+            Shape::Asymmetric => pad(42.0, 24.0),
+            // hexagon.ts: h = th + 70 (wa), w = tw + 2m + 32 (ha); the names are swapped
+            // upstream and reproduced as drawn.
+            Shape::Hexagon => pad(32.0, 70.0),
+            // leanRight/leanLeft/trapezoid.ts: labelPaddingX = 2p; Y unchanged.
+            Shape::LeanRight | Shape::LeanLeft | Shape::Trapezoid => pad(2.0 * p, p),
+            // invertedTrapezoid.ts: X = 2p, both padding values doubled.
+            Shape::InvTrapezoid => pad(4.0 * p, 2.0 * p),
+            // triangle.ts / flippedTriangle.ts: labelPaddingX = 2p.
+            Shape::Triangle | Shape::FlippedTriangle => pad(2.0 * p, classic.pad.y),
+            // card.ts: w = tw + 2·28 (no notch term), h = th + 2·24.
+            Shape::Card => pad(56.0 - NOTCH, 48.0),
+            // shadedProcess.ts: 16 / 12 per side, one frame instead of two.
+            Shape::LinedRect => pad(32.0 - FRAME, 24.0),
+            // dividedRect.ts: 16 / 16 (totals).
+            Shape::DividedRect => pad(16.0, 16.0),
+            // linedCylinder.ts: 16 / 24 per side.
+            Shape::LinedCylinder => pad(32.0, 48.0),
+            // tiltedCylinder.ts: labelPadding 12 (classic p/2).
+            Shape::HorizontalCylinder => pad(12.0, 12.0),
+            // halfRoundedRectangle, slopedRect, windowPane, trapezoidalPentagon,
+            // taggedRect, waveEdgedRectangle, curvedTrapezoid, multiRect: 16 / 12 per side.
+            Shape::Delay
+            | Shape::SlopedRect
+            | Shape::WindowPane
+            | Shape::NotchedPentagon
+            | Shape::TaggedRect
+            | Shape::Document
+            | Shape::CurvedTrapezoid
+            | Shape::StackedRect => pad(32.0, 24.0),
+            // roundedRect, question, note, state start/end, fork, choice, text,
+            // hourglass, crossedCircle: no neo branch.
+            _ => classic.pad,
+        };
+        ShapeMetrics {
+            pad,
+            // hexagon.ts: f = 3.5.
+            hexagon_factor: 3.5,
+            // doubleCircle.ts: gap 12.
+            double_circle_gap: 12.0,
+            // multiRect.ts: rectOffset 10.
+            stack_offset: 10.0,
+            // waveEdgedRectangle.ts: amplitude h/4.
+            wave_ratio: 1.0 / 4.0,
+            ..classic
         }
     }
 }
@@ -656,6 +732,35 @@ mod tests {
 
     fn sized(shape: Shape, tw: f64, th: f64, p: f64) -> ShapeSize {
         size(shape, tw, th, &ShapeMetrics::classic(shape, p), false).unwrap()
+    }
+
+    fn sized_neo(shape: Shape, tw: f64, th: f64, p: f64) -> ShapeSize {
+        size(shape, tw, th, &ShapeMetrics::neo(shape, p), false).unwrap()
+    }
+
+    #[test]
+    fn neo_look_uses_its_own_label_padding() {
+        // squareRect.ts neo: 16 / 12 per side.
+        let r = sized_neo(Shape::Rect, 100.0, 24.0, 15.0);
+        assert_eq!((r.w, r.h), (132.0, 48.0));
+        // roundedRect has no neo branch.
+        assert_eq!(
+            sized_neo(Shape::Rounded, 100.0, 24.0, 15.0),
+            sized(Shape::Rounded, 100.0, 24.0, 15.0)
+        );
+        // circle.ts neo: radius = hypot/2 + 16.
+        let c = sized_neo(Shape::Circle, 30.0, 40.0, 15.0);
+        assert_eq!(c.w, 50.0 + 32.0);
+        // doubleCircle.ts neo: inner ring as circle, gap 12.
+        let d = sized_neo(Shape::DoubleCircle, 30.0, 40.0, 15.0);
+        assert_eq!(d.w, 50.0 + 32.0 + 24.0);
+        // hexagon.ts neo: h = th + 70, m = h / 3.5, w = tw + 2m + 32.
+        let h = sized_neo(Shape::Hexagon, 100.0, 24.0, 15.0);
+        assert_eq!(h.h, 94.0);
+        assert!((h.w - (100.0 + 2.0 * 94.0 / 3.5 + 32.0)).abs() < 1e-9);
+        // card.ts neo: w = tw + 56, h = th + 48.
+        let k = sized_neo(Shape::Card, 100.0, 24.0, 15.0);
+        assert_eq!((k.w, k.h), (156.0, 72.0));
     }
 
     #[test]

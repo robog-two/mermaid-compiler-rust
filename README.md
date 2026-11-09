@@ -124,8 +124,8 @@ dagre rather than CSS for them.
 - **Themes / looks:** the colour themes' per-item palette (`data-color-id`) is resolved to concrete colours for flowchart
   subgraphs, state composites, class boxes, ER entities, requirement boxes and sequence actors/activations, in upstream's
   `colorIndex` order. Gitgraph, mindmap, journey and the other diagrams use the theme's colours but not its
-  diagram-specific palette rules. `look: neo` currently changes paint only (stroke widths, corner radii, the drop
-  shadow); its node padding/geometry is not applied yet. `look: handDrawn` is accepted and drawn as `classic`.
+  diagram-specific palette rules. `look: neo` applies the upstream shapes' neo label paddings (`node.look === 'neo'`
+  branches), the `*_neo` ER/requirement markers, stroke widths, corner radii and the drop shadow. `look: handDrawn` is accepted and drawn as `classic`.
   The redux drop shadow (hard 4px offset, 6% opacity) is exact; the neo themes' blurred `drop-shadow()` is drawn
   without blur, and the `neo`/`neo-dark` gradient node borders (`useGradient`) are drawn with the solid `nodeBorder`.
   `borderColorArray`/`bkgColorArray` cannot be overridden through `themeVariables`.
