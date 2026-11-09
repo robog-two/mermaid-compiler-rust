@@ -108,8 +108,8 @@ pub fn render(
 /// Layout settings from the `er` config section.
 fn graph_config(cfg: &MermaidConfig) -> GraphConfig {
     GraphConfig {
-        node_spacing: cfg.section_f64("er", "nodeSpacing", 60.0),
-        rank_spacing: cfg.section_f64("er", "rankSpacing", 70.0),
+        node_spacing: cfg.section_f64("er", "nodeSpacing", 140.0),
+        rank_spacing: cfg.section_f64("er", "rankSpacing", 80.0),
         padding: cfg.section_f64("er", "entityPadding", 12.0),
         diagram_padding: cfg.section_f64("er", "diagramPadding", 20.0),
         curve: Curve::Basis,

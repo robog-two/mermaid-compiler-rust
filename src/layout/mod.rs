@@ -7,13 +7,13 @@
 //! 4. add left/right border vertices for every cluster on every rank it spans;
 //! 5. order layers with weighted barycentre sweeps, keeping clusters contiguous,
 //!    scoring with an O(E log V) crossing count and keeping the best ordering;
-//! 6. assign cross-axis coordinates by repeatedly solving, per layer, the exact
-//!    weighted least-squares problem "be near your neighbours, keep minimum
-//!    separation" with the pool-adjacent-violators algorithm;
+//! 6. assign cross-axis coordinates with Brandes–Köpf, exactly as dagre does
+//!    (four median alignments, block compaction, balanced), see `bk.rs`;
 //! 7. stack ranks along the rank axis and rotate for TB / BT / LR / RL.
 
 use crate::geom::{Point, Rect};
 
+mod bk;
 pub mod boxes;
 pub mod rank;
 
@@ -132,11 +132,9 @@ pub fn layout(input: &LayoutInput) -> LayoutOutput {
     let swap = |w: f64, h: f64| if horizontal { (h, w) } else { (w, h) };
     let n = input.nodes.len();
 
-    let has_labels = input
-        .edges
-        .iter()
-        .any(|e| e.label.is_some() && e.from != e.to);
-    let rank_scale = if has_labels { 2 } else { 1 };
+    // dagre's makeSpaceForEdgeLabels: every edge spans two ranks at half the
+    // separation, labelled or not, so each edge gets a midpoint vertex.
+    let rank_scale = 2;
     let rank_sep = input.rank_sep / rank_scale as f64;
 
     // 1. Orientation.
@@ -351,7 +349,7 @@ pub fn layout(input: &LayoutInput) -> LayoutOutput {
             half(va) + half(vb) + spacing(va) / 2.0 + spacing(vb) / 2.0
         }
     };
-    let x = assign_x(&layers, &verts, &up, &down, &borders, &gap);
+    let x = assign_x(&layers, &verts, &links, &borders, &gap);
 
     // 7. Rank-axis coordinates.
     let pad_rank_low = |c: usize| {
@@ -844,127 +842,65 @@ fn total_crossings(layers: &[Vec<usize>], down: &[Vec<(usize, f64)>], nv: usize)
     total
 }
 
-/// Cross-axis coordinates via iterated per-layer weighted isotonic regression.
+/// Cross-axis coordinates (Brandes–Köpf, as dagre does it; see `bk.rs`).
 fn assign_x(
     layers: &[Vec<usize>],
     verts: &[Vertex],
-    up: &[Vec<(usize, f64)>],
-    down: &[Vec<(usize, f64)>],
+    links: &[(usize, usize, f64)],
     borders: &[Vec<(usize, usize)>],
     gap: &dyn Fn(usize, usize) -> f64,
 ) -> Vec<f64> {
     let nv = verts.len();
-    let mut x = vec![0.0f64; nv];
-    let offsets: Vec<Vec<f64>> = layers
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); nv];
+    let mut succs: Vec<Vec<usize>> = vec![Vec::new(); nv];
+    let mut link = |a: usize, b: usize| {
+        if !succs[a].contains(&b) {
+            succs[a].push(b);
+            preds[b].push(a);
+        }
+    };
+    for &(a, b, _) in links {
+        link(a, b);
+    }
+    // dagre chains each cluster's border vertices rank to rank.
+    for bs in borders {
+        for pair in bs.windows(2) {
+            link(pair[0].0, pair[1].0);
+            link(pair[0].1, pair[1].1);
+        }
+    }
+    let dummy: Vec<bool> = verts.iter().map(|v| v.kind != Kind::Real).collect();
+    let border: Vec<Option<bk::BorderSide>> = verts
         .iter()
-        .map(|layer| {
-            let mut o = Vec::with_capacity(layer.len());
-            let mut acc = 0.0;
-            for (i, &v) in layer.iter().enumerate() {
-                if i > 0 {
-                    acc += gap(layer[i - 1], v);
-                }
-                o.push(acc);
-            }
-            o
+        .map(|v| match v.kind {
+            Kind::Border {
+                side: Side::Left, ..
+            } => Some(bk::BorderSide::Left),
+            Kind::Border {
+                side: Side::Right, ..
+            } => Some(bk::BorderSide::Right),
+            _ => None,
         })
         .collect();
-    for (layer, o) in layers.iter().zip(&offsets) {
-        let shift = o.last().copied().unwrap_or(0.0) / 2.0;
-        for (&v, &ov) in layer.iter().zip(o) {
-            x[v] = ov - shift;
-        }
-    }
-    let mut border_of: Vec<Option<(usize, Side)>> = vec![None; nv];
-    for v in 0..nv {
-        if let Kind::Border { cluster, side } = verts[v].kind {
-            border_of[v] = Some((cluster, side));
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    enum Pass {
-        Down,
-        Up,
-        Both,
-    }
-    let passes = [
-        Pass::Down,
-        Pass::Up,
-        Pass::Down,
-        Pass::Up,
-        Pass::Down,
-        Pass::Up,
-        Pass::Both,
-        Pass::Both,
-        Pass::Both,
-    ];
-    for pass in passes {
-        let order: Vec<usize> = match pass {
-            Pass::Down | Pass::Both => (0..layers.len()).collect(),
-            Pass::Up => (0..layers.len()).rev().collect(),
-        };
-        // Cluster border alignment targets, recomputed per pass.
-        let targets: Vec<(f64, f64)> = borders
-            .iter()
-            .map(|bs| {
-                let l = bs.iter().map(|&(l, _)| x[l]).fold(f64::INFINITY, f64::min);
-                let r = bs
-                    .iter()
-                    .map(|&(_, r)| x[r])
-                    .fold(f64::NEG_INFINITY, f64::max);
-                (l, r)
-            })
-            .collect();
-        for li in order {
-            let layer = &layers[li];
-            if layer.is_empty() {
-                continue;
-            }
-            let mut desired = Vec::with_capacity(layer.len());
-            let mut weights = Vec::with_capacity(layer.len());
-            for &v in layer {
-                if let Some((c, side)) = border_of[v] {
-                    desired.push(if side == Side::Left {
-                        targets[c].0
-                    } else {
-                        targets[c].1
-                    });
-                    weights.push(4.0);
-                    continue;
-                }
-                let neigh: Box<dyn Iterator<Item = &(usize, f64)>> = match pass {
-                    Pass::Down => Box::new(up[v].iter()),
-                    Pass::Up => Box::new(down[v].iter()),
-                    Pass::Both => Box::new(up[v].iter().chain(down[v].iter())),
-                };
-                let (s, ws) = neigh.fold((0.0, 0.0), |(s, ws), &(u, w)| (s + x[u] * w, ws + w));
-                let base = match verts[v].kind {
-                    Kind::Dummy { .. } => 2.0,
-                    _ => 1.0,
-                };
-                if ws > 0.0 {
-                    desired.push(s / ws);
-                    weights.push(base);
-                } else {
-                    desired.push(x[v]);
-                    weights.push(0.25);
-                }
-            }
-            let solved = isotonic(&desired, &weights, &offsets[li]);
-            for (&v, xv) in layer.iter().zip(solved) {
-                x[v] = xv;
-            }
-        }
-    }
+    let width: Vec<f64> = verts
+        .iter()
+        .map(|v| match v.kind {
+            Kind::Real | Kind::Dummy { labeled: true } => v.w,
+            _ => 0.0,
+        })
+        .collect();
+    let graph = bk::LayerGraph {
+        layers,
+        preds: &preds,
+        succs: &succs,
+        dummy: &dummy,
+        border: &border,
+        width: &width,
+    };
+    let mut x = bk::position_x(&graph, gap);
     // Normalise so the leftmost extent sits at zero.
     let min = (0..nv)
-        .map(|v| {
-            x[v] - match verts[v].kind {
-                Kind::Real | Kind::Dummy { labeled: true } => verts[v].w / 2.0,
-                _ => 0.0,
-            }
-        })
+        .map(|v| x[v] - width[v] / 2.0)
         .fold(f64::INFINITY, f64::min);
     if min.is_finite() {
         for xv in x.iter_mut() {
@@ -972,37 +908,6 @@ fn assign_x(
         }
     }
     x
-}
-
-/// Minimise Σ wᵢ(xᵢ − dᵢ)² subject to xᵢ₊₁ − xᵢ ≥ oᵢ₊₁ − oᵢ (pool adjacent violators).
-fn isotonic(desired: &[f64], weights: &[f64], offsets: &[f64]) -> Vec<f64> {
-    // Substitute yᵢ = xᵢ − oᵢ, which turns the constraints into y non-decreasing.
-    let mut blocks: Vec<(f64, f64, usize)> = Vec::with_capacity(desired.len()); // (Σw·t, Σw, len)
-    for i in 0..desired.len() {
-        let w = weights[i].max(1e-9);
-        blocks.push((w * (desired[i] - offsets[i]), w, 1));
-        while blocks.len() >= 2 {
-            let (s1, w1, _) = blocks[blocks.len() - 2];
-            let (s2, w2, _) = blocks[blocks.len() - 1];
-            if s1 / w1 > s2 / w2 {
-                let top = blocks.pop().unwrap_or((0.0, 0.0, 0));
-                if let Some(prev) = blocks.last_mut() {
-                    prev.0 += top.0;
-                    prev.1 += top.1;
-                    prev.2 += top.2;
-                }
-            } else {
-                break;
-            }
-        }
-    }
-    let mut out = Vec::with_capacity(desired.len());
-    for (s, w, len) in blocks {
-        for _ in 0..len {
-            out.push(s / w + offsets[out.len()]);
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1052,11 +957,31 @@ mod tests {
             .collect()
     }
 
+    /// As in dagre (and so mermaid): every edge, labelled or not, gets a
+    /// midpoint vertex, and Brandes–Köpf lines that midpoint up with one end
+    /// rather than halfway, so a basis spline through the points bends
+    /// (the "S" curve) instead of drawing a straight diagonal.
     #[test]
-    fn isotonic_respects_gaps() {
-        let x = isotonic(&[0.0, 0.0, 0.0], &[1.0, 1.0, 1.0], &[0.0, 10.0, 20.0]);
-        assert!((x[1] - x[0] - 10.0).abs() < 1e-9 && (x[2] - x[1] - 10.0).abs() < 1e-9);
-        assert!((x[1]).abs() < 1e-9, "centred on the common target");
+    fn fan_out_edges_bend_like_dagre() {
+        let inp = input(
+            vec![node(None), node(None), node(None), node(None)],
+            vec![edge(0, 1), edge(0, 2), edge(0, 3)],
+            vec![],
+            Direction::TopBottom,
+        );
+        let out = layout(&inp);
+        for (ei, route) in out.edges.iter().enumerate() {
+            assert_eq!(route.points.len(), 3, "edge {ei} has a midpoint");
+            let [a, m, b] = [route.points[0], route.points[1], route.points[2]];
+            assert!(
+                (m.x - a.x).abs() < 1e-6 || (m.x - b.x).abs() < 1e-6,
+                "edge {ei}: midpoint {m:?} is aligned with an end ({a:?}, {b:?})"
+            );
+            assert!(a.y < m.y && m.y < b.y);
+        }
+        // The outer edges are not straight lines.
+        let r = &out.edges[0].points;
+        assert!((r[0].x - r[2].x).abs() > 1.0);
     }
 
     #[test]

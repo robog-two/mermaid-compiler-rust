@@ -88,7 +88,7 @@ pure wrapper (`src/layout/boxes.rs`): block, packet, kanban, timeline, journey, 
 
 Taffy cannot lay out node-link graphs. CSS has no concept of ranking nodes, minimising edge crossings or routing
 edges. Flowchart, state, class, ER and requirement diagrams therefore use the purpose-built layered engine
-(`src/layout/`: network-simplex ranking, barycentric ordering, least-squares coordinates), just as mermaid uses
+(`src/layout/`: network-simplex ranking, barycentric ordering, Brandes–Köpf coordinates as in dagre), just as mermaid uses
 dagre rather than CSS for them.
 
 ### Flags
@@ -112,8 +112,10 @@ dagre rather than CSS for them.
 - **PDF text uses the built-in Helvetica fonts** (nothing embedded), so characters outside Windows-1252 become `?` in PDFs.
   SVG and PNG handle any Unicode the system fonts cover.
 - **PNG text needs system fonts.** macOS always has them. Minimal Linux containers may need a font package.
-- **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction and exact weighted
-  least-squares coordinate assignment. Results are comparable to dagre but not identical. Network simplex recomputes the
+- **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction and Brandes–Köpf
+  coordinate assignment ported from dagre's `position/bk` (every edge gets a midpoint vertex, as with dagre's
+  `makeSpaceForEdgeLabels`, which gives mermaid's curved "S" edges). Crossing reduction differs from dagre's, so
+  node order can differ. Network simplex recomputes the
   tree on every pivot (O(V·E)); graphs above 4,000 nodes fall back to a greedy ranker.
 - `click`/`href`/callbacks are parsed and ignored (static images have no interactivity).
 - **No rotated text** in the scene model, so the xychart y-axis title, gitGraph commit labels and quadrant

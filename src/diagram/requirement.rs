@@ -150,7 +150,7 @@ pub fn render(
     let g = to_graph(&d);
     let gc = GraphConfig {
         node_spacing: cfg.section_f64("requirement", "nodeSpacing", 50.0),
-        rank_spacing: cfg.section_f64("requirement", "rankSpacing", 60.0),
+        rank_spacing: cfg.section_f64("requirement", "rankSpacing", 50.0),
         padding: cfg.section_f64("requirement", "padding", 14.0),
         diagram_padding: cfg.section_f64("requirement", "diagramPadding", 20.0),
         curve: Curve::Basis,
