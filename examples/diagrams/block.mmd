@@ -1,0 +1,22 @@
+block-beta
+  columns 3
+  client(["Browser"]) space gw{{"API Gateway"}}
+  block:services:3
+    columns 3
+    auth["Auth service"] orders["Orders"] search[/"Search"/]
+  end
+  queue[["Event queue"]] arrow<["publish"]>(right) db[("Database")]
+  space:2 decide{"Healthy?"}
+  ok((("OK"))) space alert>"Page on-call"]
+
+  client -- "HTTPS" --> gw
+  gw --> auth
+  gw --> orders
+  orders --> queue
+  db -.-> search
+  decide --> ok
+  decide ==> alert
+
+  classDef warn fill:#ffe0e0,stroke:#d33,color:#600
+  class alert warn
+  style gw fill:#e0f0ff,stroke:#06c,stroke-width:2px

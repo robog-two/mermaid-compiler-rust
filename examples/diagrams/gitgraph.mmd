@@ -1,0 +1,25 @@
+---
+title: Release flow
+---
+gitGraph
+  commit id: "init"
+  commit id: "readme" tag: "v0.1"
+  branch develop
+  checkout develop
+  commit id: "api"
+  commit id: "spike" type: HIGHLIGHT
+  branch feature/login order: 3
+  commit id: "login-ui"
+  commit id: "login-api"
+  checkout main
+  commit id: "hotfix" type: REVERSE
+  checkout develop
+  merge feature/login id: "merge-login"
+  commit id: "cleanup"
+  checkout main
+  merge develop id: "release" tag: "v1.0" tag: "stable"
+  switch feature/login
+  commit id: "tests"
+  checkout develop
+  cherry-pick id: "hotfix"
+  commit
