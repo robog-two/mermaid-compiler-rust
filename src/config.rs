@@ -86,7 +86,7 @@ pub struct AppearanceLayer {
 
 /// Diagram sections whose schema defaults are `theme: redux-color`, `look: neo`
 /// (mermaid 12, `config.schema.yaml`; of those, the ones this implementation renders).
-pub const NEO_DEFAULT_SECTIONS: [&str; 9] = [
+pub const NEO_DEFAULT_SECTIONS: [&str; 10] = [
     "flowchart",
     "sequence",
     "class",
@@ -96,6 +96,7 @@ pub const NEO_DEFAULT_SECTIONS: [&str; 9] = [
     "agentflow",
     "swimlane",
     "usecase",
+    "venn",
 ];
 
 impl AppearanceLayer {

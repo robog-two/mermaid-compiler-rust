@@ -1,0 +1,11 @@
+venn-beta
+  title What makes a good feature
+  set Desirable
+    text D1["User research"]
+  set Feasible
+  set Viable
+  union Desirable,Feasible["Buildable"]
+  union Feasible,Viable["Sustainable"]
+  union Desirable,Viable["Marketable"]
+  union Desirable,Feasible,Viable["Ship it"]
+  style Desirable,Feasible,Viable fill:#fde68a
