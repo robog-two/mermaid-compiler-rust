@@ -361,6 +361,16 @@ fn layout_level(
             }
         }
     };
+    // Inside a container ELK gives an edge label a layer of its own, with the full
+    // layer gap on both sides of it; the dagre-style split around the label vertex
+    // only leaves half the gap each side, so pad the label along the rank axis.
+    let label_of = |l: Option<(f64, f64)>| match scope {
+        None => l,
+        Some(_) if tree.direction(scope).is_horizontal() => {
+            l.map(|(w, h)| (w + input.inner_rank_sep, h))
+        }
+        Some(_) => l.map(|(w, h)| (w, h + input.inner_rank_sep)),
+    };
     let mut edges = Vec::new();
     let mut edge_ids = Vec::new();
     for (ei, (e, &(a, b))) in input.edges.iter().zip(ends).enumerate() {
@@ -383,7 +393,7 @@ fn layout_level(
             from,
             to,
             minlen: e.minlen,
-            label: e.label,
+            label: label_of(e.label),
             from_cluster,
             to_cluster,
         });

@@ -1269,9 +1269,10 @@ fn cluster_shapes(
 /// The order in which mermaid hands nodes to the layout. flowDb pushes its subgraphs
 /// last-declared first and the vertices after them, so at every level the child
 /// subgraphs come in reverse, before the level's own nodes; ELK keeps that model order.
+/// erDb's `getData` does the same with its groups (kept here in closing order).
 /// Other diagrams keep declaration order.
 fn model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> Vec<usize> {
-    if g.kind != DiagramKind::Flowchart || g.clusters.is_empty() {
+    if !matches!(g.kind, DiagramKind::Flowchart | DiagramKind::Er) || g.clusters.is_empty() {
         return (0..nodes.len()).collect();
     }
     let placeholder: Vec<bool> = {
