@@ -40,13 +40,14 @@ cat diagram.mmd | mmdc -i - -o - -e svg > out.svg
 log lines, warnings, error messages and exit codes as mermaid-cli 12.0.0. Scripts and Makefiles that call `mmdc` should not
 need changes for the supported diagram types.
 
-**The images are not pixel-identical.** Upstream renders with mermaid.js + dagre in a browser; this is an independent
+**The images are not pixel-identical.** Upstream renders with mermaid.js in a browser, and since mermaid 12.0 lays out
+flowchart, state and class diagrams with ELK by default (dagre before that); this is an independent
 implementation of the same diagram languages, so layouts, spacing and fonts differ in detail. Byte-identical output is not
 achievable without embedding a browser, which is what this project exists to avoid.
 
 ### Diagram support
 
-Every mermaid diagram family is implemented. See **[docs/GALLERY.md](docs/GALLERY.md)** for a rendered screenshot of
+Every diagram family in mermaid 12.3.0 (the version `mmdc` 12 installs today) is implemented. See **[docs/GALLERY.md](docs/GALLERY.md)** for a rendered screenshot of
 each example. Each entry has its source in a collapsible block, which GitHub renders with real mermaid, so you can
 compare the two directly.
 
@@ -75,7 +76,18 @@ compare the two directly.
 | Mindmap (`mindmap`) | two-sided tree | all node shapes |
 | Treemap (`treemap-beta`) | squarified | sections, values, classDef |
 | ZenUML (`zenuml`) | sequence (lowered) | translated into the sequence engine |
+| Agentflow (`agentflow-beta`) | layered graph (upstream default is ELK) | flow/global containers with nesting and collapse, connectors, task/tool/input/decision/refdoc/action shapes, sequence/reference/failure edges, `@{}` metadata, per-kind colours |
+| Swimlane (`swimlane-beta`) | lane-aware layered (port of mermaid's swimlanes engine) + orthogonal router | lanes from subgraphs, default lane, TB/BT/LR/RL, cross-lane handoffs, edge labels, line hops, flowchart shapes and styling |
+| Event Modeling (`eventmodeling`) | timeline/lane positioning ported from upstream | `tf`/`rf` frames, ui/pcr/cmd/rmo/evt lanes, namespaced lanes, `->>` sources, inline/typed data and data blocks, inferred relations |
+| Use case (`usecase-beta`) | layered graph (upstream default is ELK) | actors, ellipse/rect/business use cases, system boundaries (rect/package), associations, include/extend/generalization, notes, JSON tables, styling |
+| Railroad (`railroad-beta`, `railroad-ebnf-beta`, `railroad-abnf-beta`, `railroad-peg-beta`) | recursive box/rail layout (upstream renderer port) | IR constructors, EBNF, ABNF repeats/num-vals, PEG predicates; choice, optional, loops, special boxes |
+| Wardley map (`wardley-beta`) | fixed canvas, coordinate projection | components/anchors, flows and labels, evolve, pipelines, build/buy/outsource/market, inertia, custom stages, notes, annotations, accelerators |
+| TreeView (`treeView-beta`) | indented rows (upstream `drawTree`) | box-drawing or indented input, file/folder icons, `:::highlight`, `##` descriptions |
+| Ishikawa (`ishikawa`, `ishikawa-beta`) | fishbone (upstream geometry) | effect head, alternating cause categories, nested sub-causes, word wrap |
+| Venn (`venn-beta`) | area-proportional circles (venn.js port) | sets, unions with sizes/labels, text nodes, styles, theme palettes |
+| Cynefin (`cynefin-beta`) | fixed five-domain framework | domain items, overflow badge, labelled transitions, seeded wavy boundaries, cliff |
 | `info` | — | prints the implementation version |
+| Subgraphs / composites / namespaces | layered + per-cluster sub-layout (ELK container rules) | nested clusters, per-cluster `direction`, cluster-to-cluster edges, concurrency regions, dotted namespaces, empty/styled/classed subgraphs |
 
 Shared features: front-matter (`title`, `config`), `%%{init: …}%%` directives, `%%` comments, `accTitle`/`accDescr`
 (emitted as `<title>`/`<desc>` and used for Markdown alt text and titles, as upstream does), themes and `themeVariables`.
@@ -96,7 +108,7 @@ dagre rather than CSS for them.
 | Flag | Behaviour |
 |---|---|
 | `-i/--input`, `-o/--output`, `-e/--outputFormat`, `-a/--artefacts`, `-q/--quiet` | Same as upstream, including `-` for stdin/stdout and Markdown mode |
-| `-t/--theme` | All 12 upstream names implemented, including `neo`, `neo-dark`, `redux`, `redux-dark`, `redux-color` and `redux-dark-color` (colours derived with khroma's HSL maths, plus `strokeWidth`, `radius`, fonts and the categorical palettes). Without `-t`, mermaid 12's per-diagram defaults apply: flowchart, sequence, class, state, ER and requirement diagrams render in `redux-color` with the `neo` look, everything else in `default` (resolved as mermaid's `resolveAppearance`: directives, then site config, then defaults; a diagram section's `theme`/`look` beats the top-level one within a layer) |
+| `-t/--theme` | All 12 upstream names implemented, including `neo`, `neo-dark`, `redux`, `redux-dark`, `redux-color` and `redux-dark-color` (colours derived with khroma's HSL maths, plus `strokeWidth`, `radius`, fonts and the categorical palettes). Without `-t`, mermaid 12's per-diagram defaults apply: flowchart, sequence, class, state, ER, requirement, agentflow, swimlane, use case and venn diagrams render in `redux-color` with the `neo` look, everything else in `default` (resolved as mermaid's `resolveAppearance`: directives, then site config, then defaults; a diagram section's `theme`/`look` beats the top-level one within a layer) |
 | `-c/--configFile`, `-C/--cssFile` | Layered exactly as upstream (config file assigned over `-t`, CSS becomes `themeCSS`) |
 | `-b/--backgroundColor`, `-I/--svgId`, `-s/--scale`, `--size`, `--pdf-paper-format`, `-j/--jobs` | Same semantics |
 | `--no-font-embed` | Accepted. This implementation never embeds fonts |
@@ -112,14 +124,19 @@ dagre rather than CSS for them.
 - **PDF text uses the built-in Helvetica fonts** (nothing embedded), so characters outside Windows-1252 become `?` in PDFs.
   SVG and PNG handle any Unicode the system fonts cover.
 - **PNG text needs system fonts.** macOS always has them. Minimal Linux containers may need a font package.
+- **Layout engine:** mermaid 12 defaults to ELK (`layout: elk`) for graph diagrams; this implementation uses a
+  dagre-style layered layout and reproduces ELK's container rules instead: a subgraph with no edge crossing its border
+  is laid out on its own in its own `direction`, with ELK's padding (24) and spacing (50 between nodes, 24 between
+  layers). Edges are curved (as with `layout: dagre`) rather than ELK's right-angled routes, ELK's packing of
+  disconnected parts inside a container is not reproduced, and a subgraph's `@{ view: collapsed }` is not supported.
 - **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction and Brandes–Köpf
   coordinate assignment ported from dagre's `position/bk` (every edge gets a midpoint vertex, as with dagre's
   `makeSpaceForEdgeLabels`, which gives mermaid's curved "S" edges). Crossing reduction differs from dagre's, so
   node order can differ. Network simplex recomputes the
   tree on every pivot (O(V·E)); graphs above 4,000 nodes fall back to a greedy ranker.
 - `click`/`href`/callbacks are parsed and ignored (static images have no interactivity).
-- **No rotated text** in the scene model, so the xychart y-axis title, gitGraph commit labels and quadrant
-  y-labels are drawn horizontally.
+- **Rotated text** is used by wardley and swimlane; the xychart y-axis title, gitGraph commit labels and quadrant
+  y-labels are still drawn horizontally.
 - **Icons** (architecture, mindmap `::icon`, C4 sprites) are generic glyphs; icon packs are not loaded.
 - **Themes / looks:** the colour themes' per-item palette (`data-color-id`) is resolved to concrete colours for flowchart
   subgraphs, state composites, class boxes, ER entities, requirement boxes and sequence actors/activations, in upstream's
@@ -129,6 +146,11 @@ dagre rather than CSS for them.
   The redux drop shadow (hard 4px offset, 6% opacity) is exact; the neo themes' blurred `drop-shadow()` is drawn
   without blur, and the `neo`/`neo-dark` gradient node borders (`useGradient`) are drawn with the solid `nodeBorder`.
   `borderColorArray`/`bkgColorArray` cannot be overridden through `themeVariables`.
+- **Mermaid 12.1–12.3 diagrams:** agentflow and use case use the layered layout rather than upstream's default ELK
+  (curved rather than right-angled edges). Swimlane has a simplified orthogonal router (no crossing cleanup or
+  `automaticLaneOrdering`, no pools). Cynefin's wavy borders are seeded from the SVG id (stable output; set `cynefin.seed`
+  for upstream's exact curves). Venn's 4+-set solver uses a fixed seed (deterministic). Wardley uses a serif font as
+  mermaid's output does. Icon-pack icons (treeView, use case) draw mermaid's "?" placeholder. Eventmodeling data is not monospaced.
 - **Gantt is deterministic:** no today-marker (it would need the clock), and times are UTC.
 - **Approximate layouts** where mermaid uses force-directed or browser layout: architecture (grid from side hints),
   mindmap (two-sided tree rather than force layout), and C4 relationships (straight lines that can pass behind cards).
