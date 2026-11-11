@@ -162,6 +162,10 @@ pub fn parse(body: &str) -> Result<Sankey> {
     if !header {
         return Err(Error::parse(1, "Expecting 'sankey-beta'"));
     }
+    // sankey.jison needs at least one record after the header.
+    if g.links.is_empty() {
+        return Err(Error::parse(1, "Expecting 'NEWLINE', got 'EOF'"));
+    }
     Ok(g)
 }
 

@@ -56,6 +56,11 @@ pub fn parse(body: &str, title: Option<String>) -> Result<PieChart> {
             let value = rest
                 .strip_prefix(':')
                 .map(str::trim)
+                // pie.langium NUMBER_PIE: `-?digits(.digits)?` only (no exponent).
+                .filter(|v| {
+                    let d = v.strip_prefix('-').unwrap_or(v);
+                    !d.is_empty() && d.chars().all(|c| c.is_ascii_digit() || c == '.')
+                })
                 .and_then(|v| v.parse::<f64>().ok())
                 .ok_or_else(|| Error::parse(line_no, format!("{line}\nExpecting ': <number>'")))?;
             if value < 0.0 {

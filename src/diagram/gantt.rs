@@ -862,12 +862,9 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Gantt> {
         } else if let Some(v) = keyword(line, "axisFormat") {
             g.axis_format = Some(v.to_string());
         } else if let Some(v) = keyword(line, "tickInterval") {
-            g.tick_interval = Some(parse_tick_interval(v).ok_or_else(|| {
-                Error::parse(
-                    line_no,
-                    format!("{line}\nInvalid tickInterval (expected e.g. 1day, 2week, 6hour)"),
-                )
-            })?);
+            // ganttRenderer only applies an interval matching its pattern; any other
+            // value keeps the automatic ticks.
+            g.tick_interval = parse_tick_interval(v);
         } else if let Some(v) = keyword(line, "excludes") {
             g.excludes.extend(
                 v.split([',', ' ', '\t'])
@@ -1975,7 +1972,7 @@ mod tests {
         let e = parse("gantt\nA : 3d", None).unwrap_err();
         assert!(matches!(e, Error::Parse { line: 2, .. }));
         assert!(parse("pie\n", None).is_err());
-        assert!(parse("gantt\ntickInterval 3fortnight", None).is_err());
+        assert!(parse("gantt\ntickInterval 3fortnight", None).is_ok());
     }
 
     #[test]

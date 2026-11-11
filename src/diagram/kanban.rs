@@ -82,6 +82,10 @@ fn parse_node(text: &str) -> Option<(String, String)> {
     let closes: &[char] = &[']', ')', '}'];
     let body = inner.trim_start_matches(opens);
     let close = body.rfind(closes)?;
+    // Nothing may follow the closing delimiter (kanban.jison expects a newline).
+    if !body[close + 1..].trim().is_empty() {
+        return None;
+    }
     let body = body[..close].trim_end_matches(closes);
     let label = normalize_label(body);
     let id = if id.is_empty() { label.clone() } else { id };

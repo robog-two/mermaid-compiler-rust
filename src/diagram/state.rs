@@ -79,10 +79,10 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
             continue;
         }
         if s == "}" {
-            let c = b
-                .stack
-                .pop()
-                .ok_or_else(|| Error::parse(line, "Unexpected '}'"))?;
+            // An unmatched `}` is accepted (and ignored) upstream.
+            let Some(c) = b.stack.pop() else {
+                continue;
+            };
             if b.clusters[c.0].kind == ClusterKind::Region {
                 b.stack.pop();
             }
@@ -128,6 +128,11 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
         if let Some(rest) = s.strip_prefix("note ") {
             let rest = rest.trim();
             let (target, text) = match rest.split_once(':') {
+                // An empty single-line note has no text token: mermaid 12.3 fails to
+                // render it ("No such shape: undefined").
+                Some((_, text)) if text.trim().is_empty() => {
+                    return Err(Error::parse(line, format!("{s}\nExpecting the note text")));
+                }
                 Some((head, text)) => (note_target(head), text.trim().to_string()),
                 None => {
                     let mut lines = Vec::new();
@@ -496,7 +501,8 @@ mod tests {
     #[test]
     fn unbalanced_braces() {
         assert!(parse("stateDiagram-v2\nstate A {\nB-->C", None).is_err());
-        assert!(parse("stateDiagram-v2\n}", None).is_err());
+        // An unmatched `}` is ignored upstream.
+        assert!(parse("stateDiagram-v2\n}", None).is_ok());
         // Regions do not change the brace count.
         assert!(parse("stateDiagram-v2\nstate A {\nB\n--\nC\n}\nD", None).is_ok());
     }

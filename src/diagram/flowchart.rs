@@ -142,6 +142,12 @@ impl Builder {
                 }
                 Ok(())
             }
+            "classDef" if rest.is_empty() => Err(err_at(
+                line,
+                stmt,
+                stmt.len(),
+                "Expecting a class name after 'classDef'",
+            )),
             "classDef" => {
                 let (names, style) = split_first_word(rest);
                 let st = StyleOverrides::parse(style);

@@ -138,6 +138,13 @@ fn parse_item(line: &str, line_no: usize) -> Result<Item> {
         .or_else(|| rest.strip_prefix(','))
         .ok_or_else(|| err("Expecting ': <number>'"))?
         .trim();
+    // treemap.langium NUMBER2 is `[0-9_\.\,]+`: no sign, no exponent.
+    if !v
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '_' | '.' | ','))
+    {
+        return Err(err("Expecting a number value"));
+    }
     let value = v
         .replace('_', "")
         .parse::<f64>()

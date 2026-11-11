@@ -169,6 +169,12 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
             let opens = rest.ends_with('{');
             let decl = rest.trim_end_matches('{').trim();
             let (decl, css) = match decl.split_once(":::") {
+                Some((_, c)) if c.trim().is_empty() => {
+                    return Err(Error::parse(
+                        line,
+                        format!("{s}\nExpecting a class name after ':::'"),
+                    ));
+                }
                 Some((d, c)) => (d.trim(), Some(c.trim().to_string())),
                 None => (decl, None),
             };
@@ -185,6 +191,14 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
                 ),
                 None => (decl, None),
             };
+            // `~` opens a generic that a second `~` must close (classDiagram.jison
+            // GENERICTYPE).
+            if name.matches('~').count() == 1 {
+                return Err(Error::parse(
+                    line,
+                    format!("{s}\nUnterminated generic: expecting '~'"),
+                ));
+            }
             let (name, generic) = split_generic(name);
             if name.is_empty() {
                 return Err(Error::parse(line, "Expecting a class name"));
@@ -229,6 +243,10 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
             } else {
                 (None, rest.trim_matches('"').to_string())
             };
+            // The note text (a STR token) is mandatory.
+            if text.is_empty() {
+                return Err(Error::parse(line, format!("{s}\nExpecting the note text")));
+            }
             b.notes.push((target, text.replace("\\n", "\n")));
             continue;
         }
@@ -576,6 +594,14 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_incomplete_class_statements() {
+        assert!(parse("classDiagram\nclass A~T", None).is_err());
+        assert!(parse("classDiagram\nclass A:::", None).is_err());
+        assert!(parse("classDiagram\nnote for A", None).is_err());
+        assert!(parse("classDiagram\nclass A~T~\nnote for A \"n\"", None).is_ok());
+    }
 
     #[test]
     fn classes_members_relations() {

@@ -355,10 +355,10 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 ));
             }
             let score = task.score.clamp(1.0, 5.0);
-            // A NaN score puts upstream's face at `cy = NaN`, i.e. y 0 of the diagram,
-            // 300 above where a score of 5 sits.
+            // A NaN score puts upstream's face at `cy = NaN`, i.e. y 0 of the diagram:
+            // 110 above the task box (whose bottom is `sr.y`).
             let fy = if score.is_nan() {
-                sr.y + 30.0 - 300.0
+                sr.y - 50.0 - 110.0
             } else {
                 sr.y + 30.0 + (5.0 - score) * 30.0
             };

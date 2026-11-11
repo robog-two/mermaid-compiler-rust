@@ -116,6 +116,16 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Mindmap> {
                 ));
             }
         }
+        // mindmap.jison (12.3) has no `@{ ... }` shape data: the `@{` of a node id is
+        // unrecognised text.
+        if let Some(at) = t.find("@{") {
+            if !t[..at].contains(['[', '(', '{', ')']) {
+                return Err(Error::parse(
+                    line_no,
+                    format!("Lexical error on line {line_no}. Unrecognized text.\n{t}"),
+                ));
+            }
+        }
         let (id, label, shape) = parse_node(t, line_no)?;
         let parent = if mm.nodes.is_empty() {
             None

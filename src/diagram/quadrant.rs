@@ -100,6 +100,17 @@ fn parse_styles(s: &str, line: usize) -> Result<PointStyle> {
 }
 
 /// `left --> right` (right optional).
+/// quadrant.jison: an axis needs a label and at most one `-->`.
+fn check_axis(rest: &str, line: &str, line_no: usize) -> Result<()> {
+    if rest.trim().is_empty() || rest.matches("-->").count() > 1 {
+        return Err(Error::parse(
+            line_no,
+            format!("{line}\nExpecting 'axis-label' or 'axis-label --> axis-label'"),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_axis(rest: &str) -> (Option<String>, Option<String>) {
     match rest.split_once("-->") {
         Some((a, b)) => {
@@ -206,8 +217,10 @@ pub fn parse(body: &str, title: Option<String>) -> Result<QuadrantChart> {
         if let Some(t) = keyword(line, "title") {
             chart.title = Some(unquote(t));
         } else if let Some(r) = keyword(line, "x-axis") {
+            check_axis(r, line, line_no)?;
             (chart.x_left, chart.x_right) = parse_axis(r);
         } else if let Some(r) = keyword(line, "y-axis") {
+            check_axis(r, line, line_no)?;
             (chart.y_bottom, chart.y_top) = parse_axis(r);
         } else if let Some(r) = keyword(line, "classDef") {
             let (name, styles) = r

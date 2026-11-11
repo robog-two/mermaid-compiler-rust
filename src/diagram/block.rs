@@ -406,7 +406,12 @@ pub fn parse(body: &str, title: Option<String>) -> Result<BlockDiagram> {
         let frame_count = stack.len();
         let top = &mut stack[frame_count - 1];
         match word {
-            "columns" => {
+            // The lexer only knows `columns auto` / `columns <digits>`; otherwise
+            // `columns` is an ordinary block id.
+            "columns"
+                if rest == "auto"
+                    || (!rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())) =>
+            {
                 top.columns = if rest == "auto" {
                     None
                 } else {
@@ -1553,8 +1558,9 @@ class c hot
         assert!(matches!(e, Error::Parse { line: 3, .. }));
         let e = parse("block-beta\na -->", None).unwrap_err();
         assert!(matches!(e, Error::Parse { line: 2, .. }));
-        let e = parse("block-beta\ncolumns x", None).unwrap_err();
-        assert!(matches!(e, Error::Parse { line: 2, .. }));
+        // `columns x` is not a columns statement but two blocks, as upstream.
+        let d = parse("block-beta\ncolumns x", None).unwrap();
+        assert_eq!(d.children.len(), 2);
         let e = parse("block-beta\na<[\"x\"]>(sideways)", None).unwrap_err();
         assert!(matches!(e, Error::Parse { line: 2, .. }));
     }

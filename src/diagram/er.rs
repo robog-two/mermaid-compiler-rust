@@ -896,6 +896,13 @@ fn statement(d: &mut ErDiagram, s: &str, line: usize) -> Result<(Vec<String>, Op
         ));
     }
     let label = c.rest().trim();
+    // erDiagram.jison `role`: a word or a closed quoted string, never empty.
+    if label.is_empty() || (label.starts_with('"') && (label.len() < 2 || !label.ends_with('"'))) {
+        return Err(Error::parse(
+            line,
+            format!("{s}\nExpecting a relationship label after ':'"),
+        ));
+    }
     let label = label
         .strip_prefix('"')
         .and_then(|l| l.strip_suffix('"'))
@@ -1041,6 +1048,13 @@ mod tests {
             Err(Error::Parse { line, .. }) => line,
             other => panic!("expected parse error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn relationship_label_is_mandatory() {
+        assert!(parse("erDiagram\nA ||--o{ B :", None).is_err());
+        assert!(parse("erDiagram\nA ||--o{ B : \"x", None).is_err());
+        assert!(parse("erDiagram\nA ||--o{ B : \"x y\"", None).is_ok());
     }
 
     #[test]

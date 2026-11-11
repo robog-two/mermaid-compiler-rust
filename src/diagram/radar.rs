@@ -153,6 +153,13 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Radar> {
         if let Some(t) = keyword(line, "title") {
             r.title = Some(unquote(t));
         } else if let Some(rest) = keyword(line, "axis") {
+            // radar.langium: `axis` takes at least one axis.
+            if rest.trim().is_empty() {
+                return Err(Error::parse(
+                    line_no,
+                    format!("{line}\nExpecting an axis id"),
+                ));
+            }
             for item in split_top_level(rest) {
                 if item.is_empty() {
                     continue;

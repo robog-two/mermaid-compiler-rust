@@ -358,6 +358,10 @@ fn parse_series(kind: SeriesKind, rest: &str, line: usize) -> Result<Series> {
         .trim_end()
         .strip_suffix(']')
         .ok_or_else(|| Error::parse(line, "Expecting ']' to close the data list"))?;
+    // xychart.jison plotData: at least one number between the brackets.
+    if inner.trim().is_empty() {
+        return Err(Error::parse(line, "Expecting a number in the data list"));
+    }
     let mut values = Vec::new();
     let mut labels = Vec::new();
     for item in split_top_level(inner) {
@@ -415,6 +419,12 @@ pub fn parse(body: &str, title: Option<String>) -> Result<XyChart> {
         } else if line == "vertical" {
             chart.orientation = Orientation::Vertical;
         } else if let Some(t) = keyword(line, "title") {
+            if t.trim().is_empty() {
+                return Err(Error::parse(
+                    line_no,
+                    format!("{line}\nExpecting a title text"),
+                ));
+            }
             chart.title = Some(unquote(t));
         } else if let Some(rest) = keyword(line, "x-axis") {
             let (t, axis) = parse_axis(rest, line_no, true)?;

@@ -250,6 +250,15 @@ pub fn parse_args(inner: &str, line: usize) -> Result<Args> {
     if pieces.len() == 1 && pieces[0].trim().is_empty() {
         return Ok(Args::default());
     }
+    // c4Diagram.jison lexes an unquoted attribute as `[^,]+`: when it is the last
+    // one it swallows the closing `)` and the statement no longer parses.
+    let last = pieces.last().map_or("", |p| p.trim());
+    if !last.is_empty() && !last.starts_with(['"', '$']) {
+        return Err(Error::parse(
+            line,
+            format!("Expecting a quoted string, got '{last}' before ')'"),
+        ));
+    }
     let unquote = |s: &str| -> String {
         let s = s.trim();
         if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
@@ -494,8 +503,15 @@ pub fn parse(body: &str, title: Option<String>) -> Result<C4Diagram> {
     let mut p = Parser::default();
     while let Some(tok) = it.next() {
         match tok {
-            Tok::LineStmt { word, rest, .. } => {
+            Tok::LineStmt { word, rest, line } => {
                 if word == "title" {
+                    // `"title"\s[^#\n;]+`: a bare `title` is not a token.
+                    if rest.trim().is_empty() {
+                        return Err(Error::parse(
+                            line,
+                            "Lexical error: Unrecognized text 'title'",
+                        ));
+                    }
                     d.title = Some(rest);
                 }
             }
@@ -2021,7 +2037,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
 
     #[test]
     fn args_handle_quotes_commas_and_named() {
-        let a = parse_args(r#"a, "Hello, world", , $tags="x,y", bare text"#, 1).unwrap();
+        let a = parse_args(r#"a, "Hello, world", , $tags="x,y", bare text,"#, 1).unwrap();
         assert_eq!(a.pos(0), Some("a"));
         assert_eq!(a.pos(1), Some("Hello, world"));
         assert_eq!(a.pos(2), None);
@@ -2113,16 +2129,22 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
     fn parse_errors_report_lines() {
         assert_eq!(err_line("C4Context\nPerson(a, \"A\")\nFoo(x)"), 3);
         assert_eq!(
-            err_line("C4Context\n\nSystem_Boundary(b, \"B\")\nPerson(a)"),
+            err_line("C4Context\n\nSystem_Boundary(b, \"B\")\nPerson(a, \"A\")"),
             3
         );
         assert_eq!(
-            err_line("C4Context\nSystem_Boundary(b, \"B\") {\nPerson(a)\n"),
+            err_line("C4Context\nSystem_Boundary(b, \"B\") {\nPerson(a, \"A\")\n"),
             2
         );
         assert_eq!(err_line("C4Context\n}\n"), 2);
+        // An unquoted last attribute swallows the `)` in c4Diagram.jison.
+        assert_eq!(err_line("C4Context\nPerson(a, \"A\")\nRel(a, b)"), 3);
+        assert_eq!(err_line("C4Context\ntitle"), 2);
         assert_eq!(err_line("C4Context\nPerson(a, \"A\"\n"), 2);
-        assert_eq!(err_line("C4Context\nPerson(a)\n\nRel(a, zz, \"x\")"), 4);
+        assert_eq!(
+            err_line("C4Context\nPerson(a, \"A\")\n\nRel(a, zz, \"x\")"),
+            4
+        );
         assert_eq!(err_line("C4Context\nPerson(, \"A\")"), 2);
         assert_eq!(
             err_line("C4Context\nUpdateLayoutConfig($c4ShapeInRow=\"x\")"),

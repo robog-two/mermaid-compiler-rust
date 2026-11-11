@@ -136,6 +136,32 @@ struct Builder {
 }
 
 impl Builder {
+    /// sequenceDb addSignal(ACTIVE_END): deactivating a participant whose
+    /// activations are all closed is an error.
+    fn check_active(&self, a: usize, line: usize) -> Result<()> {
+        let count: i64 = self
+            .events
+            .iter()
+            .map(|e| match e {
+                Event::Activate(x) if *x == a => 1,
+                Event::Deactivate(x) if *x == a => -1,
+                Event::Message(m) if m.activation == Some(true) && m.to == a => 1,
+                Event::Message(m) if m.activation == Some(false) && m.from == a => -1,
+                _ => 0,
+            })
+            .sum();
+        if count < 1 {
+            return Err(Error::parse(
+                line,
+                format!(
+                    "Trying to inactivate an inactive participant ({})",
+                    self.participants[a].id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn actor(&mut self, id: &str) -> usize {
         let id = id.trim();
         if let Some(&i) = self.index.get(id) {
@@ -220,10 +246,15 @@ pub fn parse(body: &str, title: Option<String>) -> Result<SequenceDiagram> {
             }
             "destroy" | "link" | "links" | "properties" | "details" => {}
             "autonumber" => {
-                let nums: Vec<u32> = rest
-                    .split_whitespace()
-                    .filter_map(|w| w.parse().ok())
-                    .collect();
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                let nums: Vec<u32> = words.iter().filter_map(|w| w.parse().ok()).collect();
+                // sequenceDiagram.jison: `autonumber [off | NUM [NUM]]`.
+                if !(rest == "off" || (words.len() <= 2 && nums.len() == words.len())) {
+                    return Err(Error::parse(
+                        line_no,
+                        format!("{s}\nExpecting 'off' or up to two numbers after 'autonumber'"),
+                    ));
+                }
                 b.events.push(Event::Autonumber {
                     on: rest != "off",
                     start: nums.first().copied(),
@@ -238,6 +269,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<SequenceDiagram> {
             }
             "deactivate" => {
                 let a = b.actor(rest);
+                b.check_active(a, line_no)?;
                 b.events.push(Event::Deactivate(a));
             }
             "note" => {
@@ -245,6 +277,16 @@ pub fn parse(body: &str, title: Option<String>) -> Result<SequenceDiagram> {
                     Error::parse(line_no, format!("{s}\nExpecting ':' after note placement"))
                 })?;
                 let head = head.trim();
+                let actors = ["left of", "right of", "over"]
+                    .iter()
+                    .find_map(|p| head.strip_prefix(p))
+                    .unwrap_or(head);
+                if actors.split(',').any(|a| a.trim().is_empty()) {
+                    return Err(Error::parse(
+                        line_no,
+                        format!("{s}\nExpecting a participant for the note"),
+                    ));
+                }
                 let placement = if let Some(a) = head.strip_prefix("left of") {
                     NotePlacement::LeftOf(b.actor(a))
                 } else if let Some(a) = head.strip_prefix("right of") {
@@ -313,6 +355,9 @@ pub fn parse(body: &str, title: Option<String>) -> Result<SequenceDiagram> {
                         format!("{s}\nExpecting a message like 'Alice->>Bob: Hello'"),
                     )
                 })?;
+                if m.activation == Some(false) {
+                    b.check_active(m.from, line_no)?;
+                }
                 b.events.push(Event::Message(m));
             }
         }
@@ -365,10 +410,8 @@ fn parse_message(s: &str, b: &mut Builder) -> Option<Message> {
         }
         _ => None,
     };
-    let (to, text) = match rest.split_once(':') {
-        Some((t, x)) => (t.trim(), x.trim()),
-        None => (rest.trim(), ""),
-    };
+    // The message text (`TXT`, starting at ':') is mandatory upstream.
+    let (to, text) = rest.split_once(':').map(|(t, x)| (t.trim(), x.trim()))?;
     // sequenceDiagram.jison's message ACTOR token excludes `<`, `>` and `+`, so e.g.
     // `A-->>>B` (actor `>B`) is a syntax error upstream.
     let bad = |a: &str| a.is_empty() || a.contains(['<', '>', '+']);
@@ -1249,6 +1292,32 @@ fn actor_elements(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_what_the_jison_grammar_rejects() {
+        let bad = [
+            "sequenceDiagram\nA->>B",
+            "sequenceDiagram\nNote over : x",
+            "sequenceDiagram\nautonumber x y\nA->>B: x",
+            "sequenceDiagram\nA->>B: x\ndeactivate B",
+            "sequenceDiagram\nA->>+B: x\nB-->>-A: y\nB-->>-A: z",
+        ];
+        for src in bad {
+            assert!(parse(src, None).is_err(), "{src}");
+        }
+        let e = parse("sequenceDiagram\nA->>B: x\ndeactivate B", None).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("Trying to inactivate an inactive participant (B)")
+        );
+        assert!(
+            parse(
+                "sequenceDiagram\nautonumber 10 5\nA->>+B: x\nB-->>-A: y",
+                None
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn parses_messages_and_blocks() {

@@ -62,23 +62,37 @@ impl Timeline {
     }
 }
 
-/// Split `a : b : c` on colons that separate events (a `:` must be surrounded by
-/// whitespace or end the text so `10:30` stays intact).
-fn split_events(s: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut cur = String::new();
-    let chars: Vec<char> = s.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        let prev_ws = i == 0 || chars[i - 1].is_whitespace();
-        let next_ws = i + 1 >= chars.len() || chars[i + 1].is_whitespace();
-        if c == ':' && (prev_ws || next_ws) {
-            parts.push(std::mem::take(&mut cur).trim().to_string());
-        } else {
-            cur.push(c);
+/// Lex the events of a line, `s` starting at its first `:` (timeline.jison
+/// `":"\s(?:[^:\n]|":"(?!\s))+`): each event is a colon, whitespace and at least
+/// one character, running until the next colon that is followed by whitespace
+/// (so `10:30` stays intact). `None` where the lexer would hit an invalid `:`.
+fn lex_events(s: &str) -> Option<Vec<String>> {
+    let c: Vec<char> = s.chars().collect();
+    let mut events = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        if c[i] != ':' || !c.get(i + 1).is_some_and(|n| n.is_whitespace()) {
+            return None;
         }
+        i += 2;
+        let start = i;
+        while i < c.len() && !(c[i] == ':' && c.get(i + 1).is_none_or(|n| n.is_whitespace())) {
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+        events.push(c[start..i].iter().collect::<String>().trim().to_string());
     }
-    parts.push(cur.trim().to_string());
-    parts
+    Some(events)
+}
+
+/// Split a line into its period (text before the first `:`) and events.
+fn split_events(s: &str) -> Option<(String, Vec<String>)> {
+    match s.find(':') {
+        Some(at) => Some((s[..at].trim().to_string(), lex_events(&s[at..])?)),
+        None => Some((s.trim().to_string(), Vec::new())),
+    }
 }
 
 /// Parse a timeline body.
@@ -121,7 +135,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Timeline> {
                 name: Some(s.trim().to_string()),
                 periods: Vec::new(),
             });
-        } else if let Some(rest) = line.strip_prefix(':') {
+        } else if line.starts_with(':') {
             // Continuation: more events for the previous period.
             let period = tl
                 .sections
@@ -130,12 +144,16 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Timeline> {
                 .ok_or_else(|| {
                     Error::parse(line_no, format!("{line}\nEvent without a time period"))
                 })?;
+            let events = lex_events(line).ok_or_else(|| {
+                Error::parse(line_no, format!("{line}\nExpecting an event after ': '"))
+            })?;
             period
                 .events
-                .extend(split_events(rest).into_iter().filter(|e| !e.is_empty()));
+                .extend(events.into_iter().filter(|e| !e.is_empty()));
         } else {
-            let mut parts = split_events(line).into_iter();
-            let label = parts.next().unwrap_or_default();
+            let (label, events) = split_events(line).ok_or_else(|| {
+                Error::parse(line_no, format!("{line}\nExpecting an event after ': '"))
+            })?;
             if label.is_empty() {
                 return Err(Error::parse(
                     line_no,
@@ -148,7 +166,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Timeline> {
                     periods: Vec::new(),
                 });
             }
-            let events: Vec<String> = parts.filter(|e| !e.is_empty()).collect();
+            let events: Vec<String> = events.into_iter().filter(|e| !e.is_empty()).collect();
             if let Some(sec) = tl.sections.last_mut() {
                 sec.periods.push(Period { label, events });
             }
@@ -471,8 +489,20 @@ mod tests {
          : Orkut
     section Later
     2005 : YouTube
-    10:30 slot : Meeting at 10:30
+    Slot : Meeting at 10:30
 ";
+
+    #[test]
+    fn colons_follow_the_jison_lexer() {
+        // A period cannot contain `:`; an event needs `: ` plus text, and a `:`
+        // not followed by whitespace stays inside the event.
+        assert!(parse("timeline\n10:30 slot : x", None).is_err());
+        assert!(parse("timeline\n2020 :", None).is_err());
+        assert!(parse("timeline\n2020 :: a", None).is_err());
+        assert!(parse("timeline\n2020 : a : : b", None).is_err());
+        let t = parse("timeline\n2020 : a :b : c", None).unwrap();
+        assert_eq!(t.sections[0].periods[0].events, vec!["a :b", "c"]);
+    }
 
     #[test]
     fn parses_periods_events_and_sections() {
@@ -484,7 +514,7 @@ mod tests {
         assert_eq!(p[1].label, "2004");
         assert_eq!(p[1].events, vec!["Facebook", "Google", "Orkut"]);
         assert_eq!(t.sections[1].name.as_deref(), Some("Later"));
-        assert_eq!(t.sections[1].periods[1].label, "10:30 slot");
+        assert_eq!(t.sections[1].periods[1].label, "Slot");
         assert_eq!(t.sections[1].periods[1].events, vec!["Meeting at 10:30"]);
     }
 
