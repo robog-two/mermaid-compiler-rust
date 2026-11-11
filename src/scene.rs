@@ -247,6 +247,16 @@ pub enum DiagramKind {
     Treemap,
     ZenUml,
     Info,
+    Agentflow,
+    Swimlane,
+    EventModeling,
+    TreeView,
+    Ishikawa,
+    Railroad,
+    Venn,
+    Wardley,
+    Cynefin,
+    Usecase,
 }
 
 impl DiagramKind {
@@ -277,6 +287,16 @@ impl DiagramKind {
             DiagramKind::Treemap => "treemap",
             DiagramKind::ZenUml => "zenuml",
             DiagramKind::Info => "info",
+            DiagramKind::Agentflow => "agentflow",
+            DiagramKind::Swimlane => "swimlane",
+            DiagramKind::EventModeling => "eventmodeling",
+            DiagramKind::TreeView => "treeView",
+            DiagramKind::Ishikawa => "ishikawa",
+            DiagramKind::Railroad => "railroad",
+            DiagramKind::Venn => "venn",
+            DiagramKind::Wardley => "wardley",
+            DiagramKind::Cynefin => "cynefin",
+            DiagramKind::Usecase => "usecase",
         }
     }
     /// CSS class mermaid puts on the root `<svg>`.
@@ -306,6 +326,16 @@ impl DiagramKind {
             DiagramKind::Treemap => "treemap",
             DiagramKind::ZenUml => "zenuml",
             DiagramKind::Info => "info",
+            DiagramKind::Agentflow => "agentflow",
+            DiagramKind::Swimlane => "swimlane",
+            DiagramKind::EventModeling => "eventmodeling",
+            DiagramKind::TreeView => "treeView",
+            DiagramKind::Ishikawa => "ishikawa",
+            DiagramKind::Railroad => "railroad",
+            DiagramKind::Venn => "venn",
+            DiagramKind::Wardley => "wardley",
+            DiagramKind::Cynefin => "cynefin",
+            DiagramKind::Usecase => "usecase",
         }
     }
 }

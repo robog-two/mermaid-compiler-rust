@@ -1,15 +1,19 @@
 //! Diagram detection, shared preprocessing and per-diagram parsers/renderers.
 
+pub mod agentflow;
 pub mod architecture;
 pub mod block;
 pub mod c4;
 pub mod class;
+pub mod cynefin;
 pub mod er;
+pub mod eventmodeling;
 pub mod flowchart;
 pub mod gantt;
 pub mod gitgraph;
 pub mod graph;
 pub mod info;
+pub mod ishikawa;
 pub mod journey;
 pub mod kanban;
 pub mod markers;
@@ -18,13 +22,19 @@ pub mod packet;
 pub mod pie;
 pub mod quadrant;
 pub mod radar;
+pub mod railroad;
 pub mod requirement;
 pub mod sankey;
 pub mod sequence;
 pub mod shapes;
 pub mod state;
+pub mod swimlane;
 pub mod timeline;
 pub mod treemap;
+pub mod treeview;
+pub mod usecase;
+pub mod venn;
+pub mod wardley;
 pub mod xychart;
 pub mod zenuml;
 
@@ -71,6 +81,16 @@ pub enum DiagramType {
     Treemap,
     ZenUml,
     Info,
+    Agentflow,
+    Swimlane,
+    EventModeling,
+    TreeView,
+    Ishikawa,
+    Railroad,
+    Venn,
+    Wardley,
+    Cynefin,
+    Usecase,
 }
 
 impl DiagramType {
@@ -102,6 +122,16 @@ impl DiagramType {
             DiagramType::Treemap => "treemap",
             DiagramType::ZenUml => "zenuml",
             DiagramType::Info => "info",
+            DiagramType::Agentflow => "agentflow",
+            DiagramType::Swimlane => "swimlane",
+            DiagramType::EventModeling => "eventmodeling",
+            DiagramType::TreeView => "treeView",
+            DiagramType::Ishikawa => "ishikawa",
+            DiagramType::Railroad => "railroad",
+            DiagramType::Venn => "venn",
+            DiagramType::Wardley => "wardley",
+            DiagramType::Cynefin => "cynefin",
+            DiagramType::Usecase => "usecase",
         }
     }
 }
@@ -240,6 +270,64 @@ pub fn detect(body: &str) -> Result<DiagramType> {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
+    // Newer detectors are regex prefixes (`/^\s*venn-beta/`), some case-insensitive,
+    // so they are checked on the raw first line before the keyword match.
+    let lower = first.to_ascii_lowercase();
+    let word_end = |rest: &str, extra: &[char]| {
+        rest.chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_') || extra.contains(&c))
+    };
+    if let Some(rest) = first.strip_prefix("agentflow-beta") {
+        if word_end(rest, &[]) {
+            return Ok(DiagramType::Agentflow);
+        }
+    }
+    if let Some(rest) = first.strip_prefix("swimlane-beta") {
+        if word_end(rest, &[]) {
+            return Ok(DiagramType::Swimlane);
+        }
+    }
+    if [
+        "railroad-beta",
+        "railroad-ebnf-beta",
+        "railroad-abnf-beta",
+        "railroad-peg-beta",
+    ]
+    .iter()
+    .any(|k| lower.starts_with(k))
+    {
+        return Ok(DiagramType::Railroad);
+    }
+    if first.starts_with("eventmodeling") {
+        return Ok(DiagramType::EventModeling);
+    }
+    if first.starts_with("treeView-beta") {
+        return Ok(DiagramType::TreeView);
+    }
+    for k in ["ishikawa-beta", "ishikawa"] {
+        if let Some(rest) = lower.strip_prefix(k) {
+            if word_end(rest, &[]) && !rest.starts_with('-') {
+                return Ok(DiagramType::Ishikawa);
+            }
+        }
+    }
+    if first.starts_with("venn-beta") {
+        return Ok(DiagramType::Venn);
+    }
+    if lower.starts_with("wardley-beta") {
+        return Ok(DiagramType::Wardley);
+    }
+    if let Some(rest) = first.strip_prefix("cynefin-beta") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) || rest.starts_with(':') {
+            return Ok(DiagramType::Cynefin);
+        }
+    }
+    if let Some(rest) = first.strip_prefix("usecase-beta") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return Ok(DiagramType::Usecase);
+        }
+    }
     let word: String = first
         .chars()
         .take_while(|c| !c.is_whitespace() && *c != ';' && *c != ':')
@@ -349,5 +437,30 @@ mod tests {
                 (2, "C[\"a;b\"]".into())
             ]
         );
+    }
+
+    #[test]
+    fn detects_mermaid_12_3_types_like_their_regex_detectors() {
+        let cases = [
+            ("agentflow-beta\n", DiagramType::Agentflow),
+            ("swimlane-beta LR\n", DiagramType::Swimlane),
+            ("eventmodeling\n", DiagramType::EventModeling),
+            ("treeView-beta\n", DiagramType::TreeView),
+            ("ishikawa\n", DiagramType::Ishikawa),
+            ("Ishikawa-beta\n", DiagramType::Ishikawa),
+            ("railroad-beta\n", DiagramType::Railroad),
+            ("railroad-EBNF-beta\n", DiagramType::Railroad),
+            ("railroad-abnf-beta\n", DiagramType::Railroad),
+            ("railroad-peg-beta\n", DiagramType::Railroad),
+            ("venn-beta\n", DiagramType::Venn),
+            ("Wardley-beta\n", DiagramType::Wardley),
+            ("cynefin-beta: t\n", DiagramType::Cynefin),
+            ("usecase-beta\n", DiagramType::Usecase),
+        ];
+        for (src, kind) in cases {
+            assert_eq!(detect(src).unwrap(), kind, "{src:?}");
+        }
+        assert!(detect("usecase-betax\n").is_err());
+        assert!(detect("cynefin-betax\n").is_err());
     }
 }

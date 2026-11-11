@@ -151,6 +151,46 @@ pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
             diagram::info::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
             cfg.use_max_width("info"),
         ),
+        DiagramType::Agentflow => (
+            diagram::agentflow::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("agentflow"),
+        ),
+        DiagramType::Swimlane => (
+            diagram::swimlane::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("swimlane"),
+        ),
+        DiagramType::EventModeling => (
+            diagram::eventmodeling::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("eventmodeling"),
+        ),
+        DiagramType::TreeView => (
+            diagram::treeview::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("treeView"),
+        ),
+        DiagramType::Ishikawa => (
+            diagram::ishikawa::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("ishikawa"),
+        ),
+        DiagramType::Railroad => (
+            diagram::railroad::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("railroad"),
+        ),
+        DiagramType::Venn => (
+            diagram::venn::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("venn"),
+        ),
+        DiagramType::Wardley => (
+            diagram::wardley::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("wardley"),
+        ),
+        DiagramType::Cynefin => (
+            diagram::cynefin::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("cynefin"),
+        ),
+        DiagramType::Usecase => (
+            diagram::usecase::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            cfg.use_max_width("usecase"),
+        ),
     };
     scene.acc_title = pre.acc_title;
     scene.acc_descr = pre.acc_descr;
