@@ -288,6 +288,18 @@ impl Edge {
     }
 }
 
+/// How a cluster is drawn (mermaid's cluster shapes in `clusters.js`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClusterKind {
+    /// `rect`: flowchart subgraph, class namespace.
+    #[default]
+    Group,
+    /// `roundedWithTitle`: state composite (title strip over an inner body).
+    Composite,
+    /// `divider`: one concurrency region of a state composite (dashed, untitled).
+    Region,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cluster {
     pub id: String,
@@ -296,6 +308,23 @@ pub struct Cluster {
     pub style: StyleOverrides,
     /// Categorical palette slot (`colorIndex`), painted only by the colour themes.
     pub color_slot: Option<ColorSlot>,
+    /// The cluster's own `direction` statement.
+    pub direction: Option<Direction>,
+    pub kind: ClusterKind,
+}
+
+impl Cluster {
+    pub fn new(id: impl Into<String>, title: impl Into<String>, parent: Option<ClusterId>) -> Self {
+        Cluster {
+            id: id.into(),
+            title: title.into(),
+            parent,
+            style: StyleOverrides::default(),
+            color_slot: None,
+            direction: None,
+            kind: ClusterKind::Group,
+        }
+    }
 }
 
 /// A fully parsed graph-shaped diagram.
@@ -586,22 +615,30 @@ pub fn render_with(
     let font = pal.font_size;
     let horizontal = g.direction.is_horizontal();
 
-    // Placeholder nodes for clusters with no member nodes, so they still get a box.
+    // A cluster with nothing in it is a plain leaf upstream: its title alone, with no
+    // visible box. A placeholder node (sized to the title) stands in for it.
     let mut nodes = g.nodes.clone();
+    let mut empty_of: Vec<Option<usize>> = vec![None; g.clusters.len()];
     for (ci, c) in g.clusters.iter().enumerate() {
         let has_member = nodes.iter().any(|n| {
             n.cluster
                 .map(|nc| is_within(&g.clusters, nc, ClusterId(ci)))
                 .unwrap_or(false)
-        });
+        }) || g.clusters.iter().any(|o| o.parent == Some(ClusterId(ci)));
         if !has_member {
             let mut placeholder = Node::new(format!("__empty_{}", c.id), "", Shape::Invisible);
-            placeholder.cluster = Some(ClusterId(ci));
+            placeholder.cluster = c.parent;
+            empty_of[ci] = Some(nodes.len());
             nodes.push(placeholder);
         }
     }
 
-    let measured: Vec<Measured> = nodes
+    let cluster_titles: Vec<TextBlock> = g
+        .clusters
+        .iter()
+        .map(|c| TextBlock::label(&c.title, font))
+        .collect();
+    let mut measured: Vec<Measured> = nodes
         .iter()
         .map(|n| {
             measure_node(
@@ -616,11 +653,20 @@ pub fn render_with(
             )
         })
         .collect();
-    let cluster_titles: Vec<TextBlock> = g
-        .clusters
-        .iter()
-        .map(|c| TextBlock::label(&c.title, font))
-        .collect();
+    for (ci, p) in empty_of.iter().enumerate() {
+        if let Some(p) = *p {
+            let t = &cluster_titles[ci];
+            measured[p].w = t.width + CLUSTER_TITLE_PAD;
+            measured[p].h = t.height;
+        }
+    }
+    // ELK reserves the painted title width (label + the group's padding) as the
+    // frame's minimum width; class namespaces pad with `class.padding`.
+    let title_pad = if g.kind == DiagramKind::Class {
+        cfg.padding
+    } else {
+        CLUSTER_TITLE_PAD
+    };
 
     // An edge to / from a whole cluster is laid out against one member node: a member
     // without incoming edges from inside the cluster for edges into it, and (the last)
@@ -653,10 +699,17 @@ pub fn render_with(
         };
         pick.or(members.first()).copied().unwrap_or(0)
     };
-    let resolve = |e: Endpoint, outgoing: bool| match e {
-        Endpoint::Node(NodeId(i)) => i,
-        Endpoint::Cluster(c) => representative(c, outgoing),
+    // Layout endpoint of an edge end: the node, or a member of the whole cluster.
+    let layout_end = |e: Endpoint, outgoing: bool| -> (usize, Option<usize>) {
+        match e {
+            Endpoint::Node(NodeId(i)) => (i, None),
+            Endpoint::Cluster(c) => match empty_of[c.0] {
+                Some(p) => (p, None),
+                None => (representative(c, outgoing), Some(c.0)),
+            },
+        }
     };
+    let resolve = |e: Endpoint, outgoing: bool| layout_end(e, outgoing).0;
     let edge_labels: Vec<Option<TextBlock>> = g
         .edges
         .iter()
@@ -668,25 +721,36 @@ pub fn render_with(
         })
         .collect();
 
+    // Model order: the order mermaid hands its nodes to the layout.
+    let perm = model_order(g, &nodes, &empty_of);
+    let mut pos_of = vec![0; nodes.len()];
+    for (k, &old) in perm.iter().enumerate() {
+        pos_of[old] = k;
+    }
     let input = LayoutInput {
-        nodes: nodes
+        nodes: perm
             .iter()
-            .zip(&measured)
-            .map(|(n, m)| LayoutNode {
-                width: m.w,
-                height: m.h,
-                cluster: n.cluster.map(|c| c.0),
+            .map(|&i| LayoutNode {
+                width: measured[i].w,
+                height: measured[i].h,
+                cluster: nodes[i].cluster.map(|c| c.0),
             })
             .collect(),
         edges: g
             .edges
             .iter()
             .zip(&edge_labels)
-            .map(|(e, lb)| LayoutEdge {
-                from: resolve(e.from, true),
-                to: resolve(e.to, false),
-                minlen: e.minlen,
-                label: lb.as_ref().map(|b| (b.width + 8.0, b.height + 4.0)),
+            .map(|(e, lb)| {
+                let (from, from_cluster) = layout_end(e.from, true);
+                let (to, to_cluster) = layout_end(e.to, false);
+                LayoutEdge {
+                    from: pos_of[from],
+                    to: pos_of[to],
+                    minlen: e.minlen,
+                    label: lb.as_ref().map(|b| (b.width + 8.0, b.height + 4.0)),
+                    from_cluster,
+                    to_cluster,
+                }
             })
             .collect(),
         clusters: g
@@ -695,16 +759,28 @@ pub fn render_with(
             .zip(&cluster_titles)
             .map(|(c, t)| LayoutCluster {
                 parent: c.parent.map(|p| p.0),
-                title_height: if t.is_empty() { 0.0 } else { t.height + 4.0 },
+                title_height: cluster_title_height(c.kind, t),
+                min_width: if t.is_empty() {
+                    0.0
+                } else {
+                    t.width + title_pad
+                },
+                direction: c.direction,
             })
             .collect(),
         direction: g.direction,
         node_sep: cfg.node_spacing,
         rank_sep: cfg.rank_spacing,
         edge_sep: 20.0,
-        cluster_padding: 8.0,
+        cluster_padding: CLUSTER_PADDING,
+        inner_node_sep: CLUSTER_NODE_SPACING,
+        inner_rank_sep: CLUSTER_RANK_SPACING,
     };
-    let out = layout::layout(&input);
+    let raw = layout::layout(&input);
+    let out = layout::LayoutOutput {
+        nodes: (0..nodes.len()).map(|i| raw.nodes[pos_of[i]]).collect(),
+        ..raw
+    };
 
     let mut bounds = Bounds::default();
     let mut cluster_els = Vec::new();
@@ -716,7 +792,15 @@ pub fn render_with(
     let mut cluster_rects = out.clusters.clone();
     for (ci, t) in cluster_titles.iter().enumerate() {
         let r = &mut cluster_rects[ci];
-        let need = t.width + 16.0;
+        if let Some(p) = empty_of[ci] {
+            *r = Rect::centered(out.nodes[p], measured[p].w, measured[p].h);
+            continue;
+        }
+        let need = if t.is_empty() {
+            0.0
+        } else {
+            t.width + title_pad
+        };
         if r.w < need {
             r.x -= (need - r.w) / 2.0;
             r.w = need;
@@ -728,81 +812,30 @@ pub fn render_with(
         let c = &g.clusters[ci];
         let r = cluster_rects[ci];
         bounds.add_rect(r);
-        let slot = slot_colors(c.color_slot, pal);
-        let is_state = g.kind == DiagramKind::State;
-        // Flowchart subgraphs take the slot's border and fill; state composites take the
-        // border, and the fill only as a tint behind the title (`state/styles.js`).
-        let style = if is_state {
-            slot_styled(
-                &c.style,
-                slot.as_ref()
-                    .map(|sc| SlotColors {
-                        border: sc.border.clone(),
-                        fill: None,
-                    })
-                    .as_ref(),
-            )
-        } else {
-            slot_styled(&c.style, slot.as_ref())
-        };
-        let fill = style
-            .fill
-            .clone()
-            .unwrap_or_else(|| pal.cluster_bkg.clone());
-        let stroke = style
-            .stroke
-            .clone()
-            .unwrap_or_else(|| pal.cluster_border.clone());
-        // Agentflow's `flowGroup` (clusters.js + agentflow styles.ts): rounded, unfilled
-        // unless a palette slot or style fills it, 0.75px border.
-        let flow_group = g.kind == DiagramKind::Agentflow;
-        let default_width = match (is_state, flow_group) {
-            (true, _) => lk.node_stroke_width,
-            (_, true) => 0.75,
-            _ => 1.0,
-        };
-        let fill = if flow_group && style.fill.is_none() {
-            Color::none()
-        } else {
-            fill
-        };
-        let mut paint = Paint::both(&fill, &stroke, style.stroke_width.unwrap_or(default_width));
-        paint.dash = style.dash.clone();
-        let rx = match (is_state, cfg.look) {
-            (true, ConfigLook::Neo) => pal.radius.unwrap_or(5.0),
-            (true, _) => 5.0,
-            _ if flow_group => 10.0,
-            _ => 0.0,
-        };
-        let body = Element::rect(r, rx, paint.clone());
-        let mut children: Vec<Element> = shadow
-            .and_then(|sh| drop_shadow(&body, sh))
-            .into_iter()
-            .collect();
-        children.push(body);
-        let band = slot
-            .as_ref()
-            .and_then(|sc| sc.fill.as_ref())
-            .filter(|_| is_state && c.style.fill.is_none() && !cluster_titles[ci].is_empty());
-        if let Some(tint) = band {
-            let h = (cluster_titles[ci].height + 8.0).min(r.h);
-            children.push(Element::rect(
-                Rect::new(r.x, r.y, r.w, h),
-                0.0,
-                Paint::fill(tint),
-            ));
-            let mut outline = Paint::stroke(&stroke, paint.stroke_width);
-            outline.dash = paint.dash.clone();
-            children.push(Element::rect(r, rx, outline));
-        }
         let t = &cluster_titles[ci];
+        let mut children: Vec<Element> = Vec::new();
+        if empty_of[ci].is_none() {
+            let alt = depth(&g.clusters, ClusterId(ci)) % 2 == 1;
+            let shapes = cluster_shapes(c, r, t, alt, pal, &lk, cfg.look, g.kind);
+            if let Some(s) = shadow.and_then(|sh| shapes.first().and_then(|e| drop_shadow(e, sh))) {
+                children.push(s);
+            }
+            children.extend(shapes);
+        }
         if !t.is_empty() {
             let color = c
                 .style
                 .color
                 .clone()
                 .unwrap_or_else(|| pal.title_color.clone());
-            let center = Point::new(r.x + r.w / 2.0, r.y + 4.0 + t.height / 2.0);
+            // Flush with the top edge (`translate(x, y + subGraphTitleTopMargin)`);
+            // a composite's label sits 1px lower (`roundedWithTitle`).
+            let top = match (empty_of[ci], c.kind) {
+                (Some(_), _) => r.y,
+                (None, ClusterKind::Composite) => r.y + 1.0,
+                _ => r.y,
+            };
+            let center = Point::new(r.x + r.w / 2.0, top + t.height / 2.0);
             children.push(Element::classed_text(
                 Text::centered(center, &t.lines, font, t.line_height, &color),
                 "cluster-label",
@@ -860,25 +893,23 @@ pub fn render_with(
         if pts.len() < 2 {
             continue;
         }
-        let clip_end = |ep: Endpoint, toward: Point| -> Point {
-            match ep {
-                Endpoint::Node(NodeId(i)) => boundaries[i].clip(toward),
-                Endpoint::Cluster(c) => geom::clip_rect(&cluster_rects[c.0], toward),
-            }
-        };
         let is_loop = resolve(e.from, true) == resolve(e.to, false);
         if !is_loop {
-            // Cluster endpoints start from the cluster box rather than the representative.
-            if let Endpoint::Cluster(c) = e.from {
-                pts[0] = cluster_rects[c.0].center();
+            // An edge to / from a whole cluster is cut where it crosses the cluster's
+            // border (mermaid's `cutPathAtIntersect` for `fromCluster` / `toCluster`).
+            match e.from {
+                Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0]),
+                Endpoint::Node(NodeId(i)) => pts[0] = boundaries[i].clip(pts[1]),
             }
-            if let Endpoint::Cluster(c) = e.to {
-                let last = pts.len() - 1;
-                pts[last] = cluster_rects[c.0].center();
+            pts.reverse();
+            match e.to {
+                Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0]),
+                Endpoint::Node(NodeId(i)) => pts[0] = boundaries[i].clip(pts[1]),
             }
-            pts[0] = clip_end(e.from, pts[1]);
-            let last = pts.len() - 1;
-            pts[last] = clip_end(e.to, pts[last - 1]);
+            pts.reverse();
+            if pts.len() < 2 {
+                continue;
+            }
         }
         let stroke = e
             .style
@@ -1109,6 +1140,239 @@ pub fn draw_node(
         children: els,
     };
     (group, boundary)
+}
+
+/// Padding between a cluster frame and its children (mermaid's ELK `SUBGRAPH_PADDING`).
+const CLUSTER_PADDING: f64 = 24.0;
+/// Node gap inside a cluster laid out on its own (`DEFAULT_SUBGRAPH_NODE_SPACING`).
+const CLUSTER_NODE_SPACING: f64 = 50.0;
+/// Layer gap inside a cluster laid out on its own (`DEFAULT_SUBGRAPH_SPACING_BASE_VALUE`).
+const CLUSTER_RANK_SPACING: f64 = 24.0;
+/// Horizontal padding counted into a cluster's title width (the group node's `padding: 8`).
+const CLUSTER_TITLE_PAD: f64 = 8.0;
+
+/// Height of the band reserved above a cluster's children for its title: ELK keeps
+/// the label plus its label spacing clear (21px of text → 24); a state composite's
+/// body starts 2px under its label (`roundedWithTitle`); regions have no title.
+fn cluster_title_height(kind: ClusterKind, t: &TextBlock) -> f64 {
+    if t.is_empty() {
+        return 0.0;
+    }
+    match kind {
+        ClusterKind::Group => t.height + 3.0,
+        ClusterKind::Composite => t.height + 2.0,
+        ClusterKind::Region => 0.0,
+    }
+}
+
+/// The frame of one cluster (without its label), outermost shape first.
+#[allow(clippy::too_many_arguments)]
+fn cluster_shapes(
+    c: &Cluster,
+    r: Rect,
+    t: &TextBlock,
+    alt: bool,
+    pal: &Palette,
+    lk: &Look,
+    look: ConfigLook,
+    kind: DiagramKind,
+) -> Vec<Element> {
+    let slot = slot_colors(c.color_slot, pal);
+    match c.kind {
+        // Agentflow's `flowGroup` (clusters.js + agentflow styles.ts): rounded, unfilled
+        // unless a palette slot or style fills it, 0.75px border.
+        ClusterKind::Group if kind == DiagramKind::Agentflow => {
+            let style = slot_styled(&c.style, slot.as_ref());
+            let fill = style.fill.clone().unwrap_or_else(Color::none);
+            let stroke = style
+                .stroke
+                .clone()
+                .unwrap_or_else(|| pal.cluster_border.clone());
+            let mut paint = Paint::both(&fill, &stroke, style.stroke_width.unwrap_or(0.75));
+            paint.dash = style.dash.clone();
+            vec![Element::rect(r, 10.0, paint)]
+        }
+        ClusterKind::Group => {
+            let style = slot_styled(&c.style, slot.as_ref());
+            let fill = style
+                .fill
+                .clone()
+                .unwrap_or_else(|| pal.cluster_bkg.clone());
+            // The neo look outlines clusters with the node border
+            // (`[data-look="neo"].cluster rect`), unless a palette slot or style says otherwise.
+            let stroke = style.stroke.clone().unwrap_or_else(|| match look {
+                ConfigLook::Neo => pal.node_border.clone(),
+                _ => pal.cluster_border.clone(),
+            });
+            let mut paint = Paint::both(&fill, &stroke, style.stroke_width.unwrap_or(1.0));
+            paint.dash = style.dash.clone();
+            vec![Element::rect(r, 0.0, paint)]
+        }
+        ClusterKind::Composite => {
+            // `rect.outer` spans the composite and shows as the title strip; `rect.inner`
+            // covers the body. The palette tints the strip and colours both outlines.
+            let stroke = c
+                .style
+                .stroke
+                .clone()
+                .or_else(|| slot.as_ref().map(|s| s.border.clone()))
+                .unwrap_or_else(|| pal.node_border.clone());
+            let title_bkg = c
+                .style
+                .fill
+                .clone()
+                .or_else(|| slot.as_ref().and_then(|s| s.fill.clone()))
+                .or_else(|| pal.composite_title_background.clone())
+                .unwrap_or_else(|| pal.main_bkg.clone());
+            let body = if alt {
+                pal.alt_background
+                    .clone()
+                    .unwrap_or_else(|| Color::new("#f0f0f0"))
+            } else {
+                pal.composite_background
+                    .clone()
+                    .unwrap_or_else(|| pal.background.clone())
+            };
+            let width = c.style.stroke_width.unwrap_or(lk.node_stroke_width);
+            let rx = match look {
+                ConfigLook::Neo => pal.radius.unwrap_or(5.0),
+                _ => 5.0,
+            };
+            let mut outer = Paint::both(&title_bkg, &stroke, width);
+            outer.dash = c.style.dash.clone();
+            let mut inner_paint = Paint::both(&body, &stroke, width);
+            inner_paint.dash = c.style.dash.clone();
+            let th = if t.is_empty() { 0.0 } else { t.height };
+            let inner = Rect::new(r.x, r.y + th + 2.0, r.w, (r.h - th - 6.0).max(0.0));
+            vec![
+                Element::rect(r, rx, outer),
+                Element::rect(inner, 0.0, inner_paint),
+            ]
+        }
+        ClusterKind::Region => {
+            let stroke = slot
+                .as_ref()
+                .map(|s| s.border.clone())
+                .unwrap_or_else(|| pal.node_border.clone());
+            let fill = slot
+                .as_ref()
+                .and_then(|s| s.fill.clone())
+                .or_else(|| pal.alt_background.clone())
+                .unwrap_or_else(|| Color::new("#efefef"));
+            let mut paint = Paint::both(&fill, &stroke, lk.node_stroke_width);
+            paint.dash = Some(vec![10.0, 10.0]);
+            vec![Element::rect(r, 0.0, paint)]
+        }
+    }
+}
+
+/// The order in which mermaid hands nodes to the layout. flowDb pushes its subgraphs
+/// last-declared first and the vertices after them, so at every level the child
+/// subgraphs come in reverse, before the level's own nodes; ELK keeps that model order.
+/// Other diagrams keep declaration order.
+fn model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> Vec<usize> {
+    if g.kind != DiagramKind::Flowchart || g.clusters.is_empty() {
+        return (0..nodes.len()).collect();
+    }
+    let placeholder: Vec<bool> = {
+        let mut v = vec![false; nodes.len()];
+        for p in empty_of.iter().flatten() {
+            v[*p] = true;
+        }
+        v
+    };
+    fn visit(
+        scope: Option<ClusterId>,
+        g: &GraphDiagram,
+        nodes: &[Node],
+        empty_of: &[Option<usize>],
+        placeholder: &[bool],
+        out: &mut Vec<usize>,
+        depth: usize,
+    ) {
+        if depth > g.clusters.len() {
+            return;
+        }
+        for ci in (0..g.clusters.len()).rev() {
+            if g.clusters[ci].parent != scope || Some(ClusterId(ci)) == scope {
+                continue;
+            }
+            match empty_of[ci] {
+                Some(p) => out.push(p),
+                None => visit(
+                    Some(ClusterId(ci)),
+                    g,
+                    nodes,
+                    empty_of,
+                    placeholder,
+                    out,
+                    depth + 1,
+                ),
+            }
+        }
+        for (i, n) in nodes.iter().enumerate() {
+            if n.cluster == scope && !placeholder[i] {
+                out.push(i);
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(nodes.len());
+    visit(None, g, nodes, empty_of, &placeholder, &mut out, 0);
+    // Anything unreachable (a malformed parent chain) keeps its place at the end.
+    let mut seen = vec![false; nodes.len()];
+    for &i in &out {
+        seen[i] = true;
+    }
+    out.extend((0..nodes.len()).filter(|&i| !seen[i]));
+    out.dedup();
+    out
+}
+
+/// Drop the leading points of `pts` that lie inside `r` and start the path where it
+/// leaves `r` instead. Paths that never leave `r` are returned unchanged.
+fn cut_at_rect(pts: &[Point], r: &Rect) -> Vec<Point> {
+    let inside = |p: Point| p.x > r.x && p.x < r.right() && p.y > r.y && p.y < r.bottom();
+    let Some(k) = pts.iter().position(|&p| !inside(p)) else {
+        return pts.to_vec();
+    };
+    if k == 0 {
+        return pts.to_vec();
+    }
+    // Bisect the crossing segment for the border point.
+    let (mut a, mut b) = (pts[k - 1], pts[k]);
+    for _ in 0..48 {
+        let m = a.lerp(b, 0.5);
+        if inside(m) {
+            a = m;
+        } else {
+            b = m;
+        }
+    }
+    // The representative member may sit anywhere inside the cluster; leave from the
+    // side that faces the next outside point, straight across from it, so the edge
+    // reads as leaving the cluster rather than one of its members.
+    let next = pts[k];
+    let gap_x = (r.x - next.x).max(next.x - r.right()).max(0.0);
+    let gap_y = (r.y - next.y).max(next.y - r.bottom()).max(0.0);
+    let inset = |lo: f64, len: f64, v: f64| v.clamp(lo + len * 0.1, lo + len * 0.9);
+    let b = if gap_y > 0.0 && gap_y >= gap_x {
+        let y = if next.y > r.bottom() { r.bottom() } else { r.y };
+        Point::new(inset(r.x, r.w, next.x), y)
+    } else if gap_x > 0.0 {
+        let x = if next.x > r.right() { r.right() } else { r.x };
+        Point::new(x, inset(r.y, r.h, next.y))
+    } else {
+        b
+    };
+    let mut out = vec![b];
+    out.extend_from_slice(&pts[k..]);
+    if out.len() >= 2 && out[0].dist(out[1]) < 1e-6 {
+        out.remove(0);
+    }
+    if out.len() < 2 {
+        return pts.to_vec();
+    }
+    out
 }
 
 fn node_prefix(kind: DiagramKind) -> &'static str {
@@ -1655,5 +1919,81 @@ mod tests {
         assert_eq!(s.stroke.unwrap().css(), "rgb(1,2,3)");
         assert_eq!(s.stroke_width, Some(4.0));
         assert_eq!(s.dash, Some(vec![5.0, 5.0]));
+    }
+
+    #[test]
+    fn whole_cluster_edges_are_cut_at_the_border() {
+        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        // Leaves through the bottom, straight below the next outside point.
+        let pts = vec![
+            Point::new(20.0, 20.0),
+            Point::new(30.0, 80.0),
+            Point::new(60.0, 150.0),
+            Point::new(60.0, 200.0),
+        ];
+        let cut = cut_at_rect(&pts, &r);
+        assert_eq!(cut[0], Point::new(60.0, 100.0));
+        assert_eq!(&cut[1..], &pts[2..]);
+        // A path that never leaves the box is left alone.
+        assert_eq!(cut_at_rect(&pts[..2], &r), pts[..2].to_vec());
+    }
+
+    fn render_flowchart(src: &str) -> (GraphDiagram, Scene) {
+        let g = crate::diagram::flowchart::parse(src, None).unwrap();
+        let cfg = crate::config::MermaidConfig::default().flowchart;
+        let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let scene = render(&g, &cfg, &pal);
+        (g, scene)
+    }
+
+    fn cluster_group<'a>(scene: &'a Scene, id: &str) -> &'a [Element] {
+        let Element::Group { children, .. } = &scene.elements[0] else {
+            panic!("clusters group first");
+        };
+        children
+            .iter()
+            .find_map(|c| match c {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i == &format!("cluster-{id}") => Some(children.as_slice()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no cluster {id}"))
+    }
+
+    #[test]
+    fn empty_subgraph_draws_only_its_title() {
+        let (_, scene) =
+            render_flowchart("flowchart TB\nsubgraph empty\nend\nsubgraph full\na\nend");
+        let empty = cluster_group(&scene, "empty");
+        assert_eq!(empty.len(), 1, "{empty:?}");
+        assert!(matches!(empty[0], Element::Text { .. }));
+        let full = cluster_group(&scene, "full");
+        assert!(full.iter().any(|e| matches!(e, Element::Shape { .. })));
+    }
+
+    #[test]
+    fn subgraph_title_is_flush_with_the_top_and_widens_the_frame() {
+        let (_, scene) = render_flowchart(
+            "flowchart TB\nsubgraph s [A title much wider than the node inside it]\na\nend",
+        );
+        let els = cluster_group(&scene, "s");
+        let Some(Element::Shape {
+            geom: Geometry::Rect { rect, .. },
+            ..
+        }) = els.iter().find(|e| matches!(e, Element::Shape { .. }))
+        else {
+            panic!("frame rect: {els:?}");
+        };
+        let Some(Element::Text { text: t, .. }) =
+            els.iter().find(|e| matches!(e, Element::Text { .. }))
+        else {
+            panic!("title: {els:?}");
+        };
+        let title = TextBlock::label("A title much wider than the node inside it", 16.0);
+        assert!(rect.w >= title.width + CLUSTER_TITLE_PAD - 1e-6);
+        assert!((t.y - 16.0 * 0.35 - (rect.y + title.height / 2.0)).abs() < 1e-6);
     }
 }

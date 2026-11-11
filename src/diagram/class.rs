@@ -26,6 +26,7 @@ struct Builder {
     order: Vec<String>,
     classes: HashMap<String, ClassInfo>,
     clusters: Vec<Cluster>,
+    ns_index: HashMap<String, usize>,
     ns_stack: Vec<ClusterId>,
     relations: Vec<(String, String, Edge)>,
     notes: Vec<(Option<String>, String)>,
@@ -72,15 +73,25 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
             continue;
         }
         if let Some(rest) = s.strip_prefix("namespace ") {
-            let name = rest.trim_end_matches('{').trim().to_string();
-            b.clusters.push(Cluster {
-                id: name.clone(),
-                title: name,
-                parent: b.ns_stack.last().copied(),
-                style: StyleOverrides::default(),
-                color_slot: None, // namespaces are not part of the colour cycle
-            });
-            b.ns_stack.push(ClusterId(b.clusters.len() - 1));
+            let head = rest.trim_end_matches('{').trim();
+            let (name, label) = match head.find('[') {
+                Some(i) => (
+                    head[..i].trim(),
+                    Some(
+                        head[i + 1..]
+                            .trim_end_matches(']')
+                            .trim()
+                            .trim_matches('"')
+                            .to_string(),
+                    ),
+                ),
+                None => (head, None),
+            };
+            if name.is_empty() {
+                return Err(Error::parse(line, "Expecting a namespace name"));
+            }
+            let c = b.namespace(name, label);
+            b.ns_stack.push(c);
             continue;
         }
         if let Some(rest) = s.strip_prefix("class ") {
@@ -117,6 +128,11 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
             }
             if let Some(c) = css {
                 b.css_classes.push((name.clone(), c));
+            }
+            // `class X` inside a namespace body moves X there (classDb's
+            // `addClassesToNamespace`, the last namespace wins).
+            if let Some(&ns) = b.ns_stack.last() {
+                b.class(&name).namespace = Some(ns);
             }
             if opens {
                 open_class = Some(name);
@@ -337,6 +353,42 @@ fn take_cardinality(s: &str, left: bool) -> (String, Option<String>) {
 }
 
 impl Builder {
+    /// classDb's `addNamespace`: the id is qualified by the enclosing namespace, and a
+    /// dotted id creates one nested namespace per segment, each titled by its segment.
+    /// A repeated id reuses the existing namespace.
+    fn namespace(&mut self, name: &str, label: Option<String>) -> ClusterId {
+        let qualified = match self.ns_stack.last() {
+            Some(p) => format!("{}.{name}", self.clusters[p.0].id),
+            None => name.to_string(),
+        };
+        let parts: Vec<&str> = qualified.split('.').collect();
+        let mut parent: Option<ClusterId> = None;
+        let mut id = String::new();
+        for (i, part) in parts.iter().enumerate() {
+            if i > 0 {
+                id.push('.');
+            }
+            id.push_str(part);
+            let leaf = i + 1 == parts.len();
+            let c = match self.ns_index.get(&id) {
+                Some(&c) => c,
+                None => {
+                    // Namespaces are not part of the colour cycle.
+                    self.clusters.push(Cluster::new(id.clone(), *part, parent));
+                    self.ns_index.insert(id.clone(), self.clusters.len() - 1);
+                    self.clusters.len() - 1
+                }
+            };
+            if leaf {
+                if let Some(l) = &label {
+                    self.clusters[c].title = l.clone();
+                }
+            }
+            parent = Some(ClusterId(c));
+        }
+        parent.expect("a namespace has at least one segment")
+    }
+
     fn class(&mut self, name: &str) -> &mut ClassInfo {
         if !self.classes.contains_key(name) {
             self.order.push(name.to_string());
@@ -486,5 +538,34 @@ mod tests {
         assert_eq!(g.nodes[0].sections[0].lines, vec!["Square<Shape>"]);
         assert_eq!(g.nodes[0].sections[1].lines, vec!["-List<int> ids"]);
         assert!(g.nodes[0].cluster.is_some());
+    }
+
+    #[test]
+    fn dotted_and_nested_namespaces() {
+        let g = parse(
+            "classDiagram\nnamespace Company.Project {\n class A\n}\nnamespace Company {\n namespace Other[\"Elsewhere\"] {\n  class B\n }\n}\nclass C",
+            None,
+        )
+        .unwrap();
+        let ids: Vec<&str> = g.clusters.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["Company", "Company.Project", "Company.Other"]);
+        let titles: Vec<&str> = g.clusters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["Company", "Project", "Elsewhere"]);
+        assert_eq!(g.clusters[1].parent, Some(ClusterId(0)));
+        assert_eq!(g.clusters[2].parent, Some(ClusterId(0)));
+        let of = |id: &str| g.nodes.iter().find(|n| n.id == id).unwrap().cluster;
+        assert_eq!(of("A"), Some(ClusterId(1)));
+        assert_eq!(of("B"), Some(ClusterId(2)));
+        assert_eq!(of("C"), None);
+        assert!(g.clusters.iter().all(|c| c.color_slot.is_none()));
+    }
+
+    #[test]
+    fn class_moves_into_a_later_namespace() {
+        let g = parse("classDiagram\nA --> B\nnamespace N {\n class A\n}", None).unwrap();
+        let a = g.nodes.iter().find(|n| n.id == "A").unwrap();
+        assert_eq!(a.cluster, Some(ClusterId(0)));
+        let b = g.nodes.iter().find(|n| n.id == "B").unwrap();
+        assert_eq!(b.cluster, None);
     }
 }

@@ -15,6 +15,7 @@ use crate::geom::{Point, Rect};
 
 mod bk;
 pub mod boxes;
+mod nested;
 pub mod rank;
 
 /// Flow direction.
@@ -52,11 +53,31 @@ pub struct LayoutNode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutEdge {
+    /// Source node; for an edge leaving a whole cluster, a member of `from_cluster`.
     pub from: usize,
+    /// Target node; for an edge entering a whole cluster, a member of `to_cluster`.
     pub to: usize,
     pub minlen: usize,
     /// Label size in output space (width, height).
     pub label: Option<(f64, f64)>,
+    /// The edge leaves this cluster as a whole (a subgraph / composite used as endpoint).
+    pub from_cluster: Option<usize>,
+    /// The edge enters this cluster as a whole.
+    pub to_cluster: Option<usize>,
+}
+
+impl LayoutEdge {
+    /// A node-to-node edge.
+    pub fn new(from: usize, to: usize, minlen: usize, label: Option<(f64, f64)>) -> Self {
+        LayoutEdge {
+            from,
+            to,
+            minlen,
+            label,
+            from_cluster: None,
+            to_cluster: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +85,21 @@ pub struct LayoutCluster {
     pub parent: Option<usize>,
     /// Height of the title band reserved at the top of the cluster.
     pub title_height: f64,
+    /// Narrowest the cluster may be (its painted title plus padding).
+    pub min_width: f64,
+    /// The cluster's own `direction`, honoured when it is laid out on its own (see `nested`).
+    pub direction: Option<Direction>,
+}
+
+impl LayoutCluster {
+    pub fn new(parent: Option<usize>, title_height: f64) -> Self {
+        LayoutCluster {
+            parent,
+            title_height,
+            min_width: 0.0,
+            direction: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +112,9 @@ pub struct LayoutInput {
     pub rank_sep: f64,
     pub edge_sep: f64,
     pub cluster_padding: f64,
+    /// Node / rank separation inside a cluster that is laid out on its own.
+    pub inner_node_sep: f64,
+    pub inner_rank_sep: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,10 +163,19 @@ struct Oriented {
     to: usize,
     minlen: usize,
     reversed: bool,
+    /// Ranking weight (0 for the cluster-membership constraints of `rank_with_clusters`).
+    weight: f64,
 }
 
-/// Run the full layout.
+/// Run the full layout: clusters that no edge crosses are laid out on their own
+/// (with their own direction and spacing, as mermaid's ELK layout does), the
+/// rest in one layered pass with their parent (see `nested`).
 pub fn layout(input: &LayoutInput) -> LayoutOutput {
+    nested::layout(input)
+}
+
+/// One layered pass over the whole input (every cluster integrated).
+fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     let horizontal = input.direction.is_horizontal();
     let swap = |w: f64, h: f64| if horizontal { (h, w) } else { (w, h) };
     let n = input.nodes.len();
@@ -138,10 +186,10 @@ pub fn layout(input: &LayoutInput) -> LayoutOutput {
     let rank_sep = input.rank_sep / rank_scale as f64;
 
     // 1. Orientation.
-    let oriented = orient_edges(n, &input.edges, rank_scale);
+    let mut oriented = orient_edges(n, &input.edges, rank_scale);
 
     // 2. Ranking.
-    let ranks = rank_nodes(n, &oriented);
+    let ranks = rank_with_clusters(n, &mut oriented, input);
 
     // 3. Vertices + chains.
     let mut verts: Vec<Vertex> = input
@@ -550,6 +598,7 @@ fn orient_edges(n: usize, edges: &[LayoutEdge], scale: usize) -> Vec<Option<Orie
                     to,
                     minlen: e.minlen.max(1) * scale,
                     reversed: reversed[i],
+                    weight: 1.0,
                 }
             })
         })
@@ -615,13 +664,136 @@ fn rank_nodes(n: usize, edges: &[Option<Oriented>]) -> Vec<usize> {
                 tail: o.from,
                 head: o.to,
                 minlen: o.minlen as i64,
-                weight: 1.0,
+                weight: o.weight,
             })
             .collect();
         rank::network_simplex(n, &rank_edges, &mut rank, 10 * n + 100);
     }
     let min = rank.iter().copied().min().unwrap_or(0);
     rank.into_iter().map(|r| (r - min) as usize).collect()
+}
+
+/// Rank like `rank_nodes`, but an edge leaving (entering) a whole cluster is
+/// constrained to start below its last (end above its first) member, the way
+/// dagre's nesting graph ties cluster borders to their contents: every member
+/// hangs between a virtual top and bottom vertex of the cluster and the edge
+/// runs from the bottom / to the top vertex. Falls back to the plain ranking
+/// when the constraints are contradictory (an edge from a cluster into itself).
+///
+/// When the constraints hold, an edge leaving a cluster is re-attached to the member
+/// on the cluster's last rank (one entering it to a member on its first rank), so the
+/// route leaves from the cluster's far side instead of from wherever the caller's
+/// representative member happens to sit.
+fn rank_with_clusters(
+    n: usize,
+    oriented: &mut [Option<Oriented>],
+    input: &LayoutInput,
+) -> Vec<usize> {
+    let mut slot: Vec<Option<usize>> = vec![None; input.clusters.len()];
+    let mut used = Vec::new();
+    let mut ends = Vec::with_capacity(oriented.len());
+    for (ei, o) in oriented.iter().enumerate() {
+        let e = &input.edges[ei];
+        let (src, dst) = match o {
+            Some(o) if o.reversed => (e.to_cluster, e.from_cluster),
+            Some(_) => (e.from_cluster, e.to_cluster),
+            None => (None, None),
+        };
+        for c in [src, dst].into_iter().flatten() {
+            if c < slot.len() && slot[c].is_none() {
+                slot[c] = Some(used.len());
+                used.push(c);
+            }
+        }
+        ends.push((src, dst));
+    }
+    if used.is_empty() {
+        return rank_nodes(n, oriented);
+    }
+    let chains = cluster_chains(&input.clusters);
+    let top = |c: usize| slot[c].map(|k| n + 2 * k);
+    let bottom = |c: usize| slot[c].map(|k| n + 2 * k + 1);
+    let total = n + 2 * used.len();
+    let mut edges: Vec<Option<Oriented>> = Vec::new();
+    let constraint = |from: usize, to: usize| {
+        Some(Oriented {
+            from,
+            to,
+            minlen: 0,
+            reversed: false,
+            weight: 0.0,
+        })
+    };
+    for (v, nd) in input.nodes.iter().enumerate() {
+        let Some(c) = nd.cluster else { continue };
+        for &a in &chains[c] {
+            if let (Some(t), Some(b)) = (top(a), bottom(a)) {
+                edges.push(constraint(t, v));
+                edges.push(constraint(v, b));
+            }
+        }
+    }
+    for (o, (src, dst)) in oriented.iter().zip(&ends) {
+        let Some(o) = o else { continue };
+        let from = src.and_then(bottom).unwrap_or(o.from);
+        let to = dst.and_then(top).unwrap_or(o.to);
+        edges.push(Some(Oriented {
+            from,
+            to,
+            minlen: o.minlen,
+            reversed: false,
+            weight: o.weight,
+        }));
+    }
+    // The constraint graph must stay acyclic (Kahn).
+    let mut indeg = vec![0usize; total];
+    let mut outs: Vec<Vec<usize>> = vec![Vec::new(); total];
+    for o in edges.iter().flatten() {
+        indeg[o.to] += 1;
+        outs[o.from].push(o.to);
+    }
+    let mut queue: Vec<usize> = (0..total).filter(|&v| indeg[v] == 0).collect();
+    let mut seen = 0;
+    while let Some(v) = queue.pop() {
+        seen += 1;
+        for &w in &outs[v] {
+            indeg[w] -= 1;
+            if indeg[w] == 0 {
+                queue.push(w);
+            }
+        }
+    }
+    if seen < total {
+        return rank_nodes(n, oriented);
+    }
+    let all = rank_nodes(total, &edges);
+    let min = all[..n].iter().copied().min().unwrap_or(0);
+    let ranks: Vec<usize> = all[..n].iter().map(|r| r - min).collect();
+    let in_cluster = |v: usize, c: usize| {
+        input.nodes[v]
+            .cluster
+            .is_some_and(|m| chains[m].contains(&c))
+    };
+    for (o, (src, dst)) in oriented.iter_mut().zip(&ends) {
+        let Some(o) = o else { continue };
+        if let Some(c) = *src {
+            if let Some(v) = (0..n)
+                .filter(|&v| in_cluster(v, c))
+                .max_by_key(|&v| ranks[v])
+            {
+                o.from = v;
+            }
+        }
+        if let Some(c) = *dst {
+            if let Some(v) = (0..n)
+                .filter(|&v| in_cluster(v, c))
+                .min_by_key(|&v| ranks[v])
+            {
+                o.to = v;
+            }
+        }
+    }
+    ranks
 }
 
 /// Root-to-cluster ancestor chains (inclusive).
@@ -923,12 +1095,7 @@ mod tests {
     }
 
     fn edge(from: usize, to: usize) -> LayoutEdge {
-        LayoutEdge {
-            from,
-            to,
-            minlen: 1,
-            label: None,
-        }
+        LayoutEdge::new(from, to, 1, None)
     }
 
     fn input(
@@ -946,6 +1113,8 @@ mod tests {
             rank_sep: 50.0,
             edge_sep: 20.0,
             cluster_padding: 8.0,
+            inner_node_sep: 50.0,
+            inner_rank_sep: 24.0,
         }
     }
 
@@ -1065,14 +1234,8 @@ mod tests {
         ];
         let edges = vec![edge(0, 1), edge(2, 0), edge(1, 3), edge(2, 4), edge(4, 3)];
         let clusters = vec![
-            LayoutCluster {
-                parent: None,
-                title_height: 24.0,
-            },
-            LayoutCluster {
-                parent: Some(0),
-                title_height: 24.0,
-            },
+            LayoutCluster::new(None, 24.0),
+            LayoutCluster::new(Some(0), 24.0),
         ];
         let inp = input(nodes, edges, clusters, Direction::TopBottom);
         let out = layout(&inp);
@@ -1098,12 +1261,7 @@ mod tests {
     fn labels_get_space() {
         let inp = input(
             vec![node(None), node(None)],
-            vec![LayoutEdge {
-                from: 0,
-                to: 1,
-                minlen: 1,
-                label: Some((60.0, 24.0)),
-            }],
+            vec![LayoutEdge::new(0, 1, 1, Some((60.0, 24.0)))],
             vec![],
             Direction::TopBottom,
         );

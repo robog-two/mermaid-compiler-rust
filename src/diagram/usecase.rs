@@ -3604,25 +3604,26 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             .collect(),
         edges: edges
             .iter()
-            .map(|e| LayoutEdge {
-                from: e.from,
-                to: e.to,
-                minlen: e.minlen,
-                label: e.label.as_ref().map(|b| (b.w + 8.0, b.h + 4.0)),
+            .map(|e| {
+                LayoutEdge::new(
+                    e.from,
+                    e.to,
+                    e.minlen,
+                    e.label.as_ref().map(|b| (b.w + 8.0, b.h + 4.0)),
+                )
             })
             .collect(),
         clusters: clusters
             .iter()
-            .map(|c| LayoutCluster {
-                parent: None,
-                title_height: title_band(c),
-            })
+            .map(|c| LayoutCluster::new(None, title_band(c)))
             .collect(),
         direction: d.direction,
         node_sep: o.node_spacing,
         rank_sep: o.rank_spacing,
         edge_sep: 20.0,
         cluster_padding: BOUNDARY_PADDING,
+        inner_node_sep: o.node_spacing,
+        inner_rank_sep: o.rank_spacing,
     };
     let out = layout::layout(&input);
 

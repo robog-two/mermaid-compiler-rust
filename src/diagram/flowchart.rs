@@ -60,12 +60,15 @@ struct Builder {
     clusters: Vec<Cluster>,
     cluster_index: HashMap<String, usize>,
     stack: Vec<ClusterId>,
+    /// Subgraphs on the stack whose id is generated when they close (`subGraphN`).
+    unnamed: Vec<ClusterId>,
+    /// flowDb's `subCount`: bumped by every subgraph as it closes.
+    sub_count: usize,
     edges: Vec<Edge>,
     class_defs: HashMap<String, StyleOverrides>,
     node_styles: Vec<(String, StyleOverrides)>,
     class_assignments: Vec<(String, String)>,
     link_styles: Vec<(usize, Option<Vec<usize>>, StyleOverrides)>,
-    auto_subgraph: usize,
 }
 
 fn err_at(line: usize, stmt: &str, col: usize, msg: &str) -> Error {
@@ -80,15 +83,25 @@ impl Builder {
         };
         match kw {
             "subgraph" => self.subgraph(line, rest),
-            "end" if rest.is_empty() => self.stack.pop().map(|_| ()).ok_or_else(|| {
-                err_at(
-                    line,
-                    stmt,
-                    0,
-                    "Unexpected 'end' without matching 'subgraph'",
-                )
-            }),
-            "direction" => Ok(()),
+            "end" if rest.is_empty() => {
+                let c = self.stack.pop().ok_or_else(|| {
+                    err_at(
+                        line,
+                        stmt,
+                        0,
+                        "Unexpected 'end' without matching 'subgraph'",
+                    )
+                })?;
+                self.close_subgraph(c);
+                Ok(())
+            }
+            "direction" => {
+                // Only a subgraph's own `direction` matters (the last one wins).
+                if let (Some(&c), Some(d)) = (self.stack.last(), Direction::parse(rest)) {
+                    self.clusters[c.0].direction = Some(d);
+                }
+                Ok(())
+            }
             "classDef" => {
                 let (names, style) = split_first_word(rest);
                 let st = StyleOverrides::parse(style);
@@ -135,42 +148,44 @@ impl Builder {
     }
 
     fn subgraph(&mut self, _line: usize, rest: &str) -> Result<()> {
-        let rest = rest.trim();
-        let (id, title) = if let Some(q) = rest.strip_prefix('"') {
-            self.auto_subgraph += 1;
-            (
-                format!("subGraph{}", self.auto_subgraph - 1),
-                q.trim_end_matches('"').to_string(),
-            )
-        } else if let Some(open) = rest.find('[') {
-            let id = rest[..open].trim().to_string();
-            let t = rest[open + 1..].trim_end().trim_end_matches(']');
-            (id, t.trim().trim_matches('"').to_string())
-        } else if rest.is_empty() {
-            self.auto_subgraph += 1;
-            (format!("subGraph{}", self.auto_subgraph - 1), String::new())
-        } else {
-            (rest.to_string(), rest.to_string())
-        };
+        let (id, title) = subgraph_header(rest);
         let parent = self.stack.last().copied();
-        let ci = match self.cluster_index.get(&id) {
-            Some(&ci) => ci,
+        let existing = id
+            .as_ref()
+            .and_then(|id| self.cluster_index.get(id).copied());
+        let ci = match existing {
+            // A repeated id adds to the first declaration, which keeps its title.
+            Some(ci) => ci,
             None => {
-                self.clusters.push(Cluster {
-                    id: id.clone(),
-                    title,
-                    parent,
-                    style: StyleOverrides::default(),
-                    // Subgraphs take palette slots in declaration (pre-order) order,
-                    // as flowDb's `declarationIndex` assigns `colorIndex`.
-                    color_slot: Some(ColorSlot(self.clusters.len())),
-                });
-                self.cluster_index.insert(id, self.clusters.len() - 1);
-                self.clusters.len() - 1
+                let mut c = Cluster::new(id.clone().unwrap_or_default(), title, parent);
+                // Subgraphs take palette slots in declaration (pre-order) order,
+                // as flowDb's `declarationIndex` assigns `colorIndex`.
+                c.color_slot = Some(ColorSlot(self.clusters.len()));
+                self.clusters.push(c);
+                let ci = self.clusters.len() - 1;
+                match id {
+                    Some(id) => {
+                        self.cluster_index.insert(id, ci);
+                    }
+                    None => self.unnamed.push(ClusterId(ci)),
+                }
+                ci
             }
         };
         self.stack.push(ClusterId(ci));
         Ok(())
+    }
+
+    /// `end`: flowDb's `addSubGraph`, which runs as the subgraph closes, so a generated
+    /// id numbers the subgraphs in closing order (inner ones first).
+    fn close_subgraph(&mut self, c: ClusterId) {
+        if let Some(pos) = self.unnamed.iter().position(|&u| u == c) {
+            self.unnamed.remove(pos);
+            let id = format!("subGraph{}", self.sub_count);
+            self.clusters[c.0].id = id.clone();
+            self.cluster_index.entry(id).or_insert(c.0);
+        }
+        self.sub_count += 1;
     }
 
     /// Register / update a node and place it in the current subgraph.
@@ -191,6 +206,17 @@ impl Builder {
             self.class_assignments.push((id.to_string(), c));
         }
         if let Some(&cur) = self.stack.last() {
+            // A closed subgraph named inside another one becomes its child, unless it
+            // already belongs to a subgraph (flowDb's `makeUniq`).
+            if let Some(&sc) = self.cluster_index.get(id) {
+                let open = self.stack.contains(&ClusterId(sc));
+                if !open
+                    && self.clusters[sc].parent.is_none()
+                    && !self.is_ancestor(ClusterId(sc), cur)
+                {
+                    self.clusters[sc].parent = Some(cur);
+                }
+            }
             let deeper = match self.nodes[idx].cluster {
                 None => true,
                 Some(existing) => self.is_ancestor(existing, cur),
@@ -373,6 +399,54 @@ impl Builder {
             clusters: self.clusters,
             title,
         })
+    }
+}
+
+/// `subgraph` header → (explicit id, title), after flow.jison's three forms:
+/// `subgraph id [title]` / `subgraph id["title"]`, `subgraph text` (a title with
+/// whitespace gets a generated id, otherwise the text is both) and a bare `subgraph`.
+fn subgraph_header(rest: &str) -> (Option<String>, String) {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return (None, String::new());
+    }
+    let unquote = |s: &str| -> String {
+        let s = s.trim();
+        let inner = s
+            .strip_prefix('"')
+            .and_then(|x| x.strip_suffix('"'))
+            .unwrap_or(s);
+        // A markdown string keeps its quotes so the label renders it as markdown.
+        if inner.starts_with('`') && inner.ends_with('`') && inner.len() > 1 {
+            format!("\"{inner}\"")
+        } else {
+            inner.to_string()
+        }
+    };
+    let quoted = rest.starts_with('"');
+    let bracket = if quoted {
+        // `"id"[title]` is unusual; a quoted head is a title unless brackets follow it.
+        rest[1..]
+            .find('"')
+            .map(|q| q + 2)
+            .filter(|&e| rest[e..].trim_start().starts_with('['))
+    } else {
+        rest.find('[')
+    };
+    if let Some(open) = bracket {
+        let open = open + rest[open..].find('[').unwrap_or(0);
+        if rest.ends_with(']') {
+            let id = unquote(&rest[..open]);
+            let title = unquote(&rest[open + 1..rest.len() - 1]);
+            return (Some(id).filter(|i| !i.is_empty()), title);
+        }
+    }
+    let title = unquote(rest);
+    let plain = title.trim_matches('"');
+    if plain.contains(char::is_whitespace) {
+        (None, title)
+    } else {
+        (Some(plain.to_string()), title)
     }
 }
 
@@ -965,5 +1039,148 @@ mod tests {
         let g = p("flowchart TD\nA@{ shape: diam, label: \"Decide\" } --> B");
         assert_eq!(g.nodes[0].shape, Shape::Diamond);
         assert_eq!(g.nodes[0].label, "Decide");
+    }
+
+    fn cluster<'a>(g: &'a GraphDiagram, id: &str) -> &'a Cluster {
+        g.clusters
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("no cluster {id}: {:?}", g.clusters))
+    }
+
+    #[test]
+    fn subgraph_ids_and_titles() {
+        // flowDb: a title with whitespace gets `subGraph<subCount>`, counted by every
+        // subgraph as it closes; a single word is both id and title.
+        let g = p(concat!(
+            "flowchart TB
+",
+            "subgraph one [First title]
+a1
+end
+",
+            "subgraph \"Quoted title\"
+b1
+end
+",
+            "subgraph three[\"`**md**`\"]
+c1
+end
+",
+            "subgraph Title with spaces
+d1
+end
+",
+            "subgraph \"Word\"
+e1
+end
+",
+            "subgraph\nf1\nend\n",
+        ));
+        assert_eq!(cluster(&g, "one").title, "First title");
+        assert_eq!(cluster(&g, "subGraph1").title, "Quoted title");
+        assert_eq!(cluster(&g, "three").title, "\"`**md**`\"");
+        assert_eq!(cluster(&g, "subGraph3").title, "Title with spaces");
+        assert_eq!(cluster(&g, "Word").title, "Word");
+        assert_eq!(cluster(&g, "subGraph5").title, "");
+    }
+
+    #[test]
+    fn nested_subgraph_ids_number_in_closing_order() {
+        let g = p("flowchart TB
+subgraph Outer box
+subgraph Inner box
+a
+end
+end");
+        let inner = cluster(&g, "subGraph0");
+        let outer = cluster(&g, "subGraph1");
+        assert_eq!(inner.title, "Inner box");
+        assert_eq!(outer.title, "Outer box");
+        assert_eq!(g.clusters[inner.parent.unwrap().0].id, "subGraph1");
+    }
+
+    #[test]
+    fn subgraph_membership_follows_flowdb() {
+        // The first subgraph to close keeps a node listed by a later one.
+        let g = p("flowchart TB
+a --> b
+subgraph S1
+b
+end
+subgraph S2
+c
+b
+end");
+        let of = |id: &str| {
+            let n = g.nodes.iter().find(|n| n.id == id).unwrap();
+            n.cluster.map(|c| g.clusters[c.0].id.clone())
+        };
+        assert_eq!(of("a"), None);
+        assert_eq!(of("b").as_deref(), Some("S1"));
+        assert_eq!(of("c").as_deref(), Some("S2"));
+        // An inner subgraph wins over its parent, whichever mentions the node first.
+        let g = p("flowchart TB
+subgraph O
+x
+subgraph I
+x
+end
+end");
+        let x = g.nodes.iter().find(|n| n.id == "x").unwrap();
+        assert_eq!(g.clusters[x.cluster.unwrap().0].id, "I");
+    }
+
+    #[test]
+    fn closed_subgraph_named_inside_another_is_nested() {
+        let g = p("flowchart TB
+subgraph A
+a
+end
+subgraph B
+A --> b
+end");
+        assert_eq!(
+            cluster(&g, "A")
+                .parent
+                .map(|c| g.clusters[c.0].id.clone())
+                .as_deref(),
+            Some("B")
+        );
+        assert!(matches!(g.edges[0].from, Endpoint::Cluster(_)));
+        // Mentioned at the top level, it stays a sibling.
+        let g = p("flowchart TB
+subgraph A
+a
+end
+subgraph B
+b
+end
+A --> B");
+        assert!(cluster(&g, "A").parent.is_none());
+    }
+
+    #[test]
+    fn subgraph_direction_and_repeated_ids() {
+        let g = p("flowchart LR
+subgraph S
+direction TB
+a
+end
+subgraph T
+b
+end
+subgraph S
+c
+end");
+        assert_eq!(cluster(&g, "S").direction, Some(Direction::TopBottom));
+        assert_eq!(cluster(&g, "T").direction, None);
+        assert_eq!(
+            g.clusters.len(),
+            2,
+            "a repeated id merges into the first subgraph"
+        );
+        let c = g.nodes.iter().find(|n| n.id == "c").unwrap();
+        assert_eq!(g.clusters[c.cluster.unwrap().0].id, "S");
     }
 }

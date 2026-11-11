@@ -1525,11 +1525,9 @@ pub fn to_graph(af: &Agentflow, opts: &ConvertOptions) -> GraphDiagram {
     let clusters: Vec<Cluster> = visible
         .iter()
         .map(|f| Cluster {
-            id: f.id.clone(),
-            title: f.title.clone(),
-            parent: cluster_parent(&f.id),
             style: f.style.clone(),
             color_slot: Some(container_slot(&f.id)),
+            ..Cluster::new(f.id.clone(), f.title.clone(), cluster_parent(&f.id))
         })
         .collect();
 
