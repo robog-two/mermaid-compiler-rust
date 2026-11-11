@@ -134,6 +134,9 @@ pub struct LayoutOutput {
     pub edges: Vec<EdgeRoute>,
     /// One rectangle per input cluster (zero-sized if the cluster is empty).
     pub clusters: Vec<Rect>,
+    /// Per input cluster: the direction its contents were laid out in (its own
+    /// `direction` only where the layout honoured it).
+    pub cluster_directions: Vec<Direction>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,6 +360,38 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
             0.0
         }
     };
+    // Orthogonal self-loops stand off their node's low cross-axis side, each beyond
+    // the ones before it and their labels; the node keeps that much room free.
+    // Its two legs leave a quarter of the side apart, or further, around the labels of
+    // the loops inside it.
+    let mut loop_out = vec![0.0f64; input.edges.len()];
+    let mut loop_half = vec![0.0f64; input.edges.len()];
+    let mut loop_reach = vec![0.0f64; n];
+    let mut loop_inner = vec![0.0f64; n];
+    if matches!(input.routing, EdgeRouting::Orthogonal(_)) {
+        for (ei, e) in input.edges.iter().enumerate() {
+            if e.from != e.to {
+                continue;
+            }
+            let v = e.from;
+            let reach = loop_reach[v];
+            loop_out[ei] = if reach > 0.0 {
+                reach + 0.75 * SELF_LOOP_EXT
+            } else {
+                SELF_LOOP_EXT
+            };
+            let side = verts[v].h;
+            let cap = (side / 2.0 - 2.0).max(side / 8.0);
+            loop_half[ei] = (side / 8.0).max(loop_inner[v]).min(cap);
+            if let Some((lw, lh)) = e.label {
+                let (across, along) = swap(lw, lh);
+                loop_reach[v] = loop_out[ei] + across + 4.0;
+                loop_inner[v] = loop_inner[v].max(along / 2.0 + 4.0);
+            } else {
+                loop_reach[v] = loop_out[ei];
+            }
+        }
+    }
     let gap = |a: usize, b: usize| -> f64 {
         let half = |v: &Vertex| match v.kind {
             Kind::Real | Kind::Dummy { labeled: true } => v.w / 2.0,
@@ -381,7 +416,7 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
                 ..
             }
         );
-        if a_in || b_in {
+        let g = if a_in || b_in {
             let mut g = half(va) + half(vb);
             if let Kind::Border {
                 cluster,
@@ -399,6 +434,12 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
             g
         } else {
             half(va) + half(vb) + spacing(va) / 2.0 + spacing(vb) / 2.0
+        };
+        let loops = loop_reach.get(b).copied().unwrap_or(0.0);
+        if loops > 0.0 {
+            g.max(half(va) + half(vb) + loops + SELF_LOOP_CLEARANCE)
+        } else {
+            g
         }
     };
     let x = assign_x(&layers, &verts, &links, &borders, &gap);
@@ -425,6 +466,16 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     let mut rank_h = vec![0.0f64; max_rank + 1];
     for v in &verts {
         rank_h[v.rank] = rank_h[v.rank].max(v.h);
+    }
+    if plan.is_some() {
+        // An orthogonal self-loop's label stands beside its node, centred on it along
+        // the rank axis: its layer must be as deep as the label.
+        for e in &input.edges {
+            if let (true, Some((lw, lh))) = (e.from == e.to, e.label) {
+                let r = verts[e.from].rank;
+                rank_h[r] = rank_h[r].max(swap(lw, lh).1);
+            }
+        }
     }
     let mut start_pad = vec![0.0f64; max_rank + 1];
     let mut end_pad = vec![0.0f64; max_rank + 1];
@@ -523,7 +574,6 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     let pos = |v: usize| to_out(Point::new(x[v], rank_y[verts[v].rank]));
 
     let nodes: Vec<Point> = (0..n).map(pos).collect();
-    let mut loops_on = vec![0usize; n];
     let edges = input
         .edges
         .iter()
@@ -532,18 +582,16 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
             if e.from == e.to {
                 if plan.is_some() {
                     // ELK: a loop on the node's low cross-axis side (west in TB,
-                    // north in LR), its two ports a quarter of the node apart.
+                    // north in LR).
                     let v = e.from;
-                    let k = loops_on[v];
-                    loops_on[v] += 1;
                     let (cx, cy) = (x[v], rank_y[verts[v].rank]);
-                    let (side, s) = (cx - verts[v].w / 2.0, verts[v].h / 4.0);
-                    let out = side - SELF_LOOP_EXT - k as f64 * SELF_LOOP_EXT * 0.75;
+                    let (side, half) = (cx - verts[v].w / 2.0, loop_half[ei]);
+                    let out = side - loop_out[ei];
                     let points = [
-                        Point::new(side, cy - s / 2.0),
-                        Point::new(out, cy - s / 2.0),
-                        Point::new(out, cy + s / 2.0),
-                        Point::new(side, cy + s / 2.0),
+                        Point::new(side, cy - half),
+                        Point::new(out, cy - half),
+                        Point::new(out, cy + half),
+                        Point::new(side, cy + half),
                     ]
                     .map(to_out)
                     .to_vec();
@@ -598,6 +646,7 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
         nodes,
         edges,
         clusters,
+        cluster_directions: vec![input.direction; nc],
     }
 }
 
@@ -618,6 +667,8 @@ fn self_loop(c: Point, node: &LayoutNode, label: Option<(f64, f64)>) -> EdgeRout
 
 /// How far an orthogonal self-loop stands off its node.
 const SELF_LOOP_EXT: f64 = 20.0;
+/// The least room between an orthogonal self-loop (or its label) and the node beside it.
+const SELF_LOOP_CLEARANCE: f64 = 10.0;
 
 /// The rank-axis-independent part of the orthogonal routes of one layered pass
 /// (see [`ortho`]).
@@ -685,24 +736,39 @@ fn ortho_plan(
     // so an edge leaving a port runs straight on where it can. Here: top-down, each
     // dummy in an obstacle rank moves as far toward the position the edge arrives
     // at (its source port, or its previous such dummy) as its neighbours allow.
+    // An edge label, though, stands in line with the port the edge ends at (the
+    // original target's, so a reversed edge's source port), so the edge bends
+    // before its label and runs straight into the arrowhead (as mermaid's ELK
+    // output does); on a direct edge the target port is the next stop.
     let mut xs = x.to_vec();
-    let mut arrive: Vec<Option<(usize, usize)>> = vec![None; verts.len()]; // (edge, prev)
+    let mut arrive: Vec<Option<(usize, usize, bool)>> = vec![None; verts.len()]; // (edge, prev, to target)
     for (ei, ch) in chains.iter().enumerate() {
-        let Some((chain, _, _)) = ch else { continue };
+        let Some((chain, label_v, reversed)) = ch else {
+            continue;
+        };
         let mut prev = chain[0];
-        for &v in &chain[1..chain.len() - 1] {
+        let last = chain.len() - 1;
+        for (k, &v) in chain.iter().enumerate().take(last).skip(1) {
             if obstacle[verts[v].rank] {
-                arrive[v] = Some((ei, prev));
+                let next_is_target = chain[k + 1..last].iter().all(|&d| !obstacle[verts[d].rank]);
+                let to_target = !reversed && *label_v == Some(v) && next_is_target;
+                arrive[v] = Some((ei, prev, to_target));
                 prev = v;
             }
         }
     }
     for layer in layers {
         for (i, &v) in layer.iter().enumerate() {
-            let Some((ei, prev)) = arrive[v] else {
+            let Some((ei, prev, to_target)) = arrive[v] else {
                 continue;
             };
-            let want = if prev < n { start_x[ei] } else { xs[prev] };
+            let want = if to_target {
+                end_x[ei]
+            } else if prev < n {
+                start_x[ei]
+            } else {
+                xs[prev]
+            };
             let lo = i
                 .checked_sub(1)
                 .map_or(f64::NEG_INFINITY, |j| xs[layer[j]] + gap(layer[j], v));
@@ -1512,6 +1578,117 @@ mod tests {
                     || (a.y - l.y).abs() < 1e-6 && (a.x - l.x) * (b.x - l.x) <= 0.0
             }));
         }
+    }
+
+    /// A labelled edge bends before its label and runs straight from the label into
+    /// its target (as mermaid's ELK output does), so the arrowhead (or an ER crow's
+    /// foot) is not drawn over a bend.
+    #[test]
+    fn orthogonal_label_is_in_line_with_the_target_port() {
+        for dir in [Direction::TopBottom, Direction::LeftRight] {
+            let mut wide = node(None);
+            wide.width = 300.0;
+            wide.height = 300.0;
+            let mut inp = input(
+                vec![wide, node(None), node(None), node(None)],
+                vec![
+                    LayoutEdge::new(0, 1, 1, Some((30.0, 20.0))),
+                    LayoutEdge::new(0, 2, 1, Some((30.0, 20.0))),
+                    LayoutEdge::new(0, 3, 1, Some((30.0, 20.0))),
+                ],
+                vec![],
+                dir,
+            );
+            inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+            let out = layout(&inp);
+            for (ei, r) in out.edges.iter().enumerate() {
+                let l = r.label.unwrap();
+                let n = r.points.len();
+                let (a, b) = (r.points[n - 2], r.points[n - 1]);
+                let along = if dir.is_horizontal() {
+                    (a.y - b.y).abs() < 1e-6 && (l.y - b.y).abs() < 1e-6 && l.x > a.x - 1e-6
+                } else {
+                    (a.x - b.x).abs() < 1e-6 && (l.x - b.x).abs() < 1e-6 && l.y > a.y - 1e-6
+                };
+                assert!(
+                    along,
+                    "{dir:?} edge {ei}: label {l:?} not on the last leg {r:?}"
+                );
+            }
+        }
+    }
+
+    /// Several labelled self-loops on one node stand off one beyond the other's
+    /// label, and the node beside them is pushed clear of the loops and labels.
+    #[test]
+    fn orthogonal_self_loops_and_labels_do_not_overlap() {
+        for dir in [Direction::TopBottom, Direction::LeftRight] {
+            let mut inp = input(
+                vec![node(None), node(None), node(None)],
+                vec![
+                    edge(0, 1),
+                    edge(0, 2),
+                    LayoutEdge::new(2, 2, 1, Some((60.0, 20.0))),
+                    LayoutEdge::new(2, 2, 1, Some((50.0, 20.0))),
+                    edge(2, 2),
+                ],
+                vec![],
+                dir,
+            );
+            inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+            let out = layout(&inp);
+            let boxes = rects(&inp, &out);
+            let mut taken: Vec<Rect> = boxes.clone();
+            for (e, r) in inp.edges.iter().zip(&out.edges).skip(2) {
+                for w in r.points.windows(2) {
+                    let (a, b) = (w[0], w[1]);
+                    let seg = Rect::new(
+                        a.x.min(b.x),
+                        a.y.min(b.y),
+                        (a.x - b.x).abs(),
+                        (a.y - b.y).abs(),
+                    );
+                    for (k, t) in taken.iter().enumerate() {
+                        if k != 2 {
+                            assert!(
+                                !seg.intersects(&t.pad(-0.5)),
+                                "{dir:?}: loop {r:?} over {t:?}"
+                            );
+                        }
+                    }
+                }
+                if let (Some((w, h)), Some(l)) = (e.label, r.label) {
+                    let lr = Rect::centered(l, w, h);
+                    for t in &taken {
+                        assert!(
+                            !lr.pad(-0.5).intersects(t),
+                            "{dir:?}: label {lr:?} over {t:?}"
+                        );
+                    }
+                    taken.push(lr);
+                }
+            }
+        }
+    }
+
+    /// A self-loop label wider than its node (along the rank axis) gets a layer as
+    /// deep as itself, clear of the labels in the next layer.
+    #[test]
+    fn orthogonal_self_loop_label_keeps_its_layer_clear() {
+        let mut inp = input(
+            vec![node(None), node(None)],
+            vec![
+                LayoutEdge::new(0, 1, 1, Some((400.0, 20.0))),
+                LayoutEdge::new(0, 0, 1, Some((400.0, 20.0))),
+            ],
+            vec![],
+            Direction::LeftRight,
+        );
+        inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+        let out = layout(&inp);
+        let a = Rect::centered(out.edges[0].label.unwrap(), 400.0, 20.0);
+        let b = Rect::centered(out.edges[1].label.unwrap(), 400.0, 20.0);
+        assert!(!a.intersects(&b), "{a:?} {b:?}");
     }
 
     #[test]

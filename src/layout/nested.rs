@@ -289,10 +289,21 @@ pub(super) fn layout(input: &LayoutInput) -> LayoutOutput {
             })
         })
         .collect();
+    let cluster_directions = (0..nc)
+        .map(|c| {
+            let scope = if tree.separate[c] {
+                Some(c)
+            } else {
+                tree.owner_of_cluster(c)
+            };
+            tree.direction(scope)
+        })
+        .collect();
     LayoutOutput {
         nodes,
         edges,
         clusters,
+        cluster_directions,
     }
 }
 

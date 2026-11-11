@@ -1019,17 +1019,13 @@ pub fn render_with(
             let lw = edge_labels[ei].as_ref().map(|b| b.width + 8.0);
             let title_h =
                 cluster_title_height(g.clusters[ne.cluster.0].kind, &cluster_titles[ne.cluster.0]);
-            // The flow direction inside the cluster: its own, else the nearest ancestor's.
-            let mut dir = g.direction;
-            let mut cur = Some(ne.cluster);
-            for _ in 0..=g.clusters.len() {
-                let Some(c) = cur else { break };
-                if let Some(d) = g.clusters[c.0].direction {
-                    dir = d;
-                    break;
-                }
-                cur = g.clusters[c.0].parent;
-            }
+            // The flow direction inside the cluster, as the layout used it (a cluster's
+            // own `direction` is dropped when an edge crosses its border).
+            let dir = out
+                .cluster_directions
+                .get(ne.cluster.0)
+                .copied()
+                .unwrap_or(g.direction);
             let (p, l) = nested_route(ne, frame, inner_rect, dir, title_h, lw);
             pts = p;
             if elk {
@@ -2787,6 +2783,41 @@ mod tests {
             }
         }
         assert!(corners >= 4, "fan-out / fan-in edges bend");
+    }
+
+    /// An edge from a cluster to its own member is drawn in the direction the layout
+    /// really used inside the cluster: an ancestor's `direction` that an edge across
+    /// its border cancelled does not apply, so the route comes in from the top (TB)
+    /// instead of across the frame and through the member above (as LR would).
+    #[test]
+    fn cluster_to_member_edge_follows_the_layout_direction() {
+        let (g, scene) = render_flowchart(
+            "flowchart TB\nsubgraph S1\ndirection LR\nsubgraph S2\nb1 --> b2\nend\nend\nX --> b1\nS2 --> b2",
+        );
+        let ei = g
+            .edges
+            .iter()
+            .position(|e| matches!(e.from, Endpoint::Cluster(_)))
+            .unwrap();
+        let frame = cluster_group(&scene, "S2")
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+            .unwrap();
+        let cmds = &edge_paths(&scene)[ei];
+        let PathCmd::MoveTo(start) = cmds[0] else {
+            panic!("{cmds:?}");
+        };
+        assert!(
+            (start.y - frame.y).abs() < 1e-6,
+            "{start:?} not on the top of {frame:?}"
+        );
     }
 
     /// `layout: dagre` keeps mermaid's dagre rendering: the configured (basis) curve.
