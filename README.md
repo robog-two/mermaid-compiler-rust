@@ -57,7 +57,7 @@ compare the two directly.
 | Sequence (`sequenceDiagram`) | sequence | actors, activations, notes, all frames, boxes, autonumber |
 | State (`stateDiagram[-v2]`) | layered graph | composite states, fork/join/choice, notes |
 | Class (`classDiagram`) | layered graph | members, generics, relations, cardinalities, namespaces |
-| ER (`erDiagram`) | layered graph | attribute tables, keys, crow's-foot cardinalities |
+| ER (`erDiagram`) | layered graph | attribute tables, keys, crow's-foot cardinalities, aliases, styling, subgraphs (nested, per-group `direction`, relationships to a group) |
 | Requirement (`requirementDiagram`) | layered graph | all requirement/element types and relationships |
 | Architecture (`architecture-beta`) | grid from port sides, nested groups | groups (`in`, nesting, icons), services, junctions, `{group}` edges, `align row/column`. Generic icon glyphs only |
 | Pie (`pie`) | geometry | `showData`, mermaid's geometry |
