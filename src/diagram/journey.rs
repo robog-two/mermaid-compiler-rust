@@ -41,7 +41,8 @@ pub struct Journey {
 }
 
 impl Journey {
-    /// Actors in order of first appearance.
+    /// Distinct actors, sorted (`journeyDb.getActors`: `[...new Set(people)].sort()`,
+    /// which also fixes each actor's legend colour).
     pub fn actors(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for a in self
@@ -54,6 +55,8 @@ impl Journey {
                 out.push(a.clone());
             }
         }
+        // JS sorts by UTF-16 code units.
+        out.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
         out
     }
 }
@@ -410,8 +413,15 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             .map(|l| line_width(l, 20.0, true))
             .fold(0.0, f64::max);
         bounds.add_rect(Rect::new(left, 10.0, tw, 30.0));
+        // `fill` = `journey.titleColor`, default `''`: an empty attribute, so the title
+        // inherits the root's `fill: textColor`.
+        let title_fill = cfg
+            .section("journey", "titleColor")
+            .and_then(|j| j.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map_or_else(|| pal.text_color.clone(), Color::new);
         fore.push(Element::classed_text(
-            Text::centered(Point::new(0.0, 28.0), lines, 20.0, 24.0, &pal.title_color)
+            Text::centered(Point::new(0.0, 28.0), lines, 20.0, 24.0, &title_fill)
                 .bold()
                 .anchored(Anchor::Start, left),
             "titleText",
@@ -466,7 +476,8 @@ mod tests {
         assert_eq!(j.sections[0].tasks[2].actors, vec!["Me", "Cat"]);
         assert_eq!(j.sections[0].tasks[1].score, 3.0);
         assert!(j.sections[1].tasks[1].actors.is_empty());
-        assert_eq!(j.actors(), vec!["Me", "Cat"]);
+        // `getActors` sorts.
+        assert_eq!(j.actors(), vec!["Cat", "Me"]);
     }
 
     #[test]

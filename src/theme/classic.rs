@@ -22,17 +22,17 @@ use crate::scene::Color;
 use std::collections::HashMap;
 
 /// `THEME_COLOR_LIMIT`.
-const LIMIT: usize = 12;
+pub(super) const LIMIT: usize = 12;
 
 /// A colour as khroma holds it: whichever channel set the last operation produced.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum K {
+pub(super) enum K {
     Rgb(f64, f64, f64),
     Hsl(f64, f64, f64),
 }
 
 impl K {
-    fn parse(s: &str) -> Option<K> {
+    pub(super) fn parse(s: &str) -> Option<K> {
         color::parse(s).map(K::from)
     }
 
@@ -105,7 +105,7 @@ impl K {
 
     /// khroma `adjust(c, { h, s, l })`: hue is taken `% 360`, saturation and lightness
     /// clamp to `0..=100`.
-    fn adjust(self, dh: f64, ds: f64, dl: f64) -> K {
+    pub(super) fn adjust(self, dh: f64, ds: f64, dl: f64) -> K {
         let (h, s, l) = self.hsl();
         K::Hsl(
             (h + dh) % 360.0,
@@ -114,24 +114,24 @@ impl K {
         )
     }
 
-    fn hue(self, dh: f64) -> K {
+    pub(super) fn hue(self, dh: f64) -> K {
         self.adjust(dh, 0.0, 0.0)
     }
 
-    fn lighten(self, by: f64) -> K {
+    pub(super) fn lighten(self, by: f64) -> K {
         self.adjust(0.0, 0.0, by)
     }
 
-    fn darken(self, by: f64) -> K {
+    pub(super) fn darken(self, by: f64) -> K {
         self.adjust(0.0, 0.0, -by)
     }
 
-    fn invert(self) -> K {
+    pub(super) fn invert(self) -> K {
         let (r, g, b) = self.rgb();
         K::Rgb(255.0 - r, 255.0 - g, 255.0 - b)
     }
 
-    fn to_color(self) -> Color {
+    pub(super) fn to_color(self) -> Color {
         let (r, g, b) = self.rgb();
         let ch = |v: f64| v.round().clamp(0.0, 255.0) as u8;
         Color::new(
@@ -169,36 +169,36 @@ pub(super) struct SectionColors {
 }
 
 /// The theme object's colour variables (`undefined` / `'calculated'` = absent).
-struct Vars {
+pub(super) struct Vars {
     map: HashMap<String, K>,
-    dark_mode: bool,
+    pub(super) dark_mode: bool,
 }
 
 impl Vars {
-    fn get(&self, k: &str) -> Option<K> {
+    pub(super) fn get(&self, k: &str) -> Option<K> {
         self.map.get(k).copied()
     }
     /// A variable every code path defines before it is read.
-    fn c(&self, k: &str) -> K {
+    pub(super) fn c(&self, k: &str) -> K {
         self.get(k).unwrap_or(K::Rgb(0.0, 0.0, 0.0))
     }
-    fn set(&mut self, k: impl Into<String>, v: K) {
+    pub(super) fn set(&mut self, k: impl Into<String>, v: K) {
         self.map.insert(k.into(), v);
     }
     /// `this.k = this.k || f()`.
-    fn or(&mut self, k: impl Into<String>, f: impl FnOnce(&Vars) -> K) {
+    pub(super) fn or(&mut self, k: impl Into<String>, f: impl FnOnce(&Vars) -> K) {
         let k = k.into();
         if !self.map.contains_key(&k) {
             let v = f(self);
             self.map.insert(k, v);
         }
     }
-    fn n(&self, prefix: &str, i: usize) -> K {
+    pub(super) fn n(&self, prefix: &str, i: usize) -> K {
         self.c(&format!("{prefix}{i}"))
     }
 }
 
-fn hex(s: &str) -> K {
+pub(super) fn hex(s: &str) -> K {
     K::parse(s).unwrap_or(K::Rgb(0.0, 0.0, 0.0))
 }
 
@@ -234,7 +234,7 @@ fn scale_darken_peer_rotate(v: &mut Vars) {
 }
 
 /// `cScaleInvN ||= invert(cScaleN)`, `cScalePeerN ||= lighten/darken(cScaleN, 10)`.
-fn scale_invert_peer(v: &mut Vars, peer_lighten: bool) {
+pub(super) fn scale_invert_peer(v: &mut Vars, peer_lighten: bool) {
     for i in 0..LIMIT {
         v.or(format!("cScaleInv{i}"), |v| v.n("cScale", i).invert());
     }
@@ -251,7 +251,7 @@ fn scale_invert_peer(v: &mut Vars, peer_lighten: bool) {
 }
 
 /// `cScaleLabelN ||= scaleLabelColor`.
-fn scale_labels(v: &mut Vars, label: K) {
+pub(super) fn scale_labels(v: &mut Vars, label: K) {
     for i in 0..LIMIT {
         v.or(format!("cScaleLabel{i}"), |_| label);
     }
@@ -301,7 +301,7 @@ fn git_from_primary(v: &mut Vars) {
     }
 }
 
-fn git_inverses(v: &mut Vars) {
+pub(super) fn git_inverses(v: &mut Vars) {
     for i in 0..8 {
         v.or(format!("gitInv{i}"), |v| v.n("git", i).invert());
     }
@@ -501,8 +501,8 @@ fn pie_colors(theme: ThemeName, v: &Vars) -> Option<Vec<Color>> {
     Some(list.into_iter().map(K::to_color).collect())
 }
 
-/// The section colour sets of a classic theme, `themeVariables` applied; `None` for the
-/// neo / redux family.
+/// The section colour sets of a theme, `themeVariables` applied (the neo / redux family's
+/// `updateColors()` lives in `neo::section_update`).
 pub(super) fn section_colors(theme: ThemeName, vars: &[(String, String)]) -> Option<SectionColors> {
     let mut v = Vars {
         map: HashMap::new(),
@@ -525,8 +525,20 @@ pub(super) fn section_colors(theme: ThemeName, vars: &[(String, String)]) -> Opt
         ],
         ThemeName::Neutral => &[("primaryColor", "#eee"), ("text", "#333")],
         ThemeName::Base => &[("primaryColor", "#fff4dd")],
-        _ => return None,
+        _ => &[],
     };
+    let neo = !matches!(
+        theme,
+        ThemeName::Default
+            | ThemeName::Null
+            | ThemeName::Forest
+            | ThemeName::Dark
+            | ThemeName::Neutral
+            | ThemeName::Base
+    );
+    if neo {
+        super::neo::section_init(theme, &mut v);
+    }
     for (k, c) in init {
         v.set(*k, hex(c));
     }
@@ -548,12 +560,13 @@ pub(super) fn section_colors(theme: ThemeName, vars: &[(String, String)]) -> Opt
         }
         _ => {}
     }
-    let update: fn(&mut Vars) = match theme {
-        ThemeName::Forest => update_forest,
-        ThemeName::Dark => update_dark,
-        ThemeName::Neutral => update_neutral,
-        ThemeName::Base => update_base,
-        _ => update_default,
+    let update: &dyn Fn(&mut Vars) = match theme {
+        _ if neo => &|v: &mut Vars| super::neo::section_update(theme, v),
+        ThemeName::Forest => &update_forest,
+        ThemeName::Dark => &update_dark,
+        ThemeName::Neutral => &update_neutral,
+        ThemeName::Base => &update_base,
+        _ => &update_default,
     };
     // Only the default theme's constructor runs `updateColors()` itself.
     if matches!(theme, ThemeName::Default | ThemeName::Null) {
@@ -576,7 +589,11 @@ pub(super) fn section_colors(theme: ThemeName, vars: &[(String, String)]) -> Opt
     let list = |v: &Vars, prefix: &str, n: usize| -> Vec<Color> {
         (0..n).map(|i| v.n(prefix, i).to_color()).collect()
     };
-    let pie = pie_colors(theme, &v);
+    let pie = if neo {
+        Some(list(&v, "pie", LIMIT + 1).split_off(1))
+    } else {
+        pie_colors(theme, &v)
+    };
     Some(SectionColors {
         pie,
         scale: list(&v, "cScale", LIMIT),

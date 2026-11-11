@@ -45,6 +45,9 @@ pub enum Shape {
     Trapezoid,
     InvTrapezoid,
     StateStart,
+    /// Flowchart `sm-circ` / `start`: `stateStart.ts` without the state diagram's
+    /// `.state-start` CSS, so it takes `.node circle` (`mainBkg` / `nodeBorder`).
+    SmallCircle,
     StateEnd,
     ForkBar,
     Choice,
@@ -626,8 +629,15 @@ pub fn render_with(
         .drop_shadow
         .as_ref()
         .filter(|_| cfg.look == ConfigLook::Neo);
+    // The class stylesheet paints edge labels `mainBkg`; requirement and ER have their
+    // own theme variables (redux / colour themes) over `edgeLabelBackground`.
     let edge_label_bg = match (g.kind, &pal.er_edge_label_background) {
         (DiagramKind::Er, Some(bg)) => bg,
+        (DiagramKind::Class, _) => &pal.main_bkg,
+        (DiagramKind::Requirement, _) => pal
+            .requirement_edge_label_background
+            .as_ref()
+            .unwrap_or(&pal.edge_label_background),
         _ => &pal.edge_label_background,
     };
     let font = pal.font_size;
@@ -1113,7 +1123,9 @@ pub fn render_with(
                 &tb.lines,
                 tb.font_size,
                 tb.line_height,
-                &pal.title_color,
+                // `.flowchartTitleText` (and the class / state / agentflow
+                // equivalents): `fill: textColor`.
+                &pal.text_color,
             ),
             if g.kind == DiagramKind::Agentflow {
                 "agentflowTitleText"
@@ -1853,6 +1865,13 @@ fn node_elements(
                 ));
                 Boundary::Ellipse(c, 7.0, 7.0)
             }
+            Shape::SmallCircle => {
+                els.push(Element::shape(
+                    Geometry::Circle { c, r: 7.0 },
+                    Paint::both(&fill, &stroke, pal.stroke_width.unwrap_or(1.0)),
+                ));
+                Boundary::Ellipse(c, 7.0, 7.0)
+            }
             // stateEnd.ts: rough circles of diameter 14 and 14·5/14 = 5, both
             // stroked 2px.
             Shape::StateEnd => {
@@ -1926,6 +1945,11 @@ fn node_elements(
                     // Rows are striped with `rowOdd`; the colour themes paint every row
                     // with the slot fill instead (`er/styles.ts` `.node path`): no stripe.
                     odd_row: pal.er_row_odd.as_ref().filter(|_| {
+                        slot_colors(n.color_slot, pal)
+                            .and_then(|s| s.fill)
+                            .is_none()
+                    }),
+                    even_row: pal.er_row_even.as_ref().filter(|_| {
                         slot_colors(n.color_slot, pal)
                             .and_then(|s| s.fill)
                             .is_none()
@@ -2032,6 +2056,8 @@ struct TableColors<'a> {
     stroke: &'a Color,
     text: &'a Color,
     odd_row: Option<&'a Color>,
+    /// `rowEven` (`erBox.ts` fills each row with `rowOdd` / `rowEven`).
+    even_row: Option<&'a Color>,
 }
 
 fn entity_table_elements(
@@ -2068,14 +2094,19 @@ fn entity_table_elements(
     let line_paint = Paint::stroke(colors.stroke, 1.0);
     for (i, row) in n.sections.iter().enumerate() {
         let ry = y0 + t.header_h + t.row_h * i as f64;
-        if let Some(odd) = colors.odd_row.filter(|_| i % 2 == 0) {
+        let (row_fill, class) = if i % 2 == 0 {
+            (colors.odd_row, "row-rect-odd")
+        } else {
+            (colors.even_row, "row-rect-even")
+        };
+        if let Some(fill) = row_fill {
             els.push(Element::classed_shape(
                 Geometry::Rect {
                     rect: Rect::new(x0, ry, r.w, t.row_h),
                     rx: 0.0,
                 },
-                Paint::fill(odd),
-                "row-rect-odd",
+                Paint::fill(fill),
+                class,
             ));
         }
         els.push(Element::line(

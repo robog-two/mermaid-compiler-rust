@@ -266,13 +266,17 @@ fn card_style(h: f64) -> Style {
 pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let col_w = cfg.section_f64("kanban", "sectionWidth", 200.0);
     let pad = cfg.section_f64("kanban", "padding", 8.0);
+    let linked_tickets = cfg
+        .section("kanban", "ticketBaseUrl")
+        .and_then(|j| j.as_str())
+        .is_some_and(|u| !u.is_empty());
     let lh = FONT * 1.3;
     let text_w = col_w - 2.0 * pad - 2.0 * PAD;
 
     let col_titles: Vec<Vec<String>> = k
         .columns
         .iter()
-        .map(|c| wrap_text(&c.label, col_w - 2.0 * pad, FONT, true))
+        .map(|c| wrap_text(&c.label, col_w - 2.0 * pad, FONT, false))
         .collect();
     let title_h = col_titles
         .iter()
@@ -335,7 +339,8 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     for (ci, (col, cp)) in k.columns.iter().zip(&placed.children).enumerate() {
         let cr = shift(cp.rect);
         // Column `ci` is `.section-(ci+1)`: fill and stroke `cScale(ci+2)` lightened by
-        // 10 (darkened under `darkMode`), title `cScaleLabel(ci+2)`; cards are `.node`
+        // 10 (darkened under `darkMode`); the title is an HTML label in regular weight,
+        // coloured by `.cluster-label, .label { color: textColor }`; cards are `.node`
         // (`background` fill, `nodeBorder` stroke).
         let fill = shade(pal.scale_color(ci + 2), !dark_mode, 10.0);
         let mut g = vec![
@@ -350,9 +355,8 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                     &col_titles[ci],
                     FONT,
                     lh,
-                    pal.scale_text_color(ci + 2),
-                )
-                .bold(),
+                    &pal.text_color,
+                ),
                 "kanban-section-title",
             ),
         ];
@@ -397,14 +401,20 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                         font_size: SMALL,
                         bold: false,
                         anchor: Anchor::Start,
-                        fill: if pal.dark {
-                            Color::new("#8ab4ff")
-                        } else {
-                            Color::new("#1a56c4")
-                        },
+                        // An HTML label: the card's text colour, underlined inside the
+                        // `.kanban-ticket-link` anchor when `ticketBaseUrl` is set.
+                        fill: card_text.clone(),
                     },
                     "kanban-ticket",
                 ));
+                if linked_tickets {
+                    let w = line_width(t, SMALL, false);
+                    g.push(Element::line(
+                        Point::new(r.x + PAD, fy + 1.5),
+                        Point::new(r.x + PAD + w, fy + 1.5),
+                        Paint::stroke(&card_text, 1.0),
+                    ));
+                }
             }
             if let Some(a) = &item.assigned {
                 let a = normalize_label(a);

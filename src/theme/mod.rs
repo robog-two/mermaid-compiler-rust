@@ -64,6 +64,8 @@ impl FromStr for ThemeName {
 /// Resolved colours and fonts used by the renderers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Palette {
+    /// The theme this palette was built from (upstream stylesheets gate on its name).
+    pub theme: ThemeName,
     pub font_family: String,
     pub font_size: f64,
     pub background: Color,
@@ -128,10 +130,22 @@ pub struct Palette {
     pub color_slots: Option<CategoricalPalette>,
     /// ER attribute-row stripe (`rowOdd`); `None` when the theme leaves rows unfilled.
     pub er_row_odd: Option<Color>,
+    /// ER even attribute rows (`rowEven`); set together with `er_row_odd`.
+    pub er_row_even: Option<Color>,
     /// ER edge-label background used by the colour themes (`erEdgeLabelBackground`).
     pub er_edge_label_background: Option<Color>,
+    /// Requirement edge-label background (`requirementEdgeLabelBackground`, redux themes);
+    /// `None` = `edge_label_background`.
+    pub requirement_edge_label_background: Option<Color>,
     /// The drop shadow the neo look applies to nodes and clusters (`dropShadow`).
     pub drop_shadow: Option<DropShadow>,
+    /// `quadrant1Fill`: the theme's `primaryColor` (the neo / redux light themes use
+    /// their gantt-block `#ECECFE`); quadrants 2..4 add 5 per RGB channel each.
+    pub quadrant_fill: Color,
+    /// `primaryTextColor` (quadrant texts, title and axes).
+    pub primary_text: Color,
+    /// `primaryBorderColor` (quadrant borders).
+    pub primary_border: Color,
     /// State composites: `compositeTitleBackground` (`None` = `main_bkg`),
     /// `compositeBackground` (`None` = `background`) and `altBackground` (`None` = `#f0f0f0`).
     pub composite_title_background: Option<Color>,
@@ -196,6 +210,7 @@ fn hex(r: Rgba) -> Color {
 
 fn default_palette() -> Palette {
     Palette {
+        theme: ThemeName::Default,
         font_family: "\"trebuchet ms\", verdana, arial, sans-serif".into(),
         font_size: 16.0,
         background: c("white"),
@@ -209,13 +224,14 @@ fn default_palette() -> Palette {
         cluster_border: c("#aaaa33"),
         edge_label_background: c("rgba(232,232,232, 0.8)"),
         actor_bkg: c("#ECECFF"),
-        actor_border: c("hsl(259.6261682243, 59.7765363128%, 87.9019607843%)"),
+        // theme-default.js resolves `actorBorder` / `actorLineColor` to `border1`.
+        actor_border: c("#9370DB"),
         actor_text: c("black"),
-        actor_line: c("grey"),
+        actor_line: c("#9370DB"),
         signal_color: c("#333"),
         signal_text: c("#333"),
         label_box_bkg: c("#ECECFF"),
-        label_box_border: c("hsl(259.6261682243, 59.7765363128%, 87.9019607843%)"),
+        label_box_border: c("#9370DB"),
         label_text: c("black"),
         loop_text: c("black"),
         note_bkg: c("#fff5ad"),
@@ -263,8 +279,14 @@ fn default_palette() -> Palette {
         radius: None,
         color_slots: None,
         er_row_odd: Some(c("white")),
+        er_row_even: None,
         er_edge_label_background: None,
+        requirement_edge_label_background: None,
         drop_shadow: None,
+        quadrant_fill: c("#ECECFF"),
+        // invert(#ECECFF); mkBorder(#ECECFF) = adjust(s: -40, l: -10).
+        primary_text: c("#131300"),
+        primary_border: c("hsl(240, 60%, 86.2745098039%)"),
         composite_title_background: None,
         composite_background: None,
         alt_background: None,
@@ -274,22 +296,28 @@ fn default_palette() -> Palette {
 fn forest_palette() -> Palette {
     let mut p = default_palette();
     p.main_bkg = c("#cde498");
+    p.quadrant_fill = c("#cde498");
+    p.primary_text = c("#321b67");
+    p.primary_border = c("hsl(78.1578947368, 18.4615384615%, 64.5098039216%)");
     p.node_border = c("#13540c");
     p.node_text = c("#000000");
-    p.line_color = c("green");
+    p.line_color = c("#000000"); // theme-forest.js: `lineColor = invert(background)`
     p.text_color = c("#000000");
     p.title_color = c("#333");
     p.cluster_bkg = c("#cdffb2");
     p.cluster_border = c("#6eaa49");
     p.edge_label_background = c("#e8e8e8");
     p.actor_bkg = c("#cde498");
-    p.actor_border = c("#13540c");
+    p.actor_border = c("hsl(78.1578947368, 58.4615384615%, 54.5098039216%)");
+    p.actor_line = c("hsl(78.1578947368, 58.4615384615%, 54.5098039216%)");
+    p.note_border = c("#6eaa49");
     p.label_box_bkg = c("#cde498");
     p.label_box_border = c("#326932");
     p.signal_color = c("#333");
     p.activation_bkg = c("#f4f4f4");
-    p.special_state = c("#13540c");
+    p.special_state = c("#000000"); // `lineColor`
     // `pie1..12`: see `classic::pie_colors`.
+    p.pie_section_text = p.text_color.clone(); // `pieSectionTextColor ||= textColor`
     p
 }
 
@@ -298,6 +326,9 @@ fn dark_palette() -> Palette {
     p.alt_background = Some(c("#555"));
     p.background = c("#333");
     p.main_bkg = c("#1f2020");
+    p.quadrant_fill = c("#1f2020");
+    p.primary_text = c("#e0dfdf");
+    p.primary_border = c("#cccccc");
     p.node_border = c("#ccc");
     p.node_text = c("#ccc");
     p.line_color = c("lightgrey");
@@ -319,11 +350,15 @@ fn dark_palette() -> Palette {
     p.activation_bkg = c("hsl(180, 1.5873015873%, 28.3529411765%)");
     p.activation_border = c("#ccc");
     p.sequence_number = c("black");
-    p.special_state = c("#ccc");
+    p.special_state = c("#f4f4f4");
+    // theme-dark.js: notes are `secondBkg` / `secondaryBorderColor` / `secondaryTextColor`.
+    p.note_bkg = c("hsl(180, 1.5873015873%, 28.3529411765%)");
+    p.note_border = c("hsl(180, 0%, 18.3529411765%)");
+    p.note_text = c("#b8b6b6");
     // `pie1..12`: see `classic::pie_colors`.
     // theme-dark.js: `pieStrokeColor ||= 'black'`, `pieOuterStrokeColor ||= 'black'`.
     p.pie_title_text = c("lightgrey");
-    p.pie_section_text = c("lightgrey");
+    p.pie_section_text = c("#ccc"); // `textColor`
     p.pie_legend_text = c("lightgrey");
     p
 }
@@ -332,23 +367,35 @@ fn neutral_palette() -> Palette {
     let mut p = default_palette();
     p.alt_background = Some(c("#f4f4f4"));
     p.main_bkg = c("#eee");
+    p.quadrant_fill = c("#eee");
+    p.primary_text = c("#111111");
+    p.primary_border = c("hsl(0, 0%, 83.3333333333%)");
     p.node_border = c("#999");
     p.node_text = c("#333");
     p.line_color = c("#666");
-    p.text_color = c("#333");
-    p.cluster_bkg = c("hsl(0, 0%, 96.0784313725%)");
-    p.cluster_border = c("#aaa");
+    p.cluster_bkg = c("hsl(0, 0%, 98.9215686275%)");
+    p.cluster_border = c("#707070");
+    // theme-neutral.js: `actorBorder = lighten(border1, 23)`, texts `text` (#333).
+    p.actor_text = c("#333");
+    p.label_text = c("#333");
+    p.loop_text = c("#333");
     p.edge_label_background = c("white");
     p.actor_bkg = c("#eee");
-    p.actor_border = c("#999");
-    p.actor_line = c("#666");
+    p.actor_border = c("hsl(0, 0%, 83%)");
+    p.actor_line = c("hsl(0, 0%, 83%)");
     p.label_box_bkg = c("#eee");
-    p.label_box_border = c("#999");
+    p.label_box_border = c("hsl(0, 0%, 83%)");
     p.signal_color = c("#333");
     p.note_bkg = c("#666");
     p.note_border = c("#999");
     p.note_text = c("#fff");
     p.special_state = c("#222");
+    // theme-neutral.js: `textColor = invert(background)`; the pie title and legend use
+    // `taskTextDarkColor = text` (#333), the slice labels `textColor`.
+    p.text_color = c("#000000");
+    p.pie_title_text = c("#333");
+    p.pie_legend_text = c("#333");
+    p.pie_section_text = c("#000000");
     p.pie_colors = [
         "#F4F4F4", "#555", "#BBB", "#777", "#999", "#DDD", "#FFF", "#DDD", "#BBB", "#999", "#777",
         "#555",
@@ -376,8 +423,9 @@ fn base_palette(vars: &[(String, String)]) -> Palette {
     let dark_mode = vars.iter().any(|(k, v)| k == "darkMode" && v == "true");
     let secondary = get("secondaryColor").unwrap_or(primary.rotate_hue(-120.0));
     let tertiary = get("tertiaryColor").unwrap_or(primary.rotate_hue(180.0).lighten(5.0));
-    let border =
-        get("primaryBorderColor").unwrap_or(primary.lighten(if dark_mode { 10.0 } else { -40.0 }));
+    // theme-helpers.js `mkBorder(c, darkMode)`.
+    let mk_border = |c: Rgba| c.adjust_hsl(0.0, -40.0, if dark_mode { 10.0 } else { -10.0 });
+    let border = get("primaryBorderColor").unwrap_or(mk_border(primary));
     let text = get("primaryTextColor").unwrap_or(if primary.is_dark() {
         Rgba::WHITE
     } else {
@@ -388,36 +436,61 @@ fn base_palette(vars: &[(String, String)]) -> Palette {
             a: 1.0,
         }
     });
-    let line = get("lineColor").unwrap_or(if primary.is_dark() {
-        Rgba::WHITE
-    } else {
-        Rgba {
-            r: 0x33,
-            g: 0x33,
-            b: 0x33,
-            a: 1.0,
-        }
+    // theme-base.js: `lineColor ||= invert(background)`, background `#f4f4f4`.
+    let line = get("lineColor").unwrap_or_else(|| {
+        get("background")
+            .unwrap_or(Rgba {
+                r: 0xf4,
+                g: 0xf4,
+                b: 0xf4,
+                a: 1.0,
+            })
+            .invert()
     });
     let mut p = default_palette();
     p.main_bkg = hex(primary);
+    p.quadrant_fill = hex(primary);
+    p.primary_text = hex(text);
+    p.primary_border = hex(border);
     p.node_border = hex(border);
     p.node_text = hex(text);
     p.text_color = hex(text);
-    p.title_color = hex(text);
     p.line_color = hex(line);
-    p.cluster_bkg = hex(secondary);
-    p.cluster_border = hex(secondary.lighten(-40.0));
+    // theme-base.js: clusters on `tertiaryColor`, notes on a fixed `#fff5ad`, every
+    // border `mkBorder(..)` and every sequence text `textColor`.
+    p.cluster_bkg = hex(tertiary);
+    p.cluster_border = hex(mk_border(tertiary));
     p.edge_label_background = hex(secondary);
     p.actor_bkg = hex(primary);
     p.actor_border = hex(border);
+    p.actor_line = hex(border);
     p.actor_text = hex(text);
-    p.signal_color = hex(line);
+    p.signal_color = hex(text);
     p.signal_text = hex(text);
     p.label_box_bkg = hex(primary);
     p.label_box_border = hex(border);
-    p.note_bkg = hex(tertiary);
-    p.note_border = hex(tertiary.lighten(-40.0));
+    p.label_text = hex(text);
+    p.loop_text = hex(text);
+    let note = get("noteBkgColor").unwrap_or(Rgba {
+        r: 0xff,
+        g: 0xf5,
+        b: 0xad,
+        a: 1.0,
+    });
+    p.note_bkg = hex(note);
+    p.note_border = hex(mk_border(note));
+    p.note_text = hex(text);
+    p.activation_bkg = hex(secondary);
+    p.activation_border = hex(secondary.darken(10.0));
+    p.sequence_number = hex(line.invert());
+    // `titleColor ||= tertiaryTextColor = invert(tertiaryColor)`.
+    p.title_color = hex(get("titleColor").unwrap_or(tertiary.invert()));
     p.special_state = hex(line);
+    // theme-base.js: `pieTitleTextColor` / `pieLegendTextColor ||= taskTextDarkColor`
+    // (= `textColor`), `pieSectionTextColor ||= textColor`.
+    p.pie_title_text = hex(text);
+    p.pie_legend_text = hex(text);
+    p.pie_section_text = hex(text);
     p
 }
 
@@ -436,10 +509,7 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
         | ThemeName::ReduxColor
         | ThemeName::ReduxDarkColor => neo::palette(theme, default_palette()),
     };
-    if p.er_row_odd.is_some() {
-        // The classic themes stripe odd ER rows with (nearly) the canvas colour.
-        p.er_row_odd = Some(p.background.clone());
-    }
+    p.theme = theme;
     p.dark = matches!(
         theme,
         ThemeName::Dark | ThemeName::NeoDark | ThemeName::ReduxDark | ThemeName::ReduxDarkColor
@@ -461,30 +531,43 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
     for (k, v) in vars {
         apply_variable(&mut p, k, v);
     }
-    // The neo / redux family: companions not ported from those themes.
-    if p.scale_text.is_empty() {
-        p.scale_text = p
-            .scale
-            .iter()
-            .map(|c| match color::parse(c.css()) {
-                Some(rgb) if rgb.is_dark() => Color::new("#ffffff"),
-                _ => Color::new("#333333"),
-            })
-            .collect();
-    }
-    let derived = |f: fn(Rgba) -> Rgba, from: &[Color]| -> Vec<Color> {
-        from.iter()
-            .map(|c| color::parse(c.css()).map_or_else(|| c.clone(), |x| hex(f(x))))
-            .collect()
-    };
-    if p.scale_peer.is_empty() {
-        // `cScalePeerN ||= darken(cScaleN, 10)` (none of the family sets darkMode).
-        p.scale_peer = derived(|x| x.darken(10.0), &p.scale);
-    }
-    if p.scale_inv.is_empty() {
-        p.scale_inv = derived(Rgba::invert, &p.scale);
+    if p.er_row_odd.is_some() {
+        let (odd, even) = er_rows(theme, &p, vars);
+        let set = |k: &str| vars.iter().any(|(n, _)| n == k);
+        if !set("rowOdd") {
+            p.er_row_odd = Some(odd);
+        }
+        if !set("rowEven") {
+            p.er_row_even = Some(even);
+        }
     }
     p
+}
+
+/// `rowOdd` / `rowEven` of the classic themes, from the (overridden) `mainBkg`:
+/// `lighten(mainBkg, 75)` and a theme-specific shade (`theme-*.js` `updateColors`).
+fn er_rows(theme: ThemeName, p: &Palette, vars: &[(String, String)]) -> (Color, Color) {
+    let m = color::parse(p.main_bkg.css()).unwrap_or(Rgba::WHITE);
+    let dark_mode = vars
+        .iter()
+        .any(|(k, v)| k == "darkMode" && v.trim() == "true");
+    let (odd, even) = match theme {
+        ThemeName::Dark => (m.lighten(5.0), m.darken(10.0)),
+        ThemeName::Neutral => (
+            m.lighten(75.0),
+            Rgba {
+                r: 0xf4,
+                g: 0xf4,
+                b: 0xf4,
+                a: 1.0,
+            },
+        ),
+        ThemeName::Forest => (m.lighten(75.0), m.lighten(20.0)),
+        ThemeName::Base if dark_mode => (m.darken(5.0), m.darken(10.0)),
+        ThemeName::Base => (m.lighten(75.0), m.lighten(5.0)),
+        _ => (m.lighten(75.0), m.lighten(1.0)),
+    };
+    (hex(odd), hex(even))
 }
 
 impl Palette {
@@ -526,15 +609,30 @@ fn apply_variable(p: &mut Palette, key: &str, value: &str) {
         }
         "background" => p.background = v,
         "primaryColor" | "mainBkg" => {
+            // The neo / redux light themes derive `quadrant1Fill` from a local constant.
+            if key == "primaryColor"
+                && !matches!(
+                    p.theme,
+                    ThemeName::Neo | ThemeName::Redux | ThemeName::ReduxColor
+                )
+            {
+                p.quadrant_fill = v.clone();
+            }
             p.main_bkg = v.clone();
             p.actor_bkg = v.clone();
             p.label_box_bkg = v;
         }
         "primaryBorderColor" | "nodeBorder" => {
+            if key == "primaryBorderColor" {
+                p.primary_border = v.clone();
+            }
             p.node_border = v.clone();
             p.actor_border = v;
         }
         "primaryTextColor" | "nodeTextColor" => {
+            if key == "primaryTextColor" {
+                p.primary_text = v.clone();
+            }
             p.node_text = v.clone();
             p.actor_text = v;
         }
@@ -554,6 +652,10 @@ fn apply_variable(p: &mut Palette, key: &str, value: &str) {
         "altBackground" => p.alt_background = Some(v),
         "tertiaryColor" => {}
         "edgeLabelBackground" => p.edge_label_background = v,
+        "rowOdd" => p.er_row_odd = Some(v),
+        "rowEven" => p.er_row_even = Some(v),
+        "erEdgeLabelBackground" => p.er_edge_label_background = Some(v),
+        "requirementEdgeLabelBackground" => p.requirement_edge_label_background = Some(v),
         "actorBkg" => p.actor_bkg = v,
         "actorBorder" => p.actor_border = v,
         "actorTextColor" => p.actor_text = v,
@@ -647,5 +749,106 @@ mod tests {
         );
         assert_eq!(p.main_bkg.css(), "#003366");
         assert_eq!(p.node_text.css(), "#ffffff");
+    }
+
+    /// Values checked against mermaid 12.3.0's resolved `themeVariables`.
+    #[test]
+    fn classic_variables_match_upstream() {
+        let css = |c: &Color| c.css().to_ascii_lowercase();
+        let base = palette(ThemeName::Base, &[]);
+        assert_eq!(css(&base.pie_legend_text), "#333333");
+        assert_eq!(css(&base.pie_title_text), "#333333");
+        assert_eq!(css(&base.line_color), "#0b0b0b"); // invert(#f4f4f4)
+        assert_eq!(css(&base.note_bkg), "#fff5ad");
+        let neutral = palette(ThemeName::Neutral, &[]);
+        assert_eq!(css(&neutral.pie_legend_text), "#333");
+        assert_eq!(css(&neutral.text_color), "#000000");
+        let dark = palette(ThemeName::Dark, &[]);
+        assert_eq!(css(&dark.special_state), "#f4f4f4");
+        assert_eq!(css(&dark.pie_section_text), "#ccc");
+        // rowOdd = lighten(#1f2020, 5), rowEven = darken(#1f2020, 10).
+        assert_eq!(dark.er_row_odd.as_ref().map(css), Some("#2c2d2d".into()));
+        assert_eq!(dark.er_row_even.as_ref().map(css), Some("#060606".into()));
+        let default = palette(ThemeName::Default, &[]);
+        assert_eq!(css(&default.actor_border), "#9370db");
+        assert_eq!(css(&default.primary_text), "#131300");
+        let forest = palette(ThemeName::Forest, &[]);
+        assert_eq!(css(&forest.line_color), "#000000");
+        assert_eq!(css(&forest.pie_section_text), "#000000");
+        // primaryBorderColor of the family: mkBorder(#28253D) for redux.
+        assert_eq!(
+            css(&palette(ThemeName::Redux, &[]).primary_border),
+            "#181818"
+        );
+        assert_eq!(
+            css(&palette(ThemeName::NeoDark, &[]).primary_border),
+            "#cccccc"
+        );
+    }
+
+    /// `DUMP_PALETTE=1 cargo test dump_palette -- --nocapture`: our resolved values under
+    /// mermaid's variable names, for diffing against the reference's `themeVariables`.
+    #[test]
+    fn dump_palette() {
+        if std::env::var("DUMP_PALETTE").is_err() {
+            return;
+        }
+        for (name, t) in ThemeName::ALL {
+            let p = palette(t, &[]);
+            let one = |k: &str, c: &Color| println!("{name} {k} {}", c.css());
+            for (prefix, set) in [
+                ("cScale", &p.scale),
+                ("cScalePeer", &p.scale_peer),
+                ("cScaleInv", &p.scale_inv),
+                ("cScaleLabel", &p.scale_text),
+                ("fillType", &p.fill_type),
+                ("git", &p.git),
+                ("gitInv", &p.git_inv),
+                ("gitBranchLabel", &p.git_branch_label),
+            ] {
+                for (i, c) in set.iter().enumerate() {
+                    one(&format!("{prefix}{i}"), c);
+                }
+            }
+            for (i, c) in p.pie_colors.iter().enumerate() {
+                one(&format!("pie{}", i + 1), c);
+            }
+            for (k, c) in [
+                ("pieTitleTextColor", &p.pie_title_text),
+                ("pieSectionTextColor", &p.pie_section_text),
+                ("pieLegendTextColor", &p.pie_legend_text),
+                ("pieStrokeColor", &p.pie_stroke),
+                ("pieOuterStrokeColor", &p.pie_outer_stroke),
+                ("textColor", &p.text_color),
+                ("titleColor", &p.title_color),
+                ("mainBkg", &p.main_bkg),
+                ("nodeBorder", &p.node_border),
+                ("nodeTextColor", &p.node_text),
+                ("lineColor", &p.line_color),
+                ("clusterBkg", &p.cluster_bkg),
+                ("clusterBorder", &p.cluster_border),
+                ("edgeLabelBackground", &p.edge_label_background),
+                ("actorBkg", &p.actor_bkg),
+                ("actorBorder", &p.actor_border),
+                ("actorTextColor", &p.actor_text),
+                ("actorLineColor", &p.actor_line),
+                ("signalColor", &p.signal_color),
+                ("signalTextColor", &p.signal_text),
+                ("labelBoxBkgColor", &p.label_box_bkg),
+                ("labelBoxBorderColor", &p.label_box_border),
+                ("labelTextColor", &p.label_text),
+                ("loopTextColor", &p.loop_text),
+                ("noteBkgColor", &p.note_bkg),
+                ("noteBorderColor", &p.note_border),
+                ("noteTextColor", &p.note_text),
+                ("activationBkgColor", &p.activation_bkg),
+                ("activationBorderColor", &p.activation_border),
+                ("sequenceNumberColor", &p.sequence_number),
+                ("specialStateColor", &p.special_state),
+                ("background", &p.background),
+            ] {
+                one(k, c);
+            }
+        }
     }
 }

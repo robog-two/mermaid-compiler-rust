@@ -286,11 +286,8 @@ pub fn closed_round_curve(pts: &[Point], tension: f64) -> Vec<PathCmd> {
     cmds
 }
 
-fn darker(c: &Color, dark: bool) -> Color {
-    crate::color::parse(c.css())
-        .map(|rgba| Color::new(rgba.lighten(if dark { 15.0 } else { -25.0 }).to_hex()))
-        .unwrap_or_else(|| c.clone())
-}
+/// theme-*.js `radar.graticuleColor` default.
+const GRATICULE: &str = "#DEDEDE";
 
 /// Render a `radar-beta` diagram body (already preprocessed).
 pub fn render(
@@ -344,9 +341,10 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     bounds.add_rect(Rect::new(0.0, 0.0, total_w, total_h));
     let axis_c = pal.line_color.clone();
 
-    // Graticule.
+    // Graticule: `.radarGraticule` fills `graticuleColor` at fill-opacity 0.3 and
+    // strokes it at full opacity (drawn as a fill and an outline).
     let mut grat = Vec::new();
-    let gp = Paint::both(&pal.main_bkg, &axis_c, 1.0).with_opacity(0.3);
+    let grat_c = Color::new(GRATICULE);
     for t in (1..=radar.ticks).rev() {
         let r = radius * t as f64 / radar.ticks as f64;
         let geom = match radar.graticule {
@@ -356,7 +354,12 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             }
             Graticule::Polygon => Geometry::Circle { c: center, r },
         };
-        grat.push(Element::classed_shape(geom, gp.clone(), "radarGraticule"));
+        grat.push(Element::classed_shape(
+            geom.clone(),
+            Paint::fill(&grat_c).with_opacity(0.3),
+            "radarGraticule",
+        ));
+        grat.push(Element::shape(geom, Paint::stroke(&grat_c, 1.0)));
     }
     els.push(Element::group("graticule", grat));
 
@@ -365,7 +368,8 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     for (i, a) in radar.axes.iter().enumerate() {
         axes.push(Element::classed_shape(
             Geometry::Path(geom::polyline(&[center, at(i, radius * axis_scale)])),
-            Paint::stroke(&axis_c, 1.0),
+            // `axisStrokeWidth` 2.
+            Paint::stroke(&axis_c, 2.0),
             "radarAxisLine",
         ));
         let p = at(i, radius * axis_scale * label_factor);
@@ -425,7 +429,8 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         ));
         curves.push(Element::shape(
             Geometry::Path(path),
-            Paint::stroke(&darker(&col, pal.dark), 2.0),
+            // `.radarCurve-N`: `cScaleN` fill (opacity 0.5) and stroke, width 2.
+            Paint::stroke(&col, 2.0),
         ));
     }
     els.push(Element::group("curves", curves));
@@ -446,8 +451,9 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             items.push(Element::rect(
                 r,
                 0.0,
-                Paint::both(&col, &darker(&col, pal.dark), 1.0),
+                Paint::fill(&col).with_opacity(curve_opacity),
             ));
+            items.push(Element::rect(r, 0.0, Paint::stroke(&col, 1.0)));
             let t = text_at(
                 lp.x + ox,
                 lp.y + oy,
@@ -470,7 +476,8 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             &tb.lines,
             pal.font_size,
             tb.line_height,
-            &pal.title_color,
+            // `.radarTitle` sets only `color`; the SVG text inherits `fill: textColor`.
+            &pal.text_color,
         );
         bounds.add_rect(text_bounds(&txt));
         els.push(Element::classed_text(txt, "radarTitle"));

@@ -760,7 +760,8 @@ pub fn render(
             LinkColor::Fixed(c) => link_els.push(full(&Color::new(c.clone()))),
             LinkColor::Gradient => {
                 // Approximate the SVG gradient with colour-interpolated slices. Slices
-                // are opaque, toned toward the background (≈ 50% alpha), so their
+                // are opaque, toned 50% toward white (`stroke-opacity: 0.5` over mmdc's
+                // default white page; the theme `background` is not painted), so their
                 // slight overlaps leave no seams.
                 const SLICES: usize = 16;
                 let mut parts = Vec::new();
@@ -785,7 +786,7 @@ pub fn render(
                     };
                     parts.push(Element::shape(
                         crate::scene::Geometry::Path(ribbon(x0, l.y0, x1, l.y1, l.width, t0, t1o)),
-                        Paint::fill(&mix(&mix(&sc, &tc, f), &pal.background, 0.5)),
+                        Paint::fill(&mix(&mix(&sc, &tc, f), &Color::new("#ffffff"), 0.5)),
                     ));
                 }
                 link_els.push(Element::group("link", parts));
@@ -839,13 +840,7 @@ pub fn render(
             anchor,
             &pal.text_color,
         );
-        // A soft backdrop keeps labels legible where they cross ribbons.
-        let tb = text_bounds(&t);
-        label_els.push(Element::rect(
-            tb.pad(2.0),
-            3.0,
-            Paint::fill(&pal.background).with_opacity(0.55),
-        ));
+        // `labelStyle: legacy` (the default): bare text in the root's `textColor`.
         bounds.add_rect(text_bounds(&t));
         label_els.push(Element::classed_text(t, "node-label"));
     }

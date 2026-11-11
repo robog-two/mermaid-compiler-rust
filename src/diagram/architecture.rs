@@ -984,16 +984,13 @@ fn shift_item(d: &Architecture, lay: &mut Layout, it: Item, dv: Point) {
 
 // ---------------------------------------------------------------- drawing
 
-/// `archGroupBorderColor`: the theme's `primaryBorderColor`, i.e. mermaid's
-/// `mkBorder(primaryColor)` (saturation -40, lightness -10 / +10 when dark).
+/// `archGroupBorderColor`: the theme constructor's `primaryBorderColor` (the dark
+/// themes' `invert(background)`), and `#000` in theme-base.js.
 fn group_border_color(pal: &Palette) -> Color {
-    match crate::color::parse(&pal.main_bkg.0) {
-        Some(c) => Color::new(
-            c.adjust_hsl(0.0, -40.0, if pal.dark { 10.0 } else { -10.0 })
-                .to_hex(),
-        ),
-        None => pal.node_border.clone(),
+    if pal.theme == crate::theme::ThemeName::Base {
+        return Color::new("#000");
     }
+    pal.primary_border.clone()
 }
 
 fn port(r: &Rect, side: Side) -> Point {
@@ -1353,21 +1350,22 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
         });
         if let Some(b) = e.label.as_ref().map(|l| TextBlock::label(l, font)) {
             if !b.is_empty() {
-                let at = midpoint(&pts);
+                // `createText` at the midpoint with `dy: 1em`: the label hangs just
+                // below the edge rather than covering it.
+                let mid = midpoint(&pts);
+                let at = Point::new(mid.x, mid.y + b.height / 2.0);
                 let r = Rect::centered(at, b.width + 6.0, b.height);
                 bounds.add_rect(r);
                 label_els.push(Element::group(
                     "edgeLabel",
-                    vec![
-                        Element::rect(r, 0.0, Paint::fill(&pal.background)),
-                        Element::text(Text::centered(
-                            at,
-                            &b.lines,
-                            font,
-                            b.line_height,
-                            &pal.text_color,
-                        )),
-                    ],
+                    // Upstream's edge labels have no background box.
+                    vec![Element::text(Text::centered(
+                        at,
+                        &b.lines,
+                        font,
+                        b.line_height,
+                        &pal.text_color,
+                    ))],
                 ));
             }
         }

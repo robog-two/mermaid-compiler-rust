@@ -262,48 +262,55 @@ fn colors(cfg: &MermaidConfig, pal: &Palette) -> QuadColors {
             .find(|(n, _)| n == k)
             .map(|(_, v)| Color::new(v.trim()))
     };
-    let base = color::parse(pal.main_bkg.css());
-    let adj = |d: f64| {
-        base.map(|c| Color::new(c.lighten(d).to_hex()))
-            .unwrap_or_else(|| pal.main_bkg.clone())
+    // The theme files: `quadrantNFill = adjust(primaryColor, { r, g, b: 5(N-1) })`,
+    // `quadrantNTextFill = adjust(primaryTextColor, { r, g, b: -5(N-1) })`.
+    let rgb_step = |c: &Color, d: f64| -> Color {
+        color::parse(c.css()).map_or_else(
+            || c.clone(),
+            |x| {
+                let ch = |v: u8| (v as f64 + d).round().clamp(0.0, 255.0) as u8;
+                Color::new(
+                    color::Rgba {
+                        r: ch(x.r),
+                        g: ch(x.g),
+                        b: ch(x.b),
+                        a: x.a,
+                    }
+                    .to_hex(),
+                )
+            },
+        )
     };
-    let q1 = var("quadrant1Fill").unwrap_or_else(|| pal.main_bkg.clone());
+    let q1 = var("quadrant1Fill").unwrap_or_else(|| pal.quadrant_fill.clone());
     let fills = [
-        q1.clone(),
-        var("quadrant2Fill").unwrap_or_else(|| adj(if pal.dark { 3.0 } else { 1.0 })),
-        var("quadrant3Fill").unwrap_or_else(|| adj(if pal.dark { 6.0 } else { 2.0 })),
-        var("quadrant4Fill").unwrap_or_else(|| adj(if pal.dark { 9.0 } else { 3.0 })),
+        q1,
+        var("quadrant2Fill").unwrap_or_else(|| rgb_step(&pal.quadrant_fill, 5.0)),
+        var("quadrant3Fill").unwrap_or_else(|| rgb_step(&pal.quadrant_fill, 10.0)),
+        var("quadrant4Fill").unwrap_or_else(|| rgb_step(&pal.quadrant_fill, 15.0)),
     ];
-    let t = |k: &str| var(k).unwrap_or_else(|| pal.text_color.clone());
-    let point = var("quadrantPointFill").unwrap_or_else(|| {
-        color::parse(q1.css())
-            .map(|c| {
-                let c = if c.is_dark() {
-                    c.lighten(30.0)
-                } else {
-                    c.lighten(-30.0)
-                };
-                Color::new(c.to_hex())
-            })
-            .unwrap_or_else(|| pal.node_border.clone())
-    });
+    let text = &pal.primary_text;
+    let t = |k: &str, d: f64| var(k).unwrap_or_else(|| rgb_step(text, d));
+    // `quadrantPointFill = x || isDark(q1) ? lighten(q1) : darken(q1)` parses as
+    // `(x || isDark(q1)) ? ...`, and khroma's lighten/darken without an amount yield
+    // `hsl(.., NaN%)`: an invalid fill attribute, so the point inherits the root's
+    // `fill: textColor`. A user-supplied value is copied back over it afterwards.
+    let point = var("quadrantPointFill").unwrap_or_else(|| pal.text_color.clone());
+    let border = |k: &str| var(k).unwrap_or_else(|| pal.primary_border.clone());
     QuadColors {
         fills,
         texts: [
-            t("quadrant1TextFill"),
-            t("quadrant2TextFill"),
-            t("quadrant3TextFill"),
-            t("quadrant4TextFill"),
+            t("quadrant1TextFill", 0.0),
+            t("quadrant2TextFill", -5.0),
+            t("quadrant3TextFill", -10.0),
+            t("quadrant4TextFill", -15.0),
         ],
         point,
-        point_text: t("quadrantPointTextFill"),
-        x_text: t("quadrantXAxisTextFill"),
-        y_text: t("quadrantYAxisTextFill"),
-        internal: var("quadrantInternalBorderStrokeFill")
-            .unwrap_or_else(|| pal.node_border.clone()),
-        external: var("quadrantExternalBorderStrokeFill")
-            .unwrap_or_else(|| pal.node_border.clone()),
-        title: var("quadrantTitleFill").unwrap_or_else(|| pal.title_color.clone()),
+        point_text: t("quadrantPointTextFill", 0.0),
+        x_text: t("quadrantXAxisTextFill", 0.0),
+        y_text: t("quadrantYAxisTextFill", 0.0),
+        internal: border("quadrantInternalBorderStrokeFill"),
+        external: border("quadrantExternalBorderStrokeFill"),
+        title: t("quadrantTitleFill", 0.0),
     }
 }
 
@@ -738,5 +745,24 @@ mod tests {
             rot.iter().all(|(_, a, _)| (a.x - 479.0).abs() < 1e-9),
             "{rot:?}"
         );
+    }
+
+    #[test]
+    fn theme_colors_follow_upstream() {
+        let css = |c: &Color| c.css().to_ascii_lowercase();
+        let cfg = MermaidConfig::default();
+        let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let q = colors(&cfg, &pal);
+        // adjust(primaryColor #ECECFF, { r, g, b: +5 }), adjust(#131300, -5).
+        assert_eq!(css(&q.fills[1]), "#f1f1ff");
+        assert_eq!(css(&q.texts[3]), "#040400");
+        // The NaN `quadrantPointFill` falls back to the root `textColor`.
+        assert_eq!(css(&q.point), "#333");
+        assert_eq!(css(&q.external), "hsl(240, 60%, 86.2745098039%)");
+        let rc = crate::theme::palette(crate::theme::ThemeName::ReduxColor, &[]);
+        let q = colors(&cfg, &rc);
+        assert_eq!(css(&q.fills[0]), "#ececfe");
+        assert_eq!(css(&q.internal), "#181818"); // hsl(247.5, 0%, 9.2157%)
+        assert_eq!(css(&q.point), "#28253d");
     }
 }

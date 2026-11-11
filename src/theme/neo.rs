@@ -10,6 +10,7 @@
 //! * the dark variants' `edgeLabelBackground` is the plain `secondaryColor` for the
 //!   same reason.
 
+use super::classic::{self, K, LIMIT, Vars, git_inverses, scale_invert_peer, scale_labels};
 use super::{CategoricalPalette, DropShadow, Palette, ThemeName};
 use crate::color::{self, Rgba};
 use crate::scene::Color;
@@ -74,44 +75,191 @@ const COLOR_SCALE: [&str; 12] = [
     "#a3b3ff", "#bbf451", "#74d4ff", "#ffa1ad",
 ];
 
-/// mermaid's twelve-entry pie/cScale recipe from a primary/secondary/tertiary triple.
-fn pie_from(p: Rgba, s: Rgba, t: Rgba) -> Vec<Color> {
-    [
-        p,
-        s,
-        t,
-        p.adjust_hsl(0.0, 0.0, -10.0),
-        s.adjust_hsl(0.0, 0.0, -10.0),
-        t.adjust_hsl(0.0, 0.0, -10.0),
-        p.adjust_hsl(60.0, 0.0, -10.0),
-        p.adjust_hsl(-60.0, 0.0, -10.0),
-        p.adjust_hsl(120.0, 0.0, 0.0),
-        p.adjust_hsl(60.0, 0.0, -20.0),
-        p.adjust_hsl(-60.0, 0.0, -20.0),
-        p.adjust_hsl(120.0, 0.0, -10.0),
-    ]
-    .into_iter()
-    .map(hex)
-    .collect()
+/// `journeyFills` of `redux-dark-color` (Tailwind 900 shades).
+const DARK_JOURNEY_FILLS: [&str; 8] = [
+    "#701a75", "#134e4a", "#7c2d12", "#581c87", "#14532d", "#4c1d95", "#7f1d1d", "#713f12",
+];
+
+/// `neo-dark`'s fixed `git0..7` (lightened by 25: it sets `gitDarkMode = true`).
+const NEO_DARK_GIT: [&str; 8] = [
+    "#0b0000", "#4d1037", "#3f5258", "#4f2f1b", "#6e0a0a", "#3b0048", "#995a01", "#154706",
+];
+
+/// The theme object's constructor values that `updateColors()` reads for the section
+/// colour sets (`cScale*`, `fillType*`, `git*`, `pie*`).
+pub(super) fn section_init(theme: ThemeName, v: &mut Vars) {
+    if Variant::of(theme).dark {
+        let p = hexk("#1f2020");
+        v.set("primaryColor", p);
+        v.set("secondaryColor", p.lighten(16.0));
+        v.set("tertiaryColor", p.hue(-160.0));
+        v.set("primaryTextColor", p.invert());
+    } else {
+        v.set("primaryColor", hexk("#cccccc"));
+        v.set("mainBkg", hexk("#ffffff"));
+        v.set("tertiaryColor", hexk("#ffffff"));
+    }
 }
 
-/// `cScale0..11` from a primary/secondary/tertiary triple (before any darkening).
-fn scale_from(p: Rgba, s: Rgba, t: Rgba) -> Vec<Rgba> {
-    let mut v = vec![p, s, t];
-    for (h, l) in [
-        (30.0, 0.0),
-        (60.0, 0.0),
-        (90.0, 0.0),
-        (120.0, 0.0),
-        (150.0, 0.0),
-        (210.0, 150.0),
-        (270.0, 0.0),
-        (300.0, 0.0),
-        (330.0, 0.0),
-    ] {
-        v.push(p.adjust_hsl(h, 0.0, l));
+/// The light themes' gantt-block locals (`primaryColor`, `secondaryColor`,
+/// `tertiaryColor` consts) or the dark themes' own `this.*` triple.
+fn triple(v: &Vars, dark: bool) -> (K, K, K) {
+    if dark {
+        (
+            v.c("primaryColor"),
+            v.c("secondaryColor"),
+            v.c("tertiaryColor"),
+        )
+    } else {
+        let p = hexk("#ECECFE");
+        (p, hexk("#E9E9F1"), p.adjust(180.0, 0.0, 5.0))
     }
-    v
+}
+
+/// `updateColors()` of one family member, restricted to the section colour sets.
+pub(super) fn section_update(theme: ThemeName, v: &mut Vars) {
+    let var = Variant::of(theme);
+    let dm = v.dark_mode;
+    let text = if dm {
+        "#eee"
+    } else if var.redux {
+        if var.dark { "#FFFFFF" } else { "#28253D" }
+    } else {
+        "#333"
+    };
+    v.or("primaryTextColor", |_| hexk(text));
+    v.or("actorTextColor", |v| v.c("primaryTextColor"));
+    v.or("labelTextColor", |v| v.c("actorTextColor"));
+    let (p, s, t) = triple(v, var.dark);
+
+    // cScale0..11.
+    if var.color {
+        for (i, c) in COLOR_SCALE.iter().enumerate() {
+            v.or(format!("cScale{i}"), |_| hexk(c));
+        }
+    } else {
+        if var.redux && !var.dark {
+            // theme-redux.js: plain assignment, every slot is `mainBkg`.
+            let m = v.c("mainBkg");
+            for i in 0..LIMIT {
+                v.set(format!("cScale{i}"), m);
+            }
+        } else {
+            v.or("cScale0", |_| p);
+            v.or("cScale1", |_| s);
+            v.or("cScale2", |_| t);
+            for (i, h) in [30.0, 60.0, 90.0, 120.0, 150.0, 210.0, 270.0, 300.0, 330.0]
+                .iter()
+                .enumerate()
+            {
+                let l = if i + 3 == 8 { 150.0 } else { 0.0 };
+                v.or(format!("cScale{}", i + 3), |_| p.adjust(*h, 0.0, l));
+            }
+        }
+        for i in 0..LIMIT {
+            let c = v.n("cScale", i).darken(if dm { 75.0 } else { 25.0 });
+            v.set(format!("cScale{i}"), c);
+        }
+    }
+    scale_invert_peer(v, dm);
+    if var.color && var.dark {
+        // theme-redux-dark-color.js: unguarded `darken(cScaleN, 75)`.
+        for i in 0..LIMIT {
+            let c = v.n("cScale", i).darken(75.0);
+            v.set(format!("cScaleLabel{i}"), c);
+        }
+    } else {
+        let label = v
+            .get("scaleLabelColor")
+            .unwrap_or_else(|| v.c("labelTextColor"));
+        scale_labels(v, label);
+    }
+
+    // fillType0..7.
+    for i in 0..8 {
+        let c = match (var.color, var.dark) {
+            (true, false) => hexk(BKG_COLORS[i]),
+            (true, true) => hexk(DARK_JOURNEY_FILLS[i]),
+            _ => {
+                let (fp, fs, _) = triple(v, var.dark);
+                let base = if i % 2 == 0 { fp } else { fs };
+                base.hue([0.0, 0.0, 64.0, 64.0, -64.0, -64.0, 128.0, 128.0][i])
+            }
+        };
+        v.or(format!("fillType{i}"), |_| c);
+    }
+
+    // git0..7.
+    let (gp, gs, gt) = if var.dark && !var.redux {
+        (
+            hexk(NEO_DARK_GIT[0]),
+            hexk(NEO_DARK_GIT[1]),
+            hexk(NEO_DARK_GIT[2]),
+        )
+    } else {
+        (p, s, t)
+    };
+    v.or("git0", |_| gp);
+    v.or("git1", |_| gs);
+    v.or("git2", |_| gt);
+    for (i, h) in [-30.0, -60.0, -90.0, 60.0, 120.0].iter().enumerate() {
+        let c = if var.dark && !var.redux {
+            hexk(NEO_DARK_GIT[i + 3])
+        } else {
+            p.hue(*h)
+        };
+        v.or(format!("git{}", i + 3), |_| c);
+    }
+    let git_lighten = dm || (var.dark && !var.redux);
+    for i in 0..8 {
+        let g = v.n("git", i);
+        let g = if git_lighten {
+            g.lighten(25.0)
+        } else {
+            g.darken(25.0)
+        };
+        v.set(format!("git{i}"), g);
+    }
+    git_inverses(v);
+    let branch = v.get("branchLabelColor").unwrap_or_else(|| {
+        if dm {
+            hexk("black")
+        } else {
+            v.c("labelTextColor")
+        }
+    });
+    for i in 0..8 {
+        v.or(format!("gitBranchLabel{i}"), |_| branch);
+    }
+
+    // pie1..12 (kept under the engine's `pieN` keys).
+    if var.color {
+        for i in 0..LIMIT {
+            v.or(format!("pie{}", i + 1), |v| v.n("cScale", i));
+        }
+    } else {
+        let list = [
+            p,
+            s,
+            t,
+            p.adjust(0.0, 0.0, -10.0),
+            s.adjust(0.0, 0.0, -10.0),
+            t.adjust(0.0, 0.0, -10.0),
+            p.adjust(60.0, 0.0, -10.0),
+            p.adjust(-60.0, 0.0, -10.0),
+            p.adjust(120.0, 0.0, 0.0),
+            p.adjust(60.0, 0.0, -20.0),
+            p.adjust(-60.0, 0.0, -20.0),
+            p.adjust(120.0, 0.0, -10.0),
+        ];
+        for (i, c) in list.into_iter().enumerate() {
+            v.or(format!("pie{}", i + 1), |_| c);
+        }
+    }
+}
+
+fn hexk(s: &str) -> K {
+    classic::hex(s)
 }
 
 /// Build the palette for one of the six family members. `base` supplies the fields this
@@ -120,11 +268,6 @@ fn scale_from(p: Rgba, s: Rgba, t: Rgba) -> Vec<Rgba> {
 pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
     let v = Variant::of(theme);
     let mut p = base;
-
-    // Gantt-block locals of the light themes, also used by their pie and neo cScale.
-    let g_primary = rgb("#ECECFE");
-    let g_secondary = rgb("#E9E9F1");
-    let g_tertiary = g_primary.adjust_hsl(180.0, 0.0, 5.0);
 
     p.font_family = if v.redux {
         "\"Recursive Variable\", arial, sans-serif".into()
@@ -159,6 +302,9 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         p.background = hex(background);
         p.main_bkg = hex(main_bkg);
         p.node_border = c(node_border);
+        p.quadrant_fill = c("#ECECFE");
+        p.primary_text = c(primary_text);
+        p.primary_border = hex(primary_border);
         p.node_text = c(primary_text);
         p.line_color = hex(line);
         p.text_color = c(primary_text);
@@ -194,27 +340,14 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         p.activation_border = hex(secondary.darken(10.0));
         p.sequence_number = hex(line.invert());
         p.special_state = hex(line);
-        p.scale = if v.color {
-            COLOR_SCALE.iter().map(|s| c(s)).collect()
-        } else if v.redux {
-            vec![hex(main_bkg.darken(25.0)); 12]
-        } else {
-            scale_from(g_primary, g_secondary, g_tertiary)
-                .into_iter()
-                .map(|x| hex(x.darken(25.0)))
-                .collect()
-        };
-        p.pie_colors = if v.color {
-            p.scale.clone()
-        } else {
-            pie_from(g_primary, g_secondary, g_tertiary)
-        };
+        // cScale*, pie*, ...: `section_update`.
         p.pie_section_text = c(primary_text);
         p.color_slots = v.color.then(|| CategoricalPalette {
             border: BORDER_COLORS.iter().map(|s| c(s)).collect(),
             bkg: BKG_COLORS.iter().map(|s| c(s)).collect(),
         });
         p.er_edge_label_background = v.color.then(|| c("#FFFFFF"));
+        p.requirement_edge_label_background = v.redux.then(|| c("#FFFFFF"));
     } else {
         let background = rgb("#333");
         let primary = rgb("#1f2020");
@@ -239,6 +372,9 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         p.background = hex(background);
         p.main_bkg = hex(main_bkg);
         p.node_border = node_border;
+        p.quadrant_fill = hex(primary);
+        p.primary_text = hex(primary_text);
+        p.primary_border = hex(primary_border);
         p.node_text = hex(primary_text);
         p.line_color = hex(line);
         p.text_color = text.clone();
@@ -277,25 +413,14 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         p.activation_border = hex(secondary.darken(10.0));
         p.sequence_number = hex(line.invert());
         p.special_state = hex(line);
-        p.scale = if v.color {
-            COLOR_SCALE.iter().map(|s| c(s)).collect()
-        } else {
-            scale_from(primary, secondary, tertiary)
-                .into_iter()
-                .map(|x| hex(x.darken(25.0)))
-                .collect()
-        };
-        p.pie_colors = if v.color {
-            p.scale.clone()
-        } else {
-            pie_from(primary, secondary, tertiary)
-        };
+        // cScale*, pie*, ...: `section_update`.
         p.pie_section_text = if v.color { c("#28253D") } else { text.clone() };
         p.color_slots = v.color.then(|| CategoricalPalette {
             border: BORDER_COLORS.iter().map(|s| c(s)).collect(),
             bkg: Vec::new(),
         });
         p.er_edge_label_background = v.color.then(|| c("#16141F"));
+        p.requirement_edge_label_background = v.redux.then(|| c("#16141F"));
     }
     p.pie_stroke = c("black");
     p.pie_outer_stroke = c("black");
@@ -432,6 +557,95 @@ mod tests {
         assert_eq!(
             d.er_edge_label_background.as_ref().map(css),
             Some("#16141f".into())
+        );
+    }
+
+    /// Section colour sets checked against mermaid 12.3.0's resolved `themeVariables`
+    /// (rendered per theme in the reference renderer).
+    #[test]
+    fn section_colors_match_upstream() {
+        let keys = [
+            "cScale1",
+            "cScale8",
+            "cScalePeer1",
+            "cScaleInv2",
+            "cScaleLabel0",
+            "fillType2",
+            "fillType7",
+            "git0",
+            "git3",
+            "gitInv1",
+            "gitBranchLabel0",
+        ];
+        let expect: [(ThemeName, [&str; 11]); 6] = [
+            (
+                ThemeName::Neo,
+                [
+                    "#9b9bbf", "#bff986", "#7c7cac", "#060679", "#333333", "#feecfd", "#f1eae9",
+                    "#7373f8", "#73b5f8", "#646440", "#333333",
+                ],
+            ),
+            (
+                ThemeName::NeoDark,
+                [
+                    "#080909", "#c0bfbe", "#000000", "#ffffff", "#e0dfdf", "#1f1f20", "#494749",
+                    "#8b0000", "#ae683b", "#48d97d", "#e0dfdf",
+                ],
+            ),
+            (
+                ThemeName::Redux,
+                [
+                    "#bfbfbf", "#bfbfbf", "#a6a6a6", "#404040", "#28253d", "#feecfd", "#f1eae9",
+                    "#7373f8", "#73b5f8", "#646440", "#28253d",
+                ],
+            ),
+            (
+                ThemeName::ReduxDark,
+                [
+                    "#080909", "#c0bfbe", "#000000", "#ffffff", "#e0dfdf", "#1f1f20", "#494749",
+                    "#000000", "#000000", "#f7f6f6", "#e0dfdf",
+                ],
+            ),
+            (
+                ThemeName::ReduxColor,
+                [
+                    "#46ecd5", "#a3b3ff", "#18e7cb", "#004795", "#28253d", "#fff7ed", "#fefce8",
+                    "#7373f8", "#73b5f8", "#646440", "#28253d",
+                ],
+            ),
+            (
+                ThemeName::ReduxDarkColor,
+                [
+                    "#46ecd5", "#a3b3ff", "#18e7cb", "#004795", "#230028", "#7c2d12", "#713f12",
+                    "#000000", "#000000", "#f7f6f6", "#e0dfdf",
+                ],
+            ),
+        ];
+        for (theme, want) in expect {
+            let p = build(theme, &[]);
+            for (key, want) in keys.iter().zip(want) {
+                let (prefix, i) = key.split_at(key.find(|c: char| c.is_ascii_digit()).unwrap());
+                let i: usize = i.parse().unwrap();
+                let set = match prefix {
+                    "cScale" => &p.scale,
+                    "cScalePeer" => &p.scale_peer,
+                    "cScaleInv" => &p.scale_inv,
+                    "cScaleLabel" => &p.scale_text,
+                    "fillType" => &p.fill_type,
+                    "git" => &p.git,
+                    "gitInv" => &p.git_inv,
+                    "gitBranchLabel" => &p.git_branch_label,
+                    _ => unreachable!(),
+                };
+                assert_eq!(css(&set[i]), want, "{theme:?} {key}");
+            }
+        }
+        // pieN: the neo light themes use their gantt-block locals, the colour themes
+        // reuse cScale.
+        assert_eq!(css(&build(ThemeName::Neo, &[]).pie_colors[2]), "#ffffff");
+        assert_eq!(
+            css(&build(ThemeName::ReduxDarkColor, &[]).pie_colors[1]),
+            "#46ecd5"
         );
     }
 
