@@ -68,7 +68,7 @@ compare the two directly.
 | Block (`block-beta`) | port of mermaid's block layout | nested `block:id:span`, `columns`, `space:N`, shapes, block arrows, edges, styles/classes |
 | Packet (`packet-beta`) | **Taffy** CSS grid | bit ranges, `+N`, row splitting |
 | C4 (`C4Context/Container/Component/Dynamic/Deployment`) | **Taffy** flex/wrap | unified shapes (person, cylinder, queue), Structurizr type lines, boundaries, all element/rel kinds, curved rels, style updates |
-| xychart (`xychart-beta`) | geometry | bars/lines, horizontal, auto "nice" axes |
+| xychart (`xychart-beta`) | port of mermaid's chartBuilder (d3 band/linear scales) | bar and line series, horizontal, numeric/category x-axis, legend, data and point labels, axis toggles and label rotation, themes |
 | Quadrant (`quadrantChart`) | geometry | points with styles/classes |
 | Radar (`radar-beta`) | geometry | circle/polygon graticule, legend |
 | Sankey (`sankey-beta`) | sankey (d3-style) | CSV input, relaxation, link colouring |
