@@ -16,9 +16,29 @@ use crate::scene::DiagramKind;
 use crate::theme::ColorSlot;
 use std::collections::HashMap;
 
+/// Dash pattern of an animated edge (flowchart `styles.ts`: `.edge-animation-fast`,
+/// `.edge-animation-slow { stroke-dasharray: 9,5 !important }`).
+pub(crate) const ANIMATED_DASH: [f64; 2] = [9.0, 5.0];
+
+/// Config that changes how a flowchart is parsed (flowDb reads it while parsing).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParseOptions {
+    /// `flowchart.inheritDir`: a subgraph without its own `direction` takes the
+    /// diagram's, instead of having none.
+    pub inherit_dir: bool,
+}
+
 /// Parse a preprocessed flowchart body.
 pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
-    let mut b = Builder::default();
+    parse_with(body, title, ParseOptions::default())
+}
+
+/// [`parse`] with explicit [`ParseOptions`].
+pub fn parse_with(body: &str, title: Option<String>, opts: ParseOptions) -> Result<GraphDiagram> {
+    let mut b = Builder {
+        inherit_dir: opts.inherit_dir,
+        ..Builder::default()
+    };
     let mut header_seen = false;
     let mut direction = Direction::TopBottom;
     for (line, stmt) in statements(body) {
@@ -38,6 +58,8 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
                         format!("{stmt}\nInvalid direction '{d}', expecting TB, TD, BT, RL or LR"),
                     )
                 })?;
+                // flowDb's `getDirection()` is unset without a header direction.
+                b.root_dir = Some(direction);
             }
             header_seen = true;
             continue;
@@ -64,6 +86,20 @@ struct Builder {
     unnamed: Vec<ClusterId>,
     /// flowDb's `subCount`: bumped by every subgraph as it closes.
     sub_count: usize,
+    /// Per cluster: closed at least once (only then is its id in flowDb's
+    /// `subGraphLookup`, so `id@{ … }` addresses the subgraph rather than a vertex).
+    closed: Vec<bool>,
+    /// Per cluster: `@{ view: collapsed }` (the last `view` given wins).
+    collapsed: Vec<bool>,
+    /// The diagram direction from the header (`inheritDir` hands it to subgraphs).
+    root_dir: Option<Direction>,
+    inherit_dir: bool,
+    /// User edge ids (`A e1@--> B`).
+    edge_ids: HashMap<String, Vec<usize>>,
+    /// Edges with `animate: true` / `animation: …` metadata (indices into `edges`).
+    animated_edges: Vec<usize>,
+    /// `classDef`s that declare an `animation`.
+    animated_classes: std::collections::HashSet<String>,
     edges: Vec<Edge>,
     class_defs: HashMap<String, StyleOverrides>,
     node_styles: Vec<(String, StyleOverrides)>,
@@ -96,18 +132,29 @@ impl Builder {
                 Ok(())
             }
             "direction" => {
-                // Only a subgraph's own `direction` matters (the last one wins).
+                // Only a subgraph's own `direction` matters (the last one wins). A
+                // repeated id keeps the direction of its first declaration.
                 if let (Some(&c), Some(d)) = (self.stack.last(), Direction::parse(rest)) {
-                    self.clusters[c.0].direction = Some(d);
+                    if !self.closed[c.0] {
+                        self.clusters[c.0].direction = Some(d);
+                    }
                 }
                 Ok(())
             }
             "classDef" => {
                 let (names, style) = split_first_word(rest);
                 let st = StyleOverrides::parse(style);
+                let animated = style.split([',', ';']).any(|kv| {
+                    kv.split(':')
+                        .next()
+                        .is_some_and(|k| k.trim() == "animation")
+                });
                 for n in names.split(',') {
                     let e = self.class_defs.entry(n.trim().to_string()).or_default();
                     *e = e.merged(&st);
+                    if animated {
+                        self.animated_classes.insert(n.trim().to_string());
+                    }
                 }
                 Ok(())
             }
@@ -162,6 +209,8 @@ impl Builder {
                 // as flowDb's `declarationIndex` assigns `colorIndex`.
                 c.color_slot = Some(ColorSlot(self.clusters.len()));
                 self.clusters.push(c);
+                self.closed.push(false);
+                self.collapsed.push(false);
                 let ci = self.clusters.len() - 1;
                 match id {
                     Some(id) => {
@@ -185,11 +234,48 @@ impl Builder {
             self.clusters[c.0].id = id.clone();
             self.cluster_index.entry(id).or_insert(c.0);
         }
+        if !self.closed[c.0] {
+            self.closed[c.0] = true;
+            if self.inherit_dir && self.clusters[c.0].direction.is_none() {
+                self.clusters[c.0].direction = self.root_dir;
+            }
+        }
         self.sub_count += 1;
     }
 
     /// Register / update a node and place it in the current subgraph.
-    fn touch(&mut self, id: &str, shape: Option<(Shape, String)>, class: Option<String>) -> usize {
+    fn touch(
+        &mut self,
+        id: &str,
+        shape: Option<(Shape, String)>,
+        data: Option<ShapeData>,
+        class: Option<String>,
+    ) -> usize {
+        // flowDb's `addVertex`: metadata on a declared subgraph id is the subgraph's
+        // (`sub@{ view: collapsed }`) and does not make it a vertex.
+        let mut shape = shape;
+        if let Some(d) = data {
+            match self.cluster_index.get(id) {
+                Some(&c) if self.closed[c] => {
+                    if let Some(v) = d.view {
+                        self.collapsed[c] = v == "collapsed";
+                    }
+                }
+                _ => {
+                    let label = d.label.unwrap_or_else(|| {
+                        self.index
+                            .get(id)
+                            .map_or_else(|| id.to_string(), |&i| self.nodes[i].label.clone())
+                    });
+                    let s = d.shape.unwrap_or_else(|| {
+                        self.index
+                            .get(id)
+                            .map_or(Shape::Rect, |&i| self.nodes[i].shape)
+                    });
+                    shape = Some((s, label));
+                }
+            }
+        }
         let idx = match self.index.get(id) {
             Some(&i) => i,
             None => {
@@ -242,12 +328,38 @@ impl Builder {
     }
 
     fn chain(&mut self, line: usize, stmt: &str) -> Result<()> {
+        // `e1@{ animate: true }` on a known edge id is edge metadata (flowDb's
+        // `addVertex` routes it to the edge); `animate` / `animation` are drawn, a
+        // per-edge `curve` is not.
+        if let Some((id, body)) = stmt.split_once("@{") {
+            if let Some(ix) = self.edge_ids.get(id.trim()).cloned() {
+                let body = body.trim_end().trim_end_matches('}');
+                let animated = body.split(',').any(|kv| {
+                    kv.split_once(':').is_some_and(|(k, v)| {
+                        let v = v.trim().trim_matches(['"', '\'']);
+                        match k.trim() {
+                            "animate" => v == "true",
+                            "animation" => !v.is_empty(),
+                            _ => false,
+                        }
+                    })
+                });
+                if animated {
+                    self.animated_edges.extend(ix);
+                }
+                return Ok(());
+            }
+        }
         let mut sc = Scanner::new(stmt);
         let mut prev = self.group(&mut sc, line, stmt)?;
         loop {
             sc.ws();
             if sc.done() {
                 break;
+            }
+            let edge_id = sc.link_id();
+            if let Some(id) = &edge_id {
+                self.edge_ids.entry(id.clone()).or_default();
             }
             let col = sc.pos;
             let link = sc.link().ok_or_else(|| {
@@ -268,6 +380,12 @@ impl Builder {
                     e.end = link.end;
                     e.minlen = link.minlen;
                     e.label = link.label.clone();
+                    if let Some(id) = &edge_id {
+                        self.edge_ids
+                            .entry(id.clone())
+                            .or_default()
+                            .push(self.edges.len());
+                    }
                     self.edges.push(e);
                 }
             }
@@ -289,7 +407,7 @@ impl Builder {
                     &format!("Expecting a node id, got '{}'", sc.rest()),
                 ));
             };
-            let idx = self.touch(&r.id, r.shape, r.class);
+            let idx = self.touch(&r.id, r.shape, r.data, r.class);
             out.push((r.id, idx));
             sc.ws();
             if sc.peek() == Some('&') {
@@ -339,6 +457,20 @@ impl Builder {
                         e.style = e.style.merged(st);
                     }
                 }
+            }
+        }
+        // Animated edges (`animate` / `animation` metadata, or a class with an
+        // `animation`) take `.edge-animation-*`'s `stroke-dasharray: 9,5 !important`.
+        for (id, class) in &self.class_assignments {
+            if self.animated_classes.contains(class) {
+                if let Some(ix) = self.edge_ids.get(id) {
+                    self.animated_edges.extend(ix.iter().copied());
+                }
+            }
+        }
+        for &i in &self.animated_edges {
+            if let Some(e) = self.edges.get_mut(i) {
+                e.style.dash = Some(ANIMATED_DASH.to_vec());
             }
         }
         // Subgraph ids used as plain nodes would otherwise render as stray boxes.
@@ -391,14 +523,116 @@ impl Builder {
                 Some(e)
             })
             .collect();
-        Ok(GraphDiagram {
+        let g = GraphDiagram {
             kind: DiagramKind::Flowchart,
             direction,
             nodes,
             edges,
             clusters: self.clusters,
             title,
+        };
+        Ok(collapse(g, &self.collapsed))
+    }
+}
+
+/// flowDb's `getData` for `@{ view: collapsed }` subgraphs: the outermost collapsed
+/// subgraph of a chain becomes one `collapsedGroup` node (its title, style and palette
+/// slot), everything inside it disappears, and edges that cross its border are
+/// redirected to it. An edge that turns into a self-loop only because of that is
+/// dropped; an authored self-loop on the collapsed subgraph is kept.
+fn collapse(g: GraphDiagram, collapsed: &[bool]) -> GraphDiagram {
+    if !collapsed.iter().any(|&c| c) {
+        return g;
+    }
+    let n_clusters = g.clusters.len();
+    // Outermost collapsed ancestor (or self) of every cluster.
+    let folded_into: Vec<Option<usize>> = (0..n_clusters)
+        .map(|c| {
+            let mut out = None;
+            let mut cur = Some(c);
+            for _ in 0..=n_clusters {
+                let Some(k) = cur else { break };
+                if collapsed.get(k).copied().unwrap_or(false) {
+                    out = Some(k);
+                }
+                cur = g.clusters[k].parent.map(|p| p.0);
+            }
+            out
         })
+        .collect();
+    // Surviving clusters, renumbered.
+    let mut cluster_map: Vec<Option<usize>> = vec![None; n_clusters];
+    let mut clusters = Vec::new();
+    for (ci, c) in g.clusters.iter().enumerate() {
+        if folded_into[ci].is_none() {
+            cluster_map[ci] = Some(clusters.len());
+            clusters.push(c.clone());
+        }
+    }
+    for c in &mut clusters {
+        c.parent = c.parent.and_then(|p| cluster_map[p.0]).map(ClusterId);
+    }
+    // getData pushes subgraph nodes (last declared first) before the vertices.
+    let mut nodes = Vec::new();
+    let mut collapsed_node: Vec<Option<usize>> = vec![None; n_clusters];
+    for ci in (0..n_clusters).rev() {
+        if folded_into[ci] != Some(ci) {
+            continue;
+        }
+        let c = &g.clusters[ci];
+        let mut n = Node::new(c.id.clone(), c.title.clone(), Shape::CollapsedGroup);
+        n.cluster = c.parent.and_then(|p| cluster_map[p.0]).map(ClusterId);
+        n.style = c.style.clone();
+        n.color_slot = c.color_slot;
+        collapsed_node[ci] = Some(nodes.len());
+        nodes.push(n);
+    }
+    let mut node_map: Vec<Option<usize>> = vec![None; g.nodes.len()];
+    // Hidden nodes, by the collapsed node standing in for them.
+    let mut hidden_in: Vec<Option<usize>> = vec![None; g.nodes.len()];
+    for (i, n) in g.nodes.iter().enumerate() {
+        match n.cluster.and_then(|c| folded_into[c.0]) {
+            Some(a) => hidden_in[i] = collapsed_node[a],
+            None => {
+                let mut n = n.clone();
+                n.cluster = n.cluster.and_then(|c| cluster_map[c.0]).map(ClusterId);
+                node_map[i] = Some(nodes.len());
+                nodes.push(n);
+            }
+        }
+    }
+    // (new endpoint, whether the original end was hidden by a collapse)
+    let end = |e: Endpoint| -> Option<(Endpoint, bool)> {
+        match e {
+            Endpoint::Node(NodeId(i)) => match node_map[i] {
+                Some(j) => Some((Endpoint::Node(NodeId(j)), false)),
+                None => hidden_in[i].map(|j| (Endpoint::Node(NodeId(j)), true)),
+            },
+            Endpoint::Cluster(ClusterId(c)) => match folded_into[c] {
+                None => cluster_map[c].map(|k| (Endpoint::Cluster(ClusterId(k)), false)),
+                Some(a) => collapsed_node[a].map(|j| (Endpoint::Node(NodeId(j)), a != c)),
+            },
+        }
+    };
+    let edges = g
+        .edges
+        .into_iter()
+        .filter_map(|mut e| {
+            let (from, hid_a) = end(e.from)?;
+            let (to, hid_b) = end(e.to)?;
+            if from == to && (hid_a || hid_b) {
+                return None;
+            }
+            e.from = from;
+            e.to = to;
+            Some(e)
+        })
+        .collect();
+    GraphDiagram {
+        nodes,
+        edges,
+        clusters,
+        ..g
     }
 }
 
@@ -461,7 +695,18 @@ fn split_first_word(s: &str) -> (&str, &str) {
 struct NodeRef {
     id: String,
     shape: Option<(Shape, String)>,
+    /// The `@{ … }` metadata block, if the reference carries one.
+    data: Option<ShapeData>,
     class: Option<String>,
+}
+
+/// The keys of an `@{ … }` block this renderer reads.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ShapeData {
+    shape: Option<Shape>,
+    label: Option<String>,
+    /// `view: collapsed` on a declared subgraph id folds that subgraph.
+    view: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -517,6 +762,29 @@ impl Scanner {
             .all(|(i, ch)| self.at(self.pos + i) == Some(ch))
     }
 
+    /// flow.jison's `LINK_ID`: `id@` right before a link (not `@{` / `@"`). Consumed
+    /// and returned when present.
+    fn link_id(&mut self) -> Option<String> {
+        let start = self.pos;
+        let mut p = start;
+        while let Some(ch) = self.at(p) {
+            if ch.is_whitespace() || "\"[](){}|@".contains(ch) {
+                break;
+            }
+            p += 1;
+        }
+        let ok = p > start
+            && self.at(p) == Some('@')
+            && !matches!(self.at(p + 1), Some('{' | '"') | None)
+            && (self.is_link_start(p + 1)
+                || (matches!(self.at(p + 1), Some('<' | 'x' | 'o')) && self.is_link_start(p + 2)));
+        if !ok {
+            return None;
+        }
+        self.pos = p + 1;
+        Some(self.c[start..p].iter().collect())
+    }
+
     fn is_link_start(&self, i: usize) -> bool {
         let (a, b) = (self.at(i), self.at(i + 1));
         matches!(
@@ -548,7 +816,11 @@ impl Scanner {
             return Ok(None);
         }
         let id: String = self.c[start..self.pos].iter().collect();
-        let shape = self.shape()?;
+        let (shape, data) = if self.starts_with("@{") {
+            (None, Some(self.shape_attrs()?))
+        } else {
+            (self.shape()?, None)
+        };
         let class = if self.starts_with(":::") {
             self.pos += 3;
             let s = self.pos;
@@ -562,13 +834,15 @@ impl Scanner {
         } else {
             None
         };
-        Ok(Some(NodeRef { id, shape, class }))
+        Ok(Some(NodeRef {
+            id,
+            shape,
+            data,
+            class,
+        }))
     }
 
     fn shape(&mut self) -> std::result::Result<Option<(Shape, String)>, String> {
-        if self.starts_with("@{") {
-            return self.shape_attrs().map(Some);
-        }
         const OPENERS: &[(&str, &[(&str, Shape)])] = &[
             ("(((", &[(")))", Shape::DoubleCircle)]),
             ("((", &[("))", Shape::Circle)]),
@@ -660,7 +934,7 @@ impl Scanner {
     }
 
     /// `A@{ shape: diamond, label: "Decide" }` (mermaid 11 expanded syntax).
-    fn shape_attrs(&mut self) -> std::result::Result<(Shape, String), String> {
+    fn shape_attrs(&mut self) -> std::result::Result<ShapeData, String> {
         self.pos += 1;
         let start = self.pos;
         let end = (start..self.c.len())
@@ -668,8 +942,7 @@ impl Scanner {
             .ok_or("Unterminated '@{'")?;
         let body: String = self.c[start + 1..end].iter().collect();
         self.pos = end + 1;
-        let mut shape = Shape::Rect;
-        let mut label = String::new();
+        let mut data = ShapeData::default();
         for part in body.split(',') {
             let Some((k, v)) = part.split_once(':') else {
                 continue;
@@ -677,13 +950,15 @@ impl Scanner {
             let v = v.trim().trim_matches(['"', '\'']);
             match k.trim() {
                 "shape" => {
-                    shape = shape_by_name(v).ok_or_else(|| format!("No such shape: {v}."))?;
+                    data.shape =
+                        Some(shape_by_name(v).ok_or_else(|| format!("No such shape: {v}."))?);
                 }
-                "label" => label = v.to_string(),
+                "label" => data.label = Some(v.to_string()),
+                "view" => data.view = Some(v.to_string()),
                 _ => {}
             }
         }
-        Ok((shape, label))
+        Ok(data)
     }
 
     /// Scan a link token at the cursor.
@@ -1182,5 +1457,176 @@ end");
         );
         let c = g.nodes.iter().find(|n| n.id == "c").unwrap();
         assert_eq!(g.clusters[c.cluster.unwrap().0].id, "S");
+    }
+
+    fn node<'a>(g: &'a GraphDiagram, id: &str) -> Option<&'a Node> {
+        g.nodes.iter().find(|n| n.id == id)
+    }
+
+    fn edge_ids(g: &GraphDiagram) -> Vec<(String, String)> {
+        let name = |e: Endpoint| match e {
+            Endpoint::Node(NodeId(i)) => g.nodes[i].id.clone(),
+            Endpoint::Cluster(ClusterId(c)) => format!("[{}]", g.clusters[c].id),
+        };
+        g.edges.iter().map(|e| (name(e.from), name(e.to))).collect()
+    }
+
+    #[test]
+    fn collapsed_subgraph_folds_to_one_node() {
+        // subgraph.spec.js: `one@{ view: collapsed }`.
+        let g = p("graph TD
+subgraph one [My Group]
+A --> B
+end
+C --> A
+one@{ view: collapsed }");
+        assert!(g.clusters.is_empty());
+        let one = node(&g, "one").expect("collapsed node");
+        assert_eq!(one.shape, Shape::CollapsedGroup);
+        assert_eq!(one.label, "My Group");
+        assert_eq!(one.color_slot, Some(ColorSlot(0)), "keeps its palette slot");
+        assert!(node(&g, "A").is_none() && node(&g, "B").is_none());
+        // C --> A is redirected, A --> B (internal) is dropped.
+        assert_eq!(edge_ids(&g), [("C".to_string(), "one".to_string())]);
+    }
+
+    #[test]
+    fn nested_collapse_redirects_to_the_outermost() {
+        let g = p("flowchart LR
+subgraph outer
+subgraph inner
+A
+end
+B
+end
+C --> A
+inner --> C
+outer --> outer
+D --> inner
+outer@{ view: collapsed }
+inner@{ view: \"collapsed\" }
+classDef hot fill:#f00
+class outer hot");
+        assert!(g.clusters.is_empty());
+        assert!(node(&g, "inner").is_none());
+        let outer = node(&g, "outer").unwrap();
+        assert_eq!(outer.shape, Shape::CollapsedGroup);
+        assert_eq!(
+            outer.style.fill.as_ref().map(|c| c.0.as_str()),
+            Some("#f00")
+        );
+        let e: Vec<(String, String)> = edge_ids(&g);
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            e,
+            [
+                s("C", "outer"),
+                s("outer", "C"),
+                s("outer", "outer"),
+                s("D", "outer")
+            ],
+            "an authored self-loop stays"
+        );
+    }
+
+    #[test]
+    fn collapsed_child_stays_inside_its_expanded_parent() {
+        let g = p("flowchart TB
+subgraph P
+subgraph K
+x --> y
+end
+z --> K
+end
+K@{ view: collapsed }");
+        assert_eq!(g.clusters.len(), 1);
+        let k = node(&g, "K").unwrap();
+        assert_eq!(k.cluster, Some(ClusterId(0)));
+        assert_eq!(node(&g, "z").unwrap().cluster, Some(ClusterId(0)));
+        assert_eq!(edge_ids(&g), [("z".to_string(), "K".to_string())]);
+    }
+
+    #[test]
+    fn collapse_applies_to_a_repeated_subgraph() {
+        // flowDb.spec.ts: whichever declaration the metadata follows.
+        for src in [
+            "flowchart LR\nsubgraph S\n  x\nend\nsubgraph S\n  y\nend\nS@{ view: collapsed }",
+            "flowchart LR\nsubgraph S\n  x\nend\nS@{ view: collapsed }\nsubgraph S\n  y\nend",
+        ] {
+            let g = p(src);
+            assert!(g.clusters.is_empty(), "{src}");
+            assert_eq!(g.nodes.len(), 1, "{src}");
+            assert_eq!(g.nodes[0].shape, Shape::CollapsedGroup);
+        }
+        // Metadata without `view` (or another view) leaves the subgraph expanded and
+        // never turns the subgraph id into a vertex.
+        let g = p("flowchart LR\nsubgraph S\n  x\nend\nS@{ algorithm: elk.box }");
+        assert_eq!(g.clusters.len(), 1);
+        assert!(node(&g, "S").is_none());
+    }
+
+    #[test]
+    fn shape_data_without_a_label_keeps_the_id() {
+        let g = p("flowchart TD\nA@{ shape: diam }\nB[Bee]\nB@{ shape: circle }");
+        assert_eq!(node(&g, "A").unwrap().label, "A");
+        assert_eq!(node(&g, "A").unwrap().shape, Shape::Diamond);
+        assert_eq!(node(&g, "B").unwrap().label, "Bee");
+        assert_eq!(node(&g, "B").unwrap().shape, Shape::Circle);
+    }
+
+    #[test]
+    fn edge_ids_and_edge_metadata() {
+        let g = p("flowchart LR
+subgraph S
+a
+end
+A e1@--> B
+B e2@<--> S
+e1@{ animate: true }");
+        assert_eq!(g.nodes.len(), 3, "{:?}", g.nodes);
+        let e = edge_ids(&g);
+        assert_eq!(e[0], ("A".to_string(), "B".to_string()));
+        assert_eq!(e[1], ("B".to_string(), "[S]".to_string()));
+        assert_eq!(g.edges[1].start, Head::Arrow);
+    }
+
+    #[test]
+    fn animated_edges_take_the_animation_dash() {
+        let g = p("flowchart LR
+A e1@--> B
+B e2@-.-> C
+C e3@--> D
+D e4@--> E
+E --> F
+e1@{ animate: true }
+e2@{ animation: fast }
+classDef anim animation: slow, stroke: #f00
+class e3 anim
+linkStyle 0,4 stroke-dasharray: 2 2");
+        let dash: Vec<Option<Vec<f64>>> = g.edges.iter().map(|e| e.style.dash.clone()).collect();
+        let anim = Some(vec![9.0, 5.0]);
+        assert_eq!(
+            dash,
+            [anim.clone(), anim.clone(), anim, None, Some(vec![2.0, 2.0])],
+            "animation wins over linkStyle and the dotted pattern"
+        );
+    }
+
+    #[test]
+    fn inherit_dir_gives_undirected_subgraphs_the_diagram_direction() {
+        let src = "flowchart LR
+subgraph A
+direction TB
+a
+end
+subgraph B
+b
+end";
+        let off = p(src);
+        assert_eq!(cluster(&off, "A").direction, Some(Direction::TopBottom));
+        assert_eq!(cluster(&off, "B").direction, None);
+        let on = parse_with(src, None, ParseOptions { inherit_dir: true }).unwrap();
+        assert_eq!(cluster(&on, "A").direction, Some(Direction::TopBottom));
+        assert_eq!(cluster(&on, "B").direction, Some(Direction::LeftRight));
     }
 }

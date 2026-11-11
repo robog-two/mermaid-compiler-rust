@@ -28,6 +28,9 @@ struct Builder {
     clusters: Vec<Cluster>,
     ns_index: HashMap<String, usize>,
     ns_stack: Vec<ClusterId>,
+    /// Per namespace: declared by the author (classDb's `explicit`), not only implied
+    /// as the ancestor segment of a dotted name.
+    ns_explicit: Vec<bool>,
     relations: Vec<(String, String, Edge)>,
     notes: Vec<(Option<String>, String)>,
     class_defs: HashMap<String, StyleOverrides>,
@@ -35,8 +38,74 @@ struct Builder {
     styles: Vec<(String, StyleOverrides)>,
 }
 
+/// Config that changes how a class diagram is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseOptions {
+    /// `class.hierarchicalNamespaces` (default true). When false, only declared
+    /// namespaces are drawn, flat at the top level and titled by their full dotted
+    /// name; members of an implied ancestor go to the nearest declared one.
+    pub hierarchical_namespaces: bool,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        ParseOptions {
+            hierarchical_namespaces: true,
+        }
+    }
+}
+
 /// Parse a class diagram body.
 pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
+    parse_with(body, title, ParseOptions::default())
+}
+
+/// [`parse`] with explicit [`ParseOptions`].
+pub fn parse_with(body: &str, title: Option<String>, opts: ParseOptions) -> Result<GraphDiagram> {
+    let g = parse_hierarchical(body, title)?;
+    Ok(if opts.hierarchical_namespaces {
+        g.0
+    } else {
+        flatten_namespaces(g.0, &g.1)
+    })
+}
+
+/// classDb's `getData` with `hierarchicalNamespaces: false`.
+fn flatten_namespaces(mut g: GraphDiagram, explicit: &[bool]) -> GraphDiagram {
+    let n = g.clusters.len();
+    let mut map: Vec<Option<usize>> = vec![None; n];
+    let mut clusters = Vec::new();
+    for (ci, c) in g.clusters.iter().enumerate() {
+        if explicit.get(ci).copied().unwrap_or(true) {
+            map[ci] = Some(clusters.len());
+            clusters.push(Cluster {
+                title: c.id.clone(),
+                parent: None,
+                ..c.clone()
+            });
+        }
+    }
+    // Nearest declared namespace at or above `c`.
+    let resolve = |c: ClusterId| -> Option<ClusterId> {
+        let mut cur = Some(c.0);
+        for _ in 0..=n {
+            let k = cur?;
+            if let Some(m) = map[k] {
+                return Some(ClusterId(m));
+            }
+            cur = g.clusters[k].parent.map(|p| p.0);
+        }
+        None
+    };
+    // (Class relations always join classes, never namespaces.)
+    for node in &mut g.nodes {
+        node.cluster = node.cluster.and_then(resolve);
+    }
+    g.clusters = clusters;
+    g
+}
+
+fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram, Vec<bool>)> {
     let mut b = Builder::default();
     let mut direction = Direction::TopBottom;
     let mut header = false;
@@ -220,7 +289,8 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
             "Unexpected end of input: missing '}'",
         ));
     }
-    Ok(b.finish(direction, title))
+    let explicit = b.ns_explicit.clone();
+    Ok((b.finish(direction, title), explicit))
 }
 
 fn split_generic(name: &str) -> (String, Option<String>) {
@@ -375,11 +445,13 @@ impl Builder {
                 None => {
                     // Namespaces are not part of the colour cycle.
                     self.clusters.push(Cluster::new(id.clone(), *part, parent));
+                    self.ns_explicit.push(false);
                     self.ns_index.insert(id.clone(), self.clusters.len() - 1);
                     self.clusters.len() - 1
                 }
             };
             if leaf {
+                self.ns_explicit[c] = true;
                 if let Some(l) = &label {
                     self.clusters[c].title = l.clone();
                 }
@@ -567,5 +639,42 @@ mod tests {
         assert_eq!(a.cluster, Some(ClusterId(0)));
         let b = g.nodes.iter().find(|n| n.id == "B").unwrap();
         assert_eq!(b.cluster, None);
+    }
+
+    #[test]
+    fn flat_namespaces_keep_only_declared_ones() {
+        let src = "classDiagram\nnamespace Company.Project {\n class A\n}\nnamespace Company {\n namespace Other[\"Elsewhere\"] {\n  class B\n }\n class D\n}\nnamespace X.Y.Z {\n class E\n}\nclass C";
+        let g = parse_with(
+            src,
+            None,
+            ParseOptions {
+                hierarchical_namespaces: false,
+            },
+        )
+        .unwrap();
+        // `Company` is declared too (the second block), `X` and `X.Y` are only implied.
+        let ids: Vec<&str> = g.clusters.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["Company", "Company.Project", "Company.Other", "X.Y.Z"]
+        );
+        let titles: Vec<&str> = g.clusters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ids, "flat namespaces are titled by their full id");
+        assert!(g.clusters.iter().all(|c| c.parent.is_none()));
+        let of = |id: &str| {
+            g.nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .cluster
+                .map(|c| g.clusters[c.0].id.as_str())
+        };
+        assert_eq!(of("A"), Some("Company.Project"));
+        assert_eq!(of("B"), Some("Company.Other"));
+        assert_eq!(of("D"), Some("Company"));
+        assert_eq!(of("E"), Some("X.Y.Z"));
+        assert_eq!(of("C"), None);
+        // The default stays hierarchical.
+        assert_eq!(parse(src, None).unwrap().clusters.len(), 6);
     }
 }

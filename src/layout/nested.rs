@@ -137,13 +137,27 @@ impl Tree<'_> {
             .find(|&a| self.separate[a] && Some(a) != scope && self.owner_of_cluster(a) == scope)
     }
 
+    /// A cluster's own direction. Without one it is laid out with the root's, unless
+    /// it sits inside a cluster that has a direction of its own: that container is an
+    /// `elk.hierarchyHandling: SEPARATE_CHILDREN` layout run, whose child containers
+    /// are separate runs too, and `elk.direction` is not inherited, so ELK's layered
+    /// default (`RIGHT`) applies there (`flowchart.inheritDir` sets it explicitly).
     fn direction(&self, scope: Option<usize>) -> Direction {
-        match scope {
-            None => self.input.direction,
-            Some(c) => self.input.clusters[c]
-                .direction
-                .unwrap_or_else(|| self.direction(self.owner_of_cluster(c))),
+        let Some(c) = scope else {
+            return self.input.direction;
+        };
+        if let Some(d) = self.input.clusters[c].direction {
+            return d;
         }
+        let mut owner = self.owner_of_cluster(c);
+        for _ in 0..=self.parent.len() {
+            let Some(o) = owner else { break };
+            if self.input.clusters[o].direction.is_some() {
+                return Direction::LeftRight;
+            }
+            owner = self.owner_of_cluster(o);
+        }
+        self.input.direction
     }
 }
 
@@ -586,6 +600,37 @@ mod tests {
         );
         let out2 = layout(&inp2);
         assert!(out2.nodes[0].x < out2.nodes[1].x);
+    }
+
+    #[test]
+    fn undirected_cluster_inside_a_directed_one_runs_right() {
+        // ELK: a container under a SEPARATE_CHILDREN (directed) one is laid out on its
+        // own without `elk.direction`, i.e. RIGHT; a top-level undirected container is
+        // part of the root run and follows the root.
+        let inp = input(
+            vec![node(Some(1)), node(Some(1)), node(Some(2)), node(Some(2))],
+            vec![
+                LayoutEdge::new(0, 1, 1, None),
+                LayoutEdge::new(2, 3, 1, None),
+            ],
+            vec![
+                with_dir(None, Some(Direction::RightLeft)),
+                with_dir(Some(0), None),
+                with_dir(None, None),
+            ],
+            Direction::BottomTop,
+        );
+        let out = layout(&inp);
+        let (a, b) = (out.nodes[0], out.nodes[1]);
+        assert!(
+            b.x > a.x && (a.y - b.y).abs() < 1e-6,
+            "inner runs LR: {a:?} {b:?}"
+        );
+        let (c, d) = (out.nodes[2], out.nodes[3]);
+        assert!(
+            d.y < c.y && (c.x - d.x).abs() < 1e-6,
+            "top level follows BT: {c:?} {d:?}"
+        );
     }
 
     #[test]
