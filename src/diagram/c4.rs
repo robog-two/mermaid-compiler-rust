@@ -954,9 +954,43 @@ pub struct C4Layout {
     pub title_band: f64,
 }
 
-/// Rows of a container: shapes in rows of `shape_in_row`, then child
-/// boundaries in rows of `boundary_in_row` (mermaid's order).
-fn rows_of(d: &C4Diagram, items: &[Item]) -> Vec<Vec<Item>> {
+/// Shapes already counted into the current row when a boundary's shapes
+/// start, per boundary.
+///
+/// mermaid's `drawInsideBoundary` places sibling boundaries with one shared
+/// `Bounds` whose row counter (`nextData.cnt`) is never reset, so a boundary's
+/// first shape row is shortened by the shapes of the siblings drawn before it
+/// (e.g. with `c4ShapeInRow=3`, two shapes in one boundary leave room for one
+/// in the next sibling's first row). Nested boundaries get a fresh counter.
+fn row_carry(d: &C4Diagram) -> Vec<usize> {
+    fn visit(d: &C4Diagram, items: &[Item], carry: &mut Vec<usize>) {
+        let n = d.shape_in_row.max(1);
+        let mut cnt = 0usize;
+        for it in items {
+            if let Item::Boundary(b) = *it {
+                carry[b] = cnt;
+                for c in &d.boundaries[b].children {
+                    if matches!(c, Item::Shape(_)) {
+                        cnt += 1;
+                        if cnt > n {
+                            cnt = 1;
+                        }
+                    }
+                }
+                visit(d, &d.boundaries[b].children, carry);
+            }
+        }
+    }
+    let mut carry = vec![0; d.boundaries.len()];
+    visit(d, &d.root, &mut carry);
+    carry
+}
+
+/// Rows of a container: shapes in rows of `shape_in_row` (the first row
+/// shortened by `carry`, see [`row_carry`]), then child boundaries in rows of
+/// `boundary_in_row` (mermaid's order).
+fn rows_of(d: &C4Diagram, items: &[Item], carry: usize) -> Vec<Vec<Item>> {
+    let n = d.shape_in_row.max(1);
     let shapes: Vec<Item> = items
         .iter()
         .copied()
@@ -967,10 +1001,15 @@ fn rows_of(d: &C4Diagram, items: &[Item]) -> Vec<Vec<Item>> {
         .copied()
         .filter(|i| matches!(i, Item::Boundary(_)))
         .collect();
-    let mut rows: Vec<Vec<Item>> = shapes
-        .chunks(d.shape_in_row.max(1))
-        .map(<[Item]>::to_vec)
-        .collect();
+    let first = if carry >= n { n } else { n - carry };
+    let mut rows: Vec<Vec<Item>> = Vec::new();
+    let mut rest: &[Item] = &shapes;
+    if !rest.is_empty() {
+        let k = first.min(rest.len());
+        rows.push(rest[..k].to_vec());
+        rest = &rest[k..];
+    }
+    rows.extend(rest.chunks(n).map(<[Item]>::to_vec));
     rows.extend(
         bounds
             .chunks(d.boundary_in_row.max(1))
@@ -984,8 +1023,10 @@ fn container_node(
     items: &[Item],
     cards: &[CardLayout],
     style: boxes::taffy::Style,
+    carry_in: usize,
+    carry: &[usize],
 ) -> BoxNode {
-    let rows = rows_of(d, items)
+    let rows = rows_of(d, items, carry_in)
         .into_iter()
         .map(|row| {
             let gap = if matches!(row.first(), Some(Item::Boundary(_))) {
@@ -995,14 +1036,16 @@ fn container_node(
             };
             BoxNode::new(
                 boxes::row(gap),
-                row.iter().map(|it| item_node(d, *it, cards)).collect(),
+                row.iter()
+                    .map(|it| item_node(d, *it, cards, carry))
+                    .collect(),
             )
         })
         .collect();
     BoxNode::new(style, rows)
 }
 
-fn item_node(d: &C4Diagram, item: Item, cards: &[CardLayout]) -> BoxNode {
+fn item_node(d: &C4Diagram, item: Item, cards: &[CardLayout], carry: &[usize]) -> BoxNode {
     match item {
         Item::Shape(i) => BoxNode::leaf(cards[i].w, cards[i].h),
         Item::Boundary(b) => {
@@ -1014,7 +1057,7 @@ fn item_node(d: &C4Diagram, item: Item, cards: &[CardLayout]) -> BoxNode {
                 title_w + 2.0 * BOUNDARY_PAD,
                 title_h + 2.0 * BOUNDARY_PAD,
             );
-            container_node(d, &bd.children, cards, style)
+            container_node(d, &bd.children, cards, style, carry[b], carry)
         }
     }
 }
@@ -1022,17 +1065,20 @@ fn item_node(d: &C4Diagram, item: Item, cards: &[CardLayout]) -> BoxNode {
 fn read_container(
     d: &C4Diagram,
     items: &[Item],
+    carry_in: usize,
+    carry: &[usize],
     placed: &Placed,
     shapes: &mut [Rect],
     bounds: &mut [Rect],
 ) {
-    for (row, prow) in rows_of(d, items).iter().zip(&placed.children) {
+    for (row, prow) in rows_of(d, items, carry_in).iter().zip(&placed.children) {
         for (item, p) in row.iter().zip(&prow.children) {
             match *item {
                 Item::Shape(i) => shapes[i] = p.rect,
                 Item::Boundary(b) => {
                     bounds[b] = p.rect;
-                    read_container(d, &d.boundaries[b].children, p, shapes, bounds);
+                    let children = &d.boundaries[b].children;
+                    read_container(d, children, carry[b], carry, p, shapes, bounds);
                 }
             }
         }
@@ -1051,11 +1097,12 @@ fn title_band(d: &C4Diagram) -> f64 {
 pub fn layout(d: &C4Diagram) -> C4Layout {
     let cards: Vec<CardLayout> = d.shapes.iter().map(measure_shape).collect();
     let band = title_band(d);
-    let root = container_node(d, &d.root, &cards, boxes::column(ROW_GAP_Y));
+    let carry = row_carry(d);
+    let root = container_node(d, &d.root, &cards, boxes::column(ROW_GAP_Y), 0, &carry);
     let placed = boxes::compute(&root);
     let mut shapes = vec![Rect::default(); d.shapes.len()];
     let mut bounds = vec![Rect::default(); d.boundaries.len()];
-    read_container(d, &d.root, &placed, &mut shapes, &mut bounds);
+    read_container(d, &d.root, 0, &carry, &placed, &mut shapes, &mut bounds);
     let shift = |r: &mut Rect| r.y += band;
     shapes.iter_mut().for_each(shift);
     bounds.iter_mut().for_each(shift);
@@ -1442,6 +1489,42 @@ mod tests {
 
     fn p(src: &str) -> C4Diagram {
         parse(src, None).unwrap()
+    }
+
+    #[test]
+    fn sibling_boundaries_share_mermaids_row_counter() {
+        // With c4ShapeInRow=3, b2's two shapes leave one slot in b3's first row,
+        // so F and G stack (mermaid never resets `nextData.cnt` between siblings).
+        let d = p(r#"C4Context
+Boundary(b1, "B1") {
+  Boundary(b2, "B2") {
+    System(A, "A")
+    System(B, "B")
+  }
+  Boundary(b3, "B3") {
+    System(F, "F")
+    System(G, "G")
+  }
+  Boundary(b4, "B4") {
+    Boundary(b5, "B5") {
+      System(H, "H")
+      System(I, "I")
+    }
+  }
+}
+UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
+        assert_eq!(row_carry(&d), vec![0, 0, 2, 1, 0]);
+        let lay = layout(&d);
+        let r = |i: usize| lay.shapes[i];
+        assert!((r(0).y - r(1).y).abs() < 1e-6 && r(1).x > r(0).right());
+        assert!(r(3).y > r(2).bottom(), "G wraps under F");
+        // A nested boundary list starts a fresh counter: H and I share a row.
+        assert!((r(4).y - r(5).y).abs() < 1e-6);
+        // Every shape stays inside its boundary.
+        for (b, s) in [(1, 0), (1, 1), (2, 2), (2, 3), (4, 4), (4, 5)] {
+            let (o, i) = (lay.boundaries[b], r(s));
+            assert!(o.x <= i.x && i.right() <= o.right() && o.y <= i.y && i.bottom() <= o.bottom());
+        }
     }
 
     fn err_line(src: &str) -> usize {
