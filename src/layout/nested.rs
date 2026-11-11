@@ -380,6 +380,8 @@ fn layout_level(
     // only leaves half the gap each side, so pad the label along the rank axis.
     let label_of = |l: Option<(f64, f64)>| match scope {
         None => l,
+        // The orthogonal pass pads its label layers itself.
+        Some(_) if matches!(input.routing, EdgeRouting::Orthogonal(_)) => l,
         Some(_) if tree.direction(scope).is_horizontal() => {
             l.map(|(w, h)| (w + input.inner_rank_sep, h))
         }

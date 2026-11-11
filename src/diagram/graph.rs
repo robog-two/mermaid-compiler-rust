@@ -808,7 +808,8 @@ pub fn render_with(
                 LayoutEdge {
                     from: pos_of[from],
                     to: pos_of[to],
-                    minlen: e.minlen,
+                    // The ELK adapter hands ELK no edge length (`--->` is as long as `-->`).
+                    minlen: if elk { 1 } else { e.minlen },
                     label: lb.as_ref().map(|b| (b.width + 8.0, b.height + 4.0)),
                     from_cluster,
                     to_cluster,
@@ -831,8 +832,8 @@ pub fn render_with(
             })
             .collect(),
         direction: g.direction,
-        node_sep: cfg.node_spacing,
-        rank_sep: cfg.rank_spacing,
+        node_sep: layer_spacing(cfg.layout, cfg.node_spacing),
+        rank_sep: layer_spacing(cfg.layout, cfg.rank_spacing),
         edge_sep: 20.0,
         cluster_padding: CLUSTER_PADDING,
         inner_node_sep: CLUSTER_NODE_SPACING,
@@ -1196,6 +1197,20 @@ pub fn render_with(
 
 /// mermaid's `DEFAULT_EDGE_CORNER_RADIUS` (`rounded` edges).
 pub(crate) const EDGE_CORNER_RADIUS: f64 = 5.0;
+
+/// The node and layer spacing of the root graph under ELK. mermaid's adapter never
+/// reads the diagram's `nodeSpacing` / `rankSpacing`; it sets `spacing.baseValue: 40`,
+/// from which ELK derives `spacing.nodeNode` and `nodeNodeBetweenLayers` as 1× (and
+/// the edge spacings as ½×: the option default over `nodeNode`'s default of 20).
+pub(crate) const ELK_BASE_SPACING: f64 = 40.0;
+
+/// The root graph's node / rank separation: ELK's, or the configured one under dagre.
+pub(crate) fn layer_spacing(layout: LayoutAlgorithm, configured: f64) -> f64 {
+    match layout {
+        LayoutAlgorithm::Elk => ELK_BASE_SPACING,
+        LayoutAlgorithm::Dagre => configured,
+    }
+}
 
 /// The layered layout's edge routing for a `layout` setting.
 pub(crate) fn edge_routing(layout: LayoutAlgorithm) -> EdgeRouting {
@@ -2719,6 +2734,30 @@ mod tests {
             gaps.iter().all(|g| (g - gaps[0]).abs() < 1e-6),
             "evenly spread: {gaps:?}"
         );
+    }
+
+    /// mermaid's ELK adapter never reads `nodeSpacing` / `rankSpacing`; dagre does.
+    #[test]
+    fn elk_ignores_the_configured_spacing() {
+        let g = crate::diagram::flowchart::parse(FAN, None).unwrap();
+        let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let base = crate::config::MermaidConfig::default().flowchart;
+        let wide = GraphConfig {
+            node_spacing: 300.0,
+            rank_spacing: 300.0,
+            ..base.clone()
+        };
+        let size = |c: &GraphConfig| {
+            let v = render(&g, c, &pal).view_box;
+            (v.w, v.h)
+        };
+        assert_eq!(size(&base), size(&wide));
+        let dagre = |c: &GraphConfig| GraphConfig {
+            layout: LayoutAlgorithm::Dagre,
+            ..c.clone()
+        };
+        let (a, b) = (size(&dagre(&base)), size(&dagre(&wide)));
+        assert!(b.0 > a.0 + 100.0 && b.1 > a.1 + 100.0);
     }
 
     #[test]

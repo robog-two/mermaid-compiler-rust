@@ -3624,8 +3624,8 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             .map(|c| LayoutCluster::new(None, title_band(c)))
             .collect(),
         direction: d.direction,
-        node_sep: o.node_spacing,
-        rank_sep: o.rank_spacing,
+        node_sep: super::graph::layer_spacing(o.layout, o.node_spacing),
+        rank_sep: super::graph::layer_spacing(o.layout, o.rank_spacing),
         edge_sep: 20.0,
         cluster_padding: BOUNDARY_PADDING,
         // A boundary with no crossing edge is laid out on its own with ELK's

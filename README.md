@@ -132,8 +132,15 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
 - **Layout engine:** mermaid 12 defaults to ELK (`layout: elk`) for graph diagrams; this implementation uses a
   dagre-style layered layout and reproduces ELK's container rules instead: a subgraph with no edge crossing its border
   is laid out on its own in its own `direction`, with ELK's padding (24) and spacing (50 between nodes, 24 between
-  layers). Edges are curved (as with `layout: dagre`) rather than ELK's right-angled routes, ELK's packing of
-  disconnected parts inside a container is not reproduced, `@{ view: collapsed }` folds a subgraph into one node as upstream.
+  layers). Under ELK (the default) the root graph uses ELK's spacing (40 between nodes and layers, the diagram's
+  `nodeSpacing` / `rankSpacing` and edge lengths such as `--->` are ignored, as upstream) and edges are routed
+  orthogonally and drawn with radius-5 rounded corners (mermaid's `rounded` curve, whatever `curve` is set): ports
+  spread over the facing node side, one slot per bend between layers, labels on the route, self-loops on the
+  west / north side. Node placement is still the dagre-style one, so positions can differ from ELK's; ELK's line hops
+  at crossings, its side-of-edge label placement and its edges attached to a container's frame border (ours run to a
+  member node and are cut at the frame) are not reproduced. `layout: dagre` (or any other non-ELK `layout`) gives
+  dagre's spacing and the configured curve. ELK's packing of disconnected parts inside a container is not
+  reproduced, `@{ view: collapsed }` folds a subgraph into one node as upstream.
 - **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction and Brandes–Köpf
   coordinate assignment ported from dagre's `position/bk` (every edge gets a midpoint vertex, as with dagre's
   `makeSpaceForEdgeLabels`, which gives mermaid's curved "S" edges). Crossing reduction differs from dagre's, so

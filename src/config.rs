@@ -703,6 +703,39 @@ mod tests {
     }
 
     #[test]
+    fn layout_defaults_to_elk_and_falls_back_to_dagre() {
+        let c = MermaidConfig::default();
+        assert_eq!(
+            c.clone().scoped("flowchart").flowchart.layout,
+            LayoutAlgorithm::Elk
+        );
+        let d = c
+            .clone()
+            .with_json(&json(r#"{"layout":"dagre"}"#))
+            .unwrap()
+            .scoped("state");
+        assert_eq!(
+            (d.layout, d.state.layout),
+            (LayoutAlgorithm::Dagre, LayoutAlgorithm::Dagre)
+        );
+        // Front-matter / directives layer on top of `--configFile`.
+        let e = d
+            .with_directive(&parse_yaml_subset("layout: elk.mrtree"))
+            .unwrap()
+            .scoped("class");
+        assert_eq!(e.class.layout, LayoutAlgorithm::Elk);
+        // Anything else (unregistered names fall back to dagre upstream) draws as dagre.
+        assert_eq!(
+            LayoutAlgorithm::from_name("cose-bilkent"),
+            LayoutAlgorithm::Dagre
+        );
+        assert_eq!(
+            LayoutAlgorithm::from_name("elk.layered"),
+            LayoutAlgorithm::Dagre
+        );
+    }
+
+    #[test]
     fn appearance_layers_resolve_like_mermaid() {
         // -t default wins over the diagram default; look is untouched by it.
         let s = MermaidConfig::default()

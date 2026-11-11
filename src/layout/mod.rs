@@ -403,7 +403,7 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     };
     let x = assign_x(&layers, &verts, &links, &borders, &gap);
     let plan = match input.routing {
-        EdgeRouting::Orthogonal(s) => Some(ortho_plan(&verts, n, &chains, &x, max_rank, s)),
+        EdgeRouting::Orthogonal(s) => Some(ortho_plan(&verts, n, &chains, &x, &layers, &gap, s)),
         EdgeRouting::Splines => None,
     };
 
@@ -436,6 +436,17 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     }
     // Orthogonal routes: widen a gap whose slots do not fit (ELK sizes the space
     // between two layers from the slots routed through it).
+    // ELK gives edge labels a layer of their own with the full layer gap on both
+    // sides; the split around the label vertex leaves only half the gap each side.
+    let mut label_gap = vec![0.0f64; max_rank + 1];
+    if plan.is_some() {
+        for v in &verts {
+            if matches!(v.kind, Kind::Dummy { labeled: true }) {
+                label_gap[v.rank] = rank_sep;
+            }
+        }
+    }
+    let gap_before = |r: usize| rank_sep + label_gap[r - 1] + label_gap[r];
     let mut extra = vec![0.0f64; max_rank + 1];
     if let Some(p) = &plan {
         for (ra, ch) in p.channels.iter().enumerate() {
@@ -443,7 +454,7 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
             let free: f64 = (ra + 1..rb)
                 .map(|r| rank_h[r] + start_pad[r] + end_pad[r])
                 .sum();
-            let have = (rb - ra) as f64 * rank_sep + free;
+            let have = (ra + 1..=rb).map(gap_before).sum::<f64>() + free;
             extra[rb] = extra[rb].max(p.spacing.required_gap(slots) - have);
         }
     }
@@ -455,7 +466,7 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
             rank_y[r - 1]
                 + rank_h[r - 1] / 2.0
                 + end_pad[r - 1]
-                + rank_sep
+                + gap_before(r)
                 + extra[r]
                 + start_pad[r]
                 + rank_h[r] / 2.0
@@ -559,10 +570,12 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
                 if *reversed {
                     points.reverse();
                 }
-                let label = label_v.map(pos).or_else(|| {
-                    e.label
-                        .map(|_| points[0].lerp(points[points.len() - 1], 0.5))
-                });
+                let label = label_v
+                    .map(|v| to_out(Point::new(p.xs[v], rank_y[verts[v].rank])))
+                    .or_else(|| {
+                        e.label
+                            .map(|_| points[0].lerp(points[points.len() - 1], 0.5))
+                    });
                 return EdgeRoute { points, label };
             }
             let mut points: Vec<Point> = chain.iter().map(|&v| pos(v)).collect();
@@ -619,6 +632,8 @@ struct OrthoPlan {
     /// Per rank: the channel below it, as (next obstacle rank, slots used).
     channels: Vec<Option<(usize, usize)>>,
     spacing: OrthoSpacing,
+    /// Cross-axis positions, with dummies moved in line with their edges' ports.
+    xs: Vec<f64>,
 }
 
 fn ortho_plan(
@@ -626,9 +641,11 @@ fn ortho_plan(
     n: usize,
     chains: &[Option<Chain>],
     x: &[f64],
-    max_rank: usize,
+    layers: &[Vec<usize>],
+    gap: &dyn Fn(usize, usize) -> f64,
     spacing: OrthoSpacing,
 ) -> OrthoPlan {
+    let max_rank = verts.iter().map(|v| v.rank).max().unwrap_or(0);
     // Ranks holding nodes or edge labels; ranks of plain long-edge dummies are free.
     let mut obstacle = vec![false; max_rank + 1];
     for v in verts {
@@ -664,6 +681,39 @@ fn ortho_plan(
             }
         }
     }
+    // ELK places nodes with their ports in view (`nodeFlexibility: PORT_POSITION`),
+    // so an edge leaving a port runs straight on where it can. Here: top-down, each
+    // dummy in an obstacle rank moves as far toward the position the edge arrives
+    // at (its source port, or its previous such dummy) as its neighbours allow.
+    let mut xs = x.to_vec();
+    let mut arrive: Vec<Option<(usize, usize)>> = vec![None; verts.len()]; // (edge, prev)
+    for (ei, ch) in chains.iter().enumerate() {
+        let Some((chain, _, _)) = ch else { continue };
+        let mut prev = chain[0];
+        for &v in &chain[1..chain.len() - 1] {
+            if obstacle[verts[v].rank] {
+                arrive[v] = Some((ei, prev));
+                prev = v;
+            }
+        }
+    }
+    for layer in layers {
+        for (i, &v) in layer.iter().enumerate() {
+            let Some((ei, prev)) = arrive[v] else {
+                continue;
+            };
+            let want = if prev < n { start_x[ei] } else { xs[prev] };
+            let lo = i
+                .checked_sub(1)
+                .map_or(f64::NEG_INFINITY, |j| xs[layer[j]] + gap(layer[j], v));
+            let hi = layer
+                .get(i + 1)
+                .map_or(f64::INFINITY, |&r| xs[r] - gap(v, r));
+            if lo <= hi {
+                xs[v] = want.clamp(lo, hi);
+            }
+        }
+    }
     let mut stops: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ne];
     for (ei, ch) in chains.iter().enumerate() {
         let Some((chain, _, _)) = ch else { continue };
@@ -674,7 +724,7 @@ fn ortho_plan(
             .filter_map(|(k, &v)| match k {
                 0 => Some((v, start_x[ei])),
                 _ if k == last => Some((v, end_x[ei])),
-                _ => obstacle[verts[v].rank].then_some((v, x[v])),
+                _ => obstacle[verts[v].rank].then_some((v, xs[v])),
             })
             .collect();
     }
@@ -713,6 +763,7 @@ fn ortho_plan(
         jogs,
         channels,
         spacing,
+        xs,
     }
 }
 
