@@ -1145,9 +1145,9 @@ pub fn draw_node(
 /// Padding between a cluster frame and its children (mermaid's ELK `SUBGRAPH_PADDING`).
 const CLUSTER_PADDING: f64 = 24.0;
 /// Node gap inside a cluster laid out on its own (`DEFAULT_SUBGRAPH_NODE_SPACING`).
-const CLUSTER_NODE_SPACING: f64 = 50.0;
+pub(crate) const CLUSTER_NODE_SPACING: f64 = 50.0;
 /// Layer gap inside a cluster laid out on its own (`DEFAULT_SUBGRAPH_SPACING_BASE_VALUE`).
-const CLUSTER_RANK_SPACING: f64 = 24.0;
+pub(crate) const CLUSTER_RANK_SPACING: f64 = 24.0;
 /// Horizontal padding counted into a cluster's title width (the group node's `padding: 8`).
 const CLUSTER_TITLE_PAD: f64 = 8.0;
 

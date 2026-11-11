@@ -992,17 +992,13 @@ fn port(r: &Rect, side: Side) -> Point {
     }
 }
 
-fn end_rect(d: &Architecture, lay: &Layout, e: &EdgeEnd, other: usize) -> Rect {
-    if e.group {
-        let (_, ia, _) = common_items(d, e.node, other);
-        if let Item::Group(g) = ia {
-            return lay.group_box[g];
-        }
-        if let Some(g) = d.nodes[e.node].parent {
-            return lay.group_box[g];
-        }
+/// The box an edge end attaches to. A `{group}` end leaves the node's own (innermost)
+/// group: svgDraw.ts shifts the service port by `padding + 4`, just past that border.
+fn end_rect(d: &Architecture, lay: &Layout, e: &EdgeEnd) -> Rect {
+    match d.nodes[e.node].parent {
+        Some(g) if e.group => lay.group_box[g],
+        _ => lay.icon_box[e.node],
     }
-    lay.icon_box[e.node]
 }
 
 fn route(p0: Point, s0: Side, p1: Point, s1: Side) -> Vec<Point> {
@@ -1293,8 +1289,8 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
 
     for (ei, e) in d.edges.iter().enumerate() {
-        let ra = end_rect(d, &lay, &e.lhs, e.rhs.node);
-        let rb = end_rect(d, &lay, &e.rhs, e.lhs.node);
+        let ra = end_rect(d, &lay, &e.lhs);
+        let rb = end_rect(d, &lay, &e.rhs);
         let junction = |n: usize| matches!(d.nodes[n].kind, NodeKind::Junction);
         let end_point = |end: &EdgeEnd, r: &Rect| {
             if end.group {
@@ -1627,5 +1623,19 @@ mod tests {
         let s = render(SRC, Some("T".into()), &cfg, &pal).unwrap();
         assert_eq!(s.kind, DiagramKind::Architecture);
         assert!(s.view_box.w > 80.0);
+    }
+
+    #[test]
+    fn group_edge_leaves_the_nodes_innermost_group() {
+        let d = parse(
+            "architecture-beta\ngroup g(cloud)[G]\ngroup h(cloud)[H] in g\nservice a(server)[A] in h\nservice c(disk)[C]\na{group}:B -- T:c",
+            None,
+        )
+        .unwrap();
+        let lay = layout(&d, 16.0);
+        let e = &d.edges[0];
+        let h = d.groups.iter().position(|g| g.id == "h").unwrap();
+        assert_eq!(end_rect(&d, &lay, &e.lhs), lay.group_box[h]);
+        assert_eq!(end_rect(&d, &lay, &e.rhs), lay.icon_box[e.rhs.node]);
     }
 }

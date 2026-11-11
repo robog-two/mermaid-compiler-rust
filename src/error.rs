@@ -28,6 +28,14 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // Langium-based parsers (railroad, treeView, wardley, ...) already say where the
+            // error is, and mermaid wraps them as `MermaidParseError` ("Parsing failed: ...").
+            Error::Parse { message, .. }
+                if message.starts_with("Parse error on line ")
+                    || message.starts_with("Lexer error on line ") =>
+            {
+                write!(f, "Parsing failed: {message}")
+            }
             Error::Parse { line, message } => write!(f, "Parse error on line {line}:\n{message}"),
             Error::UnknownDiagram { text } => write!(
                 f,
@@ -46,3 +54,21 @@ impl std::error::Error for Error {}
 
 /// Result alias for the core.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn langium_style_messages_are_not_prefixed_twice() {
+        let e = Error::parse(2, "Parse error on line 2, column 5: Expecting `=`.");
+        assert_eq!(
+            e.to_string(),
+            "Parsing failed: Parse error on line 2, column 5: Expecting `=`."
+        );
+        assert_eq!(
+            Error::parse(3, "Expecting 'end'").to_string(),
+            "Parse error on line 3:\nExpecting 'end'"
+        );
+    }
+}

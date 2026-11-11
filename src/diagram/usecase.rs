@@ -3533,6 +3533,8 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         end: Head,
         style: StyleOverrides,
         id: String,
+        /// `animate` / `animation`: drawn as the animation's `stroke-dasharray: 9,5 !important`.
+        animated: bool,
     }
     let mut edges: Vec<VEdge> = Vec::new();
     for r in &d.relationships {
@@ -3571,6 +3573,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             end,
             style: compiled_style(&d.class_defs, &r.classes, &r.styles),
             id: r.id.clone(),
+            animated: r.animate || r.animation.is_some(),
         });
     }
     for n in &d.notes {
@@ -3585,6 +3588,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
                 end: Head::None,
                 style: compiled_style(&d.class_defs, &[], &[]),
                 id: format!("{}-edge", n.id),
+                animated: false,
             });
         }
     }
@@ -3622,8 +3626,10 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         rank_sep: o.rank_spacing,
         edge_sep: 20.0,
         cluster_padding: BOUNDARY_PADDING,
-        inner_node_sep: o.node_spacing,
-        inner_rank_sep: o.rank_spacing,
+        // A boundary with no crossing edge is laid out on its own with ELK's
+        // subgraph spacing, as for flowchart subgraphs.
+        inner_node_sep: super::graph::CLUSTER_NODE_SPACING,
+        inner_rank_sep: super::graph::CLUSTER_RANK_SPACING,
     };
     let out = layout::layout(&input);
 
@@ -3779,11 +3785,15 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             e.kind,
             Some(RelationshipType::Association | RelationshipType::Generalization)
         );
-        paint.dash = e
-            .style
-            .dash
-            .clone()
-            .or_else(|| dotted.then(|| vec![if neo { 2.0 } else { 3.0 }]));
+        paint.dash = if e.animated {
+            // `.edge-animation-*` (styles.ts) beats inline styles with `!important`.
+            Some(vec![9.0, 5.0])
+        } else {
+            e.style
+                .dash
+                .clone()
+                .or_else(|| dotted.then(|| vec![if neo { 2.0 } else { 3.0 }]))
+        };
         let kind = match e.kind {
             Some(RelationshipType::Association) => "association",
             Some(RelationshipType::Include) => "include",
@@ -4365,5 +4375,31 @@ mod tests {
             assert_eq!(s.kind, DiagramKind::Usecase);
             assert!(s.view_box.w > 0.0 && s.view_box.h > 0.0);
         }
+    }
+
+    #[test]
+    fn animated_relationships_are_dashed_like_the_animation_css() {
+        fn dashes(els: &[Element], out: &mut Vec<Vec<f64>>) {
+            for e in els {
+                match e {
+                    Element::Shape { paint, .. } => out.extend(paint.dash.clone()),
+                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                        dashes(children, out)
+                    }
+                    Element::Text { .. } => {}
+                }
+            }
+        }
+        let cfg = MermaidConfig::default();
+        let s = render(
+            "usecase-beta\nactor A\nA e1@--> Go\ne1@{ animation: slow }",
+            None,
+            &cfg,
+            &cfg.palette(),
+        )
+        .unwrap();
+        let mut found = Vec::new();
+        dashes(&s.elements, &mut found);
+        assert!(found.contains(&vec![9.0, 5.0]), "{found:?}");
     }
 }
