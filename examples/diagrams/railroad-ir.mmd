@@ -1,0 +1,15 @@
+railroad-beta
+title Expression Grammar
+
+expression = sequence(
+    nonterminal("term"),
+    zeroOrMore(sequence(
+        choice(terminal("+"), terminal("-")),
+        nonterminal("term")
+    ))
+) ;
+factor = choice(
+    nonterminal("number"),
+    sequence(terminal("("), nonterminal("expression"), terminal(")"))
+) ;
+number = sequence(optional(terminal("-")), oneOrMore(nonterminal("digit")), special("exponent")) ;

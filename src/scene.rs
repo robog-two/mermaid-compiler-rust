@@ -253,6 +253,9 @@ pub enum DiagramKind {
     TreeView,
     Ishikawa,
     Railroad,
+    RailroadEbnf,
+    RailroadAbnf,
+    RailroadPeg,
     Venn,
     Wardley,
     Cynefin,
@@ -293,6 +296,9 @@ impl DiagramKind {
             DiagramKind::TreeView => "treeView",
             DiagramKind::Ishikawa => "ishikawa",
             DiagramKind::Railroad => "railroad",
+            DiagramKind::RailroadEbnf => "railroadEbnf",
+            DiagramKind::RailroadAbnf => "railroadAbnf",
+            DiagramKind::RailroadPeg => "railroadPeg",
             DiagramKind::Venn => "venn",
             DiagramKind::Wardley => "wardley",
             DiagramKind::Cynefin => "cynefin",
@@ -331,7 +337,10 @@ impl DiagramKind {
             DiagramKind::EventModeling => "eventmodeling",
             DiagramKind::TreeView => "treeView",
             DiagramKind::Ishikawa => "ishikawa",
-            DiagramKind::Railroad => "railroad",
+            DiagramKind::Railroad
+            | DiagramKind::RailroadEbnf
+            | DiagramKind::RailroadAbnf
+            | DiagramKind::RailroadPeg => "railroad-diagram",
             DiagramKind::Venn => "venn",
             DiagramKind::Wardley => "wardley",
             DiagramKind::Cynefin => "cynefin",
