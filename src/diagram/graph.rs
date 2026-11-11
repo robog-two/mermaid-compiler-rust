@@ -975,7 +975,7 @@ pub fn render_with(
         } else {
             n
         };
-        let (mut els, boundary) = node_elements(n, m, c, pal, &lk, font);
+        let (mut els, boundary) = node_elements(n, m, c, pal, &lk, font, g.kind);
         if let Some(sh) = shadow.filter(|_| n.shape != Shape::Invisible) {
             if let Some(s) = els.first().and_then(|e| drop_shadow(e, sh)) {
                 els.insert(0, s);
@@ -1270,7 +1270,7 @@ pub fn draw_node(
         style: slot_styled(&n.style, slot.as_ref()),
         ..n.clone()
     };
-    let (mut els, boundary) = node_elements(&painted, &m, c, pal, &lk, font);
+    let (mut els, boundary) = node_elements(&painted, &m, c, pal, &lk, font, kind);
     let shadow = pal
         .drop_shadow
         .as_ref()
@@ -1887,17 +1887,25 @@ fn node_elements(
     pal: &Palette,
     lk: &Look,
     font: f64,
+    kind: DiagramKind,
 ) -> (Vec<Element>, Boundary) {
     let (w, h) = (m.w, m.h);
+    // Flowchart CSS (`.node circle, .node path { fill: mainBkg; stroke: nodeBorder;
+    // stroke-width: 2px }`) overrides the state shapes' own attributes; `f-circ` keeps
+    // its inline `fill: nodeBorder !important`.
+    let flow_css = kind == DiagramKind::Flowchart;
     let r = Rect::centered(c, w, h);
     let (x0, y0, x1) = (r.x, r.y, r.right());
     let default_fill = match n.shape {
         Shape::Note => &pal.note_bkg,
+        Shape::StateStart if flow_css => &pal.node_border,
+        Shape::ForkBar if flow_css => &pal.main_bkg,
         Shape::StateStart | Shape::ForkBar => &pal.special_state,
         _ => &pal.main_bkg,
     };
     let default_stroke = match n.shape {
         Shape::Note => &pal.note_border,
+        Shape::StateStart | Shape::StateEnd | Shape::ForkBar if flow_css => &pal.node_border,
         Shape::StateStart | Shape::StateEnd | Shape::ForkBar => &pal.special_state,
         _ => &pal.node_border,
     };
@@ -1983,7 +1991,7 @@ fn node_elements(
             Shape::StateStart => {
                 els.push(Element::shape(
                     Geometry::Circle { c, r: 7.0 },
-                    Paint::both(&fill, &stroke, 1.0),
+                    Paint::both(&fill, &stroke, if flow_css { 2.0 } else { 1.0 }),
                 ));
                 Boundary::Ellipse(c, 7.0, 7.0)
             }
@@ -1997,20 +2005,25 @@ fn node_elements(
             // stateEnd.ts: rough circles of diameter 14 and 14·5/14 = 5, both
             // stroked 2px.
             Shape::StateEnd => {
+                let inner = if flow_css {
+                    n.style.fill.as_ref().unwrap_or(&pal.main_bkg)
+                } else {
+                    &stroke
+                };
                 els.push(Element::shape(
                     Geometry::Circle { c, r: 7.0 },
                     Paint::both(&pal.background, &stroke, 2.0),
                 ));
                 els.push(Element::shape(
                     Geometry::Circle { c, r: 2.5 },
-                    Paint::both(&stroke, &stroke, 2.0),
+                    Paint::both(inner, &stroke, 2.0),
                 ));
                 Boundary::Ellipse(c, 7.0, 7.0)
             }
             Shape::ForkBar => {
                 els.push(Element::shape(
                     Geometry::Rect { rect: r, rx: 0.0 },
-                    Paint::both(&fill, &stroke, 1.0),
+                    Paint::both(&fill, &stroke, if flow_css { 2.0 } else { 1.0 }),
                 ));
                 Boundary::Rect(r)
             }
