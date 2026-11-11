@@ -97,6 +97,10 @@ pub enum Shape {
     HorizontalCylinder,
     /// `curv-trap` / `display`.
     CurvedTrapezoid,
+    /// `lin-doc` / `lined-document` (agentflow `refdoc`).
+    LinedDocument,
+    /// `collapsedGroup`: a folded container (agentflow `@{ view: collapsed }`).
+    CollapsedGroup,
 }
 
 /// Inline style overrides (`style`, `classDef`, `linkStyle`).
@@ -343,13 +347,13 @@ fn look(kind: DiagramKind) -> Look {
 /// `radius` reaches flowchart rounded nodes (`roundedRect.ts`).
 fn themed_look(mut lk: Look, kind: DiagramKind, look: ConfigLook, pal: &Palette) -> Look {
     let Some(sw) = pal.stroke_width else {
-        if kind == DiagramKind::Flowchart {
+        if matches!(kind, DiagramKind::Flowchart | DiagramKind::Agentflow) {
             lk.rounded_rx = pal.radius.unwrap_or(lk.rounded_rx);
         }
         return lk;
     };
     match kind {
-        DiagramKind::Flowchart => {
+        DiagramKind::Flowchart | DiagramKind::Agentflow => {
             lk.node_stroke_width = sw;
             lk.edge_width = sw;
             lk.rounded_rx = pal.radius.unwrap_or(lk.rounded_rx);
@@ -466,6 +470,7 @@ fn compartment_layout(
     (layout, max_w + 2.0 * pad, h)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure_node(
     node: &Node,
     kind: DiagramKind,
@@ -474,13 +479,25 @@ fn measure_node(
     font: f64,
     horizontal: bool,
     look: ConfigLook,
+    min_label_width: f64,
 ) -> Measured {
     let mut block = TextBlock::label(&node.label, font);
     if node.style.bold == Some(true) {
         block = TextBlock::new(block.lines, font, true);
     }
+    // labelHelper: `minWidth` widens non-empty labels; circles and collapsed
+    // containers size without it.
+    let widen = !block.is_empty()
+        && !matches!(
+            node.shape,
+            Shape::Circle | Shape::DoubleCircle | Shape::CollapsedGroup
+        );
     let (tw, th) = (
-        block.width,
+        if widen {
+            block.width.max(min_label_width)
+        } else {
+            block.width
+        },
         block
             .height
             .max(if block.is_empty() { 0.0 } else { font * 1.5 }),
@@ -538,8 +555,25 @@ fn measure_node(
     }
 }
 
+/// Diagram-specific options of [`render_with`] that are not part of [`GraphConfig`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RenderOptions {
+    /// mermaid's `minNodeWidth`: non-empty node labels are widened to at least this.
+    pub min_label_width: f64,
+}
+
 /// Pure renderer for graph diagrams.
 pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
+    render_with(g, cfg, pal, &RenderOptions::default())
+}
+
+/// [`render`] with extra [`RenderOptions`].
+pub fn render_with(
+    g: &GraphDiagram,
+    cfg: &GraphConfig,
+    pal: &Palette,
+    opts: &RenderOptions,
+) -> Scene {
     let lk = themed_look(look(g.kind), g.kind, cfg.look, pal);
     let shadow = pal
         .drop_shadow
@@ -578,6 +612,7 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
                 font,
                 horizontal,
                 cfg.look,
+                opts.min_label_width,
             )
         })
         .collect();
@@ -587,19 +622,40 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
         .map(|c| TextBlock::label(&c.title, font))
         .collect();
 
-    let representative = |c: ClusterId| -> usize {
-        nodes
+    // An edge to / from a whole cluster is laid out against one member node: a member
+    // without incoming edges from inside the cluster for edges into it, and (the last)
+    // one without outgoing inside edges for edges out of it, so that `A --> B` between
+    // clusters ranks B's content after A's, as dagre's cluster borders do.
+    let representative = |c: ClusterId, outgoing: bool| -> usize {
+        let members: Vec<usize> = nodes
             .iter()
-            .position(|n| {
+            .enumerate()
+            .filter(|(_, n)| {
                 n.cluster
                     .map(|nc| is_within(&g.clusters, nc, c))
                     .unwrap_or(false)
             })
-            .unwrap_or(0)
+            .map(|(i, _)| i)
+            .collect();
+        let inside = |i: usize| {
+            g.edges.iter().any(|e| match (e.from, e.to) {
+                (Endpoint::Node(NodeId(a)), Endpoint::Node(NodeId(b))) if a != b => {
+                    let (me, other) = if outgoing { (a, b) } else { (b, a) };
+                    me == i && members.contains(&other)
+                }
+                _ => false,
+            })
+        };
+        let pick = if outgoing {
+            members.iter().rev().find(|&&i| !inside(i))
+        } else {
+            members.iter().find(|&&i| !inside(i))
+        };
+        pick.or(members.first()).copied().unwrap_or(0)
     };
-    let resolve = |e: Endpoint| match e {
+    let resolve = |e: Endpoint, outgoing: bool| match e {
         Endpoint::Node(NodeId(i)) => i,
-        Endpoint::Cluster(c) => representative(c),
+        Endpoint::Cluster(c) => representative(c, outgoing),
     };
     let edge_labels: Vec<Option<TextBlock>> = g
         .edges
@@ -627,8 +683,8 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
             .iter()
             .zip(&edge_labels)
             .map(|(e, lb)| LayoutEdge {
-                from: resolve(e.from),
-                to: resolve(e.to),
+                from: resolve(e.from, true),
+                to: resolve(e.to, false),
                 minlen: e.minlen,
                 label: lb.as_ref().map(|b| (b.width + 8.0, b.height + 4.0)),
             })
@@ -697,12 +753,25 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
             .stroke
             .clone()
             .unwrap_or_else(|| pal.cluster_border.clone());
-        let default_width = if is_state { lk.node_stroke_width } else { 1.0 };
+        // Agentflow's `flowGroup` (clusters.js + agentflow styles.ts): rounded, unfilled
+        // unless a palette slot or style fills it, 0.75px border.
+        let flow_group = g.kind == DiagramKind::Agentflow;
+        let default_width = match (is_state, flow_group) {
+            (true, _) => lk.node_stroke_width,
+            (_, true) => 0.75,
+            _ => 1.0,
+        };
+        let fill = if flow_group && style.fill.is_none() {
+            Color::none()
+        } else {
+            fill
+        };
         let mut paint = Paint::both(&fill, &stroke, style.stroke_width.unwrap_or(default_width));
         paint.dash = style.dash.clone();
         let rx = match (is_state, cfg.look) {
             (true, ConfigLook::Neo) => pal.radius.unwrap_or(5.0),
             (true, _) => 5.0,
+            _ if flow_group => 10.0,
             _ => 0.0,
         };
         let body = Element::rect(r, rx, paint.clone());
@@ -797,7 +866,7 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
                 Endpoint::Cluster(c) => geom::clip_rect(&cluster_rects[c.0], toward),
             }
         };
-        let is_loop = resolve(e.from) == resolve(e.to);
+        let is_loop = resolve(e.from, true) == resolve(e.to, false);
         if !is_loop {
             // Cluster endpoints start from the cluster box rather than the representative.
             if let Endpoint::Cluster(c) = e.from {
@@ -943,7 +1012,11 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
                 tb.line_height,
                 &pal.title_color,
             ),
-            "flowchartTitleText",
+            if g.kind == DiagramKind::Agentflow {
+                "agentflowTitleText"
+            } else {
+                "flowchartTitleText"
+            },
         ));
     }
 
@@ -972,6 +1045,7 @@ fn node_prefix(kind: DiagramKind) -> &'static str {
         DiagramKind::Class => "classId",
         DiagramKind::Er => "entity",
         DiagramKind::Requirement => "requirement",
+        DiagramKind::Agentflow => "agentflow",
         _ => "flowchart",
     }
 }
@@ -1357,6 +1431,33 @@ fn node_elements(
             _ => Boundary::Rect(r),
         }
     };
+    if n.shape == Shape::CollapsedGroup {
+        // collapsedGroup.ts: a dashed separator 8px below the title, inset 8px, and three
+        // dots centred in the 20px indicator row (`.collapsed-indicator`: nodeBorder, 50%).
+        let sep_y = y0 + shapes::COLLAPSED_PAD + m.block.height + 8.0;
+        let mut sep = Paint::stroke(&pal.cluster_border, 0.75);
+        sep.dash = Some(vec![3.0, 3.0]);
+        els.push(Element::classed_shape(
+            Geometry::Path(vec![
+                PathCmd::MoveTo(Point::new(x0 + 8.0, sep_y)),
+                PathCmd::LineTo(Point::new(x1 - 8.0, sep_y)),
+            ]),
+            sep,
+            "collapsed-separator",
+        ));
+        let mut dot = Paint::fill(&pal.node_border);
+        dot.opacity = Some(0.5);
+        for i in [-1.0, 0.0, 1.0] {
+            els.push(Element::classed_shape(
+                Geometry::Circle {
+                    c: Point::new(c.x + 10.0 * i, sep_y + 10.0),
+                    r: 2.5,
+                },
+                dot.clone(),
+                "collapsed-indicator",
+            ));
+        }
+    }
     if !m.block.is_empty() && shapes::shows_label(n.shape) {
         let mut t = Text::centered(
             c.plus(m.label_offset),

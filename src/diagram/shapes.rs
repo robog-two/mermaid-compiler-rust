@@ -44,6 +44,10 @@ const NOTCH: f64 = 12.0;
 const PANE: f64 = 10.0;
 /// `taggedRect.ts` TAG_RATIO.
 const TAG_RATIO: f64 = 0.2;
+/// `collapsedGroup.ts`: `node.padding` of a collapsed container.
+pub const COLLAPSED_PAD: f64 = 8.0;
+/// `collapsedGroup.ts`: SEPARATOR_GAP + INDICATOR_ROW_HEIGHT.
+pub const COLLAPSED_ROWS: f64 = 8.0 + 20.0;
 
 impl ShapeMetrics {
     /// Classic-look values (`node.look !== 'neo'`) for `shape` with `node.padding = p`.
@@ -66,6 +70,7 @@ impl ShapeMetrics {
             | Shape::StackedRect
             | Shape::TaggedRect
             | Shape::Document
+            | Shape::LinedDocument
             | Shape::LinedCylinder
             | Shape::CurvedTrapezoid => pad(2.0 * p, 2.0 * p),
             Shape::HorizontalCylinder => pad(p / 2.0, p / 2.0),
@@ -137,6 +142,7 @@ impl ShapeMetrics {
             | Shape::NotchedPentagon
             | Shape::TaggedRect
             | Shape::Document
+            | Shape::LinedDocument
             | Shape::CurvedTrapezoid
             | Shape::StackedRect => pad(32.0, 24.0),
             // roundedRect, question, note, state start/end, fork, choice, text,
@@ -275,6 +281,27 @@ pub fn size(
             let amp = h * m.wave_ratio;
             off(tw + px, h + 2.0 * amp, 0.0, -amp)
         }
+        Shape::LinedDocument => {
+            // linedWaveEdgedRect.ts: the body is 10% wider than `tw + px` (5% each side)
+            // and the label is placed from the left edge with `node.padding`, not centred.
+            let (w, h) = (tw + px, th + py);
+            let amp = h * m.wave_ratio;
+            let np = m.node_padding;
+            off(
+                1.1 * w,
+                h + 2.0 * amp,
+                np - px / 2.0 + 0.025 * w,
+                np - py / 2.0 - amp,
+            )
+        }
+        // collapsedGroup.ts: padding 8 around the title, an 8px gap and a 20px row of
+        // dots below it, at least 80 wide; the title sits above the centre.
+        Shape::CollapsedGroup => off(
+            (tw + 2.0 * COLLAPSED_PAD).max(80.0),
+            th + COLLAPSED_ROWS + 2.0 * COLLAPSED_PAD,
+            0.0,
+            -COLLAPSED_ROWS / 2.0,
+        ),
         Shape::LinedCylinder => {
             let w = tw + px;
             let ry = cyl_ry(w);
@@ -700,6 +727,26 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             }));
             poly_outline(c, pts)
         }
+        Shape::LinedDocument => {
+            // linedWaveEdgedRect.ts: the document wave plus a vertical line at the
+            // inner (unwidened) left edge, 5% of the inner width in from the outside.
+            let amp = h / (1.0 / m.wave_ratio + 2.0);
+            let base = y1 - amp;
+            let wave_y = |x: f64| base + amp * (2.0 * PI * 0.8 * (x - x0) / w).sin();
+            let mut pts = vec![p(x0, y0), p(x1, y0)];
+            pts.extend((0..=50).rev().map(|i| {
+                let x = x0 + w * i as f64 / 50.0;
+                p(x, wave_y(x))
+            }));
+            let mut o = poly_outline(c, pts);
+            let inner = x0 + w / 22.0;
+            o.parts
+                .push(line(seg(p(inner, y0), p(inner, wave_y(inner)))));
+            o
+        }
+        // collapsedGroup.ts: rounded box (rx 10, the expanded flow container's radius);
+        // the separator and the dots are drawn by the caller.
+        Shape::CollapsedGroup => rect(10.0),
         Shape::CurvedTrapezoid => {
             let rad = h / 2.0;
             let mut pts = vec![
@@ -761,6 +808,14 @@ mod tests {
         // card.ts neo: w = tw + 56, h = th + 48.
         let k = sized_neo(Shape::Card, 100.0, 24.0, 15.0);
         assert_eq!((k.w, k.h), (156.0, 72.0));
+        // linedWaveEdgedRect.ts neo (agentflow refdoc): 120×21 label → 152×45 inner box,
+        // amplitude 45/4, outer width 1.1·152.
+        let l = sized_neo(Shape::LinedDocument, 120.0, 21.0, 15.0);
+        assert!((l.w - 167.2).abs() < 1e-9);
+        assert!((l.h - 67.5).abs() < 1e-9);
+        // collapsedGroup.ts: at least 80 wide, title + 28 + 16 high.
+        let g = sized_neo(Shape::CollapsedGroup, 30.0, 21.0, 15.0);
+        assert_eq!((g.w, g.h), (80.0, 65.0));
     }
 
     #[test]
@@ -815,6 +870,8 @@ mod tests {
             Shape::Cylinder,
             Shape::Card,
             Shape::Document,
+            Shape::LinedDocument,
+            Shape::CollapsedGroup,
             Shape::CurvedTrapezoid,
             Shape::HorizontalCylinder,
             Shape::StackedRect,
