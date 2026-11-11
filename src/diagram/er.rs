@@ -6,11 +6,15 @@
 //! (`|o`, `||`, `}o`, `}|`, `o|`, `o{`, `|{`) or word cardinalities (`one or more`,
 //! `zero or many`, `only one`, `1+`, `0+`, `many(0)`, `1`, ...), identifying
 //! (`--`, `to`) and non-identifying (`..`, `.-`, `-.`, `optionally to`) links,
-//! `direction`, `classDef`, `class`, `style`, `:::class` and `title`.
+//! `direction`, `classDef`, `class`, `style`, `:::class` and `title`, and
+//! (mermaid 11.17+) `subgraph id` / `subgraph id [title]` … `end` groups, nested,
+//! with their own `direction`, styled by `style` / `class`, and usable as
+//! relationship endpoints by id.
 
 use super::graph::StyleOverrides;
 use super::graph::{
-    self, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId, Section, Shape,
+    self, Cluster, ClusterId, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId, Section,
+    Shape,
 };
 use crate::config::{Curve, GraphConfig, MermaidConfig};
 use crate::error::{Error, Result};
@@ -70,6 +74,20 @@ pub struct Relationship {
     pub label: String,
 }
 
+/// A `subgraph … end` group (erDb's `ErSubGraph`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SubGraph {
+    pub id: String,
+    pub title: String,
+    /// Names mentioned directly inside the group (entities and nested subgraph ids),
+    /// first mention first, without names an earlier-closed group already claimed.
+    pub members: Vec<String>,
+    /// The group's own `direction` statement (the last one wins).
+    pub direction: Option<Direction>,
+    pub classes: Vec<String>,
+    pub style: StyleOverrides,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ErDiagram {
     pub title: Option<String>,
@@ -77,6 +95,9 @@ pub struct ErDiagram {
     pub entities: Vec<Entity>,
     pub relationships: Vec<Relationship>,
     pub class_defs: HashMap<String, StyleOverrides>,
+    /// Subgraphs in closing order (inner groups before the groups around them),
+    /// as erDb's `addSubGraph` runs on `end`.
+    pub subgraphs: Vec<SubGraph>,
 }
 
 impl ErDiagram {
@@ -93,6 +114,75 @@ impl ErDiagram {
         };
         &mut self.entities[i]
     }
+
+    fn subgraph_index(&self, id: &str) -> Option<usize> {
+        // erDb's `subGraphLookup`: a repeated id resolves to the latest group.
+        self.subgraphs.iter().rposition(|g| g.id == id)
+    }
+}
+
+/// A subgraph between its header and its `end`.
+struct OpenSubGraph {
+    id: String,
+    title: String,
+    members: Vec<String>,
+    direction: Option<Direction>,
+    line: usize,
+}
+
+/// `subgraph id`, `subgraph "quoted id"` or `subgraph id [title words]`.
+fn subgraph_header(rest: &str, line: usize) -> Result<(String, String)> {
+    let mut c = Cur::new(rest.trim());
+    let id = entity_name(&mut c)
+        .ok_or_else(|| Error::parse(line, "Expecting a subgraph id after 'subgraph'"))?;
+    c.ws();
+    if c.at_end() {
+        return Ok((id.clone(), id));
+    }
+    if !c.eat("[") {
+        return Err(Error::parse(
+            line,
+            format!("Unexpected '{}' after the subgraph id", c.rest().trim()),
+        ));
+    }
+    let r = c.rest();
+    let end = r
+        .find(']')
+        .ok_or_else(|| Error::parse(line, "Expecting ']' to close the subgraph title"))?;
+    if !r[end + 1..].trim().is_empty() {
+        return Err(Error::parse(
+            line,
+            format!(
+                "Unexpected '{}' after the subgraph title",
+                r[end + 1..].trim()
+            ),
+        ));
+    }
+    // `subgraphTitle`: entity names separated by whitespace, joined by single spaces.
+    let mut words = Vec::new();
+    let mut t = Cur::new(&r[..end]);
+    loop {
+        t.ws();
+        if t.at_end() {
+            break;
+        }
+        match entity_name(&mut t) {
+            Some(w) => words.push(w),
+            None => {
+                return Err(Error::parse(
+                    line,
+                    format!("Unexpected '{}' in the subgraph title", t.rest().trim()),
+                ));
+            }
+        }
+    }
+    if words.is_empty() {
+        return Err(Error::parse(
+            line,
+            "Expecting a subgraph title inside '[ ]'",
+        ));
+    }
+    Ok((id, words.join(" ")))
 }
 
 /// Parse and render a `erDiagram` diagram body (already preprocessed).
@@ -479,8 +569,10 @@ pub fn parse(body: &str, title: Option<String>) -> Result<ErDiagram> {
         entities: Vec::new(),
         relationships: Vec::new(),
         class_defs: HashMap::new(),
+        subgraphs: Vec::new(),
     };
     let mut header = false;
+    let mut open: Vec<OpenSubGraph> = Vec::new();
     // Open attribute block: entity name, tokens so far, opening line.
     let mut block: Option<OpenBlock> = None;
     let mut styles: Vec<(String, StyleOverrides)> = Vec::new();
@@ -515,18 +607,53 @@ pub fn parse(body: &str, title: Option<String>) -> Result<ErDiagram> {
                 .strip_prefix("erDiagram")
                 .ok_or_else(|| Error::parse(line, format!("{s}\nExpecting 'erDiagram'")))?;
             header = true;
-            if !rest.trim().is_empty() {
-                return Err(Error::parse(
-                    line,
-                    format!("Unexpected '{}' after 'erDiagram'", rest.trim()),
-                ));
+            // The grammar is token-based: a statement may follow on the same line.
+            if rest.trim().is_empty() || !rest.starts_with(char::is_whitespace) {
+                if !rest.trim().is_empty() {
+                    return Err(Error::parse(
+                        line,
+                        format!("Unexpected '{}' after 'erDiagram'", rest.trim()),
+                    ));
+                }
+                continue;
+            }
+            text = rest.trim().to_string();
+        }
+        let s = text.trim().trim_end_matches(';').trim();
+        let lower = s.to_ascii_lowercase();
+        if let Some(dir) = lower.strip_prefix("direction ") {
+            let dir = Direction::parse(&dir.trim().to_ascii_uppercase())
+                .ok_or_else(|| Error::parse(line, format!("Invalid direction '{}'", dir.trim())))?;
+            // Inside a subgraph `direction` belongs to the innermost open group.
+            match open.last_mut() {
+                Some(g) => g.direction = Some(dir),
+                None => d.direction = dir,
             }
             continue;
         }
-        let lower = s.to_ascii_lowercase();
-        if let Some(dir) = lower.strip_prefix("direction ") {
-            d.direction = Direction::parse(&dir.trim().to_ascii_uppercase())
-                .ok_or_else(|| Error::parse(line, format!("Invalid direction '{}'", dir.trim())))?;
+        if lower == "end" {
+            let g = open
+                .pop()
+                .ok_or_else(|| Error::parse(line, "Unexpected 'end' outside a subgraph"))?;
+            close_subgraph(&mut d, g);
+            if let Some(parent) = open.last_mut() {
+                // `subgraphHeader document END` yields the id into the enclosing document.
+                let id = d.subgraphs.last().map(|g| g.id.clone()).unwrap_or_default();
+                parent.members.push(id);
+            }
+            continue;
+        }
+        if lower == "subgraph"
+            || (lower.starts_with("subgraph") && s[8..].starts_with(char::is_whitespace))
+        {
+            let (id, title) = subgraph_header(&s[8..], line)?;
+            open.push(OpenSubGraph {
+                id,
+                title,
+                members: Vec::new(),
+                direction: None,
+                line,
+            });
             continue;
         }
         if lower.starts_with("title ") || lower == "title" {
@@ -563,7 +690,11 @@ pub fn parse(body: &str, title: Option<String>) -> Result<ErDiagram> {
             }
             continue;
         }
-        block = statement(&mut d, s, line)?.map(|name| (name, Vec::new(), line));
+        let (names, opened) = statement(&mut d, s, line)?;
+        if let Some(g) = open.last_mut() {
+            g.members.extend(names);
+        }
+        block = opened.map(|name| (name, Vec::new(), line));
         // A block may open and close on the same line: `A { string x }`.
         if let Some((name, toks, _)) = block.as_mut() {
             let after = s.split_once('{').map(|x| x.1).unwrap_or("");
@@ -597,10 +728,29 @@ pub fn parse(body: &str, title: Option<String>) -> Result<ErDiagram> {
             format!("Unterminated attribute block for entity '{name}': missing '}}'"),
         ));
     }
+    if let Some(g) = open.last() {
+        return Err(Error::parse(
+            g.line,
+            format!("Unterminated subgraph '{}': missing 'end'", g.id),
+        ));
+    }
     for (id, cls) in class_assign {
         if let Some(e) = d.entities.iter_mut().find(|e| e.name == id) {
-            e.classes.push(cls);
+            e.classes.push(cls.clone());
         }
+        if let Some(i) = d.subgraph_index(&id) {
+            d.subgraphs[i].classes.push(cls);
+        }
+    }
+    // Subgraphs take only their own classes (no `default`), then `style` statements.
+    for g in d.subgraphs.iter_mut() {
+        let mut st = StyleOverrides::default();
+        for c in &g.classes {
+            if let Some(def) = d.class_defs.get(c) {
+                st = st.merged(def);
+            }
+        }
+        g.style = st;
     }
     for e in d.entities.iter_mut() {
         let mut st = d.class_defs.get("default").cloned().unwrap_or_default();
@@ -615,8 +765,34 @@ pub fn parse(body: &str, title: Option<String>) -> Result<ErDiagram> {
         if let Some(e) = d.entities.iter_mut().find(|e| e.name == id) {
             e.style = e.style.merged(&st);
         }
+        if let Some(i) = d.subgraph_index(&id) {
+            d.subgraphs[i].style = d.subgraphs[i].style.merged(&st);
+        }
     }
     Ok(d)
+}
+
+/// erDb's `addSubGraph`: dedupe the members and drop names an earlier-closed group
+/// already holds (`makeUniq`), so every entity belongs to at most one group.
+fn close_subgraph(d: &mut ErDiagram, g: OpenSubGraph) {
+    let mut members: Vec<String> = Vec::new();
+    for m in g.members {
+        let m = m.trim().to_string();
+        if m.is_empty() || members.contains(&m) {
+            continue;
+        }
+        if d.subgraphs.iter().any(|o| o.members.contains(&m)) {
+            continue;
+        }
+        members.push(m);
+    }
+    d.subgraphs.push(SubGraph {
+        id: g.id,
+        title: g.title,
+        members,
+        direction: g.direction,
+        ..SubGraph::default()
+    });
 }
 
 fn register(d: &mut ErDiagram, r: &EntityRef) {
@@ -631,19 +807,20 @@ fn register(d: &mut ErDiagram, r: &EntityRef) {
     }
 }
 
-/// One entity/relationship statement. Returns the entity name when it opens a block.
-fn statement(d: &mut ErDiagram, s: &str, line: usize) -> Result<Option<String>> {
+/// One entity/relationship statement. Returns the entity names it mentions (what the
+/// grammar yields into an enclosing subgraph) and the entity name when it opens a block.
+fn statement(d: &mut ErDiagram, s: &str, line: usize) -> Result<(Vec<String>, Option<String>)> {
     let mut c = Cur::new(s);
     let a = entity_ref(&mut c, line)?
         .ok_or_else(|| Error::parse(line, format!("{s}\nExpecting an entity name")))?;
     c.ws();
     if c.at_end() {
         register(d, &a);
-        return Ok(None);
+        return Ok((vec![a.name], None));
     }
     if c.eat("{") {
         register(d, &a);
-        return Ok(Some(a.name));
+        return Ok((vec![a.name.clone()], Some(a.name)));
     }
     let left = cardinality(&mut c).ok_or_else(|| {
         Error::parse(
@@ -684,8 +861,13 @@ fn statement(d: &mut ErDiagram, s: &str, line: usize) -> Result<Option<String>> 
         .and_then(|l| l.strip_suffix('"'))
         .unwrap_or(label)
         .to_string();
-    register(d, &a);
-    register(d, &b);
+    // erDb's `addRelationship`: an endpoint naming a (closed) subgraph is that group.
+    for r in [&a, &b] {
+        if d.subgraph_index(&r.name).is_none() {
+            register(d, r);
+        }
+    }
+    let names = vec![a.name.clone(), b.name.clone()];
     d.relationships.push(Relationship {
         from: a.name,
         to: b.name,
@@ -694,57 +876,101 @@ fn statement(d: &mut ErDiagram, s: &str, line: usize) -> Result<Option<String>> 
         identifying,
         label,
     });
-    Ok(None)
+    Ok((names, None))
 }
 
 // ---------------------------------------------------------------- graph
 
-/// Lower the ER IR to the shared graph IR.
+/// Lower the ER IR to the shared graph IR. Subgraphs become clusters (erDb's
+/// `getData`): an entity or group sits in the group whose member list names it, and a
+/// relationship whose endpoint names a group attaches to that group's frame.
 pub fn to_graph(d: &ErDiagram) -> GraphDiagram {
-    let index: HashMap<&str, usize> = d
-        .entities
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (e.name.as_str(), i))
-        .collect();
-    let nodes = d
-        .entities
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let mut n = Node::new(
-                e.name.clone(),
-                e.alias.clone().unwrap_or_else(|| e.name.clone()),
-                Shape::EntityTable,
-            );
-            // erDb: every entity takes the next slot, in first-mention order.
-            n.color_slot = Some(ColorSlot(i));
-            n.style = e.style.clone();
-            n.classes = e.classes.clone();
-            n.sections = e
-                .attributes
-                .iter()
-                .map(|a| Section {
-                    lines: vec![
-                        a.ty.clone(),
-                        a.name.clone(),
-                        a.keys.join(", "),
-                        a.comment.clone().unwrap_or_default(),
-                    ],
-                    centered: false,
-                    bold: false,
-                })
-                .collect();
-            n
-        })
-        .collect();
+    // `parentDB`: member name -> index of the group holding it.
+    let mut parent_of: HashMap<&str, usize> = HashMap::new();
+    for (gi, g) in d.subgraphs.iter().enumerate().rev() {
+        for m in &g.members {
+            parent_of.insert(m.as_str(), gi);
+        }
+    }
+    let cluster_of = |name: &str| parent_of.get(name).map(|&gi| ClusterId(gi));
+    let mut clusters: Vec<Cluster> = Vec::with_capacity(d.subgraphs.len());
+    for g in &d.subgraphs {
+        let mut c = Cluster::new(g.id.clone(), g.title.clone(), None);
+        c.direction = g.direction;
+        c.style = g.style.clone();
+        clusters.push(c);
+    }
+    for gi in 0..clusters.len() {
+        let id = &d.subgraphs[gi].id;
+        // Only the latest group of a repeated id is the one its name resolves to.
+        if d.subgraph_index(id) != Some(gi) {
+            continue;
+        }
+        let Some(p) = cluster_of(id) else { continue };
+        // A group cannot sit inside itself (a name yielded into its own descendant).
+        let mut cur = Some(p);
+        let mut cyclic = false;
+        for _ in 0..=clusters.len() {
+            match cur {
+                Some(c) if c.0 == gi => {
+                    cyclic = true;
+                    break;
+                }
+                Some(c) => cur = clusters[c.0].parent,
+                None => break,
+            }
+        }
+        if !cyclic {
+            clusters[gi].parent = Some(p);
+        }
+    }
+
+    // Entities named like a group are that group, not a node of their own.
+    let mut index: HashMap<&str, usize> = HashMap::new();
+    let mut nodes: Vec<Node> = Vec::new();
+    for e in &d.entities {
+        if d.subgraph_index(&e.name).is_some() {
+            continue;
+        }
+        let mut n = Node::new(
+            e.name.clone(),
+            e.alias.clone().unwrap_or_else(|| e.name.clone()),
+            Shape::EntityTable,
+        );
+        // erDb: every entity takes the next slot, in first-mention order; groups
+        // take none.
+        n.color_slot = Some(ColorSlot(nodes.len()));
+        n.style = e.style.clone();
+        n.classes = e.classes.clone();
+        n.cluster = cluster_of(&e.name);
+        n.sections = e
+            .attributes
+            .iter()
+            .map(|a| Section {
+                lines: vec![
+                    a.ty.clone(),
+                    a.name.clone(),
+                    a.keys.join(", "),
+                    a.comment.clone().unwrap_or_default(),
+                ],
+                centered: false,
+                bold: false,
+            })
+            .collect();
+        index.insert(e.name.as_str(), nodes.len());
+        nodes.push(n);
+    }
+    let endpoint = |name: &str| -> Option<Endpoint> {
+        match d.subgraph_index(name) {
+            Some(gi) => Some(Endpoint::Cluster(ClusterId(gi))),
+            None => index.get(name).map(|&i| Endpoint::Node(NodeId(i))),
+        }
+    };
     let edges = d
         .relationships
         .iter()
         .filter_map(|r| {
-            let from = *index.get(r.from.as_str())?;
-            let to = *index.get(r.to.as_str())?;
-            let mut e = Edge::new(Endpoint::Node(NodeId(from)), Endpoint::Node(NodeId(to)));
+            let mut e = Edge::new(endpoint(&r.from)?, endpoint(&r.to)?);
             e.start = r.from_card.head();
             e.end = r.to_card.head();
             e.label = Some(r.label.clone()).filter(|l| !l.trim().is_empty());
@@ -759,7 +985,7 @@ pub fn to_graph(d: &ErDiagram) -> GraphDiagram {
         direction: d.direction,
         nodes,
         edges,
-        clusters: Vec::new(),
+        clusters,
         title: d.title.clone(),
     }
 }
@@ -767,6 +993,8 @@ pub fn to_graph(d: &ErDiagram) -> GraphDiagram {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::{PathCmd, Point, Rect};
+    use crate::scene::{Element, Geometry};
 
     fn err_line(src: &str) -> usize {
         match parse(src, None) {
@@ -876,5 +1104,293 @@ mod tests {
         .unwrap();
         assert_eq!(s.kind, DiagramKind::Er);
         assert!(s.view_box.w > 100.0 && s.view_box.h > 100.0);
+    }
+
+    // ------------------------------------------------------------ subgraphs
+    // Ported from upstream `parser/subgraph.spec.js`.
+
+    fn sg<'a>(d: &'a ErDiagram, id: &str) -> &'a SubGraph {
+        d.subgraphs.iter().find(|g| g.id == id).unwrap()
+    }
+
+    #[test]
+    fn subgraph_simple_nodes_and_id_title() {
+        let d = parse("erDiagram\nsubgraph Group\nA\nB\nend", None).unwrap();
+        assert_eq!(d.subgraphs.len(), 1);
+        let g = &d.subgraphs[0];
+        assert_eq!(g.members, vec!["A", "B"]);
+        assert_eq!((g.id.as_str(), g.title.as_str()), ("Group", "Group"));
+    }
+
+    #[test]
+    fn subgraph_quoted_and_explicit_titles() {
+        let d = parse("erDiagram\nsubgraph \"Some Title\"\nA\nB\nend", None).unwrap();
+        assert_eq!(d.subgraphs[0].id, "Some Title");
+        assert_eq!(d.subgraphs[0].title, "Some Title");
+        let d = parse("erDiagram\nsubgraph id [Title]\nA\nB\nend", None).unwrap();
+        assert_eq!(
+            (d.subgraphs[0].id.as_str(), d.subgraphs[0].title.as_str()),
+            ("id", "Title")
+        );
+        let d = parse("erDiagram\nsubgraph id1 [title 1]\nCUSTOMER\nend", None).unwrap();
+        assert_eq!(d.subgraphs[0].title, "title 1");
+        let d = parse("erDiagram\nsubgraph \"Group 1.5\"\nA\nend", None).unwrap();
+        assert_eq!(d.subgraphs[0].id, "Group 1.5");
+        assert_eq!(d.subgraphs[0].members, vec!["A"]);
+    }
+
+    #[test]
+    fn subgraph_blank_lines_trailing_space_and_empty() {
+        let d = parse("erDiagram\nsubgraph Group\n\nA\n\nB\n\nend", None).unwrap();
+        assert_eq!(d.subgraphs[0].members, vec!["A", "B"]);
+        let d = parse("erDiagram\nsubgraph Group\nA\nend   \n", None).unwrap();
+        assert_eq!(d.subgraphs[0].members, vec!["A"]);
+        let d = parse("erDiagram\nsubgraph empty\nend", None).unwrap();
+        assert!(d.subgraphs[0].members.is_empty());
+        assert_eq!(d.subgraphs[0].title, "empty");
+    }
+
+    #[test]
+    fn subgraph_direction_on_header_line() {
+        let d = parse("erDiagram subgraph WithRL\ndirection RL\nA\nB\nend", None).unwrap();
+        let g = &d.subgraphs[0];
+        assert_eq!(g.direction, Some(Direction::RightLeft));
+        assert_eq!(g.members, vec!["A", "B"]);
+        assert_eq!(d.direction, Direction::TopBottom);
+    }
+
+    #[test]
+    fn subgraph_relationship_endpoints() {
+        // Both endpoints of a relationship inside a group are members.
+        let d = parse(
+            "erDiagram\nsubgraph Group\nA }|--|| B : \"relates to\"\nend",
+            None,
+        )
+        .unwrap();
+        assert_eq!(d.subgraphs[0].members, vec!["A", "B"]);
+        assert_eq!(d.relationships.len(), 1);
+        // Entity inside, other outside.
+        let d = parse(
+            "erDiagram\nsubgraph Group\nA\nend\nA }|--|| B : \"relates to\"\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(d.subgraphs[0].members, vec!["A"]);
+        // Between groups: the endpoints are the groups, no entities are made for them.
+        let d = parse(
+            "erDiagram\nsubgraph G1\n  A\nend\nsubgraph G2\n  B\nend\nG1 }|--|| G2 : \"relates to\"\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(d.entities.len(), 2);
+        let g = to_graph(&d);
+        assert_eq!(g.edges[0].from, Endpoint::Cluster(ClusterId(0)));
+        assert_eq!(g.edges[0].to, Endpoint::Cluster(ClusterId(1)));
+        // Entities in different groups.
+        let d = parse(
+            "erDiagram\nsubgraph G1\n  A\nend\nsubgraph G2\n  B\nend\nA }|--|| B : \"relates to\"\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                sg(&d, "G1").members[0].as_str(),
+                sg(&d, "G2").members[0].as_str()
+            ),
+            ("A", "B")
+        );
+        let g = to_graph(&d);
+        assert_eq!(g.nodes[0].cluster, Some(ClusterId(0)));
+        assert_eq!(g.nodes[1].cluster, Some(ClusterId(1)));
+        // Entity and group.
+        let d = parse(
+            "erDiagram\nsubgraph Group\nA\nend\nGroup }|--|| B : \"relates to\"\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(d.subgraphs[0].members, vec!["A"]);
+        let g = to_graph(&d);
+        assert_eq!(g.edges[0].from, Endpoint::Cluster(ClusterId(0)));
+        assert_eq!(g.edges[0].to, Endpoint::Node(NodeId(1)));
+        // Multiple relationships inside one group.
+        let d = parse(
+            "erDiagram\nsubgraph Group\n  A }|--|| B : \"r1\"\n  B }|--|| C : \"r2\"\nend",
+            None,
+        )
+        .unwrap();
+        assert_eq!(d.subgraphs[0].members, vec!["A", "B", "C"]);
+        assert_eq!(d.relationships.len(), 2);
+    }
+
+    #[test]
+    fn nested_subgraphs() {
+        let d = parse(
+            "erDiagram\nsubgraph outer\n  A\n  subgraph inner\n    B\n  end\nend",
+            None,
+        )
+        .unwrap();
+        // Closing order: the inner group first; its id is a member of the outer one.
+        assert_eq!(d.subgraphs[0].id, "inner");
+        assert_eq!(sg(&d, "outer").members, vec!["A", "inner"]);
+        assert_eq!(sg(&d, "inner").members, vec!["B"]);
+        let g = to_graph(&d);
+        assert_eq!(g.clusters[0].parent, Some(ClusterId(1)));
+        assert_eq!(g.clusters[1].parent, None);
+        let d = parse(
+            "erDiagram\nsubgraph outer\n    A\n      B\n  subgraph inner\n        C\n  end\nend",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sg(&d, "outer").members, vec!["A", "B", "inner"]);
+        assert_eq!(sg(&d, "inner").members, vec!["C"]);
+        let d = parse(
+            "erDiagram\nsubgraph outer\n  subgraph inner\n    A }|--|| B : \"relates to\"\n  end\nend",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sg(&d, "outer").members, vec!["inner"]);
+        assert_eq!(sg(&d, "inner").members, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn entity_in_two_subgraphs_stays_in_the_first_closed() {
+        let d = parse(
+            "erDiagram\nsubgraph G1\nA\nB\nend\nsubgraph G2\nB\nC\nend",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sg(&d, "G1").members, vec!["A", "B"]);
+        assert_eq!(sg(&d, "G2").members, vec!["C"]);
+        // A nested group closes first, so it keeps a name the outer group repeats.
+        let d = parse("erDiagram\nsubgraph O\nX\nsubgraph I\nX\nend\nend", None).unwrap();
+        assert_eq!(sg(&d, "I").members, vec!["X"]);
+        assert_eq!(sg(&d, "O").members, vec!["I"]);
+    }
+
+    #[test]
+    fn subgraph_styles_classes_and_colour_slots() {
+        let d = parse(
+            "erDiagram\nsubgraph G\nA\nend\nG ||--|| B : r\nstyle G fill:#ffe,stroke:#c90\nclassDef hot stroke:#f00,color:#00f\nclassDef default fill:#f9f\nclass G hot",
+            None,
+        )
+        .unwrap();
+        let g = to_graph(&d);
+        let c = &g.clusters[0];
+        assert_eq!(c.style.fill.as_ref().unwrap().css(), "#ffe");
+        assert_eq!(c.style.stroke.as_ref().unwrap().css(), "#c90");
+        assert_eq!(c.color_slot, None);
+        // Entities take consecutive slots; groups take none.
+        let slots: Vec<_> = g.nodes.iter().map(|n| n.color_slot).collect();
+        assert_eq!(slots, vec![Some(ColorSlot(0)), Some(ColorSlot(1))]);
+    }
+
+    #[test]
+    fn subgraph_errors() {
+        assert_eq!(err_line("erDiagram\nA\nend"), 3);
+        assert_eq!(err_line("erDiagram\nsubgraph G\nA\n"), 2);
+        assert_eq!(err_line("erDiagram\nsubgraph G [x\nend"), 2);
+        assert_eq!(err_line("erDiagram\nsubgraph\nend"), 2);
+    }
+
+    #[test]
+    fn subgraph_layout_contains_members() {
+        let src = "erDiagram\n direction LR\n subgraph L1 [Level A]\n  A\n  subgraph L2 [Level B]\n   direction TB\n   B\n   subgraph L3\n    C ||--o{ D : has\n   end\n  end\n end\n A ||--|{ B : owns\n X }o--|| L3 : refs\n subgraph EMPTY\n end";
+        let d = parse(src, None).unwrap();
+        let g = to_graph(&d);
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let scene = graph::render(&g, &graph_config(&cfg), &pal);
+        let mut clusters = Vec::new();
+        boxes(&scene.elements, "cluster-", &mut clusters);
+        let mut nodes = Vec::new();
+        boxes(&scene.elements, "entity-", &mut nodes);
+        let cl = |id: &str| clusters.iter().find(|(c, _)| c == id).unwrap().1;
+        let nd = |id: &str| {
+            nodes
+                .iter()
+                .find(|(n, _)| n.rsplit_once('-').map(|(a, _)| a) == Some(id))
+                .unwrap()
+                .1
+        };
+        for n in &g.nodes {
+            match n.cluster {
+                Some(c) => assert!(contains(&cl(&g.clusters[c.0].id), &nd(&n.id)), "{}", n.id),
+                None => {
+                    // The empty group draws only its title (no frame).
+                    for c in g.clusters.iter().filter(|c| c.id != "EMPTY") {
+                        assert!(!overlaps(&cl(&c.id), &nd(&n.id)), "{} in {}", n.id, c.id);
+                    }
+                }
+            }
+        }
+        assert!(clusters.iter().all(|(c, _)| c != "EMPTY"));
+        for c in &g.clusters {
+            if let Some(p) = c.parent {
+                assert!(contains(&cl(&g.clusters[p.0].id), &cl(&c.id)), "{}", c.id);
+            }
+        }
+        assert_eq!(
+            g.clusters.iter().find(|c| c.id == "L2").unwrap().direction,
+            Some(Direction::TopBottom)
+        );
+    }
+
+    fn bbox(el: &Element, out: &mut Option<Rect>) {
+        let mut add = |p: Point| {
+            let r = out.get_or_insert(Rect::new(p.x, p.y, 0.0, 0.0));
+            let (x0, y0) = (r.x.min(p.x), r.y.min(p.y));
+            let (x1, y1) = (r.right().max(p.x), r.bottom().max(p.y));
+            *r = Rect::new(x0, y0, x1 - x0, y1 - y0);
+        };
+        match el {
+            Element::Group { children, .. } => children.iter().for_each(|c| bbox(c, out)),
+            Element::Shape { geom, .. } => match geom {
+                Geometry::Rect { rect, .. } => {
+                    add(Point::new(rect.x, rect.y));
+                    add(Point::new(rect.right(), rect.bottom()));
+                }
+                Geometry::Circle { c, .. } => add(*c),
+                Geometry::Path(cmds) => {
+                    for c in cmds {
+                        match c {
+                            PathCmd::MoveTo(p) | PathCmd::LineTo(p) => add(*p),
+                            PathCmd::CubicTo(_, _, p) => add(*p),
+                            PathCmd::Close => {}
+                        }
+                    }
+                }
+            },
+            Element::Text { .. } | Element::Rotated { .. } => {}
+        }
+    }
+
+    /// Bounding boxes of every group whose id starts with `prefix`, keyed by the rest.
+    fn boxes(els: &[Element], prefix: &str, out: &mut Vec<(String, Rect)>) {
+        for el in els {
+            if let Element::Group { id, children, .. } = el {
+                if let Some(rest) = id.as_deref().and_then(|i| i.strip_prefix(prefix)) {
+                    let mut r = None;
+                    bbox(el, &mut r);
+                    if let Some(r) = r {
+                        out.push((rest.to_string(), r));
+                    }
+                }
+                boxes(children, prefix, out);
+            }
+        }
+    }
+
+    fn contains(outer: &Rect, inner: &Rect) -> bool {
+        inner.x >= outer.x - 0.5
+            && inner.y >= outer.y - 0.5
+            && inner.right() <= outer.right() + 0.5
+            && inner.bottom() <= outer.bottom() + 0.5
+    }
+
+    fn overlaps(a: &Rect, b: &Rect) -> bool {
+        a.x < b.right() - 0.5
+            && b.x < a.right() - 0.5
+            && a.y < b.bottom() - 0.5
+            && b.y < a.bottom() - 0.5
     }
 }

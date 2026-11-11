@@ -1,0 +1,27 @@
+---
+title: Subgraphs in an ER diagram
+---
+erDiagram
+    direction LR
+    %% Groups nest, take their own direction, and can be relationship endpoints.
+    subgraph TOP [Order domain]
+        direction TB
+        subgraph B1 [Customers]
+            direction RL
+            CUSTOMER ||--o{ ADDRESS : "lives at"
+        end
+        subgraph B2 [Orders]
+            direction BT
+            ORDER ||--|{ LINE-ITEM : contains
+        end
+    end
+    subgraph "Catalogue"
+        PRODUCT {
+            string code PK
+            string name
+        }
+    end
+    WAREHOUSE ||--|| TOP : serves
+    TOP ||--o{ Catalogue : sells
+    B1 ||--|| B2 : places
+    style Catalogue fill:#fff7e6,stroke:#d48806
