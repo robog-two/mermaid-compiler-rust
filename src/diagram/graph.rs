@@ -3,9 +3,11 @@
 
 use super::markers::{self, End, MarkerColors};
 use super::shapes::{self, Boundary, PartStyle, ShapeMetrics};
-use crate::config::{Curve, GraphConfig, Look as ConfigLook};
+use crate::config::{Curve, GraphConfig, LayoutAlgorithm, Look as ConfigLook};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
-use crate::layout::{self, Direction, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode};
+use crate::layout::{
+    self, Direction, EdgeRouting, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode, OrthoSpacing,
+};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
 use crate::theme::{ColorSlot, DropShadow, Palette, SlotColors};
@@ -695,6 +697,7 @@ pub fn render_with(
     };
     let font = pal.font_size;
     let horizontal = g.direction.is_horizontal();
+    let elk = cfg.layout == LayoutAlgorithm::Elk;
 
     // A cluster with nothing in it is a plain leaf upstream: its title alone, with no
     // visible box. A placeholder node (sized to the title) stands in for it.
@@ -847,7 +850,8 @@ pub fn render_with(
                 LayoutEdge {
                     from: pos_of[from],
                     to: pos_of[to],
-                    minlen: e.minlen,
+                    // The ELK adapter hands ELK no edge length (`--->` is as long as `-->`).
+                    minlen: if elk { 1 } else { e.minlen },
                     label: lb.as_ref().map(|b| (b.width + 8.0, b.height + 4.0)),
                     from_cluster,
                     to_cluster,
@@ -870,12 +874,13 @@ pub fn render_with(
             })
             .collect(),
         direction: g.direction,
-        node_sep: cfg.node_spacing,
-        rank_sep: cfg.rank_spacing,
+        node_sep: layer_spacing(cfg.layout, cfg.node_spacing),
+        rank_sep: layer_spacing(cfg.layout, cfg.rank_spacing),
         edge_sep: 20.0,
         cluster_padding: CLUSTER_PADDING,
         inner_node_sep: CLUSTER_NODE_SPACING,
         inner_rank_sep: CLUSTER_RANK_SPACING,
+        routing: edge_routing(cfg.layout),
     };
     if g.kind == DiagramKind::Er {
         wrap_er_cluster_titles(
@@ -1027,6 +1032,9 @@ pub fn render_with(
             }
             let (p, l) = nested_route(ne, frame, inner_rect, dir, title_h, lw);
             pts = p;
+            if elk {
+                pts.dedup_by(|a, b| a.dist(*b) < 1e-9);
+            }
             if let Endpoint::Node(NodeId(i)) = ne.inner {
                 // Clip at the node's own outline (diamonds, circles, …).
                 let k = if ne.inner_is_target { pts.len() - 1 } else { 0 };
@@ -1038,17 +1046,25 @@ pub fn render_with(
             continue;
         }
         let is_loop = nested[ei].is_some() || resolve(e.from, true) == resolve(e.to, false);
+        if elk && is_loop && nested[ei].is_none() {
+            // An orthogonal self-loop leaves and re-enters through ports on the node's side.
+            if let (Endpoint::Node(NodeId(a)), Endpoint::Node(NodeId(b))) = (e.from, e.to) {
+                let n = pts.len();
+                pts[0] = clip_along(&boundaries[a], pts[0], pts[1]);
+                pts[n - 1] = clip_along(&boundaries[b], pts[n - 1], pts[n - 2]);
+            }
+        }
         if !is_loop {
             // An edge to / from a whole cluster is cut where it crosses the cluster's
             // border (mermaid's `cutPathAtIntersect` for `fromCluster` / `toCluster`).
             match e.from {
                 Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0]),
-                Endpoint::Node(NodeId(i)) => pts[0] = boundaries[i].clip(pts[1]),
+                Endpoint::Node(NodeId(i)) => pts[0] = clip_end(&boundaries[i], &pts, elk),
             }
             pts.reverse();
             match e.to {
                 Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0]),
-                Endpoint::Node(NodeId(i)) => pts[0] = boundaries[i].clip(pts[1]),
+                Endpoint::Node(NodeId(i)) => pts[0] = clip_end(&boundaries[i], &pts, elk),
             }
             pts.reverse();
             if pts.len() < 2 {
@@ -1068,6 +1084,9 @@ pub fn render_with(
             } else {
                 lk.edge_width
             });
+        if !elk {
+            pts = geom::fix_corners(&pts);
+        }
         let mut heads = Vec::new();
         let last = pts.len() - 1;
         let end_dir = pts[last].minus(pts[last - 1]).norm();
@@ -1105,6 +1124,8 @@ pub fn render_with(
             bounds.add_point(*p);
         }
         let cmds = match cfg.curve {
+            // The ELK adapter overrides every routed edge's curve with `rounded`.
+            _ if elk => geom::rounded_path(&pts, EDGE_CORNER_RADIUS),
             Curve::Basis => geom::basis_curve(&pts),
             Curve::Linear => geom::polyline(&pts),
             Curve::Step => geom::polyline(&step_points(&pts, horizontal)),
@@ -1216,6 +1237,102 @@ pub fn render_with(
         font_family: pal.font_family.clone(),
         css: String::new(),
     }
+}
+
+/// mermaid's `DEFAULT_EDGE_CORNER_RADIUS` (`rounded` edges).
+pub(crate) const EDGE_CORNER_RADIUS: f64 = 5.0;
+
+/// The node and layer spacing of the root graph under ELK. mermaid's adapter never
+/// reads the diagram's `nodeSpacing` / `rankSpacing`; it sets `spacing.baseValue: 40`,
+/// from which ELK derives `spacing.nodeNode` and `nodeNodeBetweenLayers` as 1× (and
+/// the edge spacings as ½×: the option default over `nodeNode`'s default of 20).
+pub(crate) const ELK_BASE_SPACING: f64 = 40.0;
+
+/// The root graph's node / rank separation: ELK's, or the configured one under dagre.
+pub(crate) fn layer_spacing(layout: LayoutAlgorithm, configured: f64) -> f64 {
+    match layout {
+        LayoutAlgorithm::Elk => ELK_BASE_SPACING,
+        LayoutAlgorithm::Dagre => configured,
+    }
+}
+
+/// The layered layout's edge routing for a `layout` setting.
+pub(crate) fn edge_routing(layout: LayoutAlgorithm) -> EdgeRouting {
+    match layout {
+        LayoutAlgorithm::Elk => EdgeRouting::Orthogonal(OrthoSpacing::ROOT),
+        LayoutAlgorithm::Dagre => EdgeRouting::Splines,
+    }
+}
+
+/// The clipped first point of `pts` (which starts at node `b`). A dagre route
+/// starts at the node's centre and is cut where the line toward the next point
+/// leaves the outline; an orthogonal (ELK) route starts at a port on the node's
+/// bounding box and is moved in along its first segment onto the outline.
+fn clip_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
+    if elk {
+        clip_along(b, pts[0], pts[1])
+    } else {
+        b.clip(pts[1])
+    }
+}
+
+/// Where the line from `next` through `port` (a point on the node's bounding box)
+/// meets the node's outline, coming from outside: `port` itself for a rectangle,
+/// further in for a diamond, circle, ... (as the ELK adapter's `cutter2` clips the
+/// first segment). `port` if the line misses the outline.
+pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
+    let center = match b {
+        Boundary::Rect(r) => r.center(),
+        Boundary::Ellipse(c, _, _) | Boundary::Polygon(c, _) => *c,
+    };
+    let inward = port.minus(next);
+    if inward.len() < 1e-9 {
+        return port;
+    }
+    let d = inward.norm();
+    let to_center = center.minus(port);
+    let depth = to_center.x * d.x + to_center.y * d.y;
+    if depth <= 0.0 {
+        return port;
+    }
+    // The point level with the centre on the line, and the way out from it.
+    let inner = port.plus(d.scale(depth));
+    let out = d.scale(-1.0);
+    let t = match b {
+        Boundary::Rect(r) => {
+            let exit = |p: f64, v: f64, lo: f64, hi: f64| {
+                if v > 1e-12 {
+                    (hi - p) / v
+                } else if v < -1e-12 {
+                    (lo - p) / v
+                } else {
+                    f64::INFINITY
+                }
+            };
+            exit(inner.x, out.x, r.x, r.right()).min(exit(inner.y, out.y, r.y, r.bottom()))
+        }
+        Boundary::Ellipse(c, rx, ry) => {
+            // |(inner + t * out - c) / r|^2 = 1, the positive root.
+            let (px, py) = ((inner.x - c.x) / rx, (inner.y - c.y) / ry);
+            let (vx, vy) = (out.x / rx, out.y / ry);
+            let qa = vx * vx + vy * vy;
+            let qb = 2.0 * (px * vx + py * vy);
+            let qc = px * px + py * py - 1.0;
+            let disc = qb * qb - 4.0 * qa * qc;
+            if qa < 1e-12 || disc < 0.0 {
+                return port;
+            }
+            (-qb + disc.sqrt()) / (2.0 * qa)
+        }
+        Boundary::Polygon(_, poly) => {
+            let hit = geom::clip_polygon(inner, poly, inner.plus(out));
+            hit.minus(inner).len()
+        }
+    };
+    if !t.is_finite() || t <= 1e-9 || t > depth + 1e-6 {
+        return port;
+    }
+    inner.plus(out.scale(t))
 }
 
 /// A node drawn by a layout other than the layered one (swimlanes): its size, as
@@ -2609,5 +2726,164 @@ mod tests {
         assert_eq!(b.lines.len(), 2, "{:?}", b.lines);
         assert!(b.width <= EDGE_LABEL_WRAP);
         assert_eq!(edge_label_block("has", 16.0).lines, ["has"]);
+    }
+
+    fn edge_paths(scene: &Scene) -> Vec<Vec<PathCmd>> {
+        let Element::Group { children, .. } = &scene.elements[1] else {
+            panic!("edgePaths second");
+        };
+        children
+            .iter()
+            .filter_map(|c| match c {
+                Element::Group { children, .. } => match children.first() {
+                    Some(Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    }) => Some(cmds.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    const FAN: &str = "flowchart TD\n A --> B & C & D\n B --> E\n C --> E\n D --> E\n A --> E";
+
+    /// Under ELK (the default `layout`) every edge is a run of horizontal and vertical
+    /// lines whose bends are radius-5 rounded corners (`generateRoundedPath`).
+    #[test]
+    fn elk_edges_are_orthogonal_with_rounded_corners() {
+        let (_, scene) = render_flowchart(FAN);
+        let mut corners = 0;
+        for cmds in edge_paths(&scene) {
+            let mut at = match cmds[0] {
+                PathCmd::MoveTo(p) => p,
+                ref c => panic!("starts with {c:?}"),
+            };
+            for c in &cmds[1..] {
+                match *c {
+                    PathCmd::LineTo(p) => {
+                        assert!(
+                            (p.x - at.x).abs() < 1e-6 || (p.y - at.y).abs() < 1e-6,
+                            "diagonal line {at:?} -> {p:?} in {cmds:?}"
+                        );
+                        at = p;
+                    }
+                    PathCmd::CubicTo(c1, _, p) => {
+                        // A quarter turn: the corner is cut 5 / sin(45°) back on each leg.
+                        let corner = at.plus(c1.minus(at).scale(1.5));
+                        assert!((corner.dist(at) - 5.0 * 2f64.sqrt()).abs() < 1e-6);
+                        assert!((corner.dist(p) - 5.0 * 2f64.sqrt()).abs() < 1e-6);
+                        corners += 1;
+                        at = p;
+                    }
+                    _ => panic!("unexpected {c:?}"),
+                }
+            }
+        }
+        assert!(corners >= 4, "fan-out / fan-in edges bend");
+    }
+
+    /// `layout: dagre` keeps mermaid's dagre rendering: the configured (basis) curve.
+    #[test]
+    fn dagre_layout_keeps_the_basis_curve() {
+        let g = crate::diagram::flowchart::parse(FAN, None).unwrap();
+        let cfg = GraphConfig {
+            layout: LayoutAlgorithm::Dagre,
+            ..crate::config::MermaidConfig::default().flowchart
+        };
+        let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let scene = render(&g, &cfg, &pal);
+        let paths = edge_paths(&scene);
+        // A basis spline: M, L, cubics, L.
+        assert!(
+            paths
+                .iter()
+                .all(|c| matches!(c[1], PathCmd::LineTo(_)) && matches!(c[2], PathCmd::CubicTo(..)))
+        );
+        let diagonal = paths.iter().any(|cmds| {
+            cmds.windows(2).any(|w| match (&w[0], &w[1]) {
+                (PathCmd::CubicTo(_, _, a), PathCmd::CubicTo(_, _, b)) => {
+                    (a.x - b.x).abs() > 1.0 && (a.y - b.y).abs() > 1.0
+                }
+                _ => false,
+            })
+        });
+        assert!(diagonal, "dagre's S curves are not right-angled");
+    }
+
+    /// ELK gives every edge end its own port, spread evenly over the node's side.
+    #[test]
+    fn elk_ports_spread_over_the_node_side() {
+        let (_, scene) = render_flowchart(FAN);
+        let starts: Vec<Point> = edge_paths(&scene)
+            .iter()
+            .filter_map(|c| match c[0] {
+                PathCmd::MoveTo(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        // A's four outgoing edges leave its bottom side at four distinct ports.
+        let y = starts.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+        let mut xs: Vec<f64> = starts
+            .iter()
+            .filter(|p| (p.y - y).abs() < 1e-6)
+            .map(|p| p.x)
+            .collect();
+        xs.sort_by(f64::total_cmp);
+        xs.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        assert_eq!(xs.len(), 4, "{starts:?}");
+        let gaps: Vec<f64> = xs.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            gaps.iter().all(|g| (g - gaps[0]).abs() < 1e-6),
+            "evenly spread: {gaps:?}"
+        );
+    }
+
+    /// mermaid's ELK adapter never reads `nodeSpacing` / `rankSpacing`; dagre does.
+    #[test]
+    fn elk_ignores_the_configured_spacing() {
+        let g = crate::diagram::flowchart::parse(FAN, None).unwrap();
+        let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let base = crate::config::MermaidConfig::default().flowchart;
+        let wide = GraphConfig {
+            node_spacing: 300.0,
+            rank_spacing: 300.0,
+            ..base.clone()
+        };
+        let size = |c: &GraphConfig| {
+            let v = render(&g, c, &pal).view_box;
+            (v.w, v.h)
+        };
+        assert_eq!(size(&base), size(&wide));
+        let dagre = |c: &GraphConfig| GraphConfig {
+            layout: LayoutAlgorithm::Dagre,
+            ..c.clone()
+        };
+        let (a, b) = (size(&dagre(&base)), size(&dagre(&wide)));
+        assert!(b.0 > a.0 + 100.0 && b.1 > a.1 + 100.0);
+    }
+
+    #[test]
+    fn clipping_along_the_axis_meets_the_outline() {
+        let c = Point::new(0.0, 0.0);
+        // A diamond of half-size 50: the vertical through x = 20 leaves it at y = 30.
+        let diamond = Boundary::Polygon(
+            c,
+            vec![
+                Point::new(0.0, -50.0),
+                Point::new(50.0, 0.0),
+                Point::new(0.0, 50.0),
+                Point::new(-50.0, 0.0),
+            ],
+        );
+        let p = clip_along(&diamond, Point::new(20.0, 50.0), Point::new(20.0, 80.0));
+        assert!(p.dist(Point::new(20.0, 30.0)) < 1e-6, "{p:?}");
+        let circle = Boundary::Ellipse(c, 10.0, 10.0);
+        let p = clip_along(&circle, Point::new(6.0, 10.0), Point::new(6.0, 30.0));
+        assert!(p.dist(Point::new(6.0, 8.0)) < 1e-6, "{p:?}");
+        let rect = Boundary::Rect(Rect::new(-10.0, -5.0, 20.0, 10.0));
+        let p = clip_along(&rect, Point::new(4.0, 5.0), Point::new(4.0, 20.0));
+        assert!(p.dist(Point::new(4.0, 5.0)) < 1e-6, "{p:?}");
     }
 }

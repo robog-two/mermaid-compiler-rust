@@ -16,6 +16,8 @@ use crate::geom::{Point, Rect};
 mod bk;
 pub mod boxes;
 mod nested;
+mod ortho;
+pub use ortho::{EdgeRouting, OrthoSpacing};
 pub mod rank;
 
 /// Flow direction.
@@ -115,6 +117,8 @@ pub struct LayoutInput {
     /// Node / rank separation inside a cluster that is laid out on its own.
     pub inner_node_sep: f64,
     pub inner_rank_sep: f64,
+    /// How edges are routed (dagre-style splines or ELK-style orthogonal routes).
+    pub routing: EdgeRouting,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -398,6 +402,10 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
         }
     };
     let x = assign_x(&layers, &verts, &links, &borders, &gap);
+    let plan = match input.routing {
+        EdgeRouting::Orthogonal(s) => Some(ortho_plan(&verts, n, &chains, &x, &layers, &gap, s)),
+        EdgeRouting::Splines => None,
+    };
 
     // 7. Rank-axis coordinates.
     let pad_rank_low = |c: usize| {
@@ -426,6 +434,30 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
             end_pad[hi] += pad_rank_high(c);
         }
     }
+    // Orthogonal routes: widen a gap whose slots do not fit (ELK sizes the space
+    // between two layers from the slots routed through it).
+    // ELK gives edge labels a layer of their own with the full layer gap on both
+    // sides; the split around the label vertex leaves only half the gap each side.
+    let mut label_gap = vec![0.0f64; max_rank + 1];
+    if plan.is_some() {
+        for v in &verts {
+            if matches!(v.kind, Kind::Dummy { labeled: true }) {
+                label_gap[v.rank] = rank_sep;
+            }
+        }
+    }
+    let gap_before = |r: usize| rank_sep + label_gap[r - 1] + label_gap[r];
+    let mut extra = vec![0.0f64; max_rank + 1];
+    if let Some(p) = &plan {
+        for (ra, ch) in p.channels.iter().enumerate() {
+            let Some((rb, slots)) = *ch else { continue };
+            let free: f64 = (ra + 1..rb)
+                .map(|r| rank_h[r] + start_pad[r] + end_pad[r])
+                .sum();
+            let have = (ra + 1..=rb).map(gap_before).sum::<f64>() + free;
+            extra[rb] = extra[rb].max(p.spacing.required_gap(slots) - have);
+        }
+    }
     let mut rank_y = vec![0.0f64; max_rank + 1];
     for r in 0..=max_rank {
         rank_y[r] = if r == 0 {
@@ -434,7 +466,8 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
             rank_y[r - 1]
                 + rank_h[r - 1] / 2.0
                 + end_pad[r - 1]
-                + rank_sep
+                + gap_before(r)
+                + extra[r]
                 + start_pad[r]
                 + rank_h[r] / 2.0
         };
@@ -490,12 +523,36 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     let pos = |v: usize| to_out(Point::new(x[v], rank_y[verts[v].rank]));
 
     let nodes: Vec<Point> = (0..n).map(pos).collect();
+    let mut loops_on = vec![0usize; n];
     let edges = input
         .edges
         .iter()
         .enumerate()
         .map(|(ei, e)| {
             if e.from == e.to {
+                if plan.is_some() {
+                    // ELK: a loop on the node's low cross-axis side (west in TB,
+                    // north in LR), its two ports a quarter of the node apart.
+                    let v = e.from;
+                    let k = loops_on[v];
+                    loops_on[v] += 1;
+                    let (cx, cy) = (x[v], rank_y[verts[v].rank]);
+                    let (side, s) = (cx - verts[v].w / 2.0, verts[v].h / 4.0);
+                    let out = side - SELF_LOOP_EXT - k as f64 * SELF_LOOP_EXT * 0.75;
+                    let points = [
+                        Point::new(side, cy - s / 2.0),
+                        Point::new(out, cy - s / 2.0),
+                        Point::new(out, cy + s / 2.0),
+                        Point::new(side, cy + s / 2.0),
+                    ]
+                    .map(to_out)
+                    .to_vec();
+                    let label = e.label.map(|(lw, lh)| {
+                        let lw = swap(lw, lh).0;
+                        to_out(Point::new(out - lw / 2.0 - 2.0, cy))
+                    });
+                    return EdgeRoute { points, label };
+                }
                 return self_loop(nodes[e.from], &input.nodes[e.from], e.label);
             }
             let Some((chain, label_v, reversed)) = &chains[ei] else {
@@ -504,6 +561,23 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
                     label: None,
                 };
             };
+            if let Some(p) = &plan {
+                let mut points: Vec<Point> = p
+                    .route(ei, &verts, &rank_y, &rank_h, &start_pad, &end_pad)
+                    .into_iter()
+                    .map(to_out)
+                    .collect();
+                if *reversed {
+                    points.reverse();
+                }
+                let label = label_v
+                    .map(|v| to_out(Point::new(p.xs[v], rank_y[verts[v].rank])))
+                    .or_else(|| {
+                        e.label
+                            .map(|_| points[0].lerp(points[points.len() - 1], 0.5))
+                    });
+                return EdgeRoute { points, label };
+            }
             let mut points: Vec<Point> = chain.iter().map(|&v| pos(v)).collect();
             if *reversed {
                 points.reverse();
@@ -540,6 +614,195 @@ fn self_loop(c: Point, node: &LayoutNode, label: Option<(f64, f64)>) -> EdgeRout
     let label =
         label.map(|(lw, _)| Point::new(c.x + w / 2.0 + ext + lw / 2.0 + 4.0, c.y - h / 2.0 - ext));
     EdgeRoute { points, label }
+}
+
+/// How far an orthogonal self-loop stands off its node.
+const SELF_LOOP_EXT: f64 = 20.0;
+
+/// The rank-axis-independent part of the orthogonal routes of one layered pass
+/// (see [`ortho`]).
+struct OrthoPlan {
+    /// Per edge (oriented along the flow): the points it must pass, as (vertex,
+    /// cross-axis position): its source port, its dummies in obstacle ranks, its
+    /// target port.
+    stops: Vec<Vec<(usize, f64)>>,
+    /// Per edge, per pair of consecutive stops: the slot level of the jog between
+    /// them, if their positions differ.
+    jogs: Vec<Vec<Option<usize>>>,
+    /// Per rank: the channel below it, as (next obstacle rank, slots used).
+    channels: Vec<Option<(usize, usize)>>,
+    spacing: OrthoSpacing,
+    /// Cross-axis positions, with dummies moved in line with their edges' ports.
+    xs: Vec<f64>,
+}
+
+fn ortho_plan(
+    verts: &[Vertex],
+    n: usize,
+    chains: &[Option<Chain>],
+    x: &[f64],
+    layers: &[Vec<usize>],
+    gap: &dyn Fn(usize, usize) -> f64,
+    spacing: OrthoSpacing,
+) -> OrthoPlan {
+    let max_rank = verts.iter().map(|v| v.rank).max().unwrap_or(0);
+    // Ranks holding nodes or edge labels; ranks of plain long-edge dummies are free.
+    let mut obstacle = vec![false; max_rank + 1];
+    for v in verts {
+        if matches!(v.kind, Kind::Real | Kind::Dummy { labeled: true }) {
+            obstacle[v.rank] = true;
+        }
+    }
+    // Ports: the edge ends on each node's two flow sides, in the order of the
+    // vertices they lead to, spread evenly over the side.
+    let ne = chains.len();
+    let mut out_side: Vec<Vec<(f64, f64, usize)>> = vec![Vec::new(); n];
+    let mut in_side: Vec<Vec<(f64, f64, usize)>> = vec![Vec::new(); n];
+    for (ei, ch) in chains.iter().enumerate() {
+        let Some((chain, _, _)) = ch else { continue };
+        let (u, w) = (chain[0], chain[chain.len() - 1]);
+        out_side[u].push((x[chain[1]], x[w], ei));
+        in_side[w].push((x[chain[chain.len() - 2]], x[u], ei));
+    }
+    let mut start_x = vec![0.0; ne];
+    let mut end_x = vec![0.0; ne];
+    for v in 0..n {
+        for (side, port_x) in [
+            (&mut out_side[v], &mut start_x),
+            (&mut in_side[v], &mut end_x),
+        ] {
+            side.sort_by(|a, b| {
+                a.0.total_cmp(&b.0)
+                    .then(a.1.total_cmp(&b.1))
+                    .then(a.2.cmp(&b.2))
+            });
+            for (&(_, _, ei), off) in side.iter().zip(ortho::port_offsets(side.len(), verts[v].w)) {
+                port_x[ei] = x[v] + off;
+            }
+        }
+    }
+    // ELK places nodes with their ports in view (`nodeFlexibility: PORT_POSITION`),
+    // so an edge leaving a port runs straight on where it can. Here: top-down, each
+    // dummy in an obstacle rank moves as far toward the position the edge arrives
+    // at (its source port, or its previous such dummy) as its neighbours allow.
+    let mut xs = x.to_vec();
+    let mut arrive: Vec<Option<(usize, usize)>> = vec![None; verts.len()]; // (edge, prev)
+    for (ei, ch) in chains.iter().enumerate() {
+        let Some((chain, _, _)) = ch else { continue };
+        let mut prev = chain[0];
+        for &v in &chain[1..chain.len() - 1] {
+            if obstacle[verts[v].rank] {
+                arrive[v] = Some((ei, prev));
+                prev = v;
+            }
+        }
+    }
+    for layer in layers {
+        for (i, &v) in layer.iter().enumerate() {
+            let Some((ei, prev)) = arrive[v] else {
+                continue;
+            };
+            let want = if prev < n { start_x[ei] } else { xs[prev] };
+            let lo = i
+                .checked_sub(1)
+                .map_or(f64::NEG_INFINITY, |j| xs[layer[j]] + gap(layer[j], v));
+            let hi = layer
+                .get(i + 1)
+                .map_or(f64::INFINITY, |&r| xs[r] - gap(v, r));
+            if lo <= hi {
+                xs[v] = want.clamp(lo, hi);
+            }
+        }
+    }
+    let mut stops: Vec<Vec<(usize, f64)>> = vec![Vec::new(); ne];
+    for (ei, ch) in chains.iter().enumerate() {
+        let Some((chain, _, _)) = ch else { continue };
+        let last = chain.len() - 1;
+        stops[ei] = chain
+            .iter()
+            .enumerate()
+            .filter_map(|(k, &v)| match k {
+                0 => Some((v, start_x[ei])),
+                _ if k == last => Some((v, end_x[ei])),
+                _ => obstacle[verts[v].rank].then_some((v, xs[v])),
+            })
+            .collect();
+    }
+    // Jogs, channel by channel (a channel is named by the obstacle rank above it).
+    let mut by_channel: Vec<Vec<(usize, usize, ortho::Jog)>> = vec![Vec::new(); max_rank + 1];
+    let mut channels: Vec<Option<(usize, usize)>> = vec![None; max_rank + 1];
+    let mut jogs: Vec<Vec<Option<usize>>> = stops
+        .iter()
+        .map(|s| vec![None; s.len().saturating_sub(1)])
+        .collect();
+    for (ei, s) in stops.iter().enumerate() {
+        for (k, w) in s.windows(2).enumerate() {
+            let ((a, ax), (b, bx)) = (w[0], w[1]);
+            if (ax - bx).abs() > 0.5 {
+                let ra = verts[a].rank;
+                by_channel[ra].push((ei, k, ortho::Jog { from: ax, to: bx }));
+                channels[ra] = Some((verts[b].rank, 0));
+            }
+        }
+    }
+    for (ra, list) in by_channel.iter().enumerate() {
+        if list.is_empty() {
+            continue;
+        }
+        let segs: Vec<ortho::Jog> = list.iter().map(|&(_, _, j)| j).collect();
+        let (levels, count) = ortho::assign_slots(&segs, spacing.edge_edge / 2.0);
+        for (&(ei, k, _), l) in list.iter().zip(levels) {
+            jogs[ei][k] = Some(l);
+        }
+        if let Some((rb, _)) = channels[ra] {
+            channels[ra] = Some((rb, count));
+        }
+    }
+    OrthoPlan {
+        stops,
+        jogs,
+        channels,
+        spacing,
+        xs,
+    }
+}
+
+impl OrthoPlan {
+    /// Edge `ei`'s route in layout space, oriented along the flow: from its source
+    /// port on the node's side, through its stops, to its target port.
+    fn route(
+        &self,
+        ei: usize,
+        verts: &[Vertex],
+        rank_y: &[f64],
+        rank_h: &[f64],
+        start_pad: &[f64],
+        end_pad: &[f64],
+    ) -> Vec<Point> {
+        let stops = &self.stops[ei];
+        let (Some(&(u, ux)), Some(&(w, wx))) = (stops.first(), stops.last()) else {
+            return Vec::new();
+        };
+        let mut pts = vec![Point::new(ux, rank_y[verts[u].rank] + verts[u].h / 2.0)];
+        for (k, pair) in stops.windows(2).enumerate() {
+            let ((a, ax), (b, bx)) = (pair[0], pair[1]);
+            if let Some(level) = self.jogs[ei][k] {
+                let ra = verts[a].rank;
+                let (rb, slots) = self.channels[ra].unwrap_or((verts[b].rank, 1));
+                let top = rank_y[ra] + rank_h[ra] / 2.0 + end_pad[ra];
+                let bottom = rank_y[rb] - rank_h[rb] / 2.0 - start_pad[rb];
+                let ee = self.spacing.edge_edge;
+                let y = (top + bottom) / 2.0 - (slots - 1) as f64 * ee / 2.0 + level as f64 * ee;
+                pts.push(Point::new(ax, y));
+                pts.push(Point::new(bx, y));
+            }
+            if b != w {
+                pts.push(Point::new(bx, rank_y[verts[b].rank]));
+            }
+        }
+        pts.push(Point::new(wx, rank_y[verts[w].rank] - verts[w].h / 2.0));
+        ortho::simplify(&pts)
+    }
 }
 
 /// DFS-based cycle breaking. Returns `None` for self-loops.
@@ -1138,6 +1401,7 @@ mod tests {
             cluster_padding: 8.0,
             inner_node_sep: 50.0,
             inner_rank_sep: 24.0,
+            routing: EdgeRouting::Splines,
         }
     }
 
@@ -1174,6 +1438,80 @@ mod tests {
         // The outer edges are not straight lines.
         let r = &out.edges[0].points;
         assert!((r[0].x - r[2].x).abs() > 1.0);
+    }
+
+    /// Orthogonal routes: right angles only, port to port on the facing sides, never
+    /// through another node, and stacked slots `edge_edge` apart.
+    #[test]
+    fn orthogonal_routes_avoid_nodes() {
+        for dir in [
+            Direction::TopBottom,
+            Direction::LeftRight,
+            Direction::BottomTop,
+            Direction::RightLeft,
+        ] {
+            let mut inp = input(
+                (0..6).map(|_| node(None)).collect(),
+                vec![
+                    edge(0, 1),
+                    edge(0, 2),
+                    edge(0, 3),
+                    edge(1, 4),
+                    edge(2, 4),
+                    edge(3, 4),
+                    edge(0, 4),
+                    edge(4, 5),
+                    edge(5, 0),
+                    LayoutEdge::new(1, 5, 1, Some((40.0, 20.0))),
+                    edge(2, 2),
+                ],
+                vec![],
+                dir,
+            );
+            inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+            let out = layout(&inp);
+            let boxes = rects(&inp, &out);
+            for (ei, (e, r)) in inp.edges.iter().zip(&out.edges).enumerate() {
+                assert!(ortho::is_orthogonal(&r.points), "{dir:?} edge {ei}: {r:?}");
+                // Ends on the bounding boxes of their nodes.
+                let on = |p: Point, b: &Rect| {
+                    ((p.x - b.x).abs() < 1e-6 || (p.x - b.right()).abs() < 1e-6)
+                        && p.y >= b.y - 1e-6
+                        && p.y <= b.bottom() + 1e-6
+                        || ((p.y - b.y).abs() < 1e-6 || (p.y - b.bottom()).abs() < 1e-6)
+                            && p.x >= b.x - 1e-6
+                            && p.x <= b.right() + 1e-6
+                };
+                assert!(on(r.points[0], &boxes[e.from]), "{dir:?} edge {ei} start");
+                assert!(
+                    on(r.points[r.points.len() - 1], &boxes[e.to]),
+                    "{dir:?} edge {ei} end"
+                );
+                // No segment enters any node's interior.
+                for w in r.points.windows(2) {
+                    for (v, b) in boxes.iter().enumerate() {
+                        let inner = b.pad(-1.0);
+                        let (lo, hi) = (
+                            Point::new(w[0].x.min(w[1].x), w[0].y.min(w[1].y)),
+                            Point::new(w[0].x.max(w[1].x), w[0].y.max(w[1].y)),
+                        );
+                        let hits = lo.x < inner.right()
+                            && hi.x > inner.x
+                            && lo.y < inner.bottom()
+                            && hi.y > inner.y;
+                        assert!(!hits, "{dir:?} edge {ei} runs through node {v}: {w:?}");
+                    }
+                }
+            }
+            // The labelled edge passes through its label.
+            let r = &out.edges[9];
+            let l = r.label.unwrap();
+            assert!(r.points.windows(2).any(|w| {
+                let (a, b) = (w[0], w[1]);
+                (a.x - l.x).abs() < 1e-6 && (a.y - l.y) * (b.y - l.y) <= 0.0
+                    || (a.y - l.y).abs() < 1e-6 && (a.x - l.x) * (b.x - l.x) <= 0.0
+            }));
+        }
     }
 
     #[test]

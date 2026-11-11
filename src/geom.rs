@@ -192,6 +192,129 @@ pub fn basis_curve(points: &[Point]) -> Vec<PathCmd> {
     out
 }
 
+/// mermaid's `generateRoundedPath` (the `rounded` curve of ELK edges): straight
+/// segments whose bends are cut `radius / sin(θ/2)` back (at most half of either
+/// segment) and joined by a quadratic Bézier with the bend as its control point.
+/// The quadratics are emitted as their exact cubic equivalents.
+pub fn rounded_path(points: &[Point], radius: f64) -> Vec<PathCmd> {
+    const EPS: f64 = 1e-5;
+    let mut out = Vec::with_capacity(points.len() * 2);
+    let Some(&first) = points.first() else {
+        return out;
+    };
+    if points.len() < 2 {
+        return out;
+    }
+    out.push(PathCmd::MoveTo(first));
+    for i in 1..points.len() {
+        let curr = points[i];
+        if i == points.len() - 1 {
+            out.push(PathCmd::LineTo(curr));
+            break;
+        }
+        let (prev, next) = (points[i - 1], points[i + 1]);
+        let (d1, d2) = (curr.minus(prev), next.minus(curr));
+        let (len1, len2) = (d1.len(), d2.len());
+        if len1 < EPS || len2 < EPS {
+            out.push(PathCmd::LineTo(curr));
+            continue;
+        }
+        let (n1, n2) = (d1.scale(1.0 / len1), d2.scale(1.0 / len2));
+        let angle = (n1.x * n2.x + n1.y * n2.y).clamp(-1.0, 1.0).acos();
+        if angle < EPS || (std::f64::consts::PI - angle).abs() < EPS {
+            out.push(PathCmd::LineTo(curr));
+            continue;
+        }
+        let cut = (radius / (angle / 2.0).sin())
+            .min(len1 / 2.0)
+            .min(len2 / 2.0);
+        let start = curr.minus(n1.scale(cut));
+        let end = curr.plus(n2.scale(cut));
+        out.push(PathCmd::LineTo(start));
+        // Q curr end  ==  C (start + 2/3 (curr - start)) (end + 2/3 (curr - end)) end
+        out.push(PathCmd::CubicTo(
+            start.lerp(curr, 2.0 / 3.0),
+            end.lerp(curr, 2.0 / 3.0),
+            end,
+        ));
+    }
+    out
+}
+
+/// mermaid's `fixCorners` (`edges.js`), applied to every edge not drawn `rounded`:
+/// each exact right-angle bend whose legs are both longer than 5 is replaced by
+/// the points 5 before and after it, with (when the neighbours are far enough
+/// apart) the bend pulled diagonally in so the curve rounds it.
+pub fn fix_corners(points: &[Point]) -> Vec<Point> {
+    let is_corner = |i: usize| {
+        let (prev, curr, next) = (points[i - 1], points[i], points[i + 1]);
+        #[allow(clippy::float_cmp)]
+        let corner = (prev.x == curr.x
+            && curr.y == next.y
+            && (curr.x - next.x).abs() > 5.0
+            && (curr.y - prev.y).abs() > 5.0)
+            || (prev.y == curr.y
+                && curr.x == next.x
+                && (curr.x - prev.x).abs() > 5.0
+                && (curr.y - next.y).abs() > 5.0);
+        corner
+    };
+    // findAdjacentPoint(a, b, d): the point `d` before `b` on the way from `a`.
+    let adjacent = |a: Point, b: Point, d: f64| {
+        let diff = b.minus(a);
+        b.minus(diff.scale(d / diff.len()))
+    };
+    let mut out = Vec::with_capacity(points.len() + 4);
+    for (i, &p) in points.iter().enumerate() {
+        if i == 0 || i + 1 >= points.len() || !is_corner(i) {
+            out.push(p);
+            continue;
+        }
+        let (prev, next) = (points[i - 1], points[i + 1]);
+        let new_prev = adjacent(prev, p, 5.0);
+        let new_next = adjacent(next, p, 5.0);
+        let (dx, dy) = (new_next.x - new_prev.x, new_next.y - new_prev.y);
+        out.push(new_prev);
+        let a = std::f64::consts::SQRT_2 * 2.0;
+        let r = 5.0;
+        let mut corner = p;
+        if (next.x - prev.x).abs() > 10.0 && (next.y - prev.y).abs() >= 10.0 {
+            #[allow(clippy::float_cmp)]
+            let vertical_first = p.x == new_prev.x;
+            corner = if vertical_first {
+                Point::new(
+                    if dx < 0.0 {
+                        new_prev.x - r + a
+                    } else {
+                        new_prev.x + r - a
+                    },
+                    if dy < 0.0 {
+                        new_prev.y - a
+                    } else {
+                        new_prev.y + a
+                    },
+                )
+            } else {
+                Point::new(
+                    if dx < 0.0 {
+                        new_prev.x - a
+                    } else {
+                        new_prev.x + a
+                    },
+                    if dy < 0.0 {
+                        new_prev.y - r + a
+                    } else {
+                        new_prev.y + r - a
+                    },
+                )
+            };
+        }
+        out.push(corner);
+        out.push(new_next);
+    }
+    out
+}
+
 /// Cubic segments approximating a circular arc (angles in radians, SVG y-down,
 /// 0 = east, increasing clockwise on screen). Does not emit the initial MoveTo.
 pub fn arc_cubics(c: Point, r: f64, a0: f64, a1: f64) -> Vec<PathCmd> {
@@ -313,5 +436,81 @@ mod tests {
         let c = basis_curve(&pts);
         assert_eq!(c.first(), Some(&PathCmd::MoveTo(pts[0])));
         assert_eq!(c.last(), Some(&PathCmd::LineTo(pts[2])));
+    }
+
+    #[test]
+    fn rounded_path_cuts_right_angles_by_five_over_sin_45() {
+        // mermaid's reference ER edge: M130.36,93 L130.36,105.93 Q130.36,113 123.29,113 ...
+        let pts = [
+            Point::new(130.36, 93.0),
+            Point::new(130.36, 113.0),
+            Point::new(62.0, 113.0),
+            Point::new(62.0, 204.5),
+        ];
+        let c = rounded_path(&pts, 5.0);
+        assert_eq!(c.len(), 6);
+        let PathCmd::LineTo(a) = c[1] else { panic!() };
+        assert!((a.y - 105.929).abs() < 1e-3);
+        let PathCmd::CubicTo(c1, c2, b) = c[2] else {
+            panic!()
+        };
+        assert!((b.x - 123.289).abs() < 1e-3 && (b.y - 113.0).abs() < 1e-9);
+        // The exact cubic form of `Q130.36,113 123.29,113`.
+        assert!(c1.dist(a.lerp(pts[1], 2.0 / 3.0)) < 1e-9);
+        assert!(c2.dist(b.lerp(pts[1], 2.0 / 3.0)) < 1e-9);
+        assert_eq!(c.last(), Some(&PathCmd::LineTo(pts[3])));
+        // Short legs limit the cut to half of either one; straight runs stay lines.
+        let short = rounded_path(
+            &[
+                Point::new(0.0, 0.0),
+                Point::new(0.0, 4.0),
+                Point::new(9.0, 4.0),
+            ],
+            5.0,
+        );
+        assert_eq!(short[1], PathCmd::LineTo(Point::new(0.0, 2.0)));
+        let straight = rounded_path(
+            &[
+                Point::new(0.0, 0.0),
+                Point::new(0.0, 4.0),
+                Point::new(0.0, 9.0),
+            ],
+            5.0,
+        );
+        assert!(straight.iter().all(|c| !matches!(c, PathCmd::CubicTo(..))));
+    }
+
+    #[test]
+    fn fix_corners_rounds_exact_right_angles() {
+        let pts = [
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 50.0),
+            Point::new(50.0, 50.0),
+        ];
+        let f = fix_corners(&pts);
+        let a = 2f64.sqrt() * 2.0;
+        assert_eq!(
+            f,
+            vec![
+                Point::new(0.0, 0.0),
+                Point::new(0.0, 45.0),
+                Point::new(5.0 - a, 45.0 + a),
+                Point::new(5.0, 50.0),
+                Point::new(50.0, 50.0),
+            ]
+        );
+        // Not a right angle (or legs of 5 or less): unchanged.
+        let slanted = [
+            Point::new(0.0, 0.0),
+            Point::new(3.0, 50.0),
+            Point::new(50.0, 50.0),
+        ];
+        assert_eq!(fix_corners(&slanted), slanted.to_vec());
+        let short = [
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 4.0),
+            Point::new(50.0, 4.0),
+        ];
+        assert_eq!(fix_corners(&short), short.to_vec());
     }
 }

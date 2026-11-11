@@ -161,6 +161,7 @@ pub fn render(
         title_top_margin: 25.0,
         min_node_width: 0.0,
         wrapping_width: 0.0,
+        layout: cfg.layout,
     };
     Ok(graph::render(&g, &gc, pal))
 }

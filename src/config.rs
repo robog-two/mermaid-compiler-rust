@@ -23,7 +23,33 @@ impl Curve {
     }
 }
 
-/// mermaid's `look`. `HandDrawn` is accepted but drawn like `Classic` (no rough.js).
+/// The top-level `layout` config key: the layout algorithm of the unified renderer
+/// (flowchart, state, class, ER, requirement, agentflow and use-case diagrams).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutAlgorithm {
+    /// `elk` (mermaid 12's default): orthogonal edges drawn with rounded corners
+    /// (the ELK adapter sets `curve: "rounded"`), whatever curve is configured.
+    #[default]
+    Elk,
+    /// `dagre`, and anything mermaid falls back to dagre for: edges drawn with the
+    /// diagram's configured curve.
+    Dagre,
+}
+
+impl LayoutAlgorithm {
+    /// mermaid's `getRegisteredLayoutAlgorithm`: `elk` and the other registered ELK
+    /// algorithms (`elk.stress`, `elk.mrtree`, …; approximated by the layered
+    /// routing here) select ELK; anything else falls back to `dagre`.
+    pub fn from_name(s: &str) -> LayoutAlgorithm {
+        match s {
+            "elk" | "elk.stress" | "elk.force" | "elk.mrtree" | "elk.sporeOverlap" | "elk.box"
+            | "elk.rectpacking" => LayoutAlgorithm::Elk,
+            _ => LayoutAlgorithm::Dagre,
+        }
+    }
+}
+
+/// mermaid's `look`.`HandDrawn` is accepted but drawn like `Classic` (no rough.js).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Look {
     #[default]
@@ -183,6 +209,8 @@ pub struct GraphConfig {
     /// `wrappingWidth`: node labels wrap at this width (labelHelper's `createText`
     /// width; 0 = off).
     pub wrapping_width: f64,
+    /// The top-level `layout` (copied in by [`MermaidConfig::scoped`]).
+    pub layout: LayoutAlgorithm,
 }
 
 impl GraphConfig {
@@ -198,6 +226,7 @@ impl GraphConfig {
             title_top_margin: 25.0,
             min_node_width: 120.0,
             wrapping_width: 120.0,
+            layout: LayoutAlgorithm::Elk,
         }
     }
     fn state() -> Self {
@@ -333,6 +362,8 @@ pub struct MermaidConfig {
     pub theme_css: Option<String>,
     pub font_family: Option<String>,
     pub font_size: Option<f64>,
+    /// The top-level `layout` key.
+    pub layout: LayoutAlgorithm,
     pub flowchart: GraphConfig,
     pub state: GraphConfig,
     pub class: GraphConfig,
@@ -354,6 +385,7 @@ impl Default for MermaidConfig {
             theme_css: None,
             font_family: None,
             font_size: None,
+            layout: LayoutAlgorithm::Elk,
             flowchart: GraphConfig::flowchart(),
             state: GraphConfig::state(),
             class: GraphConfig::class(),
@@ -410,6 +442,9 @@ impl MermaidConfig {
         self.state.look = look;
         self.class.look = look;
         self.sequence.look = look;
+        self.flowchart.layout = self.layout;
+        self.state.layout = self.layout;
+        self.class.layout = self.layout;
         self
     }
 
@@ -462,6 +497,9 @@ impl MermaidConfig {
         }
         if let Some(f) = j.get("fontSize").and_then(Json::as_f64) {
             self.font_size = Some(f);
+        }
+        if let Some(l) = j.get("layout").and_then(Json::as_str) {
+            self.layout = LayoutAlgorithm::from_name(l);
         }
         if let Some(f) = j.get("flowchart") {
             self.flowchart.apply(f);
@@ -662,6 +700,39 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn layout_defaults_to_elk_and_falls_back_to_dagre() {
+        let c = MermaidConfig::default();
+        assert_eq!(
+            c.clone().scoped("flowchart").flowchart.layout,
+            LayoutAlgorithm::Elk
+        );
+        let d = c
+            .clone()
+            .with_json(&json(r#"{"layout":"dagre"}"#))
+            .unwrap()
+            .scoped("state");
+        assert_eq!(
+            (d.layout, d.state.layout),
+            (LayoutAlgorithm::Dagre, LayoutAlgorithm::Dagre)
+        );
+        // Front-matter / directives layer on top of `--configFile`.
+        let e = d
+            .with_directive(&parse_yaml_subset("layout: elk.mrtree"))
+            .unwrap()
+            .scoped("class");
+        assert_eq!(e.class.layout, LayoutAlgorithm::Elk);
+        // Anything else (unregistered names fall back to dagre upstream) draws as dagre.
+        assert_eq!(
+            LayoutAlgorithm::from_name("cose-bilkent"),
+            LayoutAlgorithm::Dagre
+        );
+        assert_eq!(
+            LayoutAlgorithm::from_name("elk.layered"),
+            LayoutAlgorithm::Dagre
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use super::graph::{Head, StyleOverrides};
 use super::markers::{self, End, MarkerColors};
 use super::shapes::{Boundary as Clip, ShapeMetrics};
-use crate::config::{Curve, Look, MermaidConfig};
+use crate::config::{Curve, LayoutAlgorithm, Look, MermaidConfig};
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::json::{self, Json};
@@ -2829,6 +2829,7 @@ struct Options {
     min_width: f64,
     rotate: bool,
     curve: Curve,
+    layout: LayoutAlgorithm,
     role: RoleColors,
 }
 
@@ -2854,6 +2855,7 @@ impl Options {
             min_width: num("minNodeWidth", 120.0),
             rotate: s("colorScheme") == Some("rotate"),
             curve: cfg.flowchart.curve,
+            layout: cfg.layout,
             role: role_colors(cfg.theme, &cfg.theme_variables, pal),
         }
     }
@@ -3622,14 +3624,15 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             .map(|c| LayoutCluster::new(None, title_band(c)))
             .collect(),
         direction: d.direction,
-        node_sep: o.node_spacing,
-        rank_sep: o.rank_spacing,
+        node_sep: super::graph::layer_spacing(o.layout, o.node_spacing),
+        rank_sep: super::graph::layer_spacing(o.layout, o.rank_spacing),
         edge_sep: 20.0,
         cluster_padding: BOUNDARY_PADDING,
         // A boundary with no crossing edge is laid out on its own with ELK's
         // subgraph spacing, as for flowchart subgraphs.
         inner_node_sep: super::graph::CLUSTER_NODE_SPACING,
         inner_rank_sep: super::graph::CLUSTER_RANK_SPACING,
+        routing: super::graph::edge_routing(o.layout),
     };
     let out = layout::layout(&input);
 
@@ -3732,10 +3735,19 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         if pts.len() < 2 {
             continue;
         }
-        if e.from != e.to {
+        let elk = o.layout == LayoutAlgorithm::Elk;
+        if elk {
+            // Orthogonal routes start and end at ports on the bounding boxes.
+            let last = pts.len() - 1;
+            pts[0] = super::graph::clip_along(&clips[e.from], pts[0], pts[1]);
+            pts[last] = super::graph::clip_along(&clips[e.to], pts[last], pts[last - 1]);
+        } else if e.from != e.to {
             pts[0] = clips[e.from].clip(pts[1]);
             let last = pts.len() - 1;
             pts[last] = clips[e.to].clip(pts[last - 1]);
+        }
+        if !elk {
+            pts = geom::fix_corners(&pts);
         }
         let line_color = match e.kind {
             Some(RelationshipType::Include) => &o.role.include_line,
@@ -3777,6 +3789,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             bounds.add_point(*p);
         }
         let cmds = match o.curve {
+            _ if elk => geom::rounded_path(&pts, super::graph::EDGE_CORNER_RADIUS),
             Curve::Linear | Curve::Step => geom::polyline(&pts),
             Curve::Basis => geom::basis_curve(&pts),
         };
