@@ -1105,7 +1105,7 @@ fn rank_with_clusters(
             push(&mut edges, o.from, o.to, o);
         }
     }
-    for (o, end) in oriented.iter().zip(ends.iter_mut()) {
+    for (o, end) in oriented.iter_mut().zip(ends.iter_mut()) {
         let Some(o) = o else { continue };
         let (src, dst) = *end;
         if src.is_none() && dst.is_none() {
@@ -1115,7 +1115,15 @@ fn rank_with_clusters(
         let to = dst.and_then(top).unwrap_or(o.to);
         if !push(&mut edges, from, to, o) {
             *end = (None, None);
-            push(&mut edges, o.from, o.to, o);
+            if !push(&mut edges, o.from, o.to, o) {
+                // Even its plain ends close a cycle (the cluster constraints of other
+                // edges already order them the other way): the edge runs backwards,
+                // as a reversed edge, which the graph always takes (it is acyclic).
+                // Left unranked, it could end up pointing up or within one layer.
+                push(&mut edges, o.to, o.from, o);
+                std::mem::swap(&mut o.from, &mut o.to);
+                o.reversed = !o.reversed;
+            }
         }
     }
     let all = rank_nodes(total, &edges);
@@ -1689,6 +1697,43 @@ mod tests {
         let a = Rect::centered(out.edges[0].label.unwrap(), 400.0, 20.0);
         let b = Rect::centered(out.edges[1].label.unwrap(), 400.0, 20.0);
         assert!(!a.intersects(&b), "{a:?} {b:?}");
+    }
+
+    /// `n4 --> s1` and `s1 --> n4` with `s1` nested in `s0`: the cluster constraints
+    /// of the first edge order `n4` above all of `s1`, so the second cannot run down
+    /// from any member to `n4`, not even from its plain ends. It used to be left out
+    /// of the ranking and pointed upward across two layers without dummies, which
+    /// broke the coordinate assignment (the two members overlapped) and, in a debug
+    /// build, underflowed the rank span. It is now ranked as a reversed edge.
+    #[test]
+    fn contradictory_cluster_edge_runs_reversed() {
+        let mut nd = node(Some(1));
+        nd.width = 152.0;
+        let mut into = LayoutEdge::new(2, 0, 1, None);
+        into.to_cluster = Some(1);
+        let mut out_of = LayoutEdge::new(1, 2, 1, None);
+        out_of.from_cluster = Some(1);
+        for routing in [
+            EdgeRouting::Splines,
+            EdgeRouting::Orthogonal(OrthoSpacing::ROOT),
+        ] {
+            let mut inp = input(
+                vec![nd.clone(), nd.clone(), node(None)],
+                vec![into.clone(), out_of.clone()],
+                vec![
+                    LayoutCluster::new(None, 24.0),
+                    LayoutCluster::new(Some(0), 24.0),
+                ],
+                Direction::TopBottom,
+            );
+            inp.routing = routing;
+            let out = layout(&inp);
+            let b = rects(&inp, &out);
+            assert!(!b[0].intersects(&b[1]), "{routing:?}: {b:?}");
+            let r = &out.edges[1].points;
+            // Drawn from its source (in the cluster, below) up to n4.
+            assert!(r[0].y > r[r.len() - 1].y, "{routing:?}: {r:?}");
+        }
     }
 
     #[test]

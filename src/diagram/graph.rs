@@ -852,7 +852,12 @@ pub fn render_with(
                     to: pos_of[to],
                     // The ELK adapter hands ELK no edge length (`--->` is as long as `-->`).
                     minlen: if elk { 1 } else { e.minlen },
-                    label: lb.as_ref().map(|b| (b.width + 8.0, b.height + 4.0)),
+                    // A cluster's edge to its own member is laid out as a loop but drawn
+                    // against the frame: under ELK its label reserves no loop room.
+                    label: lb
+                        .as_ref()
+                        .filter(|_| !(elk && nested[ei].is_some()))
+                        .map(|b| (b.width + 8.0, b.height + 4.0)),
                     from_cluster,
                     to_cluster,
                 }
@@ -1026,7 +1031,12 @@ pub fn render_with(
                 .get(ne.cluster.0)
                 .copied()
                 .unwrap_or(g.direction);
-            let (p, l) = nested_route(ne, frame, inner_rect, dir, title_h, lw);
+            // The other nodes, which the route keeps clear of where it can.
+            let obstacles: Vec<Rect> = (0..nodes.len())
+                .filter(|&i| ne.inner != Endpoint::Node(NodeId(i)))
+                .map(|i| Rect::centered(out.nodes[i], measured[i].w, measured[i].h))
+                .collect();
+            let (p, l) = nested_route(ne, frame, inner_rect, dir, title_h, lw, &obstacles);
             pts = p;
             if elk {
                 pts.dedup_by(|a, b| a.dist(*b) < 1e-9);
@@ -1054,12 +1064,12 @@ pub fn render_with(
             // An edge to / from a whole cluster is cut where it crosses the cluster's
             // border (mermaid's `cutPathAtIntersect` for `fromCluster` / `toCluster`).
             match e.from {
-                Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0]),
+                Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0], elk),
                 Endpoint::Node(NodeId(i)) => pts[0] = clip_end(&boundaries[i], &pts, elk),
             }
             pts.reverse();
             match e.to {
-                Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0]),
+                Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0], elk),
                 Endpoint::Node(NodeId(i)) => pts[0] = clip_end(&boundaries[i], &pts, elk),
             }
             pts.reverse();
@@ -1633,7 +1643,9 @@ fn model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> 
 
 /// Drop the leading points of `pts` that lie inside `r` and start the path where it
 /// leaves `r` instead. Paths that never leave `r` are returned unchanged.
-fn cut_at_rect(pts: &[Point], r: &Rect) -> Vec<Point> {
+/// An orthogonal (ELK) route is cut exactly where it crosses the border, keeping its
+/// right angles; a dagre route is moved to leave straight across from the next point.
+fn cut_at_rect(pts: &[Point], r: &Rect, elk: bool) -> Vec<Point> {
     let inside = |p: Point| p.x > r.x && p.x < r.right() && p.y > r.y && p.y < r.bottom();
     let Some(k) = pts.iter().position(|&p| !inside(p)) else {
         return pts.to_vec();
@@ -1658,7 +1670,9 @@ fn cut_at_rect(pts: &[Point], r: &Rect) -> Vec<Point> {
     let gap_x = (r.x - next.x).max(next.x - r.right()).max(0.0);
     let gap_y = (r.y - next.y).max(next.y - r.bottom()).max(0.0);
     let inset = |lo: f64, len: f64, v: f64| v.clamp(lo + len * 0.1, lo + len * 0.9);
-    let b = if gap_y > 0.0 && gap_y >= gap_x {
+    let b = if elk {
+        b
+    } else if gap_y > 0.0 && gap_y >= gap_x {
         let y = if next.y > r.bottom() { r.bottom() } else { r.y };
         Point::new(inset(r.x, r.w, next.x), y)
     } else if gap_x > 0.0 {
@@ -1745,6 +1759,7 @@ fn nested_route(
     dir: Direction,
     title_h: f64,
     label_w: Option<f64>,
+    obstacles: &[Rect],
 ) -> (Vec<Point>, Point) {
     if ne.inner == Endpoint::Cluster(ne.cluster) {
         let ext = 22.0;
@@ -1771,71 +1786,94 @@ fn nested_route(
     let (cx, cy) = (inner.x + inner.w / 2.0, inner.y + inner.h / 2.0);
     // The edge runs in the lane the frame's padding keeps free along one side (clear
     // of the nodes and of the title) and turns into / out of the inner end sideways,
-    // so it does not cut through the nodes before / after it in the flow.
+    // so it does not cut through the nodes before / after it in the flow. If that
+    // sideways run would cross another node, the lane on the other side is tried,
+    // then a straight run along the flow.
     let lane = CLUSTER_PADDING / 2.0;
-    if ne.inner_is_target {
-        // In from the entry side, down the lane on the cross axis' near side.
-        let pts = match dir {
+    let (near_x, far_x) = (frame.x + lane, frame.right() - lane);
+    let (near_y, far_y) = (frame.y + title_h + lane, frame.bottom() - lane);
+    let p = Point::new;
+    let candidates: [Vec<Point>; 3] = if ne.inner_is_target {
+        // In from the entry side.
+        match dir {
             Direction::TopBottom | Direction::BottomTop => {
-                let x = frame.x + lane;
-                let entry = if dir == Direction::TopBottom {
-                    frame.y
+                let (entry, face) = if dir == Direction::TopBottom {
+                    (frame.y, inner.y)
                 } else {
-                    frame.bottom()
+                    (frame.bottom(), inner.bottom())
                 };
-                vec![
-                    Point::new(x, entry),
-                    Point::new(x, cy),
-                    Point::new(inner.x, cy),
+                [
+                    vec![p(near_x, entry), p(near_x, cy), p(inner.x, cy)],
+                    vec![p(far_x, entry), p(far_x, cy), p(inner.right(), cy)],
+                    vec![p(cx, entry), p(cx, face)],
                 ]
             }
             Direction::LeftRight | Direction::RightLeft => {
-                let y = frame.y + title_h + lane;
-                let entry = if dir == Direction::LeftRight {
-                    frame.x
+                let (entry, face) = if dir == Direction::LeftRight {
+                    (frame.x, inner.x)
                 } else {
-                    frame.right()
+                    (frame.right(), inner.right())
                 };
-                vec![
-                    Point::new(entry, y),
-                    Point::new(cx, y),
-                    Point::new(cx, inner.y),
+                [
+                    vec![p(entry, near_y), p(cx, near_y), p(cx, inner.y)],
+                    vec![p(entry, far_y), p(cx, far_y), p(cx, inner.bottom())],
+                    vec![p(entry, cy), p(face, cy)],
                 ]
             }
-        };
-        let label = pts[0].lerp(pts[1], 0.5);
-        return (pts, label);
-    }
-    // Out of the cluster: sideways into the far lane, then along it to the exit side.
-    let pts = match dir {
-        Direction::TopBottom | Direction::BottomTop => {
-            let x = frame.right() - lane;
-            let exit = if dir == Direction::TopBottom {
-                frame.bottom()
-            } else {
-                frame.y
-            };
-            vec![
-                Point::new(inner.right(), cy),
-                Point::new(x, cy),
-                Point::new(x, exit),
-            ]
         }
-        Direction::LeftRight | Direction::RightLeft => {
-            let y = frame.bottom() - lane;
-            let exit = if dir == Direction::LeftRight {
-                frame.right()
-            } else {
-                frame.x
-            };
-            vec![
-                Point::new(cx, inner.bottom()),
-                Point::new(cx, y),
-                Point::new(exit, y),
-            ]
+    } else {
+        // Out to the exit side.
+        match dir {
+            Direction::TopBottom | Direction::BottomTop => {
+                let (exit, face) = if dir == Direction::TopBottom {
+                    (frame.bottom(), inner.bottom())
+                } else {
+                    (frame.y, inner.y)
+                };
+                [
+                    vec![p(inner.right(), cy), p(far_x, cy), p(far_x, exit)],
+                    vec![p(inner.x, cy), p(near_x, cy), p(near_x, exit)],
+                    vec![p(cx, face), p(cx, exit)],
+                ]
+            }
+            Direction::LeftRight | Direction::RightLeft => {
+                let (exit, face) = if dir == Direction::LeftRight {
+                    (frame.right(), inner.right())
+                } else {
+                    (frame.x, inner.x)
+                };
+                [
+                    vec![p(cx, inner.bottom()), p(cx, far_y), p(exit, far_y)],
+                    vec![p(cx, inner.y), p(cx, near_y), p(exit, near_y)],
+                    vec![p(face, cy), p(exit, cy)],
+                ]
+            }
         }
     };
-    let label = pts[1].lerp(pts[2], 0.5);
+    let clear = |pts: &[Point]| {
+        pts.windows(2).all(|w| {
+            let (a, b) = (w[0], w[1]);
+            let seg = Rect::new(
+                a.x.min(b.x),
+                a.y.min(b.y),
+                (a.x - b.x).abs(),
+                (a.y - b.y).abs(),
+            );
+            obstacles.iter().all(|o| !seg.intersects(&o.pad(-1.0)))
+        })
+    };
+    let [first, ..] = &candidates;
+    let pts = candidates
+        .iter()
+        .find(|c| clear(c))
+        .unwrap_or(first)
+        .clone();
+    // The label sits on the run along the frame side (in) / to the frame side (out).
+    let label = if ne.inner_is_target {
+        pts[0].lerp(pts[1], 0.5)
+    } else {
+        pts[pts.len() - 2].lerp(pts[pts.len() - 1], 0.5)
+    };
     (pts, label)
 }
 
@@ -2433,11 +2471,22 @@ mod tests {
             Point::new(60.0, 150.0),
             Point::new(60.0, 200.0),
         ];
-        let cut = cut_at_rect(&pts, &r);
+        let cut = cut_at_rect(&pts, &r, false);
         assert_eq!(cut[0], Point::new(60.0, 100.0));
         assert_eq!(&cut[1..], &pts[2..]);
         // A path that never leaves the box is left alone.
-        assert_eq!(cut_at_rect(&pts[..2], &r), pts[..2].to_vec());
+        assert_eq!(cut_at_rect(&pts[..2], &r, false), pts[..2].to_vec());
+        // An orthogonal route is cut where it crosses, keeping its right angles
+        // (moving the cut under the next point would make the last leg diagonal).
+        let pts = vec![
+            Point::new(50.0, 50.0),
+            Point::new(50.0, 120.0),
+            Point::new(-30.0, 120.0),
+            Point::new(-30.0, 200.0),
+        ];
+        let cut = cut_at_rect(&pts, &r, true);
+        assert!((cut[0].x - 50.0).abs() < 1e-9 && (cut[0].y - 100.0).abs() < 1e-6);
+        assert_eq!(&cut[1..], &pts[1..]);
     }
 
     fn render_flowchart(src: &str) -> (GraphDiagram, Scene) {
