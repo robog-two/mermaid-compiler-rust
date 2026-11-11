@@ -1020,6 +1020,15 @@ fn translate(e: Element, dx: f64, dy: f64) -> Element {
             paint,
             class,
         },
+        Element::Rotated {
+            deg,
+            about,
+            children,
+        } => Element::Rotated {
+            deg,
+            about: crate::geom::Point::new(about.x + dx, about.y + dy),
+            children: children.into_iter().map(|c| translate(c, dx, dy)).collect(),
+        },
         Element::Text { mut text, class } => {
             text.x += dx;
             text.y += dy;

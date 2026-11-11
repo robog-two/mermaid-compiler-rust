@@ -2140,6 +2140,18 @@ fn translate_element(e: Element, dy: f64) -> Element {
                 .map(|c| translate_element(c, dy))
                 .collect(),
         },
+        Element::Rotated {
+            deg,
+            about,
+            children,
+        } => Element::Rotated {
+            deg,
+            about: crate::geom::Point::new(about.x, about.y + dy),
+            children: children
+                .into_iter()
+                .map(|c| translate_element(c, dy))
+                .collect(),
+        },
         Element::Shape { geom, paint, class } => Element::Shape {
             geom: geom.translated(0.0, dy),
             paint,
