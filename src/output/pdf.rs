@@ -222,6 +222,28 @@ impl Ctx {
             Element::Group { children, .. } => children.iter().for_each(|c| self.element(c)),
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
             Element::Text { text, .. } => self.text(text),
+            Element::Rotated {
+                deg,
+                about,
+                children,
+            } => {
+                // Same matrix as SVG `rotate(deg cx cy)`; the page CTM already flips y.
+                let (sin, cos) = deg.to_radians().sin_cos();
+                let e = about.x - cos * about.x + sin * about.y;
+                let f = about.y - sin * about.x - cos * about.y;
+                let _ = writeln!(
+                    self.out,
+                    "q\n{} {} {} {} {} {} cm",
+                    n(cos),
+                    n(sin),
+                    n(-sin),
+                    n(cos),
+                    n(e),
+                    n(f)
+                );
+                children.iter().for_each(|c| self.element(c));
+                self.out.push_str("Q\n");
+            }
         }
     }
 }

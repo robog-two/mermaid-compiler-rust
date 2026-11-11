@@ -176,6 +176,13 @@ pub enum Element {
         text: Text,
         class: Option<String>,
     },
+    /// Children drawn rotated by `deg` degrees (clockwise, SVG `rotate(deg cx cy)`)
+    /// about `about` — e.g. vertical axis titles or labels running along a line.
+    Rotated {
+        deg: f64,
+        about: Point,
+        children: Vec<Element>,
+    },
 }
 
 impl Element {
@@ -371,7 +378,9 @@ impl Scene {
         fn count(e: &[Element]) -> usize {
             e.iter()
                 .map(|el| match el {
-                    Element::Group { children, .. } => 1 + count(children),
+                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                        1 + count(children)
+                    }
                     _ => 1,
                 })
                 .sum()

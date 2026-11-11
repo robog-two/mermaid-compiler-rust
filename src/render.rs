@@ -181,7 +181,7 @@ pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
         ),
         DiagramType::Wardley => (
             diagram::wardley::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("wardley"),
+            cfg.use_max_width("wardley-beta") && cfg.use_max_width("wardley"),
         ),
         DiagramType::Cynefin => (
             diagram::cynefin::render(&pre.body, pre.title.clone(), &cfg, &pal)?,

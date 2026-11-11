@@ -192,6 +192,26 @@ fn write_element(out: &mut String, el: &Element) {
             }
         }
         Element::Text { text, class } => write_text(out, text, class),
+        Element::Rotated {
+            deg,
+            about,
+            children,
+        } => {
+            if children.is_empty() {
+                return;
+            }
+            let _ = write!(
+                out,
+                "<g transform=\"rotate({} {} {})\">",
+                num(*deg),
+                num(about.x),
+                num(about.y)
+            );
+            for c in children {
+                write_element(out, c);
+            }
+            out.push_str("</g>");
+        }
     }
 }
 
