@@ -11,14 +11,14 @@ use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::layout::boxes::{self, BoxNode, Placed};
 use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{line_width, normalize_label, split_lines};
+use crate::text::line_width;
 use crate::theme::Palette;
 use boxes::taffy::prelude::*;
 
 /// Greedy word wrap of a raw label (`<br>` respected) to `max_width` pixels.
 pub(crate) fn wrap_text(raw: &str, max_width: f64, font_size: f64, bold: bool) -> Vec<String> {
     let mut out = Vec::new();
-    for para in split_lines(&normalize_label(raw)) {
+    for para in crate::text::label_lines(raw) {
         let mut cur = String::new();
         for word in para.split_whitespace() {
             let cand = if cur.is_empty() {
@@ -380,7 +380,7 @@ pub fn draw(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
 
     if let Some(t) = tl.title.as_ref().filter(|t| !t.trim().is_empty()) {
-        let lines = split_lines(&normalize_label(t));
+        let lines = crate::text::label_lines(t);
         let w = lines
             .iter()
             .map(|l| line_width(l, 24.0, true))

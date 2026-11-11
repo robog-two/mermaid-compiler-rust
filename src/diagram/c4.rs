@@ -964,7 +964,7 @@ pub fn stereotype_text(s: &Shape) -> String {
 fn wrap(textv: &str, font: f64, bold: bool, max: f64) -> Vec<String> {
     let fits = |s: &str| text::line_width(s, font, bold) <= max;
     let mut out = Vec::new();
-    for para in text::split_lines(&text::normalize_label(textv)) {
+    for para in text::label_lines(textv) {
         let mut cur = String::new();
         let mut words: Vec<String> = para.split_whitespace().map(str::to_string).collect();
         words.reverse();
@@ -1862,7 +1862,7 @@ pub fn draw(d: &C4Diagram, lay: &C4Layout, conf: &C4Conf, pal: &Palette) -> Scen
             rel.label.clone()
         };
         // Like mermaid, relationship text only breaks at explicit line breaks.
-        let mut lines = text::split_lines(&text::normalize_label(&label));
+        let mut lines = text::label_lines(&label);
         if let Some(t) = rel.techn.as_ref().filter(|t| !t.is_empty()) {
             lines.push(format!("[{t}]"));
         }

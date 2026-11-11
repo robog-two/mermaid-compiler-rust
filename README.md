@@ -130,7 +130,7 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   dagre-style layered layout and reproduces ELK's container rules instead: a subgraph with no edge crossing its border
   is laid out on its own in its own `direction`, with ELK's padding (24) and spacing (50 between nodes, 24 between
   layers). Edges are curved (as with `layout: dagre`) rather than ELK's right-angled routes, ELK's packing of
-  disconnected parts inside a container is not reproduced, and a subgraph's `@{ view: collapsed }` is not supported.
+  disconnected parts inside a container is not reproduced, `@{ view: collapsed }` folds a subgraph into one node as upstream.
 - **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction and Brandes–Köpf
   coordinate assignment ported from dagre's `position/bk` (every edge gets a midpoint vertex, as with dagre's
   `makeSpaceForEdgeLabels`, which gives mermaid's curved "S" edges). Crossing reduction differs from dagre's, so
@@ -157,7 +157,8 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
 - **Upstream bugs not reproduced:** mermaid 12.3 throws `this.calcIntersect is not a function` for a block-diagram
   edge to or from a diamond (`id{"…"}`) node; this renders it.
 - **Parse error line numbers** follow mermaid: they count lines after front-matter, directives and `%%` comment lines
-  are removed, so they can be lower than the line in your file.
+  are removed, so they can be lower than the line in your file. Where jison only notices an error at the next token,
+  mermaid reports that token's line; this reports the statement's own line.
 - **Gantt is deterministic:** no today-marker (it would need the clock), and times are UTC.
 - **Approximate layouts** where mermaid uses force-directed or browser layout: architecture (grid from side hints),
   mindmap (two-sided tree rather than force layout), and C4 (flex rows rather than mermaid's grid; relationships can pass behind cards).

@@ -509,9 +509,13 @@ fn measure_node(
     horizontal: bool,
     look: ConfigLook,
     min_label_width: f64,
+    wrap_width: f64,
 ) -> Measured {
     let mut block = TextBlock::label(&node.label, font);
-    if node.style.bold == Some(true) {
+    let bold = node.style.bold == Some(true);
+    if wrap_width > 0.0 && !block.is_empty() {
+        block = TextBlock::new(wrap_lines(&block.lines, wrap_width, font, bold), font, bold);
+    } else if bold {
         block = TextBlock::new(block.lines, font, true);
     }
     // labelHelper: `minWidth` widens non-empty labels; circles and collapsed
@@ -595,18 +599,28 @@ pub struct RenderOptions {
     pub subgraph_title_margin: (f64, f64),
 }
 
-/// `node` with its label wrapped at `cfg.wrapping_width`, as labelHelper's `createText`
-/// does (mermaid 12 wraps every flowchart / state node label at `wrappingWidth`).
-fn wrapped(node: &Node, cfg: &GraphConfig, font: f64) -> Node {
-    if cfg.wrapping_width <= 0.0 || node.label.trim().is_empty() {
-        return node.clone();
+/// Word-wrap already-decoded label lines at `width`, as labelHelper's `createText`
+/// does (mermaid 12 wraps flowchart / state node labels at `wrappingWidth`). A word
+/// wider than `width` keeps its own line.
+fn wrap_lines(lines: &[String], width: f64, font: f64, bold: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in lines {
+        let mut cur = String::new();
+        for word in line.split_whitespace() {
+            let cand = if cur.is_empty() {
+                word.to_string()
+            } else {
+                format!("{cur} {word}")
+            };
+            if !cur.is_empty() && crate::text::line_width(&cand, font, bold) > width {
+                out.push(std::mem::replace(&mut cur, word.to_string()));
+            } else {
+                cur = cand;
+            }
+        }
+        out.push(cur);
     }
-    let bold = node.style.bold == Some(true);
-    let lines = super::timeline::wrap_text(&node.label, cfg.wrapping_width, font, bold);
-    Node {
-        label: lines.join("<br>"),
-        ..node.clone()
-    }
+    out
 }
 
 /// Pure renderer for graph diagrams.
@@ -635,7 +649,7 @@ pub fn render_with(
 
     // A cluster with nothing in it is a plain leaf upstream: its title alone, with no
     // visible box. A placeholder node (sized to the title) stands in for it.
-    let mut nodes: Vec<Node> = g.nodes.iter().map(|n| wrapped(n, cfg, font)).collect();
+    let mut nodes = g.nodes.clone();
     let mut empty_of: Vec<Option<usize>> = vec![None; g.clusters.len()];
     for (ci, c) in g.clusters.iter().enumerate() {
         let has_member = nodes.iter().any(|n| {
@@ -668,6 +682,7 @@ pub fn render_with(
                 horizontal,
                 cfg.look,
                 opts.min_label_width.max(cfg.min_node_width),
+                cfg.wrapping_width,
             )
         })
         .collect();
@@ -1152,7 +1167,7 @@ pub fn node_size(
     horizontal: bool,
 ) -> (f64, f64) {
     let m = measure_node(
-        &wrapped(n, cfg, pal.font_size),
+        n,
         kind,
         cfg.padding,
         cfg.diagram_padding,
@@ -1160,6 +1175,7 @@ pub fn node_size(
         horizontal,
         cfg.look,
         cfg.min_node_width,
+        cfg.wrapping_width,
     );
     (m.w, m.h)
 }
@@ -1177,8 +1193,6 @@ pub fn draw_node(
 ) -> (Element, Boundary) {
     let lk = themed_look(look(kind), kind, cfg.look, pal);
     let font = pal.font_size;
-    let wrapped_node = wrapped(n, cfg, font);
-    let n = &wrapped_node;
     let m = measure_node(
         n,
         kind,
@@ -1188,6 +1202,7 @@ pub fn draw_node(
         horizontal,
         cfg.look,
         cfg.min_node_width,
+        cfg.wrapping_width,
     );
     let slot = slot_colors(n.color_slot, pal);
     let painted = Node {
@@ -1751,11 +1766,7 @@ fn requirement_metrics(node: &Node, font: f64) -> RequirementMetrics {
             .unwrap_or_default()
     };
     let stereo = TextBlock::new(section(0), font, false);
-    let name = TextBlock::new(
-        crate::text::split_lines(&crate::text::normalize_label(&node.label)),
-        font,
-        true,
-    );
+    let name = TextBlock::new(crate::text::label_lines(&node.label), font, true);
     let body = TextBlock::new(section(1), font, false);
     let w = stereo.width.max(name.width).max(body.width) + REQ_PADDING;
     // Labels are centred on their y offset, so the content box starts half a

@@ -369,7 +369,10 @@ fn parse_message(s: &str, b: &mut Builder) -> Option<Message> {
         Some((t, x)) => (t.trim(), x.trim()),
         None => (rest.trim(), ""),
     };
-    if from.is_empty() || to.is_empty() {
+    // sequenceDiagram.jison's message ACTOR token excludes `<`, `>` and `+`, so e.g.
+    // `A-->>>B` (actor `>B`) is a syntax error upstream.
+    let bad = |a: &str| a.is_empty() || a.contains(['<', '>', '+']);
+    if bad(from) || bad(to) {
         return None;
     }
     let from = b.actor(from);
@@ -1416,5 +1419,11 @@ mod tests {
         let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
         let cfg = SequenceConfig::default();
         assert!(render(&long, &cfg, &p).view_box.w > render(&short, &cfg, &p).view_box.w);
+    }
+
+    #[test]
+    fn actor_names_cannot_contain_arrow_characters() {
+        assert!(parse("sequenceDiagram\nA-->>>B: bad", None).is_err());
+        assert!(parse("sequenceDiagram\nA-->>B: ok", None).is_ok());
     }
 }

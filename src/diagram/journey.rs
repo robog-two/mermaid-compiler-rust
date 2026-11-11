@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::layout::boxes::{self, BoxNode};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{line_width, normalize_label, split_lines};
+use crate::text::line_width;
 use crate::theme::Palette;
 use std::f64::consts::PI;
 
@@ -41,7 +41,8 @@ pub struct Journey {
 }
 
 impl Journey {
-    /// Actors in order of first appearance.
+    /// Distinct actors, sorted (journeyDb.js `[...new Set(actors)].sort()`, which
+    /// orders the legend and assigns actor colours).
     pub fn actors(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for a in self
@@ -54,6 +55,8 @@ impl Journey {
                 out.push(a.clone());
             }
         }
+        // JS's default sort compares UTF-16 code units; for the BMP that is char order.
+        out.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
         out
     }
 }
@@ -220,7 +223,7 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .title
         .as_ref()
         .filter(|t| !t.trim().is_empty())
-        .map(|t| split_lines(&normalize_label(t)));
+        .map(|t| crate::text::label_lines(t));
     let title_h = if title_lines.is_some() { 50.0 } else { 10.0 };
     let left = 20.0 + legend_w + if actors.is_empty() { 0.0 } else { 30.0 };
 
@@ -466,7 +469,7 @@ mod tests {
         assert_eq!(j.sections[0].tasks[2].actors, vec!["Me", "Cat"]);
         assert_eq!(j.sections[0].tasks[1].score, 3.0);
         assert!(j.sections[1].tasks[1].actors.is_empty());
-        assert_eq!(j.actors(), vec!["Me", "Cat"]);
+        assert_eq!(j.actors(), vec!["Cat", "Me"]);
     }
 
     #[test]

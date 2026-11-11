@@ -138,53 +138,65 @@ impl DiagramType {
 
 /// Strip front-matter, directives, comments and accessibility statements.
 pub fn preprocess(src: &str) -> Result<Preprocessed> {
-    let src = src.replace("\r\n", "\n");
+    let src = normalize_newlines(src);
     let mut config_layers = Vec::new();
     let mut title = None;
 
-    // Front-matter: must be the first non-blank content.
-    let mut lines: Vec<String> = src.lines().map(str::to_string).collect();
-    if let Some(first) = lines.iter().position(|l| !l.trim().is_empty()) {
-        if lines[first].trim() == "---" {
-            if let Some(end) = lines
-                .iter()
-                .skip(first + 1)
-                .position(|l| l.trim() == "---")
-                .map(|p| p + first + 1)
-            {
-                let yaml = parse_yaml_subset(&lines[first + 1..end].join("\n"));
-                title = yaml.get("title").and_then(Json::to_scalar_string);
-                if let Some(cfg) = yaml.get("config").filter(|c| c.as_object().is_some()) {
-                    config_layers.push(cfg.clone());
+    // Front-matter: only at the very start (optionally indented), as mermaid's
+    // `frontMatterRegex` requires; its lines (and the blank lines after it) are blanked.
+    let mut lines: Vec<String> = src.split('\n').map(str::to_string).collect();
+    let chars: Vec<char> = src.chars().collect();
+    if let Some(end) = front_matter_end(&chars) {
+        let fm_lines = chars[..end].iter().filter(|&&c| c == '\n').count();
+        let indent = lines[0].len() - lines[0].trim_start().len();
+        let close = (1..fm_lines)
+            .rev()
+            .find(|&i| lines[i].trim() == "---")
+            .unwrap_or(fm_lines.saturating_sub(1));
+        let yaml_src: Vec<&str> = lines[1..close]
+            .iter()
+            .map(|l| {
+                l.get(indent..)
+                    .filter(|_| l.starts_with(&lines[0][..indent]))
+                    .unwrap_or(l)
+            })
+            .collect();
+        let yaml = parse_yaml_subset(&yaml_src.join("\n"));
+        title = yaml.get("title").and_then(Json::to_scalar_string);
+        if let Some(cfg) = yaml.get("config").filter(|c| c.as_object().is_some()) {
+            config_layers.push(cfg.clone());
+        }
+        for l in &mut lines[..fm_lines] {
+            l.clear();
+        }
+    }
+    let text = lines.join("\n");
+
+    // Directives (`directiveRegex`; may span lines, and an unclosed `%%{` is removed
+    // up to where the regex stops rather than being an error).
+    let mut chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i + 2 < chars.len() {
+        if chars[i] == '%' && chars[i + 1] == '%' && chars[i + 2] == '{' {
+            if let Some(end) = directive_end(&chars, i) {
+                if chars[..end].ends_with(&['}', '%', '%']) {
+                    let inner: String = chars[i + 3..end - 3].iter().collect();
+                    if let Some(layer) = parse_directive(inner.trim()) {
+                        config_layers.push(layer);
+                    }
                 }
-                if let Some(mode) = yaml.get("displayMode").and_then(Json::as_str) {
-                    let _ = mode; // gantt-only option, accepted for compatibility
+                for c in &mut chars[i..end] {
+                    if *c != '\n' {
+                        *c = ' ';
+                    }
                 }
-                for l in &mut lines[first..=end] {
-                    l.clear();
-                }
+                i = end;
+                continue;
             }
         }
+        i += 1;
     }
-    let mut text = lines.join("\n");
-
-    // Directives: %%{ init: {...} }%% (may span lines).
-    while let Some(start) = text.find("%%{") {
-        let Some(rel_end) = text[start..].find("}%%") else {
-            let line = text[..start].matches('\n').count() + 1;
-            return Err(Error::parse(line, "Unterminated directive: expected '}%%'"));
-        };
-        let end = start + rel_end + 3;
-        let inner = text[start + 3..end - 3].trim();
-        if let Some(layer) = parse_directive(inner) {
-            config_layers.push(layer);
-        }
-        let blank: String = text[start..end]
-            .chars()
-            .map(|c| if c == '\n' { '\n' } else { ' ' })
-            .collect();
-        text.replace_range(start..end, &blank);
-    }
+    let text: String = chars.into_iter().collect();
 
     // Comments and accessibility statements.
     let mut acc_title = None;
@@ -257,70 +269,164 @@ pub fn preprocess(src: &str) -> Result<Preprocessed> {
 /// spanning lines collapses onto one), every `%% comment` line (`cleanupComments`), and
 /// then leading whitespace (`trimStart`). Error positions count lines of that text.
 pub fn mermaid_line_numbers(src: &str) -> Vec<Option<usize>> {
-    let src = src.replace("\r\n", "\n");
-    let lines: Vec<&str> = src.split('\n').collect();
-    let mut keep = vec![true; lines.len()];
-    // Front-matter: `---` on the very first line, up to the closing `---` and the
-    // blank lines after it.
-    if lines.first().map(|l| l.trim_end()) == Some("---") {
-        if let Some(end) = lines.iter().skip(1).position(|l| l.trim_end() == "---") {
-            let mut last = end + 1;
-            while last + 1 < lines.len() && lines[last + 1].trim().is_empty() {
-                last += 1;
-            }
-            keep[..=last].iter_mut().for_each(|k| *k = false);
+    let text = normalize_newlines(src);
+    // Each char tagged with its (0-based) source line; removals filter this sequence
+    // exactly as mermaid's string replacements remove text.
+    let mut seq: Vec<(char, usize)> = Vec::with_capacity(text.len());
+    let mut line = 0;
+    for c in text.chars() {
+        seq.push((c, line));
+        if c == '\n' {
+            line += 1;
         }
     }
-    // Directives: lines after the first of a multi-line directive merge into it.
+    let n_lines = line + 1;
+    let as_string = |seq: &[(char, usize)]| seq.iter().map(|&(c, _)| c).collect::<Vec<char>>();
+    // extractFrontMatter.
+    let chars = as_string(&seq);
+    if let Some(end) = front_matter_end(&chars) {
+        seq.drain(..end);
+    }
+    // removeDirectives.
+    let chars = as_string(&seq);
+    let mut keep = vec![true; chars.len()];
     let mut i = 0;
-    while i < lines.len() {
-        if keep[i] {
-            if let Some(start) = lines[i].find("%%{") {
-                if !lines[i][start..].contains("}%%") {
-                    let mut j = i + 1;
-                    while j < lines.len() && !lines[j].contains("}%%") {
-                        keep[j] = false;
-                        j += 1;
-                    }
-                    if j < lines.len() {
-                        keep[j] = false;
-                    }
-                    i = j;
-                }
+    while i + 2 < chars.len() {
+        if chars[i] == '%' && chars[i + 1] == '%' && chars[i + 2] == '{' {
+            if let Some(end) = directive_end(&chars, i) {
+                keep[i..end].iter_mut().for_each(|k| *k = false);
+                i = end;
+                continue;
             }
         }
         i += 1;
     }
-    // Comment lines (`/^\s*%%(?!{)[^\n]+\n?/gm`).
-    for (k, l) in lines.iter().enumerate() {
-        let t = l.trim_start();
-        if let Some(rest) = t.strip_prefix("%%") {
-            if !rest.is_empty() && !rest.starts_with('{') {
-                keep[k] = false;
-            }
+    let mut it = keep.iter();
+    seq.retain(|_| *it.next().unwrap_or(&true));
+    // cleanupComments: `/^\s*%%(?!{)[^\n]+\n?/gm`, then `trimStart()`.
+    let chars = as_string(&seq);
+    let mut keep = vec![true; chars.len()];
+    let mut st = 0;
+    while st < chars.len() {
+        let mut p = st;
+        while p < chars.len() && chars[p].is_whitespace() {
+            p += 1;
         }
-    }
-    // `trimStart`: leading lines that are blank (or held only a directive) go too.
-    for k in 0..lines.len() {
-        if !keep[k] {
+        let is_comment = chars.get(p) == Some(&'%')
+            && chars.get(p + 1) == Some(&'%')
+            && chars.get(p + 2).is_some_and(|&c| c != '{' && c != '\n');
+        if is_comment {
+            let mut e = p + 2;
+            while e < chars.len() && chars[e] != '\n' {
+                e += 1;
+            }
+            if e < chars.len() {
+                e += 1;
+            }
+            keep[st..e].iter_mut().for_each(|k| *k = false);
+            st = e;
             continue;
         }
-        let blank = lines[k].trim().is_empty()
-            || (lines[k].trim_start().starts_with("%%{") && lines[k].trim_end().ends_with("}%%"));
-        if !blank {
-            break;
+        // Next line start (`^` with the m flag).
+        match chars[st..].iter().position(|&c| c == '\n') {
+            Some(k) => st += k + 1,
+            None => break,
         }
-        keep[k] = false;
     }
-    let mut n = 0;
-    keep.iter()
-        .map(|&k| {
-            k.then(|| {
-                n += 1;
-                n
-            })
-        })
-        .collect()
+    let mut it = keep.iter();
+    seq.retain(|_| *it.next().unwrap_or(&true));
+    let lead = seq.iter().take_while(|&&(c, _)| c.is_whitespace()).count();
+    seq.drain(..lead);
+    // A source line maps to the cleaned line holding its first surviving char.
+    let mut out = vec![None; n_lines];
+    let mut cleaned_line = 1;
+    for &(c, l) in &seq {
+        if out[l].is_none() {
+            out[l] = Some(cleaned_line);
+        }
+        if c == '\n' {
+            cleaned_line += 1;
+        }
+    }
+    out
+}
+
+/// mermaid's `cleanupText` line endings: `\r\n` and lone `\r` become `\n`.
+pub fn normalize_newlines(src: &str) -> String {
+    src.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// End (char index) of a front-matter block at the very start of `s`, per
+/// `frontMatterRegex = /^([^\S\n\r]*)-{3}\s*[\n\r](.*?)[\n\r]\1-{3}\s*[\n\r]+/s`.
+fn front_matter_end(s: &[char]) -> Option<usize> {
+    let indent = s
+        .iter()
+        .take_while(|&&c| c.is_whitespace() && c != '\n')
+        .count();
+    let mut p = indent;
+    if s.get(p..p + 3) != Some(&['-', '-', '-'][..]) {
+        return None;
+    }
+    p += 3;
+    // `\s*[\n\r]`: the body starts after the last newline of the whitespace run.
+    let run_end = p + s[p..].iter().take_while(|c| c.is_whitespace()).count();
+    let body = s[p..run_end].iter().rposition(|&c| c == '\n')? + p + 1;
+    let mut k = body.max(p);
+    // Lazy body: the first `\n<indent>---` followed by whitespace holding a newline.
+    while k < s.len() {
+        if s[k] == '\n' && s[k + 1..].starts_with(&s[..indent]) {
+            let q = k + 1 + indent;
+            if s.get(q..q + 3) == Some(&['-', '-', '-'][..]) {
+                let r = q + 3;
+                let ws_end = r + s[r..].iter().take_while(|c| c.is_whitespace()).count();
+                if let Some(last_nl) = s[r..ws_end].iter().rposition(|&c| c == '\n') {
+                    return Some(r + last_nl + 1);
+                }
+            }
+        }
+        k += 1;
+    }
+    None
+}
+
+/// End (char index) of the directive starting at `start` (`%%{`), per mermaid's
+/// `directiveRegex = /%{2}{\s*(?:(\w+)\s*:|(\w+))\s*(?:(\w+)|((?:(?!}%{2}).|\r?\n)*))?\s*(?:}%{2})?/gi`
+/// (the closing `}%%` is optional). `None` when there is no directive keyword.
+fn directive_end(s: &[char], start: usize) -> Option<usize> {
+    let word = |p: usize| {
+        s[p..]
+            .iter()
+            .take_while(|c| c.is_ascii_alphanumeric() || **c == '_')
+            .count()
+    };
+    let ws = |p: usize| s[p..].iter().take_while(|c| c.is_whitespace()).count();
+    let mut p = start + 3;
+    p += ws(p);
+    let w = word(p);
+    if w == 0 {
+        return None;
+    }
+    p += w;
+    let after = p + ws(p);
+    if s.get(after) == Some(&':') {
+        p = after + 1;
+    }
+    p += ws(p);
+    let w = word(p);
+    if w > 0 {
+        p += w;
+    } else {
+        while p < s.len()
+            && !(s[p] == '}' && s.get(p + 1) == Some(&'%') && s.get(p + 2) == Some(&'%'))
+        {
+            p += 1;
+        }
+    }
+    p += ws(p);
+    if s[p..].starts_with(&['}', '%', '%']) {
+        p += 3;
+    }
+    Some(p)
 }
 
 fn parse_directive(inner: &str) -> Option<Json> {
@@ -545,13 +651,46 @@ mod tests {
         assert_eq!(&m[..5], &[None, None, None, None, Some(1)]);
         assert_eq!(m[5], None, "comment line removed");
         assert_eq!(m[6], Some(2));
-        assert_eq!(m[7], Some(3), "a directive collapses onto its first line");
-        assert_eq!(m[8], None);
+        assert_eq!(m[7], None, "a directive's text is removed");
+        assert_eq!(m[8], Some(3), "what follows it stays on one line");
         assert_eq!(m[9], Some(4));
         // Without front-matter or comments the numbering is unchanged.
         assert_eq!(
             mermaid_line_numbers("graph TD\nA-->B"),
             vec![Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn error_lines_follow_mermaids_regexes() {
+        let line_of = |src: &str, needle: &str| {
+            let idx = src.split('\n').position(|l| l.contains(needle)).unwrap();
+            mermaid_line_numbers(src)[idx]
+        };
+        // `\s*` in the comment regex also takes the blank lines before a comment.
+        let s = "flowchart TD\n A --> B\n\n\n %% c\n C --> --> D";
+        assert_eq!(line_of(s, "C -->"), Some(3));
+        // A multi-line directive at the top is trimmed away entirely.
+        let s = "%%{init: {\n 'theme':'dark'\n}}%%\nflowchart TD\n A --> B\n C --> --> D";
+        assert_eq!(line_of(s, "C -->"), Some(3));
+        // Indented front-matter.
+        let s = "  ---\n  title: x\n  ---\nflowchart TD\n A-->B\n C --> --> D";
+        assert_eq!(line_of(s, "C -->"), Some(3));
+        // Lone CR line endings count as newlines.
+        assert_eq!(mermaid_line_numbers("graph TD\rA-->B").len(), 2);
+    }
+
+    #[test]
+    fn front_matter_and_directives_like_mermaid() {
+        let p = preprocess("  ---\n  title: Hi\n  ---\ngraph TD\nA-->B").unwrap();
+        assert_eq!(p.title.as_deref(), Some("Hi"));
+        assert_eq!(detect(&p.body).unwrap(), DiagramType::Flowchart);
+        // Front-matter after a blank line is not front-matter for mermaid.
+        let p = preprocess("\n---\ntitle: Hi\n---\ngraph TD").unwrap();
+        assert_eq!(p.title, None);
+        // An unclosed directive is removed up to where the regex stops, not an error.
+        let p = preprocess("flowchart TD\n A --> B\n%%{ todo fix this\n B --> C").unwrap();
+        assert!(p.body.contains("this"), "{:?}", p.body);
+        assert!(!p.body.contains("todo"));
     }
 }

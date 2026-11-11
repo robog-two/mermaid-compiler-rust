@@ -89,7 +89,7 @@ impl TextBlock {
 
     /// Normalise a raw mermaid label and measure it.
     pub fn label(raw: &str, font_size: f64) -> Self {
-        Self::new(split_lines(&normalize_label(raw)), font_size, false)
+        Self::new(label_lines(raw), font_size, false)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -137,6 +137,20 @@ fn br_tag_len(s: &str) -> Option<usize> {
 /// Decode mermaid entity codes, strip markdown-string backticks, emphasis
 /// markers and inline HTML tags other than `<br>`.
 pub fn normalize_label(raw: &str) -> String {
+    decode_entities(&strip_markup(raw))
+}
+
+/// A label's display lines: split on `\n` / `<br>` *before* decoding entities, so an
+/// escaped `&lt;br&gt;` stays literal text as in mermaid's HTML labels.
+pub fn label_lines(raw: &str) -> Vec<String> {
+    split_lines(&strip_markup(raw))
+        .iter()
+        .map(|l| decode_entities(l))
+        .collect()
+}
+
+/// [`normalize_label`] without the entity decoding.
+fn strip_markup(raw: &str) -> String {
     let mut s = raw.trim().to_string();
     if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
         s = s[1..s.len() - 1].to_string();
@@ -145,8 +159,7 @@ pub fn normalize_label(raw: &str) -> String {
         s = s[1..s.len() - 1].replace("**", "").replace("__", "");
         s = s.replace('*', "");
     }
-    let s = strip_tags(&s);
-    decode_entities(&s)
+    strip_tags(&s)
 }
 
 fn strip_tags(s: &str) -> String {
@@ -267,5 +280,12 @@ mod tests {
         let b = TextBlock::label("a<br>bb", 16.0);
         assert_eq!(b.lines.len(), 2);
         assert_eq!(b.height, 48.0);
+    }
+
+    #[test]
+    fn escaped_br_is_text_not_a_line_break() {
+        assert_eq!(label_lines("a &lt;br&gt; b"), vec!["a <br> b"]);
+        assert_eq!(label_lines("a<br>b &amp; c"), vec!["a", "b & c"]);
+        assert_eq!(normalize_label("&lt;tag&gt;"), "<tag>");
     }
 }

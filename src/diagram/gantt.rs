@@ -18,7 +18,7 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{line_width, normalize_label, split_lines};
+use crate::text::{line_width, normalize_label};
 use crate::theme::Palette;
 
 pub const SECOND_MS: i64 = 1_000;
@@ -1289,7 +1289,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let sec_labels: Vec<Vec<String>> = g
         .sections
         .iter()
-        .map(|s| split_lines(&normalize_label(s)))
+        .map(|s| crate::text::label_lines(s))
         .collect();
     let widest_sec = sec_labels
         .iter()

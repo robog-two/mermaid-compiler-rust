@@ -356,6 +356,11 @@ impl Builder {
     }
 
     fn finish(mut self, direction: Direction, title: Option<String>) -> GraphDiagram {
+        // dataFetcher.ts `getDir(item, DEFAULT_NESTED_DOC_DIR = 'TB')`: a composite with no
+        // `direction` of its own is laid out top to bottom, whatever the diagram's direction.
+        for c in &mut self.clusters {
+            c.direction.get_or_insert(Direction::TopBottom);
+        }
         for (id, lines) in &self.descriptions {
             if let Some(&i) = self.index.get(id) {
                 let n = &mut self.nodes[i];
@@ -547,5 +552,16 @@ mod tests {
         assert_eq!(g.nodes[note].cluster, None);
         let e = g.edges.last().unwrap();
         assert_eq!(e.from, Endpoint::Node(NodeId(note)));
+    }
+
+    #[test]
+    fn composites_default_to_top_bottom_like_upstream() {
+        let g = parse(
+            "stateDiagram-v2\ndirection LR\nstate B {\nb1 --> b2\n}\nA --> B",
+            None,
+        )
+        .unwrap();
+        assert_eq!(g.direction, Direction::LeftRight);
+        assert_eq!(g.clusters[0].direction, Some(Direction::TopBottom));
     }
 }

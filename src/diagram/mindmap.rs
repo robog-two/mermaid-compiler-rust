@@ -16,7 +16,7 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{TextBlock, line_width, normalize_label, split_lines};
+use crate::text::{TextBlock, line_width};
 use crate::theme::Palette;
 
 /// Node shapes.
@@ -102,13 +102,19 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Mindmap> {
                 .extend(rest.split_whitespace().map(str::to_string));
             continue;
         }
-        // mindmap.jison only lexes `:::` as a statement of its own (`SPACELIST CLASS`);
-        // after a node on the same line it is a syntax error.
-        if find_unquoted(t, ":::").is_some() {
-            return Err(Error::parse(
-                line_no,
-                "Expecting 'SPACELINE', 'NL', 'EOF', got 'CLASS'",
-            ));
+        // mindmap.jison lexes `:::` as a CLASS token only where a token may start: after
+        // a shape's closing delimiter that is a syntax error, while in a bare id it is
+        // just part of the NODE_ID text (`a:::urgent` is a node labelled so).
+        if let Some(i) = find_unquoted(t, ":::") {
+            let before = t[..i].trim_end();
+            if !before.is_empty()
+                && matches!(parse_node(before, line_no), Ok((_, _, shape)) if shape != NodeShape::Default)
+            {
+                return Err(Error::parse(
+                    line_no,
+                    "Expecting 'SPACELINE', 'NL', 'EOF', got 'CLASS'",
+                ));
+            }
         }
         let (id, label, shape) = parse_node(t, line_no)?;
         let parent = if mm.nodes.is_empty() {
@@ -239,7 +245,7 @@ impl Placed {
 /// Greedy word wrap at `max` pixels.
 fn wrap(text: &str, font: f64, max: f64) -> Vec<String> {
     let mut out = Vec::new();
-    for para in split_lines(&normalize_label(text)) {
+    for para in crate::text::label_lines(text) {
         let mut cur = String::new();
         for word in para.split_whitespace() {
             let cand = if cur.is_empty() {
@@ -713,5 +719,9 @@ mod tests {
         assert!(matches!(e, Error::Parse { line: 3, .. }), "{e:?}");
         let mm = parse("mindmap\n  root\n    a(A)\n    :::urgent", None).unwrap();
         assert_eq!(mm.nodes[1].classes, vec!["urgent"]);
+        // In a bare id, `:::` is just text.
+        let mm = parse("mindmap\n  root:::x\n    a:::urgent", None).unwrap();
+        assert_eq!(mm.nodes[0].label, "root:::x");
+        assert_eq!(mm.nodes[1].label, "a:::urgent");
     }
 }
