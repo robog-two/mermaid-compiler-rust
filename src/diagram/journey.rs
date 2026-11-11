@@ -101,12 +101,12 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Journey> {
             let label = line[..colon].trim();
             let mut data = line[colon + 1..].splitn(2, ':');
             let score_txt = data.next().unwrap_or("").trim();
-            let score: f64 = score_txt.parse().map_err(|_| {
-                Error::parse(
-                    line_no,
-                    format!("{line}\nExpecting a numeric score (1-5) after the task name"),
-                )
-            })?;
+            // journeyDb addTask: `Number(score)` — blank is 0, anything else NaN.
+            let score: f64 = if score_txt.is_empty() {
+                0.0
+            } else {
+                score_txt.parse().unwrap_or(f64::NAN)
+            };
             if label.is_empty() {
                 return Err(Error::parse(
                     line_no,
@@ -355,7 +355,13 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 ));
             }
             let score = task.score.clamp(1.0, 5.0);
-            let fy = sr.y + 30.0 + (5.0 - score) * 30.0;
+            // A NaN score puts upstream's face at `cy = NaN`, i.e. y 0 of the diagram,
+            // 300 above where a score of 5 sits.
+            let fy = if score.is_nan() {
+                sr.y + 30.0 - 300.0
+            } else {
+                sr.y + 30.0 + (5.0 - score) * 30.0
+            };
             fore.extend(face(Point::new(cx, fy), task.score, &pal.line_color));
         }
     }
@@ -481,8 +487,9 @@ mod tests {
 
     #[test]
     fn errors_have_line_numbers() {
-        let e = parse("journey\nsection A\n  Task: high: Me", None).unwrap_err();
-        assert!(matches!(e, Error::Parse { line: 3, .. }));
+        // `Number("high")` is NaN upstream: accepted, drawn with a neutral face.
+        let j = parse("journey\nsection A\n  Task: high: Me", None).unwrap();
+        assert!(j.sections[0].tasks[0].score.is_nan());
         let e = parse("journey\n\nnonsense", None).unwrap_err();
         assert!(matches!(e, Error::Parse { line: 3, .. }));
         assert!(parse("journeyx", None).is_err());

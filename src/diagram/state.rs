@@ -131,11 +131,21 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
                 Some((head, text)) => (note_target(head), text.trim().to_string()),
                 None => {
                     let mut lines = Vec::new();
+                    let mut closed = false;
                     for (_, l) in iter.by_ref() {
                         if l.trim() == "end note" {
+                            closed = true;
                             break;
                         }
                         lines.push(l.trim().to_string());
+                    }
+                    // The lexer's note state needs `end note`: without it the
+                    // `note …` line itself is unrecognised.
+                    if !closed {
+                        return Err(Error::parse(
+                            line,
+                            format!("Lexical error on line {line}. Unrecognized text.\n{s}"),
+                        ));
                     }
                     (note_target(rest), lines.join("\n"))
                 }
@@ -536,6 +546,17 @@ mod tests {
         .unwrap();
         let b = g2.clusters.iter().find(|c| c.id == "B").unwrap();
         assert_eq!(b.color_slot, Some(ColorSlot(1)));
+    }
+
+    #[test]
+    fn unterminated_multiline_note_is_a_lexical_error() {
+        let e = parse(
+            "stateDiagram-v2\n  A --> B\n  note left of A\n    text",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(e, Error::Parse { line: 3, .. }), "{e}");
+        assert!(e.to_string().contains("Lexical error on line 3"));
     }
 
     #[test]

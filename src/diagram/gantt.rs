@@ -999,12 +999,12 @@ fn parse_task(
             ))
         })?,
     };
-    let end = parse_end(g, end).ok_or_else(|| {
-        err(&format!(
-            "Invalid end '{end}': expected a date in format '{}', a duration (e.g. 3d) or 'until <id>'",
-            g.date_format
-        ))
-    })?;
+    // ganttDb getEndDate: neither a date nor a duration is only a warning upstream;
+    // the task keeps a zero duration.
+    let end = parse_end(g, end).unwrap_or(EndSpec::For(Duration {
+        value: 0.0,
+        unit: DurUnit::Millisecond,
+    }));
     Ok(RawTask {
         line,
         label: label.to_string(),
@@ -1976,6 +1976,18 @@ mod tests {
         assert!(matches!(e, Error::Parse { line: 2, .. }));
         assert!(parse("pie\n", None).is_err());
         assert!(parse("gantt\ntickInterval 3fortnight", None).is_err());
+    }
+
+    #[test]
+    fn unparsable_end_gives_a_zero_duration_task() {
+        // ganttDb getEndDate only warns; `:: bad` leaves the data ": bad".
+        let g = parse(
+            "gantt\ndateFormat YYYY-MM-DD\nsection S\na :a1, 2024-01-01, 3d\nb :: bad",
+            None,
+        )
+        .unwrap();
+        assert_eq!(g.tasks[1].start, d(2024, 1, 4));
+        assert_eq!(g.tasks[1].end, g.tasks[1].start);
     }
 
     #[test]

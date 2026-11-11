@@ -104,6 +104,38 @@ pub enum Shape {
     LinedDocument,
     /// `collapsedGroup`: a folded container (agentflow `@{ view: collapsed }`).
     CollapsedGroup,
+    /// `datastore` / `data-store`: top and bottom rules only.
+    Datastore,
+    /// `folder` / `directory`.
+    Folder,
+    /// `bucket`.
+    Bucket,
+    /// `console`: terminal window with a `>_` glyph.
+    Console,
+    /// `browser`: window with a chrome bar.
+    Browser,
+    /// `person`: head over a rounded body.
+    Person,
+    /// `bang`.
+    Bang,
+    /// `cloud`.
+    Cloud,
+    /// `brace` / `comment` / `brace-l`.
+    BraceLeft,
+    /// `brace-r`.
+    BraceRight,
+    /// `braces`.
+    Braces,
+    /// `bolt` / `com-link` / `lightning-bolt`.
+    Bolt,
+    /// `docs` / `st-doc` / `stacked-document`.
+    StackedDocument,
+    /// `bow-rect` / `stored-data`.
+    BowTieRect,
+    /// `tag-doc` / `tagged-document`.
+    TaggedDocument,
+    /// `flag` / `paper-tape`.
+    PaperTape,
 }
 
 /// Inline style overrides (`style`, `classDef`, `linkStyle`).
@@ -549,7 +581,7 @@ fn measure_node(
         (Shape::Note, DiagramKind::State) => 15.0,
         _ => pad,
     };
-    let metrics = ShapeMetrics::for_look(node.shape, node_pad, look);
+    let metrics = ShapeMetrics::for_look(node.shape, node_pad, look).with_label(tw, th);
     let mut sections = Vec::new();
     let mut compartments = None;
     let mut table = None;
@@ -1914,7 +1946,35 @@ fn node_elements(
                     Paint::stroke(&stroke, paint.stroke_width),
                 )),
                 PartStyle::Hidden => {}
+                PartStyle::Fill => els.push(Element::classed_shape(
+                    part.geom,
+                    Paint::fill(&fill),
+                    "basic label-container",
+                )),
+                PartStyle::AccentLine | PartStyle::AccentFaint => {
+                    let mut accent = Paint::stroke(&pal.node_border, 1.0);
+                    if part.style == PartStyle::AccentFaint {
+                        accent.opacity = Some(0.6);
+                    }
+                    els.push(Element::shape(part.geom, accent));
+                }
+                PartStyle::AccentDot => {
+                    els.push(Element::shape(part.geom, Paint::fill(&pal.node_border)))
+                }
             }
+        }
+        for g in o.glyphs {
+            let text = Text {
+                x: g.at.x,
+                y: g.at.y,
+                lines: vec![g.text.to_string()],
+                line_height: g.font_size,
+                font_size: g.font_size,
+                bold: g.bold,
+                anchor: Anchor::Start,
+                fill: pal.node_border.clone(),
+            };
+            els.push(Element::classed_text(text, "console-glyph"));
         }
         o.boundary
     } else {

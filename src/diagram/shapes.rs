@@ -34,6 +34,11 @@ pub struct ShapeMetrics {
     pub wave_ratio: f64,
     /// Corner radius of `Shape::Rounded` (`roundedRect.ts`: `themeVariables.radius ?? 5`).
     pub corner_radius: f64,
+    /// `node.look === 'neo'` (shapes with look branches outside `pad`).
+    pub neo: bool,
+    /// Measured label size; shapes sized from their drawn bounding box rebuild
+    /// their geometry from it in [`outline`]. Set with [`ShapeMetrics::with_label`].
+    pub label: (f64, f64),
 }
 
 /// `subroutine.ts` / `shadedProcess.ts` FRAME_WIDTH.
@@ -55,7 +60,8 @@ impl ShapeMetrics {
         let pad = |x: f64, y: f64| LabelPad { x, y };
         let pad = match shape {
             // squareRect.ts: labelPaddingX = 2p on each side, labelPaddingY = p.
-            Shape::Rect | Shape::State => pad(4.0 * p, 2.0 * p),
+            // datastore.ts draws through drawRect with the same padding in every look.
+            Shape::Rect | Shape::State | Shape::Datastore => pad(4.0 * p, 2.0 * p),
             Shape::Rounded | Shape::Note => pad(2.0 * p, 2.0 * p),
             // circle.ts: radius = labelRadius + p/2 (halfPadding).
             Shape::Circle => pad(p, p),
@@ -84,11 +90,21 @@ impl ShapeMetrics {
             stack_offset: 5.0,
             wave_ratio: 1.0 / 8.0,
             corner_radius: 5.0,
+            neo: false,
+            label: (0.0, 0.0),
         }
     }
 }
 
 impl ShapeMetrics {
+    /// The same metrics remembering the measured label size.
+    pub fn with_label(self, tw: f64, th: f64) -> Self {
+        ShapeMetrics {
+            label: (tw, th),
+            ..self
+        }
+    }
+
     /// The metrics for `look` (`HandDrawn` sizes like `Classic`).
     pub fn for_look(shape: Shape, p: f64, look: Look) -> Self {
         match look {
@@ -159,6 +175,7 @@ impl ShapeMetrics {
             stack_offset: 10.0,
             // waveEdgedRectangle.ts: amplitude h/4.
             wave_ratio: 1.0 / 4.0,
+            neo: true,
             ..classic
         }
     }
@@ -198,8 +215,31 @@ pub fn size(
         label_offset: Point::new(dx, dy),
     };
     Some(match shape {
-        Shape::Rect | Shape::State | Shape::Rounded | Shape::Note | Shape::Text => {
-            at(tw + px, th + py)
+        Shape::Rect
+        | Shape::State
+        | Shape::Rounded
+        | Shape::Note
+        | Shape::Text
+        | Shape::Datastore => at(tw + px, th + py),
+        Shape::Folder
+        | Shape::Bucket
+        | Shape::Console
+        | Shape::Browser
+        | Shape::Person
+        | Shape::Bang
+        | Shape::Cloud
+        | Shape::BraceLeft
+        | Shape::BraceRight
+        | Shape::Braces
+        | Shape::Bolt
+        | Shape::StackedDocument
+        | Shape::BowTieRect
+        | Shape::TaggedDocument
+        | Shape::PaperTape
+        | Shape::LinedDocument => {
+            let l = local(shape, tw, th, m)?;
+            let b = l.bounds();
+            off(b.w, b.h, l.label.x, l.label.y)
         }
         Shape::Stadium => {
             // stadium.ts stadiumDimensions (50-point arcs).
@@ -281,19 +321,6 @@ pub fn size(
             let amp = h * m.wave_ratio;
             off(tw + px, h + 2.0 * amp, 0.0, -amp)
         }
-        Shape::LinedDocument => {
-            // linedWaveEdgedRect.ts: the body is 10% wider than `tw + px` (5% each side)
-            // and the label is placed from the left edge with `node.padding`, not centred.
-            let (w, h) = (tw + px, th + py);
-            let amp = h * m.wave_ratio;
-            let np = m.node_padding;
-            off(
-                1.1 * w,
-                h + 2.0 * amp,
-                np - px / 2.0 + 0.025 * w,
-                np - py / 2.0 - amp,
-            )
-        }
         // collapsedGroup.ts: padding 8 around the title, an 8px gap and a 20px row of
         // dots below it, at least 80 wide; the title sits above the centre.
         Shape::CollapsedGroup => off(
@@ -345,6 +372,7 @@ pub fn shows_label(shape: Shape) -> bool {
             | Shape::Invisible
             | Shape::Hourglass
             | Shape::CrossedCircle
+            | Shape::Bolt
     )
 }
 
@@ -354,6 +382,9 @@ pub enum Boundary {
     Rect(Rect),
     Ellipse(Point, f64, f64),
     Polygon(Point, Vec<Point>),
+    /// A possibly concave outline clipped like `intersect.polygon`: of the crossings
+    /// between the centre and the outer point, the one nearest the outer point.
+    Outline(Point, Vec<Point>),
 }
 
 impl Boundary {
@@ -362,6 +393,7 @@ impl Boundary {
             Boundary::Rect(r) => geom::clip_rect(r, toward),
             Boundary::Ellipse(c, rx, ry) => geom::clip_ellipse(*c, *rx, *ry, toward),
             Boundary::Polygon(c, pts) => geom::clip_polygon(*c, pts, toward),
+            Boundary::Outline(c, pts) => outline_clip(*c, pts, toward),
         }
     }
 }
@@ -375,6 +407,14 @@ pub enum PartStyle {
     Line,
     /// Takes up space but paints nothing (`rect.text { fill: none; stroke-width: 0 }`).
     Hidden,
+    /// The node's fill without a stroke.
+    Fill,
+    /// A 1px stroke in `themeVariables.nodeBorder` (decorations of console/browser/bucket).
+    AccentLine,
+    /// Like [`PartStyle::AccentLine`] at 60% opacity.
+    AccentFaint,
+    /// Filled with `themeVariables.nodeBorder`, no stroke.
+    AccentDot,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -388,6 +428,17 @@ pub struct Part {
 pub struct Outline {
     pub parts: Vec<Part>,
     pub boundary: Boundary,
+    /// Decorative text drawn inside the shape (the `console` prompt).
+    pub glyphs: Vec<Glyph>,
+}
+
+/// A short decoration string, `x`/`y` = start of its baseline, in the accent colour.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Glyph {
+    pub at: Point,
+    pub text: &'static str,
+    pub font_size: f64,
+    pub bold: bool,
 }
 
 fn body(geom: Geometry) -> Part {
@@ -412,6 +463,7 @@ fn poly_outline(c: Point, pts: Vec<Point>) -> Outline {
     Outline {
         parts: vec![body(Geometry::Path(geom::polygon(&pts)))],
         boundary: Boundary::Polygon(c, pts),
+        glyphs: Vec::new(),
     }
 }
 
@@ -436,9 +488,27 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
     let rect = |rx: f64| Outline {
         parts: vec![body(Geometry::Rect { rect: r, rx })],
         boundary: Boundary::Rect(r),
+        glyphs: Vec::new(),
     };
     Some(match shape {
         Shape::Rect | Shape::Note => rect(0.0),
+        // datastore.ts: `stroke-dasharray: w h` leaves only the top and bottom rules.
+        Shape::Datastore => Outline {
+            parts: vec![
+                Part {
+                    geom: Geometry::Rect { rect: r, rx: 0.0 },
+                    style: PartStyle::Fill,
+                },
+                line(seg(p(x0, y0), p(x1, y0))),
+                line(seg(p(x0, y1), p(x1, y1))),
+            ],
+            boundary: Boundary::Rect(r),
+            glyphs: Vec::new(),
+        },
+        s if is_bbox_sized(s) => {
+            let (tw, th) = m.label;
+            return local(s, tw, th, m).map(|l| l.place(r));
+        }
         // roundedRect.ts: themeVariables.radius (5); state rects get `rx: 5px` from CSS.
         Shape::Rounded => rect(m.corner_radius),
         Shape::State => rect(5.0),
@@ -448,6 +518,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
                 style: PartStyle::Hidden,
             }],
             boundary: Boundary::Rect(r),
+            glyphs: Vec::new(),
         },
         Shape::Stadium => {
             let rad = h / 2.0;
@@ -466,6 +537,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             Outline {
                 parts: vec![body(Geometry::Path(cmds))],
                 boundary: Boundary::Polygon(c, pts),
+                glyphs: Vec::new(),
             }
         }
         Shape::Subroutine | Shape::LinedRect => {
@@ -508,6 +580,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             Outline {
                 parts,
                 boundary: Boundary::Rect(r),
+                glyphs: Vec::new(),
             }
         }
         Shape::HorizontalCylinder => {
@@ -542,11 +615,13 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             Outline {
                 parts: vec![body(Geometry::Path(cmds)), line(inner)],
                 boundary: Boundary::Rect(r),
+                glyphs: Vec::new(),
             }
         }
         Shape::Circle => Outline {
             parts: vec![body(Geometry::Circle { c, r: w / 2.0 })],
             boundary: Boundary::Ellipse(c, w / 2.0, h / 2.0),
+            glyphs: Vec::new(),
         },
         Shape::DoubleCircle => Outline {
             parts: vec![
@@ -557,6 +632,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
                 }),
             ],
             boundary: Boundary::Ellipse(c, w / 2.0, h / 2.0),
+            glyphs: Vec::new(),
         },
         Shape::CrossedCircle => {
             let rad = w / 2.0;
@@ -568,6 +644,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
                     line(seg(p(c.x + d, c.y + d), p(c.x - d, c.y - d))),
                 ],
                 boundary: Boundary::Ellipse(c, rad, rad),
+                glyphs: Vec::new(),
             }
         }
         // rectLeftInvArrow.ts: notch depth h/4.
@@ -631,6 +708,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             Outline {
                 parts: vec![body(Geometry::Path(cmds))],
                 boundary: Boundary::Polygon(c, pts),
+                glyphs: Vec::new(),
             }
         }
         Shape::Triangle => poly_outline(c, vec![p(x0, y1), p(x1, y1), p(c.x, y0)]),
@@ -641,6 +719,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             Outline {
                 parts: vec![body(Geometry::Path(geom::polygon(&pts)))],
                 boundary: Boundary::Rect(r),
+                glyphs: Vec::new(),
             }
         }
         // slopedRect.ts: the right edge rises h/2 above the left one.
@@ -705,6 +784,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
                     body(Geometry::Path(geom::polygon(&inner))),
                 ],
                 boundary: Boundary::Polygon(c, outer),
+                glyphs: Vec::new(),
             }
         }
         Shape::TaggedRect => {
@@ -727,23 +807,6 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
                 p(x, base + amp * (2.0 * PI * 0.8 * (x - x0) / w).sin())
             }));
             poly_outline(c, pts)
-        }
-        Shape::LinedDocument => {
-            // linedWaveEdgedRect.ts: the document wave plus a vertical line at the
-            // inner (unwidened) left edge, 5% of the inner width in from the outside.
-            let amp = h / (1.0 / m.wave_ratio + 2.0);
-            let base = y1 - amp;
-            let wave_y = |x: f64| base + amp * (2.0 * PI * 0.8 * (x - x0) / w).sin();
-            let mut pts = vec![p(x0, y0), p(x1, y0)];
-            pts.extend((0..=50).rev().map(|i| {
-                let x = x0 + w * i as f64 / 50.0;
-                p(x, wave_y(x))
-            }));
-            let mut o = poly_outline(c, pts);
-            let inner = x0 + w / 22.0;
-            o.parts
-                .push(line(seg(p(inner, y0), p(inner, wave_y(inner)))));
-            o
         }
         // collapsedGroup.ts: rounded box (rx 10, the expanded flow container's radius);
         // the separator and the dots are drawn by the caller.
@@ -772,6 +835,800 @@ fn arc_points(c: Point, r: f64, a0: f64, a1: f64) -> Vec<Point> {
             Point::new(c.x + r * a.cos(), c.y + r * a.sin())
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Shapes sized from their drawn bounding box.
+//
+// Upstream builds these in the node's local frame (origin = node centre), applies
+// a group transform, and sets the node size from `getBBox()` — so the drawing need
+// not be centred in its layout box. [`local`] reproduces that frame; [`size`] takes
+// the bounding box and [`outline`] draws the same geometry around the node centre.
+// ---------------------------------------------------------------------------
+
+/// Shapes whose layout box is the bounding box of their local geometry.
+fn is_bbox_sized(shape: Shape) -> bool {
+    matches!(
+        shape,
+        Shape::Folder
+            | Shape::Bucket
+            | Shape::Console
+            | Shape::Browser
+            | Shape::Person
+            | Shape::Bang
+            | Shape::Cloud
+            | Shape::BraceLeft
+            | Shape::BraceRight
+            | Shape::Braces
+            | Shape::Bolt
+            | Shape::StackedDocument
+            | Shape::BowTieRect
+            | Shape::TaggedDocument
+            | Shape::PaperTape
+            | Shape::LinedDocument
+    )
+}
+
+/// A shape's geometry in its local frame.
+struct Local {
+    parts: Vec<Part>,
+    glyphs: Vec<Glyph>,
+    /// `intersect.polygon` points (aligned to the layout box by their minimum, as
+    /// upstream does); empty for `intersect.rect`.
+    clip: Vec<Point>,
+    /// Label centre.
+    label: Point,
+}
+
+impl Local {
+    fn bounds(&self) -> Rect {
+        let mut pts = Vec::new();
+        for part in &self.parts {
+            geometry_points(&part.geom, &mut pts);
+        }
+        let (mut x0, mut y0, mut x1, mut y1) = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for q in pts {
+            x0 = x0.min(q.x);
+            y0 = y0.min(q.y);
+            x1 = x1.max(q.x);
+            y1 = y1.max(q.y);
+        }
+        if x0 > x1 {
+            return Rect::default();
+        }
+        Rect::new(x0, y0, x1 - x0, y1 - y0)
+    }
+
+    /// Draw around the centre of the layout box `r`.
+    fn place(self, r: Rect) -> Outline {
+        let c = r.center();
+        let boundary = if self.clip.is_empty() {
+            Boundary::Rect(r)
+        } else {
+            let min_x = self.clip.iter().map(|q| q.x).fold(f64::INFINITY, f64::min);
+            let min_y = self.clip.iter().map(|q| q.y).fold(f64::INFINITY, f64::min);
+            Boundary::Outline(c, shifted(&self.clip, r.x - min_x, r.y - min_y))
+        };
+        Outline {
+            parts: self
+                .parts
+                .into_iter()
+                .map(|part| Part {
+                    geom: part.geom.translated(c.x, c.y),
+                    style: part.style,
+                })
+                .collect(),
+            boundary,
+            glyphs: self
+                .glyphs
+                .into_iter()
+                .map(|g| Glyph {
+                    at: g.at.plus(c),
+                    ..g
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `intersect-polygon.js`: the crossing of segment `c`→`toward` with the outline
+/// that lies nearest `toward` (falls back to the ray clip when there is none).
+fn outline_clip(c: Point, pts: &[Point], toward: Point) -> Point {
+    let d = toward.minus(c);
+    let mut best: Option<f64> = None;
+    for i in 0..pts.len() {
+        let a = pts[i];
+        let e = pts[(i + 1) % pts.len()].minus(a);
+        let den = d.x * e.y - d.y * e.x;
+        if den.abs() < 1e-12 {
+            continue;
+        }
+        let ac = a.minus(c);
+        let t = (ac.x * e.y - ac.y * e.x) / den;
+        let u = (ac.x * d.y - ac.y * d.x) / den;
+        if (0.0..=1.0).contains(&t) && (-1e-9..=1.0 + 1e-9).contains(&u) {
+            best = Some(best.map_or(t, |bt: f64| bt.max(t)));
+        }
+    }
+    best.map_or_else(
+        || geom::clip_polygon(c, pts, toward),
+        |t| c.plus(d.scale(t)),
+    )
+}
+
+/// Points bounding a geometry (cubics sampled).
+fn geometry_points(g: &Geometry, out: &mut Vec<Point>) {
+    match g {
+        Geometry::Rect { rect, .. } => {
+            out.push(Point::new(rect.x, rect.y));
+            out.push(Point::new(rect.right(), rect.bottom()));
+        }
+        Geometry::Circle { c, r } => {
+            out.push(Point::new(c.x - r, c.y - r));
+            out.push(Point::new(c.x + r, c.y + r));
+        }
+        Geometry::Path(cmds) => {
+            let mut cur = Point::default();
+            for cmd in cmds {
+                match *cmd {
+                    PathCmd::MoveTo(q) | PathCmd::LineTo(q) => {
+                        out.push(q);
+                        cur = q;
+                    }
+                    PathCmd::CubicTo(a, b, e) => {
+                        for i in 1..=32 {
+                            let t = i as f64 / 32.0;
+                            let u = 1.0 - t;
+                            let (k0, k1, k2, k3) =
+                                (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+                            out.push(Point::new(
+                                k0 * cur.x + k1 * a.x + k2 * b.x + k3 * e.x,
+                                k0 * cur.y + k1 * a.y + k2 * b.y + k3 * e.y,
+                            ));
+                        }
+                        cur = e;
+                    }
+                    PathCmd::Close => {}
+                }
+            }
+        }
+    }
+}
+
+/// `generateFullSineWavePoints` (util.ts): 51 points.
+fn sine_wave(x1: f64, y1: f64, x2: f64, y2: f64, amp: f64, cycles: f64) -> Vec<Point> {
+    let (dx, dy) = (x2 - x1, y2 - y1);
+    let freq = 2.0 * PI / (dx / cycles);
+    let mid = y1 + dy / 2.0;
+    (0..=50)
+        .map(|i| {
+            let x = x1 + i as f64 / 50.0 * dx;
+            Point::new(x, mid + amp * (freq * (x - x1)).sin())
+        })
+        .collect()
+}
+
+/// `generateCirclePoints` without the negation (curlyBraceRight.ts' local copy).
+fn circle_points_pos(cx: f64, cy: f64, r: f64, n: usize, a0: f64, a1: f64) -> Vec<Point> {
+    circle_points(cx, cy, r, n, a0, a1)
+        .into_iter()
+        .map(|q| Point::new(-q.x, -q.y))
+        .collect()
+}
+
+/// `generateArcPoints` (bowTieRect.ts): 20 points on an ellipse from `a` to `b`.
+fn bow_arc_points(a: Point, b: Point, rx: f64, ry: f64, clockwise: bool) -> Vec<Point> {
+    let mid = a.lerp(b, 0.5);
+    let angle = (b.y - a.y).atan2(b.x - a.x);
+    let (tx, ty) = ((b.x - a.x) / 2.0 / rx, (b.y - a.y) / 2.0 / ry);
+    let dist = tx.hypot(ty).min(1.0);
+    let k = (1.0 - dist * dist).sqrt();
+    let s = if clockwise { -1.0 } else { 1.0 };
+    let cx = mid.x + k * ry * angle.sin() * s;
+    let cy = mid.y - k * rx * angle.cos() * s;
+    let start = ((a.y - cy) / ry).atan2((a.x - cx) / rx);
+    let end = ((b.y - cy) / ry).atan2((b.x - cx) / rx);
+    let mut range = end - start;
+    if clockwise && range < 0.0 {
+        range += 2.0 * PI;
+    }
+    if !clockwise && range > 0.0 {
+        range -= 2.0 * PI;
+    }
+    (0..20)
+        .map(|i| {
+            let t = start + i as f64 / 19.0 * range;
+            Point::new(cx + rx * t.cos(), cy + ry * t.sin())
+        })
+        .collect()
+}
+
+/// One SVG elliptical arc command: radii, `x-axis-rotation` (degrees), the
+/// large-arc and sweep flags.
+#[derive(Debug, Clone, Copy)]
+struct Arc {
+    rx: f64,
+    ry: f64,
+    phi: f64,
+    large: bool,
+    sweep: bool,
+}
+
+/// SVG elliptical arc from `from` to `to` as cubics (SVG 1.1 implementation notes
+/// F.6.5/F.6.6, radii scaled up when too small).
+fn svg_arc(out: &mut Vec<PathCmd>, from: Point, a: Arc, to: Point) {
+    let (mut rx, mut ry) = (a.rx.abs(), a.ry.abs());
+    if rx == 0.0 || ry == 0.0 || from == to {
+        out.push(PathCmd::LineTo(to));
+        return;
+    }
+    let (sp, cp) = a.phi.to_radians().sin_cos();
+    let hx = (from.x - to.x) / 2.0;
+    let hy = (from.y - to.y) / 2.0;
+    let x1 = cp * hx + sp * hy;
+    let y1 = -sp * hx + cp * hy;
+    let lambda = (x1 / rx).powi(2) + (y1 / ry).powi(2);
+    if lambda > 1.0 {
+        rx *= lambda.sqrt();
+        ry *= lambda.sqrt();
+    }
+    let num = (rx * ry).powi(2) - (rx * y1).powi(2) - (ry * x1).powi(2);
+    let den = (rx * y1).powi(2) + (ry * x1).powi(2);
+    let mut coef = (num / den).max(0.0).sqrt();
+    if a.large == a.sweep {
+        coef = -coef;
+    }
+    let cxp = coef * rx * y1 / ry;
+    let cyp = -coef * ry * x1 / rx;
+    let cx = cp * cxp - sp * cyp + (from.x + to.x) / 2.0;
+    let cy = sp * cxp + cp * cyp + (from.y + to.y) / 2.0;
+    let t1 = ((y1 - cyp) / ry).atan2((x1 - cxp) / rx);
+    let t2 = ((-y1 - cyp) / ry).atan2((-x1 - cxp) / rx);
+    let mut dt = t2 - t1;
+    if !a.sweep && dt > 0.0 {
+        dt -= 2.0 * PI;
+    } else if a.sweep && dt < 0.0 {
+        dt += 2.0 * PI;
+    }
+    let n = ((dt.abs() / (PI / 2.0)).ceil() as usize).max(1);
+    let step = dt / n as f64;
+    let k = 4.0 / 3.0 * (step / 4.0).tan();
+    let at = |t: f64| {
+        let (ex, ey) = (rx * t.cos(), ry * t.sin());
+        Point::new(cx + cp * ex - sp * ey, cy + sp * ex + cp * ey)
+    };
+    let d = |t: f64| {
+        let (ex, ey) = (-rx * t.sin(), ry * t.cos());
+        Point::new(cp * ex - sp * ey, sp * ex + cp * ey)
+    };
+    for i in 0..n {
+        let s = t1 + step * i as f64;
+        let e = s + step;
+        let end = if i + 1 == n { to } else { at(e) };
+        out.push(PathCmd::CubicTo(
+            at(s).plus(d(s).scale(k)),
+            at(e).minus(d(e).scale(k)),
+            end,
+        ));
+    }
+}
+
+/// A closed path of relative SVG arcs (`a rx,ry phi large,sweep dx,dy`) from `start`.
+fn relative_arcs(start: Point, arcs: &[(Arc, f64, f64)]) -> Vec<PathCmd> {
+    let mut cmds = vec![PathCmd::MoveTo(start)];
+    let mut cur = start;
+    for &(a, dx, dy) in arcs {
+        let to = Point::new(cur.x + dx, cur.y + dy);
+        svg_arc(&mut cmds, cur, a, to);
+        cur = to;
+    }
+    cmds.push(PathCmd::Close);
+    cmds
+}
+
+fn part(geom: Geometry, style: PartStyle) -> Part {
+    Part { geom, style }
+}
+
+fn body_poly(pts: &[Point]) -> Part {
+    body(Geometry::Path(geom::polygon(pts)))
+}
+
+fn shifted(pts: &[Point], dx: f64, dy: f64) -> Vec<Point> {
+    pts.iter().map(|q| Point::new(q.x + dx, q.y + dy)).collect()
+}
+
+/// Local geometry of a bounding-box-sized shape around a `tw`×`th` label.
+fn local(shape: Shape, tw: f64, th: f64, m: &ShapeMetrics) -> Option<Local> {
+    let p = m.node_padding;
+    let neo = m.neo;
+    let pt = Point::new;
+    let mut l = Local {
+        parts: Vec::new(),
+        glyphs: Vec::new(),
+        clip: Vec::new(),
+        label: Point::default(),
+    };
+    match shape {
+        // folder.ts
+        Shape::Folder => {
+            let w = (tw + 2.0 * p).max(90.0);
+            let content = th + 2.0 * p;
+            let tab_h = (content * 0.16).clamp(8.0, 14.0);
+            let total = content + tab_h;
+            let tab_w = (w * 0.38).max(28.0);
+            let top = -total / 2.0;
+            let pts = vec![
+                pt(-w / 2.0, top),
+                pt(-w / 2.0 + tab_w, top),
+                pt(-w / 2.0 + tab_w, top + tab_h),
+                pt(w / 2.0, top + tab_h),
+                pt(w / 2.0, total / 2.0),
+                pt(-w / 2.0, total / 2.0),
+            ];
+            l.parts.push(body_poly(&pts));
+            l.clip = pts;
+            l.label = pt(0.0, top + tab_h + (total - tab_h) / 2.0);
+        }
+        // bucket.ts
+        Shape::Bucket => {
+            let w = (tw + 2.0 * p).max(80.0);
+            let rim = (w * 0.08).clamp(5.0, 12.0);
+            let total = th + 2.0 * p + rim;
+            let top = -total / 2.0 + rim;
+            let bottom = total / 2.0;
+            let bw = w * 0.72;
+            let arc = |rx: f64| Arc {
+                rx,
+                ry: rim,
+                phi: 0.0,
+                large: false,
+                sweep: false,
+            };
+            let mut cmds = vec![
+                PathCmd::MoveTo(pt(-w / 2.0, top)),
+                PathCmd::LineTo(pt(-bw / 2.0, bottom)),
+            ];
+            svg_arc(
+                &mut cmds,
+                pt(-bw / 2.0, bottom),
+                arc(bw / 2.0),
+                pt(bw / 2.0, bottom),
+            );
+            cmds.push(PathCmd::LineTo(pt(w / 2.0, top)));
+            svg_arc(&mut cmds, pt(w / 2.0, top), arc(w / 2.0), pt(-w / 2.0, top));
+            cmds.push(PathCmd::Close);
+            l.parts.push(body(Geometry::Path(cmds)));
+            l.parts.push(part(
+                Geometry::Path(geom::ellipse(pt(0.0, top), w / 2.0, rim)),
+                PartStyle::AccentLine,
+            ));
+            let half_ellipse = |rx: f64, cy: f64, sign: f64| -> Vec<Point> {
+                (0..=12)
+                    .map(|i| {
+                        let t = PI - i as f64 * PI / 12.0;
+                        pt(rx * t.cos(), cy + sign * rim * t.sin())
+                    })
+                    .collect()
+            };
+            l.clip = half_ellipse(w / 2.0, top, -1.0);
+            l.clip
+                .extend(half_ellipse(bw / 2.0, bottom, 1.0).into_iter().rev());
+            l.label = pt(0.0, top + (bottom - top) / 2.0);
+        }
+        // console.ts / browser.ts: a rounded window with a decorated top band.
+        Shape::Console | Shape::Browser => {
+            let band = if shape == Shape::Console { 20.0 } else { 18.0 };
+            let w = (tw + 2.0 * p).max(90.0);
+            let h = th + 2.0 * p + band;
+            let top = -h / 2.0;
+            l.parts.push(body(Geometry::Rect {
+                rect: Rect::new(-w / 2.0, top, w, h),
+                rx: 12.0,
+            }));
+            if shape == Shape::Console {
+                l.glyphs.push(Glyph {
+                    at: pt(-w / 2.0 + 12.0, top + 16.0),
+                    text: ">_",
+                    font_size: 14.0,
+                    bold: true,
+                });
+            } else {
+                l.parts.push(part(
+                    Geometry::Path(seg(pt(-w / 2.0, top + band), pt(w / 2.0, top + band))),
+                    PartStyle::AccentLine,
+                ));
+                for i in 0..3 {
+                    l.parts.push(part(
+                        Geometry::Circle {
+                            c: pt(-w / 2.0 + 12.0 + 9.0 * i as f64, top + band / 2.0),
+                            r: 2.5,
+                        },
+                        PartStyle::AccentDot,
+                    ));
+                }
+                l.parts.push(part(
+                    Geometry::Rect {
+                        rect: Rect::new(
+                            -w / 2.0 + 44.0,
+                            top + 4.0,
+                            (w - 56.0).max(10.0),
+                            band - 8.0,
+                        ),
+                        rx: 3.0,
+                    },
+                    PartStyle::AccentFaint,
+                ));
+            }
+            l.label = pt(0.0, top + band + (h - band) / 2.0);
+        }
+        // person.ts
+        Shape::Person => {
+            let w = (tw + 2.0 * p).max(100.0);
+            let head = (w * 0.23).clamp(16.0, 56.0);
+            let overlap = head * 0.27;
+            let body_h = th + 2.0 * p;
+            let body_r = (w * 0.177).min(body_h * 0.45);
+            let total = body_h + 2.0 * head - overlap;
+            let top = -total / 2.0;
+            let body_top = top + 2.0 * head - overlap;
+            l.parts.push(body(Geometry::Rect {
+                rect: Rect::new(-w / 2.0, body_top, w, body_h),
+                rx: body_r,
+            }));
+            let head_cy = top + head;
+            l.parts.push(body(Geometry::Circle {
+                c: pt(0.0, head_cy),
+                r: head,
+            }));
+            let phi = ((body_top - head_cy) / head).min(1.0).asin().to_degrees();
+            let mut clip = circle_points(0.0, -head_cy, head, 24, 180.0 + phi, -phi);
+            let (lx, rx) = (-(-w / 2.0 + body_r), -(w / 2.0 - body_r));
+            let (ty, by) = (-(body_top + body_r), -(total / 2.0 - body_r));
+            clip.extend(circle_points(lx, ty, body_r, 12, 90.0, 0.0));
+            clip.extend(circle_points(lx, by, body_r, 12, 360.0, 270.0));
+            clip.extend(circle_points(rx, by, body_r, 12, 270.0, 180.0));
+            clip.extend(circle_points(rx, ty, body_r, 12, 180.0, 90.0));
+            l.clip = clip;
+            l.label = pt(0.0, body_top + body_h / 2.0);
+        }
+        // bang.ts: every arc carries `x-axis-rotation` 1 (an upstream quirk, kept).
+        Shape::Bang => {
+            let half = p / 2.0;
+            let base_w = tw + 10.0 * half;
+            let w = base_w.max(tw + 20.0);
+            let h = (th + 8.0 * half).max(th + 20.0);
+            let r = 0.15 * base_w;
+            let a = |rr: f64, dx: f64, dy: f64| {
+                (
+                    Arc {
+                        rx: rr,
+                        ry: rr,
+                        phi: 1.0,
+                        large: false,
+                        sweep: false,
+                    },
+                    dx,
+                    dy,
+                )
+            };
+            let arcs = [
+                a(r, w * 0.25, -h * 0.1),
+                a(r, w * 0.25, 0.0),
+                a(r, w * 0.25, 0.0),
+                a(r, w * 0.25, h * 0.1),
+                a(r, w * 0.15, h * 0.33),
+                a(r * 0.8, 0.0, h * 0.34),
+                a(r, -w * 0.15, h * 0.33),
+                a(r, -w * 0.25, h * 0.15),
+                a(r, -w * 0.25, 0.0),
+                a(r, -w * 0.25, 0.0),
+                a(r, -w * 0.25, -h * 0.15),
+                a(r, -w * 0.1, -h * 0.33),
+                a(r * 0.8, 0.0, -h * 0.34),
+                a(r, w * 0.1, -h * 0.33),
+            ];
+            l.parts.push(body(Geometry::Path(relative_arcs(
+                pt(-w / 2.0, -h / 2.0),
+                &arcs,
+            ))));
+        }
+        // cloud.ts
+        Shape::Cloud => {
+            let half = p / 2.0;
+            let (w, h) = (tw + 2.0 * half, th + 2.0 * half);
+            let (r1, r2, r3, r4) = (0.15 * w, 0.25 * w, 0.35 * w, 0.2 * w);
+            let a = |rx: f64, ry: f64, phi: f64, dx: f64, dy: f64| {
+                (
+                    Arc {
+                        rx,
+                        ry,
+                        phi,
+                        large: false,
+                        sweep: true,
+                    },
+                    dx,
+                    dy,
+                )
+            };
+            let arcs = [
+                a(r1, r1, 0.0, w * 0.25, -w * 0.1),
+                a(r3, r3, 1.0, w * 0.4, -w * 0.1),
+                a(r2, r2, 1.0, w * 0.35, w * 0.2),
+                a(r1, r1, 1.0, w * 0.15, h * 0.35),
+                a(r4, r4, 1.0, -w * 0.15, h * 0.65),
+                a(r2, r1, 1.0, -w * 0.25, w * 0.15),
+                a(r3, r3, 1.0, -w * 0.5, 0.0),
+                a(r1, r1, 1.0, -w * 0.25, -w * 0.15),
+                a(r1, r1, 1.0, -w * 0.1, -h * 0.35),
+                a(r4, r4, 1.0, w * 0.1, -h * 0.65),
+            ];
+            l.parts.push(body(Geometry::Path(relative_arcs(
+                pt(-w / 2.0, -h / 2.0),
+                &arcs,
+            ))));
+        }
+        // curlyBraceLeft.ts / curlyBraceRight.ts / curlyBraces.ts: open braces drawn
+        // over an invisible hit polygon, the label pushed to the left.
+        Shape::BraceLeft | Shape::BraceRight | Shape::Braces => {
+            let (px, py) = if neo { (18.0, 12.0) } else { (p, p) };
+            let k = if neo && shape != Shape::BraceLeft {
+                2.0
+            } else {
+                1.0
+            };
+            let (w, h) = (tw + k * px, th + k * py);
+            let r = (h * 0.1).max(5.0);
+            let neg = circle_points;
+            let left = || {
+                let mut v = neg(w / 2.0, -h / 2.0, r, 30, -90.0, 0.0);
+                v.push(pt(-w / 2.0 - r, r));
+                v.extend(neg(w / 2.0 + 2.0 * r, -r, r, 20, -180.0, -270.0));
+                v.extend(neg(w / 2.0 + 2.0 * r, r, r, 20, -90.0, -180.0));
+                v.push(pt(-w / 2.0 - r, -h / 2.0));
+                v.extend(neg(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                v
+            };
+            // Label top-left corner: brace-l `(-w/2 + r, -h/2 + p/2)`, the others
+            // `(-w/2 + p/2, -h/2 + p/2)`.
+            let label_x = if shape == Shape::BraceLeft {
+                -w / 2.0 + r
+            } else {
+                -w / 2.0 + p / 2.0
+            };
+            l.label = pt(label_x + tw / 2.0, -h / 2.0 + p / 2.0 + th / 2.0);
+            let (braces, rect, dx) = match shape {
+                Shape::BraceLeft => {
+                    let mut rect = vec![pt(w / 2.0, -h / 2.0 - r), pt(-w / 2.0, -h / 2.0 - r)];
+                    rect.extend(neg(w / 2.0, -h / 2.0, r, 20, -90.0, 0.0));
+                    rect.push(pt(-w / 2.0 - r, -r));
+                    rect.extend(neg(w / 2.0 + w * 0.1, -r, r, 20, -180.0, -270.0));
+                    rect.extend(neg(w / 2.0 + w * 0.1, r, r, 20, -90.0, -180.0));
+                    rect.push(pt(-w / 2.0 - r, h / 2.0));
+                    rect.extend(neg(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                    rect.push(pt(-w / 2.0, h / 2.0 + r));
+                    rect.push(pt(w / 2.0, h / 2.0 + r));
+                    (vec![left()], rect, r)
+                }
+                Shape::BraceRight => {
+                    let pos = circle_points_pos;
+                    let mut brace = pos(w / 2.0, -h / 2.0, r, 20, -90.0, 0.0);
+                    brace.push(pt(w / 2.0 + r, -r));
+                    brace.extend(pos(w / 2.0 + 2.0 * r, -r, r, 20, -180.0, -270.0));
+                    brace.extend(pos(w / 2.0 + 2.0 * r, r, r, 20, -90.0, -180.0));
+                    brace.push(pt(w / 2.0 + r, h / 2.0));
+                    brace.extend(pos(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                    let mut rect = vec![pt(-w / 2.0, -h / 2.0 - r), pt(w / 2.0, -h / 2.0 - r)];
+                    rect.extend(pos(w / 2.0, -h / 2.0, r, 20, -90.0, 0.0));
+                    rect.push(pt(w / 2.0 + r, -r));
+                    rect.extend(pos(w / 2.0 + 2.0 * r, -r, r, 20, -180.0, -270.0));
+                    rect.extend(pos(w / 2.0 + 2.0 * r, r, r, 20, -90.0, -180.0));
+                    rect.push(pt(w / 2.0 + r, h / 2.0));
+                    rect.extend(pos(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                    rect.push(pt(w / 2.0, h / 2.0 + r));
+                    rect.push(pt(-w / 2.0, h / 2.0 + r));
+                    (vec![brace], rect, -r)
+                }
+                _ => {
+                    let x = -w / 2.0 + r + r / 2.0;
+                    let mut right = neg(x, -h / 2.0, r, 20, -90.0, -180.0);
+                    right.push(pt(w / 2.0 - r / 2.0, r));
+                    right.extend(neg(-w / 2.0 - r / 2.0, -r, r, 20, 0.0, 90.0));
+                    right.extend(neg(-w / 2.0 - r / 2.0, r, r, 20, -90.0, 0.0));
+                    right.push(pt(w / 2.0 - r / 2.0, -r));
+                    right.extend(neg(x, h / 2.0, r, 30, -180.0, -270.0));
+                    let mut rect = vec![pt(w / 2.0, -h / 2.0 - r), pt(-w / 2.0, -h / 2.0 - r)];
+                    rect.extend(neg(w / 2.0, -h / 2.0, r, 20, -90.0, 0.0));
+                    rect.push(pt(-w / 2.0 - r, -r));
+                    rect.extend(neg(w / 2.0 + 2.0 * r, -r, r, 20, -180.0, -270.0));
+                    rect.extend(neg(w / 2.0 + 2.0 * r, r, r, 20, -90.0, -180.0));
+                    rect.push(pt(-w / 2.0 - r, h / 2.0));
+                    rect.extend(neg(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                    rect.push(pt(-w / 2.0, h / 2.0 + r));
+                    rect.push(pt(w / 2.0 - r - r / 2.0, h / 2.0 + r));
+                    rect.extend(right.iter().copied());
+                    (vec![left(), right], rect, r - r / 4.0)
+                }
+            };
+            l.parts.push(part(
+                Geometry::Path(geom::polygon(&shifted(&rect, dx, 0.0))),
+                PartStyle::Hidden,
+            ));
+            for b in &braces {
+                l.parts.push(line(geom::polyline(&shifted(b, dx, 0.0))));
+            }
+            l.clip = rect;
+        }
+        // lightningBolt.ts: 35×70, no label.
+        Shape::Bolt => {
+            let (w, h, gap) = (35.0, 35.0, 7.0);
+            let pts = vec![
+                pt(w, 0.0),
+                pt(0.0, h + gap / 2.0),
+                pt(w - 2.0 * gap, h + gap / 2.0),
+                pt(0.0, 2.0 * h),
+                pt(w, h - gap / 2.0),
+                pt(2.0 * gap, h - gap / 2.0),
+            ];
+            l.parts.push(body_poly(&shifted(&pts, -w / 2.0, -h)));
+            l.clip = pts;
+        }
+        // multiWaveEdgedRectangle.ts
+        Shape::StackedDocument => {
+            let (lpx, lpy) = if neo { (16.0, 12.0) } else { (p, p) };
+            let (w, h) = (tw + 2.0 * lpx, th + 3.0 * lpy);
+            let amp = if neo { h / 4.0 } else { h / 8.0 };
+            let fh = h + amp / 2.0;
+            let (x, y, o) = (-w / 2.0, -fh / 2.0, 10.0);
+            let wave = sine_wave(x - o, y + fh + o, x + w - o, y + fh + o, amp, 0.8);
+            let last = wave[wave.len() - 1];
+            let mut outer = vec![pt(x - o, y + o), pt(x - o, y + fh + o)];
+            outer.extend(wave);
+            outer.extend([
+                pt(x + w - o, last.y - o),
+                pt(x + w, last.y - o),
+                pt(x + w, last.y - 2.0 * o),
+                pt(x + w + o, last.y - 2.0 * o),
+                pt(x + w + o, y - o),
+                pt(x + o, y - o),
+                pt(x + o, y),
+                pt(x, y),
+                pt(x, y + o),
+            ]);
+            let inner = [
+                pt(x, y + o),
+                pt(x + w - o, y + o),
+                pt(x + w - o, last.y - o),
+                pt(x + w, last.y - o),
+                pt(x + w, y),
+                pt(x, y),
+            ];
+            l.parts.push(body_poly(&shifted(&outer, 0.0, -amp / 2.0)));
+            l.parts.push(body_poly(&shifted(&inner, 0.0, -amp / 2.0)));
+            l.clip = outer;
+            l.label = pt(-o, o - amp);
+        }
+        // bowTieRect.ts
+        Shape::BowTieRect => {
+            let (lpx, lpy) = if neo { (16.0, 12.0) } else { (p, p) };
+            let h = th + lpy;
+            let ry = h / 2.0;
+            let rx = ry / (2.5 + h / 50.0);
+            let w = tw + 2.0 * lpx;
+            let mut pts = vec![pt(w / 2.0, -h / 2.0), pt(-w / 2.0, -h / 2.0)];
+            pts.extend(bow_arc_points(
+                pt(-w / 2.0, -h / 2.0),
+                pt(-w / 2.0, h / 2.0),
+                rx,
+                ry,
+                false,
+            ));
+            pts.push(pt(w / 2.0, h / 2.0));
+            pts.extend(bow_arc_points(
+                pt(w / 2.0, h / 2.0),
+                pt(w / 2.0, -h / 2.0),
+                rx,
+                ry,
+                true,
+            ));
+            l.parts.push(body_poly(&shifted(&pts, rx / 2.0, 0.0)));
+            l.clip = pts;
+        }
+        // taggedWaveEdgedRectangle.ts (no neo branch)
+        Shape::TaggedDocument => {
+            let (w, h) = (tw + 2.0 * p, th + 2.0 * p);
+            let amp = h / 8.0;
+            let (tag_w, tag_h) = (0.2 * w, 0.2 * h);
+            let fh = h + amp;
+            let ext = w / 2.0 * 0.1;
+            let mut pts = vec![pt(-w / 2.0 - ext, fh / 2.0)];
+            pts.extend(sine_wave(
+                -w / 2.0 - ext,
+                fh / 2.0,
+                w / 2.0 + ext,
+                fh / 2.0,
+                amp,
+                0.8,
+            ));
+            pts.extend([pt(w / 2.0 + ext, -fh / 2.0), pt(-w / 2.0 - ext, -fh / 2.0)]);
+            let x = -w / 2.0 + ext;
+            let y = -fh / 2.0 - tag_h * 0.4;
+            let mut tag = vec![
+                pt(x + w - tag_w, (y + h) * 1.3),
+                pt(x + w, y + h - tag_h),
+                pt(x + w, (y + h) * 0.9),
+            ];
+            tag.extend(sine_wave(
+                x + w,
+                (y + h) * 1.25,
+                x + w - tag_w,
+                (y + h) * 1.3,
+                -h * 0.02,
+                0.5,
+            ));
+            l.parts.push(body_poly(&shifted(&pts, 0.0, -amp / 2.0)));
+            l.parts.push(body_poly(&shifted(&tag, 0.0, -amp / 2.0)));
+            l.clip = pts;
+            l.label = pt(0.0, -amp / 2.0);
+        }
+        // waveRectangle.ts
+        Shape::PaperTape => {
+            let (lpx, lpy) = if neo { (16.0, 20.0) } else { (p, p) };
+            let (w, h) = (tw + 2.0 * lpx, th + lpy);
+            let amp = h / 8.0;
+            let fh = h + 2.0 * amp;
+            let mut pts = vec![pt(-w / 2.0, fh / 2.0)];
+            pts.extend(sine_wave(-w / 2.0, fh / 2.0, w / 2.0, fh / 2.0, amp, 1.0));
+            pts.push(pt(w / 2.0, -fh / 2.0));
+            pts.extend(sine_wave(
+                w / 2.0,
+                -fh / 2.0,
+                -w / 2.0,
+                -fh / 2.0,
+                amp,
+                -1.0,
+            ));
+            l.parts.push(body_poly(&pts));
+            l.clip = pts;
+        }
+        // linedWaveEdgedRect.ts: the frame line is part of the outline polygon.
+        Shape::LinedDocument => {
+            let (lpx, lpy) = if neo { (16.0, 12.0) } else { (p, p) };
+            let (w, h) = (tw + 2.0 * lpx, th + 2.0 * lpy);
+            let amp = if neo { h / 4.0 } else { h / 8.0 };
+            let fh = h + amp;
+            let ext = w / 2.0 * 0.1;
+            let mut pts = vec![pt(-w / 2.0 - ext, -fh / 2.0), pt(-w / 2.0 - ext, fh / 2.0)];
+            pts.extend(sine_wave(
+                -w / 2.0 - ext,
+                fh / 2.0,
+                w / 2.0 + ext,
+                fh / 2.0,
+                amp,
+                0.8,
+            ));
+            pts.extend([
+                pt(w / 2.0 + ext, -fh / 2.0),
+                pt(-w / 2.0 - ext, -fh / 2.0),
+                pt(-w / 2.0, -fh / 2.0),
+                pt(-w / 2.0, fh / 2.0 * 1.1),
+                pt(-w / 2.0, -fh / 2.0),
+            ]);
+            l.parts.push(body_poly(&shifted(&pts, 0.0, -amp / 2.0)));
+            l.clip = pts;
+            l.label = pt(
+                -w / 2.0 + p + ext / 2.0 + tw / 2.0,
+                -h / 2.0 + p - amp + th / 2.0,
+            );
+        }
+        _ => return None,
+    }
+    Some(l)
 }
 
 #[cfg(test)]
@@ -813,7 +1670,8 @@ mod tests {
         // amplitude 45/4, outer width 1.1·152.
         let l = sized_neo(Shape::LinedDocument, 120.0, 21.0, 15.0);
         assert!((l.w - 167.2).abs() < 1e-9);
-        assert!((l.h - 67.5).abs() < 1e-9);
+        // The bottom of the sampled wave falls just short of the amplitude.
+        assert!((l.h - 67.5).abs() < 0.05);
         // collapsedGroup.ts: at least 80 wide, title + 28 + 16 high.
         let g = sized_neo(Shape::CollapsedGroup, 30.0, 21.0, 15.0);
         assert_eq!((g.w, g.h), (80.0, 65.0));
@@ -859,6 +1717,114 @@ mod tests {
         assert_eq!((l.w, l.h), (154.0, 39.0));
         let t = sized(Shape::InvTrapezoid, 100.0, 24.0, 15.0);
         assert_eq!((t.w, t.h), (184.0, 54.0));
+    }
+
+    fn neo_metrics(shape: Shape, tw: f64, th: f64) -> ShapeMetrics {
+        ShapeMetrics::neo(shape, 15.0).with_label(tw, th)
+    }
+
+    #[test]
+    fn bbox_sized_shapes_match_upstream() {
+        // Reference values from mermaid 12.3 (neo look, padding 15, 120×21 label).
+        let s = |shape| sized_neo(shape, 120.0, 21.0, 15.0);
+        // folder.ts: 150 wide, tab 8.16 → 59.16 high.
+        let f = s(Shape::Folder);
+        assert!((f.w - 150.0).abs() < 1e-9 && (f.h - 59.16).abs() < 1e-9);
+        assert!((f.label_offset.y - 4.08).abs() < 1e-9);
+        // bucket.ts: rim 12, the base arc bulges another 12 below the box.
+        let b = s(Shape::Bucket);
+        assert!((b.w - 150.0).abs() < 1e-6 && (b.h - 75.0).abs() < 1e-6);
+        // console.ts / browser.ts: 20 / 18 px bands.
+        assert_eq!((s(Shape::Console).w, s(Shape::Console).h), (150.0, 71.0));
+        assert_eq!(s(Shape::Browser).h, 69.0);
+        // person.ts: head r 34.5, body 51 → 51 + 69 - 9.315.
+        assert!((s(Shape::Person).h - 110.685).abs() < 1e-9);
+        // lightningBolt.ts: fixed 35×70 whatever the label.
+        assert_eq!((s(Shape::Bolt).w, s(Shape::Bolt).h), (35.0, 70.0));
+        // curlyBraceLeft.ts neo: w = 138, h = 33, r = 5 → hit polygon 138/2 + 0.6·138 wide.
+        let l = s(Shape::BraceLeft);
+        assert!((l.w - (69.0 + 0.6 * 138.0)).abs() < 1e-6);
+        assert!((l.h - 43.0).abs() < 1e-9);
+        assert!((l.label_offset.x - (-64.0 + 60.0)).abs() < 1e-9);
+        // waveRectangle.ts neo: w = 152, h = 41, amplitude 5.125.
+        let t = s(Shape::PaperTape);
+        assert!((t.w - 152.0).abs() < 1e-9);
+        assert!(t.h > 41.0 && t.h <= 41.0 + 4.0 * 5.125);
+        // bowTieRect.ts neo: w = 152 plus the left bulge rx.
+        let rx = 16.5 / (2.5 + 33.0 / 50.0);
+        // (20 sampled arc points stop just short of the bulge.)
+        assert!((s(Shape::BowTieRect).w - (152.0 + rx)).abs() < 0.05);
+    }
+
+    #[test]
+    fn svg_arc_matches_endpoint_parameterisation() {
+        // A half circle from (-1,0) to (1,0) bulging down (sweep 0 goes through +y).
+        let mut cmds = vec![PathCmd::MoveTo(Point::new(-1.0, 0.0))];
+        let a = Arc {
+            rx: 1.0,
+            ry: 1.0,
+            phi: 0.0,
+            large: false,
+            sweep: false,
+        };
+        svg_arc(&mut cmds, Point::new(-1.0, 0.0), a, Point::new(1.0, 0.0));
+        let mut pts = Vec::new();
+        geometry_points(&Geometry::Path(cmds), &mut pts);
+        let max_y = pts.iter().map(|q| q.y).fold(f64::MIN, f64::max);
+        assert!((max_y - 1.0).abs() < 1e-3, "{max_y}");
+        // Radii too small for the chord are scaled up.
+        let mut cmds = vec![PathCmd::MoveTo(Point::new(0.0, 0.0))];
+        svg_arc(
+            &mut cmds,
+            Point::new(0.0, 0.0),
+            Arc {
+                rx: 0.1,
+                ry: 0.1,
+                ..a
+            },
+            Point::new(4.0, 0.0),
+        );
+        let mut pts = Vec::new();
+        geometry_points(&Geometry::Path(cmds), &mut pts);
+        let max_y = pts.iter().map(|q| q.y).fold(f64::MIN, f64::max);
+        assert!((max_y - 2.0).abs() < 1e-2, "{max_y}");
+    }
+
+    #[test]
+    fn bbox_shapes_draw_their_local_geometry_around_the_centre() {
+        for shape in [
+            Shape::Folder,
+            Shape::Bucket,
+            Shape::Console,
+            Shape::Browser,
+            Shape::Person,
+            Shape::Bang,
+            Shape::Cloud,
+            Shape::BraceLeft,
+            Shape::BraceRight,
+            Shape::Braces,
+            Shape::Bolt,
+            Shape::StackedDocument,
+            Shape::BowTieRect,
+            Shape::TaggedDocument,
+            Shape::PaperTape,
+            Shape::LinedDocument,
+        ] {
+            let m = neo_metrics(shape, 80.0, 21.0);
+            let s = size(shape, 80.0, 21.0, &m, false).unwrap();
+            let c = Point::new(500.0, 300.0);
+            let o = outline(shape, c, s.w, s.h, &m).unwrap();
+            let mut pts = Vec::new();
+            for part in &o.parts {
+                geometry_points(&part.geom, &mut pts);
+            }
+            let w = pts.iter().map(|q| q.x).fold(f64::MIN, f64::max)
+                - pts.iter().map(|q| q.x).fold(f64::MAX, f64::min);
+            assert!((w - s.w).abs() < 1e-6, "{shape:?}");
+            // Edges coming from far away stop on the outline, not at the centre.
+            let hit = o.boundary.clip(Point::new(c.x - 1000.0, c.y));
+            assert!(hit.x < c.x - 5.0, "{shape:?} {hit:?}");
+        }
     }
 
     #[test]

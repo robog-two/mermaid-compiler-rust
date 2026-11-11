@@ -28,12 +28,12 @@ pub enum Priority {
 
 impl Priority {
     fn parse(s: &str) -> Option<Self> {
-        Some(match s.to_ascii_lowercase().as_str() {
-            "very high" => Priority::VeryHigh,
-            "high" => Priority::High,
-            "medium" => Priority::Medium,
-            "low" => Priority::Low,
-            "very low" => Priority::VeryLow,
+        Some(match s {
+            "Very High" => Priority::VeryHigh,
+            "High" => Priority::High,
+            "Medium" => Priority::Medium,
+            "Low" => Priority::Low,
+            "Very Low" => Priority::VeryLow,
             _ => return None,
         })
     }
@@ -120,7 +120,14 @@ fn parse_metadata(s: &str) -> Option<Vec<(String, String)>> {
     }
     parts.push(cur);
     for p in parts.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
-        let (k, v) = p.split_once(':')?;
+        // A bare `key` is a flow-mapping key with a null value for js-yaml (or a
+        // plain scalar document): valid, and it sets nothing.
+        let Some((k, v)) = p.split_once(':') else {
+            if p.starts_with(['\'', '"']) && !(p.len() > 1 && p.ends_with(&p[..1])) {
+                return None;
+            }
+            continue;
+        };
         out.push((k.trim().to_string(), unquote(v)));
     }
     Some(out)
@@ -223,16 +230,9 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Kanban> {
             match key.as_str() {
                 "ticket" => item.ticket = Some(v),
                 "assigned" => item.assigned = Some(v),
-                "priority" => {
-                    item.priority = Some(Priority::parse(&v).ok_or_else(|| {
-                        Error::parse(
-                            line_no,
-                            format!(
-                                "{line}\nUnknown priority '{v}' (expected Very High, High, Medium, Low or Very Low)"
-                            ),
-                        )
-                    })?)
-                }
+                // kanbanItem.ts colorFromPriority: an unknown (or differently cased)
+                // value draws no stripe.
+                "priority" => item.priority = Priority::parse(&v),
                 "label" => item.label = v,
                 _ => {}
             }
@@ -514,10 +514,18 @@ mod tests {
 
     #[test]
     fn errors_have_line_numbers() {
-        let e = parse("kanban\n  c[Col]\n    a[A]@{ priority: 'Urgent' }", None).unwrap_err();
-        assert!(matches!(e, Error::Parse { line: 3, .. }));
-        let e = parse("kanban\n  c[Col]\n\n    a[A]@{ ticket }", None).unwrap_err();
-        assert!(matches!(e, Error::Parse { line: 4, .. }));
+        // Unknown priorities and bare keys are accepted upstream (no stripe, no value).
+        let k = parse("kanban\n  c[Col]\n    a[A]@{ priority: 'Urgent' }", None).unwrap();
+        assert_eq!(k.columns[0].items[0].priority, None);
+        let k = parse(
+            "kanban\n  c[Col]\n\n    a[A]@{ ticket }\n    b@{ bogus }",
+            None,
+        )
+        .unwrap();
+        assert_eq!(k.columns[0].items.len(), 2);
+        assert_eq!(k.columns[0].items[0].ticket, None);
+        let e = parse("kanban\n  c[Col]\n    a[A]@{ \"ticket }", None).unwrap_err();
+        assert!(matches!(e, Error::Parse { line: 3, .. }), "{e}");
         let e = parse("kanban\n  c[Col]\n    a[A]@{ ticket: 1", None).unwrap_err();
         assert!(matches!(e, Error::Parse { line: 3, .. }));
         assert!(parse("kanban\n  c[Col\n", None).is_err());

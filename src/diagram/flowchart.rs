@@ -1200,16 +1200,60 @@ pub(crate) fn shape_by_name(name: &str) -> Option<Shape> {
         "lin-cyl" | "disk" | "lined-cylinder" => Shape::LinedCylinder,
         "h-cyl" | "das" | "horizontal-cylinder" => Shape::HorizontalCylinder,
         "curv-trap" | "curved-trapezoid" | "display" => Shape::CurvedTrapezoid,
-        // Valid upstream shapes not drawn yet.
-        "datastore" | "data-store" | "folder" | "directory" | "bucket" | "console" | "browser"
-        | "person" | "bang" | "cloud" | "brace" | "comment" | "brace-l" | "brace-r" | "braces"
-        | "bolt" | "com-link" | "lightning-bolt" | "docs" | "documents" | "st-doc"
-        | "stacked-document" | "bow-rect" | "stored-data" | "bow-tie-rectangle" | "tag-doc"
-        | "tagged-document" | "flag" | "paper-tape" | "lin-doc" | "lined-document" | "state"
-        | "choice" | "note" | "composite" | "rectWithTitle" | "labelRect" | "block_arrow"
-        | "collapsedGroup" | "iconSquare" | "iconCircle" | "icon" | "iconRounded"
-        | "imageSquare" | "anchor" | "kanbanItem" | "mindmapCircle" | "defaultMindmapNode"
-        | "classBox" | "erBox" | "requirementBox" => Shape::Rect,
+        "datastore" | "data-store" => Shape::Datastore,
+        "folder" | "directory" => Shape::Folder,
+        "bucket" => Shape::Bucket,
+        "console" => Shape::Console,
+        "browser" => Shape::Browser,
+        "person" => Shape::Person,
+        "bang" => Shape::Bang,
+        "cloud" => Shape::Cloud,
+        "brace" | "comment" | "brace-l" => Shape::BraceLeft,
+        "brace-r" => Shape::BraceRight,
+        "braces" => Shape::Braces,
+        "bolt" | "com-link" | "lightning-bolt" => Shape::Bolt,
+        "docs" | "documents" | "st-doc" | "stacked-document" => Shape::StackedDocument,
+        "bow-rect" | "stored-data" | "bow-tie-rectangle" => Shape::BowTieRect,
+        "tag-doc" | "tagged-document" => Shape::TaggedDocument,
+        "flag" | "paper-tape" => Shape::PaperTape,
+        "lin-doc" | "lined-document" => Shape::LinedDocument,
+        "state" => Shape::State,
+        "choice" => Shape::Choice,
+        "note" => Shape::Note,
+        "collapsedGroup" => Shape::CollapsedGroup,
+        // Valid upstream shapes (other diagrams' internals) drawn as rectangles.
+        "composite"
+        | "rectWithTitle"
+        | "labelRect"
+        | "block_arrow"
+        | "iconSquare"
+        | "iconCircle"
+        | "icon"
+        | "iconRounded"
+        | "imageSquare"
+        | "anchor"
+        | "kanbanItem"
+        | "mindmapCircle"
+        | "defaultMindmapNode"
+        | "classBox"
+        | "erBox"
+        | "requirementBox"
+        | "usecaseActor"
+        | "usecaseActorHollow"
+        | "usecaseActorAwesome"
+        | "usecaseActorIcon"
+        | "usecaseBusiness"
+        | "usecaseEllipse"
+        | "usecaseJsonTable"
+        | "bpmn-start"
+        | "bpmn-intermediate"
+        | "bpmn-boundary"
+        | "bpmn-end"
+        | "bpmn-gateway"
+        | "bpmn-activity"
+        | "bpmn-data"
+        | "bpmn-data-store"
+        | "bpmn-annotation" => Shape::Rect,
         _ => return None,
     })
 }
@@ -1220,6 +1264,37 @@ mod tests {
 
     fn p(src: &str) -> GraphDiagram {
         parse(src, None).unwrap()
+    }
+
+    #[test]
+    fn every_upstream_shape_name_is_accepted() {
+        // shapes.ts: every shortName and alias of the documented shapes.
+        let drawn = [
+            ("datastore", Shape::Datastore),
+            ("data-store", Shape::Datastore),
+            ("directory", Shape::Folder),
+            ("bucket", Shape::Bucket),
+            ("console", Shape::Console),
+            ("browser", Shape::Browser),
+            ("person", Shape::Person),
+            ("bang", Shape::Bang),
+            ("cloud", Shape::Cloud),
+            ("comment", Shape::BraceLeft),
+            ("brace-r", Shape::BraceRight),
+            ("braces", Shape::Braces),
+            ("lightning-bolt", Shape::Bolt),
+            ("st-doc", Shape::StackedDocument),
+            ("stored-data", Shape::BowTieRect),
+            ("tagged-document", Shape::TaggedDocument),
+            ("paper-tape", Shape::PaperTape),
+            ("lin-doc", Shape::LinedDocument),
+            ("lined-document", Shape::LinedDocument),
+        ];
+        for (name, shape) in drawn {
+            assert_eq!(shape_by_name(name), Some(shape), "{name}");
+        }
+        assert_eq!(shape_by_name("bpmn-gateway"), Some(Shape::Rect));
+        assert_eq!(shape_by_name("bogus"), None);
     }
 
     #[test]
