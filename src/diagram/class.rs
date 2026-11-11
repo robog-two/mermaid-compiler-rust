@@ -4,7 +4,7 @@ use super::graph::{
     Cluster, ClusterId, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId, Section, Shape,
     StyleOverrides,
 };
-use super::statements;
+use super::statements_multiline;
 use crate::error::{Error, Result};
 use crate::layout::Direction;
 use crate::scene::DiagramKind;
@@ -110,7 +110,8 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
     let mut direction = Direction::TopBottom;
     let mut header = false;
     let mut open_class: Option<String> = None;
-    for (line, s) in statements(body) {
+    // A `class A["…"]` label may span lines (the jison string matches newlines).
+    for (line, s) in statements_multiline(body, |s| s.starts_with("class ")) {
         if !header {
             if !s.starts_with("classDiagram") {
                 return Err(Error::parse(line, format!("{s}\nExpecting 'classDiagram'")));
@@ -501,7 +502,8 @@ impl Builder {
                 Some(g) => format!("{name}<{}>", generic_text(g)),
                 None => name.clone(),
             });
-            header.push(display);
+            // A label spanning lines breaks there (`first<br>second`).
+            header.extend(display.split('\n').map(|l| l.trim().to_string()));
             let mut n = Node::new(name.clone(), String::new(), Shape::Compartments);
             // Only classes consume a palette slot (classDb: `classColorIndex++`); notes do not.
             n.color_slot = Some(ColorSlot(nodes.len()));
@@ -676,5 +678,12 @@ mod tests {
         assert_eq!(of("C"), None);
         // The default stays hierarchical.
         assert_eq!(parse(src, None).unwrap().clusters.len(), 6);
+    }
+
+    #[test]
+    fn class_labels_may_span_lines() {
+        let g = parse("classDiagram\nclass A[\"first\nsecond\"]\nA --> B", None).unwrap();
+        assert_eq!(g.nodes[0].sections[0].lines, vec!["first", "second"]);
+        assert_eq!(g.edges.len(), 1);
     }
 }

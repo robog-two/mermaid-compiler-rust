@@ -11,30 +11,19 @@ use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::layout::boxes::{self, BoxNode, Placed};
 use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{line_width, normalize_label, split_lines};
+use crate::text::{self, BreakRule, line_width, normalize_label, split_lines};
 use crate::theme::Palette;
 use boxes::taffy::prelude::*;
 
-/// Greedy word wrap of a raw label (`<br>` respected) to `max_width` pixels.
+/// Wrap a raw label (`<br>` respected) to `max_width` pixels the way the browser
+/// lays out an HTML label (spaces, hyphens, CJK); see [`BreakRule::Browser`].
 pub(crate) fn wrap_text(raw: &str, max_width: f64, font_size: f64, bold: bool) -> Vec<String> {
-    let mut out = Vec::new();
-    for para in split_lines(&normalize_label(raw)) {
-        let mut cur = String::new();
-        for word in para.split_whitespace() {
-            let cand = if cur.is_empty() {
-                word.to_string()
-            } else {
-                format!("{cur} {word}")
-            };
-            if !cur.is_empty() && line_width(&cand, font_size, bold) > max_width {
-                out.push(std::mem::replace(&mut cur, word.to_string()));
-            } else {
-                cur = cand;
-            }
-        }
-        out.push(cur);
-    }
-    out
+    text::wrap(raw, max_width, font_size, bold, BreakRule::Browser)
+}
+
+/// Greedy word wrap at spaces only, as timeline's SVG `wrap` (`split(/(\s+|<br>)/)`).
+fn wrap_words(raw: &str, max_width: f64, font_size: f64, bold: bool) -> Vec<String> {
+    text::wrap(raw, max_width, font_size, bold, BreakRule::Spaces)
 }
 
 /// Darker (light themes) or lighter (dark themes) shade of a CSS colour.
@@ -210,16 +199,16 @@ pub fn draw(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             header: s
                 .name
                 .as_ref()
-                .map(|n| wrap_text(n, f64::INFINITY, HEADER_FONT, true)),
+                .map(|n| wrap_words(n, f64::INFINITY, HEADER_FONT, true)),
             periods: s
                 .periods
                 .iter()
                 .map(|p| {
                     (
-                        wrap_text(&p.label, text_w, FONT, true),
+                        wrap_words(&p.label, text_w, FONT, true),
                         p.events
                             .iter()
-                            .map(|e| wrap_text(e, text_w, FONT, false))
+                            .map(|e| wrap_words(e, text_w, FONT, false))
                             .collect(),
                     )
                 })

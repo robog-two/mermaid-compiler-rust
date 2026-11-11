@@ -197,6 +197,9 @@ pub struct Node {
     pub sections: Vec<Section>,
     /// Categorical palette slot (`colorIndex`), painted only by the colour themes.
     pub color_slot: Option<ColorSlot>,
+    /// Width of a label that `createText` wrapped: its `div` is given the whole
+    /// wrapping width, however wide the longest line is.
+    pub wrapped_width: Option<f64>,
 }
 
 impl Node {
@@ -210,6 +213,7 @@ impl Node {
             classes: Vec::new(),
             sections: Vec::new(),
             color_slot: None,
+            wrapped_width: None,
         }
     }
 }
@@ -595,6 +599,26 @@ pub struct RenderOptions {
     pub subgraph_title_margin: (f64, f64),
 }
 
+/// Edge labels wrap at 200px: `insertEdgeLabel` calls `createText` without a
+/// width, so its default (`width = 200`) applies to every edge label.
+pub(crate) const EDGE_LABEL_WRAP: f64 = 200.0;
+
+/// An edge label measured as `insertEdgeLabel` lays it out (wrapped at
+/// [`EDGE_LABEL_WRAP`] by the browser's line breaking).
+fn edge_label_block(label: &str, font: f64) -> TextBlock {
+    TextBlock::new(
+        crate::text::wrap(
+            label,
+            EDGE_LABEL_WRAP,
+            font,
+            false,
+            crate::text::BreakRule::Browser,
+        ),
+        font,
+        false,
+    )
+}
+
 /// `node` with its label wrapped at `cfg.wrapping_width`, as labelHelper's `createText`
 /// does (mermaid 12 wraps every flowchart / state node label at `wrappingWidth`).
 fn wrapped(node: &Node, cfg: &GraphConfig, font: f64) -> Node {
@@ -651,7 +675,7 @@ pub fn render_with(
         }
     }
 
-    let cluster_titles: Vec<TextBlock> = g
+    let mut cluster_titles: Vec<TextBlock> = g
         .clusters
         .iter()
         .map(|c| TextBlock::label(&c.title, font))
@@ -753,7 +777,7 @@ pub fn render_with(
         .map(|e| {
             e.label
                 .as_ref()
-                .map(|l| TextBlock::label(l, font))
+                .map(|l| edge_label_block(l, font))
                 .filter(|b| !b.is_empty())
         })
         .collect();
@@ -764,7 +788,7 @@ pub fn render_with(
     for (k, &old) in perm.iter().enumerate() {
         pos_of[old] = k;
     }
-    let input = LayoutInput {
+    let mut input = LayoutInput {
         nodes: perm
             .iter()
             .map(|&i| LayoutNode {
@@ -813,6 +837,16 @@ pub fn render_with(
         inner_node_sep: CLUSTER_NODE_SPACING,
         inner_rank_sep: CLUSTER_RANK_SPACING,
     };
+    if g.kind == DiagramKind::Er {
+        wrap_er_cluster_titles(
+            g,
+            &mut input,
+            &mut cluster_titles,
+            &empty_of,
+            font,
+            title_pad,
+        );
+    }
     let raw = layout::layout(&input);
     let out = layout::LayoutOutput {
         nodes: (0..nodes.len()).map(|i| raw.nodes[pos_of[i]]).collect(),
@@ -1224,6 +1258,40 @@ pub(crate) const CLUSTER_NODE_SPACING: f64 = 50.0;
 pub(crate) const CLUSTER_RANK_SPACING: f64 = 24.0;
 /// Horizontal padding counted into a cluster's title width (the group node's `padding: 8`).
 const CLUSTER_TITLE_PAD: f64 = 8.0;
+
+/// ER groups render their title with `createText` at the group's laid-out width
+/// (`node.width`), so a title wider than the group's content wraps onto more lines
+/// and the frame is that width plus the label padding. A probe layout without the
+/// titles' minimum widths gives each group's content width.
+fn wrap_er_cluster_titles(
+    g: &GraphDiagram,
+    input: &mut LayoutInput,
+    titles: &mut [TextBlock],
+    empty_of: &[Option<usize>],
+    font: f64,
+    title_pad: f64,
+) {
+    let mut probe = input.clone();
+    probe.clusters.iter_mut().for_each(|c| c.min_width = 0.0);
+    let widths: Vec<f64> = layout::layout(&probe)
+        .clusters
+        .iter()
+        .map(|r| r.w)
+        .collect();
+    for (ci, c) in g.clusters.iter().enumerate() {
+        let w = widths.get(ci).copied().unwrap_or(0.0);
+        if empty_of[ci].is_some() || titles[ci].is_empty() || w <= 0.0 || titles[ci].width <= w {
+            continue;
+        }
+        let lines = crate::text::wrap(&c.title, w, font, false, crate::text::BreakRule::Browser);
+        let mut t = TextBlock::new(lines, font, false);
+        // The wrapped `div` is given exactly the wrapping width.
+        t.width = t.width.max(w);
+        input.clusters[ci].title_height = cluster_title_height(c.kind, &t);
+        input.clusters[ci].min_width = t.width + title_pad;
+        titles[ci] = t;
+    }
+}
 
 /// Height of the band reserved above a cluster's children for its title: ELK keeps
 /// the label plus its label spacing clear (21px of text → 24); a state composite's
@@ -1682,7 +1750,7 @@ fn table_metrics(node: &Node, text_pad: f64, cell_pad: f64, font: f64) -> TableM
             header_h: 0.0,
             row_h: 0.0,
             text_inset: cell_pad / 2.0,
-            w: (label.width + 2.0 * cell_pad).max(100.0),
+            w: (label.width.max(node.wrapped_width.unwrap_or(0.0)) + 2.0 * cell_pad).max(100.0),
             h: label.height.max(line_h) + 3.0 * cell_pad,
         };
     }
@@ -2431,5 +2499,17 @@ mod tests {
         fc.min_node_width = 0.0;
         fc.wrapping_width = 0.0;
         assert!(size(&fc, "Hi", Shape::Rect).0 < 120.0);
+    }
+
+    #[test]
+    fn edge_labels_wrap_at_200px() {
+        let b = edge_label_block(
+            "a really quite long relationship label that keeps going on",
+            14.0,
+        );
+        // mermaid (14px): two lines in a 200px wide label.
+        assert_eq!(b.lines.len(), 2, "{:?}", b.lines);
+        assert!(b.width <= EDGE_LABEL_WRAP);
+        assert_eq!(edge_label_block("has", 16.0).lines, ["has"]);
     }
 }

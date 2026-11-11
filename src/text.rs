@@ -97,6 +97,154 @@ impl TextBlock {
     }
 }
 
+/// Where a line of wrapped text may break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakRule {
+    /// Only at spaces (mermaid's own SVG `wrap` helpers split on `\s+`).
+    Spaces,
+    /// Like the browser lays out an HTML label (`white-space: break-spaces` in a
+    /// `max-width` div): at spaces, after a hyphen inside a word, and between CJK
+    /// characters (UAX #14 ID class, keeping closing punctuation off a line start).
+    /// A word with no break opportunity overflows rather than being split.
+    Browser,
+}
+
+/// Normalise a raw label and wrap it into lines no wider than `max_width` (where
+/// break opportunities allow). Explicit `<br>` / newlines always break.
+pub fn wrap(raw: &str, max_width: f64, font_size: f64, bold: bool, rule: BreakRule) -> Vec<String> {
+    let mut out = Vec::new();
+    for para in split_lines(&normalize_label(raw)) {
+        let para = para.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut cur = String::new();
+        for seg in segments(&para, rule) {
+            let cand = format!("{cur}{seg}");
+            if !cur.trim().is_empty() && line_width(cand.trim_end(), font_size, bold) > max_width {
+                out.push(std::mem::replace(&mut cur, seg).trim_end().to_string());
+            } else {
+                cur = cand;
+            }
+        }
+        out.push(cur.trim_end().to_string());
+    }
+    out
+}
+
+/// CJK ideographs, kana, Hangul and full-width forms: each is its own word to the
+/// browser's line breaker.
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x11FF | 0x2E80..=0x2FFF | 0x3000..=0x303F | 0x3040..=0x30FF
+        | 0x3100..=0x31FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF
+        | 0x20000..=0x3FFFF)
+}
+
+/// No line may start with these (closing punctuation, small kana; UAX #14 CL/NS).
+fn no_break_before(c: char) -> bool {
+    matches!(
+        c,
+        '、' | '。'
+            | '，'
+            | '．'
+            | '：'
+            | '；'
+            | '！'
+            | '？'
+            | '）'
+            | '」'
+            | '』'
+            | '】'
+            | '〉'
+            | '》'
+            | '〕'
+            | '］'
+            | '｝'
+            | '〙'
+            | '〗'
+            | '・'
+            | 'ー'
+            | '々'
+            | '〜'
+            | 'ぁ'
+            | 'ぃ'
+            | 'ぅ'
+            | 'ぇ'
+            | 'ぉ'
+            | 'っ'
+            | 'ゃ'
+            | 'ゅ'
+            | 'ょ'
+            | 'ァ'
+            | 'ィ'
+            | 'ゥ'
+            | 'ェ'
+            | 'ォ'
+            | 'ッ'
+            | 'ャ'
+            | 'ュ'
+            | 'ョ'
+            | ','
+            | '.'
+            | ')'
+            | ']'
+            | '}'
+            | '!'
+            | '?'
+            | ':'
+            | ';'
+    )
+}
+
+/// No line may end with these (opening punctuation; UAX #14 OP).
+fn no_break_after(c: char) -> bool {
+    matches!(
+        c,
+        '（' | '「'
+            | '『'
+            | '【'
+            | '〈'
+            | '《'
+            | '〔'
+            | '［'
+            | '｛'
+            | '〘'
+            | '〖'
+            | '('
+            | '['
+            | '{'
+    )
+}
+
+/// Split a single-spaced paragraph into unbreakable pieces; a piece keeps the space
+/// that follows it.
+fn segments(para: &str, rule: BreakRule) -> Vec<String> {
+    let chars: Vec<char> = para.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        cur.push(c);
+        let next = chars.get(i + 1).copied();
+        let Some(n) = next else { break };
+        let brk = if c == ' ' {
+            n != ' '
+        } else if rule == BreakRule::Spaces || n == ' ' {
+            false
+        } else if (is_cjk(c) || is_cjk(n)) && !no_break_before(n) && !no_break_after(c) {
+            true
+        } else {
+            // `DELIVERY-ADDRESS` breaks after the hyphen (UAX #14 HY before a letter).
+            c == '-' && n.is_alphabetic() && i > 0 && chars[i - 1].is_alphanumeric()
+        };
+        if brk {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 /// Split on `\n` and every `<br>` variant.
 pub fn split_lines(s: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -142,11 +290,110 @@ pub fn normalize_label(raw: &str) -> String {
         s = s[1..s.len() - 1].to_string();
     }
     if s.len() >= 2 && s.starts_with('`') && s.ends_with('`') {
-        s = s[1..s.len() - 1].replace("**", "").replace("__", "");
-        s = s.replace('*', "");
+        // A markdown string: blank lines only separate paragraphs (`<p>` without
+        // margins), single newlines are line breaks.
+        let body: Vec<&str> = s[1..s.len() - 1]
+            .split('\n')
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        s = strip_emphasis(&body.join("\n"));
     }
     let s = strip_tags(&s);
     decode_entities(&s)
+}
+
+/// Remove the `*` / `_` delimiters that markdown (marked, CommonMark rules) turns
+/// into `<em>` / `<strong>`, keeping the ones that stay literal: `snake_case`,
+/// `2 * 3`, unmatched runs. Text is drawn without the emphasis styles.
+pub fn strip_emphasis(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let punct = |c: Option<char>| c.is_some_and(|c| c.is_ascii_punctuation());
+    let space = |c: Option<char>| c.is_none_or(char::is_whitespace);
+    struct Run {
+        ch: char,
+        start: usize,
+        len: usize,
+        /// Delimiters still unused (removed from the end nearest the text).
+        left: usize,
+        open: bool,
+        close: bool,
+    }
+    let mut runs: Vec<Run> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c != '*' && c != '_' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && chars[i] == c {
+            i += 1;
+        }
+        let before = start.checked_sub(1).map(|k| chars[k]);
+        let after = chars.get(i).copied();
+        let left_flanking = !space(after) && (!punct(after) || space(before) || punct(before));
+        let right_flanking = !space(before) && (!punct(before) || space(after) || punct(after));
+        let (open, close) = if c == '*' {
+            (left_flanking, right_flanking)
+        } else {
+            (
+                left_flanking && (!right_flanking || punct(before)),
+                right_flanking && (!left_flanking || punct(after)),
+            )
+        };
+        runs.push(Run {
+            ch: c,
+            start,
+            len: i - start,
+            left: i - start,
+            open,
+            close,
+        });
+    }
+    // CommonMark "process emphasis": match each closer with the nearest opener.
+    let mut removed = vec![false; chars.len()];
+    for ci in 0..runs.len() {
+        if !runs[ci].close {
+            continue;
+        }
+        while runs[ci].left > 0 {
+            let opener = (0..ci).rev().find(|&oi| {
+                let (o, c) = (&runs[oi], &runs[ci]);
+                o.ch == c.ch
+                    && o.open
+                    && o.left > 0
+                    // "Rule of 3": a run that can both open and close only pairs when
+                    // the lengths don't sum to a multiple of 3 (unless both are).
+                    && !((o.close || c.open)
+                        && (o.len + c.len) % 3 == 0
+                        && !(o.len % 3 == 0 && c.len % 3 == 0))
+            });
+            let Some(oi) = opener else { break };
+            let used = if runs[oi].left >= 2 && runs[ci].left >= 2 {
+                2
+            } else {
+                1
+            };
+            // Openers lose delimiters from their end, closers from their start.
+            let o_end = runs[oi].start + runs[oi].left;
+            removed[o_end - used..o_end].fill(true);
+            let c_start = runs[ci].start + (runs[ci].len - runs[ci].left);
+            removed[c_start..c_start + used].fill(true);
+            runs[oi].left -= used;
+            runs[ci].left -= used;
+            // Runs between the pair can no longer match anything.
+            for r in &mut runs[oi + 1..ci] {
+                r.left = 0;
+            }
+        }
+    }
+    chars
+        .iter()
+        .zip(&removed)
+        .filter(|(_, r)| !**r)
+        .map(|(c, _)| c)
+        .collect()
 }
 
 fn strip_tags(s: &str) -> String {
@@ -267,5 +514,45 @@ mod tests {
         let b = TextBlock::label("a<br>bb", 16.0);
         assert_eq!(b.lines.len(), 2);
         assert_eq!(b.height, 48.0);
+    }
+
+    #[test]
+    fn markdown_emphasis_follows_commonmark_delimiter_rules() {
+        let n = |s: &str| normalize_label(&format!("`{s}`"));
+        assert_eq!(n("**Bold** and _italic_ text"), "Bold and italic text");
+        assert_eq!(n("snake_case_word and _it_"), "snake_case_word and it");
+        assert_eq!(n("2 * 3 * 4 and *a*b"), "2 * 3 * 4 and ab");
+        assert_eq!(n("__strong__ ***both*** ~~del~~"), "strong both ~~del~~");
+        assert_eq!(n("**unclosed"), "**unclosed");
+        assert_eq!(strip_emphasis("**a*"), "*a");
+        // Blank lines only separate paragraphs; single newlines break lines.
+        assert_eq!(n("md1\n\nmd3"), "md1\nmd3");
+        // Plain strings keep `_` and `*`, and their blank lines.
+        assert_eq!(normalize_label("_x_ *y*\n\nz"), "_x_ *y*\n\nz");
+    }
+
+    #[test]
+    fn browser_wrapping_breaks_cjk_and_hyphens_but_not_long_words() {
+        let w = |s: &str, max: f64| wrap(s, max, 16.0, false, BreakRule::Browser);
+        // CJK breaks between any two characters (16px each at 16px).
+        let cjk = w("这是一段很长的中文文本用于测试", 120.0);
+        assert_eq!(cjk, ["这是一段很长的", "中文文本用于测", "试"]);
+        // ... but no line starts with closing punctuation.
+        assert_eq!(w("一二三四五六七。", 112.0), ["一二三四五六", "七。"]);
+        assert_eq!(w("DELIVERY-ADDRESS", 120.0), ["DELIVERY-", "ADDRESS"]);
+        // A word without break opportunities overflows.
+        let long = "Supercalifragilisticexpialidocious";
+        assert_eq!(w(long, 120.0), [long]);
+        assert_eq!(w("a - b", 1000.0), ["a - b"]);
+        assert_eq!(w("x<br>y z", 1000.0), ["x", "y z"]);
+        // Space-only breaking keeps CJK and hyphenated words whole.
+        let s = wrap(
+            "中文文本 DELIVERY-ADDRESS",
+            40.0,
+            16.0,
+            false,
+            BreakRule::Spaces,
+        );
+        assert_eq!(s, ["中文文本", "DELIVERY-ADDRESS"]);
     }
 }

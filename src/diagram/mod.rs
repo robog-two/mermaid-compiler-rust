@@ -442,28 +442,63 @@ pub fn detect(body: &str) -> Result<DiagramType> {
 /// Split a diagram body into statements (newline or `;` separated) keeping
 /// 1-based line numbers. Semicolons inside quotes are preserved.
 pub fn statements(body: &str) -> Vec<(usize, String)> {
+    statements_multiline(body, |_| false)
+}
+
+/// [`statements`] where a `"…"` string opened by a statement for which `spans(stmt)`
+/// holds (`stmt` is the statement text so far, trimmed) may run on across lines, as
+/// the jison string states allow (`["]` … `[^"]+` matches newlines): the newlines stay
+/// in the statement, which keeps the line number of its first line. A string that is
+/// never closed does not swallow the rest of the input: its line is split on its own
+/// (as by [`statements`]) so the parser reports the error where the string starts.
+pub fn statements_multiline(body: &str, spans: impl Fn(&str) -> bool) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = body.lines().collect();
     let mut out = Vec::new();
-    for (i, line) in body.lines().enumerate() {
+    let mut i = 0;
+    // Lines whose open string must not carry on (it is never closed).
+    let mut no_carry = std::collections::HashSet::new();
+    'outer: while i < lines.len() {
         let mut cur = String::new();
         let mut in_quote = false;
-        for c in line.chars() {
-            match c {
-                '"' => {
-                    in_quote = !in_quote;
-                    cur.push(c);
-                }
-                ';' if !in_quote => {
-                    if !cur.trim().is_empty() {
-                        out.push((i + 1, cur.trim().to_string()));
+        let start = i;
+        let mut stmt_line = i;
+        let mut j = i;
+        let emitted = out.len();
+        loop {
+            for c in lines[j].chars() {
+                match c {
+                    '"' => {
+                        in_quote = !in_quote;
+                        cur.push(c);
                     }
-                    cur.clear();
+                    ';' if !in_quote => {
+                        if !cur.trim().is_empty() {
+                            out.push((stmt_line + 1, cur.trim().to_string()));
+                        }
+                        cur.clear();
+                        stmt_line = j;
+                    }
+                    _ => cur.push(c),
                 }
-                _ => cur.push(c),
             }
+            let carry = in_quote && !no_carry.contains(&stmt_line) && spans(cur.trim());
+            if !carry {
+                break;
+            }
+            if j + 1 == lines.len() {
+                // Unterminated string: redo from `start` without carrying from `j`.
+                no_carry.insert(stmt_line);
+                out.truncate(emitted);
+                i = start;
+                continue 'outer;
+            }
+            cur.push('\n');
+            j += 1;
         }
         if !cur.trim().is_empty() {
-            out.push((i + 1, cur.trim().to_string()));
+            out.push((stmt_line + 1, cur.trim().to_string()));
         }
+        i = j + 1;
     }
     out
 }
@@ -553,5 +588,39 @@ mod tests {
             mermaid_line_numbers("graph TD\nA-->B"),
             vec![Some(1), Some(2)]
         );
+    }
+
+    #[test]
+    fn multiline_strings_join_lines_and_keep_the_first_line_number() {
+        let all = |_: &str| true;
+        let s = statements_multiline("graph TD\nA[\"one\ntwo\"] --> B; C\nD", all);
+        assert_eq!(
+            s,
+            vec![
+                (1, "graph TD".into()),
+                (2, "A[\"one\ntwo\"] --> B".into()),
+                (3, "C".into()),
+                (4, "D".into())
+            ]
+        );
+        // `;` inside the multi-line string does not split it.
+        let s = statements_multiline("A[\"a;\nb\"];B", all);
+        assert_eq!(s, vec![(1, "A[\"a;\nb\"]".into()), (2, "B".into())]);
+        // An unterminated string falls back to one statement per line.
+        let s = statements_multiline("graph TD\nA[\"open\nB --> C", all);
+        assert_eq!(
+            s,
+            vec![
+                (1, "graph TD".into()),
+                (2, "A[\"open".into()),
+                (3, "B --> C".into())
+            ]
+        );
+        // Statements the predicate rejects never carry.
+        let s = statements_multiline("S1 : 5\" screen\nS2 : 7\" screen", |s| {
+            s.starts_with("state ")
+        });
+        assert_eq!(s.len(), 2);
+        assert_eq!(statements("A[\"x\ny\"]").len(), 2);
     }
 }

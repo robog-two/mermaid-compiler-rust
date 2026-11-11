@@ -9,7 +9,7 @@ use super::graph::{
     Cluster, ClusterId, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId, Shape,
     StyleOverrides,
 };
-use super::statements;
+use super::statements_multiline;
 use crate::error::{Error, Result};
 use crate::layout::Direction;
 use crate::scene::DiagramKind;
@@ -41,7 +41,8 @@ pub fn parse_with(body: &str, title: Option<String>, opts: ParseOptions) -> Resu
     };
     let mut header_seen = false;
     let mut direction = Direction::TopBottom;
-    for (line, stmt) in statements(body) {
+    // flow.jison's string states match newlines: quoted labels may span lines.
+    for (line, stmt) in statements_multiline(body, |_| true) {
         if !header_seen {
             let mut words = stmt.split_whitespace();
             let kw = words.next().unwrap_or("");
@@ -1628,5 +1629,26 @@ end";
         let on = parse_with(src, None, ParseOptions { inherit_dir: true }).unwrap();
         assert_eq!(cluster(&on, "A").direction, Some(Direction::TopBottom));
         assert_eq!(cluster(&on, "B").direction, Some(Direction::LeftRight));
+    }
+
+    #[test]
+    fn quoted_and_markdown_labels_may_span_lines() {
+        let g = p(
+            "flowchart TD\n  A[\"line1\nline3\"] --> B[\"`md1\nmd2`\"]\n  B -- \"edge\nlabel\" --> C\n  C --> D",
+        );
+        assert_eq!(g.nodes[0].label, "line1\nline3");
+        assert!(
+            g.nodes[1].label.contains("md1\nmd2"),
+            "{}",
+            g.nodes[1].label
+        );
+        assert_eq!(g.edges[1].label.as_deref(), Some("\"edge\nlabel\""));
+        assert_eq!(g.nodes.len(), 4);
+        // An unclosed string still reports the line it starts on.
+        let e = parse("graph TD\nA[\"open\nB --> C", None).unwrap_err();
+        assert!(matches!(e, Error::Parse { line: 2, .. }), "{e:?}");
+        // Errors after a multi-line statement keep their own line numbers.
+        let e = parse("graph TD\nA[\"a\nb\"]\nA -->", None).unwrap_err();
+        assert!(matches!(e, Error::Parse { line: 4, .. }), "{e:?}");
     }
 }
