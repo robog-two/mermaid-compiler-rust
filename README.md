@@ -136,8 +136,9 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   node order can differ. Network simplex recomputes the
   tree on every pivot (O(V·E)); graphs above 4,000 nodes fall back to a greedy ranker.
 - `click`/`href`/callbacks are parsed and ignored (static images have no interactivity).
-- **Rotated text** is used by wardley and swimlane; the xychart y-axis title, gitGraph commit labels and quadrant
-  y-labels are still drawn horizontally.
+- **Rotated text** follows mermaid (xychart left-axis title and `xAxis.labelRotation`, gitGraph `rotateCommitLabel`
+  and TB/BT tags, quadrant y-labels, wardley, swimlane). With `rotateCommitLabel: false` the LR gitGraph widens its
+  commit step so horizontal labels don't overlap (mermaid lets them overlap).
 - **Icons** (architecture, mindmap `::icon`, C4 sprites) are generic glyphs; icon packs are not loaded.
 - **Themes / looks:** the colour themes' per-item palette (`data-color-id`) is resolved to concrete colours for flowchart
   subgraphs, state composites, class boxes, ER entities, requirement boxes and sequence actors/activations, in upstream's

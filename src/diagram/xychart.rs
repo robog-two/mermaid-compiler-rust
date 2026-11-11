@@ -531,16 +531,27 @@ pub struct XyConfig {
     pub show_data_label: bool,
     pub data_label_outside: bool,
     pub horizontal_cfg: bool,
+    /// Axis `titlePadding` (space around the axis titles).
+    pub axis_title_padding: f64,
+    /// `xAxis.labelRotation` in degrees (0 outside -90..=90, like mermaid's
+    /// `normalizedLabelRotationInRad`). mermaid only rotates the labels of an
+    /// axis drawn at the bottom, i.e. the x-axis of a vertical chart.
+    pub x_label_rotation: f64,
 }
 
 impl XyConfig {
     pub fn from_config(cfg: &MermaidConfig) -> Self {
         let s = "xyChart";
-        let axis_f64 = |key: &str, d: f64| {
-            cfg.section(s, "xAxis")
+        let axis_of = |axis: &str, key: &str, d: f64| {
+            cfg.section(s, axis)
                 .and_then(|a| a.get(key))
                 .and_then(crate::json::Json::as_f64)
                 .unwrap_or(d)
+        };
+        let axis_f64 = |key: &str, d: f64| axis_of("xAxis", key, d);
+        let rotation = |axis: &str| {
+            let r = axis_of(axis, "labelRotation", 0.0);
+            if (-90.0..=90.0).contains(&r) { r } else { 0.0 }
         };
         XyConfig {
             width: cfg.section_f64(s, "width", 700.0),
@@ -559,6 +570,8 @@ impl XyConfig {
                 .section(s, "chartOrientation")
                 .and_then(crate::json::Json::as_str)
                 == Some("horizontal"),
+            axis_title_padding: axis_f64("titlePadding", 5.0),
+            x_label_rotation: rotation("xAxis"),
         }
     }
 }
@@ -791,27 +804,22 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> 
     let tf = xc.axis_title_font;
     let tick = xc.tick_length;
     let (cat_title, val_title) = (&chart.x_title, &chart.y_title);
-    // Title of whichever axis sits on the left goes above the plot (no rotated text).
+    // The left axis title is turned -90° inside the left band (mermaid's
+    // `getDrawableElementsForLeftAxis`: rotation 270 at titlePadding from the
+    // band's edge, taking titleHeight + 2 × titlePadding of width).
     let left_title = if horizontal { cat_title } else { val_title };
     let bottom_title = if horizontal { val_title } else { cat_title };
-    if left_title.as_ref().is_some_and(|t| !t.is_empty()) {
-        top += tf * 1.5 + 4.0;
-    }
+    let tp = xc.axis_title_padding;
+    let left_title_space = if left_title.as_ref().is_some_and(|t| !t.is_empty()) {
+        tf * 1.2 + 2.0 * tp
+    } else {
+        0.0
+    };
     let plot_top = top + lf * 0.6;
     let mut bottom_band = tick + 5.0 + lf * 1.3 + 10.0;
     if bottom_title.as_ref().is_some_and(|t| !t.is_empty()) {
         bottom_band += tf * 1.5 + 5.0;
     }
-
-    // Value scale (tick density depends on axis length; estimate it first).
-    let est_len = if horizontal {
-        w * 0.7
-    } else {
-        h - plot_top - bottom_band
-    };
-    let target = ((est_len / if horizontal { 80.0 } else { 50.0 }).round() as usize).clamp(2, 10);
-    let vs = ValueScale::resolve(chart, target);
-    let tick_labels: Vec<String> = vs.ticks.iter().map(|v| fmt_num(*v)).collect();
 
     // Category / numeric x labels.
     let x_ticks: Vec<(f64, String)> = match chart.x_axis {
@@ -825,6 +833,34 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> 
         _ => Vec::new(),
     };
 
+    // Rotated bottom-axis labels (`labelRotation`) need
+    // |sin r|·maxWidth + |cos r|·height instead of one line height.
+    let bottom_rot = if horizontal { 0.0 } else { xc.x_label_rotation };
+    let label_h = lf * 1.2;
+    let mut bottom_label_w = 0.0;
+    let mut rot_extra = 0.0;
+    if bottom_rot != 0.0 {
+        bottom_label_w = categories
+            .iter()
+            .chain(x_ticks.iter().map(|t| &t.1))
+            .map(|l| line_width(l, lf, false))
+            .fold(0.0, f64::max);
+        let (s, c) = bottom_rot.to_radians().sin_cos();
+        let need = (s * bottom_label_w).abs() + (c * label_h).abs();
+        rot_extra = (need - label_h).max(0.0);
+        bottom_band += rot_extra;
+    }
+
+    // Value scale (tick density depends on axis length; estimate it first).
+    let est_len = if horizontal {
+        w * 0.7
+    } else {
+        h - plot_top - bottom_band
+    };
+    let target = ((est_len / if horizontal { 80.0 } else { 50.0 }).round() as usize).clamp(2, 10);
+    let vs = ValueScale::resolve(chart, target);
+    let tick_labels: Vec<String> = vs.ticks.iter().map(|v| fmt_num(*v)).collect();
+
     let left_band;
     let plot_left;
     let plot_right = w - 20.0;
@@ -836,7 +872,7 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> 
             .map(|c| line_width(c, lf, false))
             .fold(0.0, f64::max)
             .min(w * 0.3);
-        left_band = 10.0 + max_cat_w + 5.0 + tick;
+        left_band = left_title_space + 10.0 + max_cat_w + 5.0 + tick;
         plot_left = left_band;
         for c in &categories {
             cat_lines.push(wrap_words(c, lf, w * 0.3));
@@ -846,11 +882,16 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> 
             .iter()
             .map(|c| line_width(c, lf, false))
             .fold(0.0, f64::max);
-        left_band = 10.0 + max_tick_w + 5.0 + tick;
+        left_band = left_title_space + 10.0 + max_tick_w + 5.0 + tick;
         plot_left = left_band;
         let band = (plot_right - plot_left) / n_slots as f64;
         for c in &categories {
-            cat_lines.push(wrap_words(c, lf, (band - 4.0).max(20.0)));
+            // Rotated labels stay on one line (mermaid never wraps them).
+            cat_lines.push(if bottom_rot != 0.0 {
+                vec![c.clone()]
+            } else {
+                wrap_words(c, lf, (band - 4.0).max(20.0))
+            });
         }
         let extra = cat_lines.iter().map(Vec::len).max().unwrap_or(1).max(1) - 1;
         bottom_band += extra as f64 * lf * 1.2;
@@ -887,6 +928,34 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> 
     };
 
     // --- Axes drawing.
+    // A bottom-axis tick label; with `labelRotation` it is placed like
+    // mermaid's `getDrawableElementsForBottomAxis` (x shifted by
+    // sin(r)·height/2, y by |sin(r)·width/2|, text-before-edge baseline) and
+    // turned by r about that point.
+    let bottom_label = |p: f64, lines: &[String], bounds: &mut Bounds| -> Element {
+        let y0 = plot.bottom() + tick + 5.0;
+        if bottom_rot == 0.0 {
+            let t = text_at(p, y0 + lf * 0.85, lines, lf, Anchor::Middle, &text_c);
+            bounds.add_rect(text_bounds(&t));
+            return Element::text(t);
+        }
+        let s = bottom_rot.to_radians().sin();
+        let about = Point::new(p + s * label_h / 2.0, y0 + (s * bottom_label_w / 2.0).abs());
+        let t = text_at(
+            about.x,
+            about.y + lf * 0.9,
+            lines,
+            lf,
+            Anchor::Middle,
+            &text_c,
+        );
+        bounds.add_rotated_rect(text_bounds(&t), about, bottom_rot);
+        Element::Rotated {
+            deg: bottom_rot,
+            about,
+            children: vec![Element::text(t)],
+        }
+    };
     let mut axis_els = Vec::new();
     let line_paint = Paint::stroke(&axis_c, 2.0);
     let tick_paint = Paint::stroke(&axis_c, 2.0);
@@ -905,16 +974,7 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> 
                 Point::new(p, plot.bottom() + tick),
                 tick_paint.clone(),
             ));
-            let t = text_at(
-                p,
-                plot.bottom() + tick + 5.0 + lf * 0.85,
-                std::slice::from_ref(label),
-                lf,
-                Anchor::Middle,
-                &text_c,
-            );
-            bounds.add_rect(text_bounds(&t));
-            axis_els.push(Element::text(t));
+            axis_els.push(bottom_label(p, std::slice::from_ref(label), &mut bounds));
         } else {
             axis_els.push(Element::line(
                 Point::new(plot.x, p),
@@ -976,16 +1036,7 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> 
                 Point::new(*p, plot.bottom() + tick),
                 tick_paint.clone(),
             ));
-            let t = text_at(
-                *p,
-                plot.bottom() + tick + 5.0 + lf * 0.85,
-                lines,
-                lf,
-                Anchor::Middle,
-                &text_c,
-            );
-            bounds.add_rect(text_bounds(&t));
-            axis_els.push(Element::text(t));
+            axis_els.push(bottom_label(*p, lines, &mut bounds));
         }
     }
     // Axis lines (left and bottom).
@@ -1001,16 +1052,23 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> 
     ));
     // Axis titles.
     if let Some(t) = left_title.as_ref().filter(|t| !t.is_empty()) {
+        // translate(titlePadding, mid-height) rotate(270), text-before-edge,
+        // anchored at its middle: reads bottom-to-top with its top facing left.
+        let about = Point::new(plot.x - left_band + tp, plot.y + plot.h / 2.0);
         let tt = text_at(
-            plot.x - left_band + 10.0,
-            plot.y - lf * 0.6 - 6.0,
+            about.x,
+            about.y + tf * 0.9,
             std::slice::from_ref(t),
             tf,
-            Anchor::Start,
+            Anchor::Middle,
             &text_c,
         );
-        bounds.add_rect(text_bounds(&tt));
-        axis_els.push(Element::classed_text(tt, "axis-title"));
+        bounds.add_rotated_rect(text_bounds(&tt), about, -90.0);
+        axis_els.push(Element::Rotated {
+            deg: -90.0,
+            about,
+            children: vec![Element::classed_text(tt, "axis-title")],
+        });
     }
     if let Some(t) = bottom_title.as_ref().filter(|t| !t.is_empty()) {
         let extra = if horizontal {
@@ -1020,7 +1078,7 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> 
         };
         let tt = text_at(
             plot.x + plot.w / 2.0,
-            plot.bottom() + tick + 5.0 + lf * 1.3 + extra + 5.0 + tf,
+            plot.bottom() + tick + 5.0 + lf * 1.3 + extra + rot_extra + 5.0 + tf,
             std::slice::from_ref(t),
             tf,
             Anchor::Middle,
@@ -1292,5 +1350,84 @@ mod tests {
         .unwrap();
         assert_eq!(s.kind, DiagramKind::XyChart);
         assert!(s.view_box.w >= 700.0 && s.view_box.h >= 500.0);
+    }
+
+    /// `(deg, about, text)` of every `Rotated` element holding a text.
+    fn rotated_texts(els: &[Element]) -> Vec<(f64, Point, Text)> {
+        let mut out = Vec::new();
+        for e in els {
+            match e {
+                Element::Group { children, .. } => out.extend(rotated_texts(children)),
+                Element::Rotated {
+                    deg,
+                    about,
+                    children,
+                } => {
+                    if let Some(Element::Text { text, .. }) = children.first() {
+                        out.push((*deg, *about, text.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn left_axis_title_is_rotated() {
+        let src =
+            "xychart-beta\n  x-axis \"Month\" [a, b]\n  y-axis \"Revenue\" 0 --> 10\n  bar [1, 2]";
+        let cfg = MermaidConfig::default();
+        let s = render(src, None, &cfg, &cfg.palette()).unwrap();
+        let rot = rotated_texts(&s.elements);
+        assert_eq!(rot.len(), 1, "{rot:?}");
+        let (deg, about, t) = &rot[0];
+        assert_eq!(*deg, -90.0);
+        assert_eq!(t.lines, vec!["Revenue".to_string()]);
+        assert_eq!(t.anchor, Anchor::Middle);
+        // titlePadding (5) from the chart's left edge.
+        assert!((about.x - 5.0).abs() < 1e-9);
+        // Horizontal charts rotate the category (left) axis title instead.
+        let s = render(
+            &src.replace("xychart-beta", "xychart-beta horizontal"),
+            None,
+            &cfg,
+            &cfg.palette(),
+        )
+        .unwrap();
+        let rot = rotated_texts(&s.elements);
+        assert_eq!(rot.len(), 1);
+        assert_eq!(rot[0].2.lines, vec!["Month".to_string()]);
+    }
+
+    #[test]
+    fn x_label_rotation_turns_bottom_labels() {
+        let src = "xychart-beta\n  x-axis [alpha, beta]\n  bar [1, 2]";
+        let cfg = MermaidConfig::default()
+            .with_directive(
+                &crate::json::parse(r#"{"xyChart":{"xAxis":{"labelRotation":-45}}}"#).unwrap(),
+            )
+            .unwrap();
+        let xc = XyConfig::from_config(&cfg);
+        assert_eq!(xc.x_label_rotation, -45.0);
+        let s = render(src, None, &cfg, &cfg.palette()).unwrap();
+        let rot = rotated_texts(&s.elements);
+        assert_eq!(rot.len(), 2, "{rot:?}");
+        assert!(rot.iter().all(|(d, _, _)| *d == -45.0));
+        // Shifted by sin(r)·height/2 from the tick position.
+        let lf = xc.label_font;
+        let shift = (-45f64).to_radians().sin() * lf * 1.2 / 2.0;
+        assert!(rot[0].1.x < rot[1].1.x);
+        assert!((rot[0].2.x - rot[0].1.x).abs() < 1e-9);
+        assert!(shift < 0.0);
+        // Out-of-range rotations are ignored, like mermaid.
+        let cfg = MermaidConfig::default()
+            .with_directive(
+                &crate::json::parse(r#"{"xyChart":{"xAxis":{"labelRotation":120}}}"#).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(XyConfig::from_config(&cfg).x_label_rotation, 0.0);
+        let s = render(src, None, &cfg, &cfg.palette()).unwrap();
+        assert!(rotated_texts(&s.elements).is_empty());
     }
 }

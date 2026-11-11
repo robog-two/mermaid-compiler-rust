@@ -38,6 +38,13 @@ impl Point {
     pub fn lerp(self, o: Point, t: f64) -> Point {
         Point::new(self.x + (o.x - self.x) * t, self.y + (o.y - self.y) * t)
     }
+    /// This point rotated by `deg` degrees (clockwise on screen, like SVG
+    /// `rotate(deg cx cy)`) about `about`.
+    pub fn rotated(self, about: Point, deg: f64) -> Point {
+        let (s, c) = deg.to_radians().sin_cos();
+        let d = self.minus(about);
+        Point::new(about.x + d.x * c - d.y * s, about.y + d.x * s + d.y * c)
+    }
 }
 
 /// Axis-aligned rectangle (`x`,`y` = top-left).
@@ -99,6 +106,17 @@ impl Bounds {
     }
     pub fn add_point(&mut self, p: Point) {
         self.add_rect(Rect::new(p.x, p.y, 0.0, 0.0));
+    }
+    /// Add the corners of `r` rotated by `deg` degrees about `about`.
+    pub fn add_rotated_rect(&mut self, r: Rect, about: Point, deg: f64) {
+        for p in [
+            Point::new(r.x, r.y),
+            Point::new(r.right(), r.y),
+            Point::new(r.x, r.bottom()),
+            Point::new(r.right(), r.bottom()),
+        ] {
+            self.add_point(p.rotated(about, deg));
+        }
     }
     pub fn rect(&self) -> Rect {
         self.0.unwrap_or_default()
