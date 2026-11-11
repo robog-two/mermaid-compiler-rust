@@ -102,10 +102,14 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Mindmap> {
                 .extend(rest.split_whitespace().map(str::to_string));
             continue;
         }
-        let (t, inline_classes) = match find_unquoted(t, ":::") {
-            Some(i) => (t[..i].trim(), t[i + 3..].split_whitespace().collect()),
-            None => (t, Vec::new()),
-        };
+        // mindmap.jison only lexes `:::` as a statement of its own (`SPACELIST CLASS`);
+        // after a node on the same line it is a syntax error.
+        if find_unquoted(t, ":::").is_some() {
+            return Err(Error::parse(
+                line_no,
+                "Expecting 'SPACELINE', 'NL', 'EOF', got 'CLASS'",
+            ));
+        }
         let (id, label, shape) = parse_node(t, line_no)?;
         let parent = if mm.nodes.is_empty() {
             None
@@ -130,7 +134,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Mindmap> {
             label,
             shape,
             icon: None,
-            classes: inline_classes.into_iter().map(str::to_string).collect(),
+            classes: Vec::new(),
             level: indent,
             children: Vec::new(),
             parent,
@@ -159,7 +163,6 @@ const DELIMS: [(&str, &str, NodeShape); 7] = [
 ];
 
 fn parse_node(t: &str, line_no: usize) -> Result<(String, String, NodeShape)> {
-    // Strip a trailing `:::class` written on the node line itself.
     let t = t.trim();
     // Find the earliest opening delimiter outside quotes.
     let mut best: Option<(usize, &str, &str, NodeShape)> = None;
@@ -637,7 +640,8 @@ mod tests {
       Pen and paper
       Mermaid
     id1[Square]
-    id2(Rounded):::urgent
+    id2(Rounded)
+    :::urgent
     id3))Bang((
     id4)Cloud(
     id5{{Hexagon}}
@@ -701,5 +705,13 @@ mod tests {
         assert!(right > 0 && left > 0);
         // Wrapped long label stays within maxNodeWidth (+ padding).
         assert!(p.iter().all(|n| n.w <= 200.0 + 60.0));
+    }
+
+    #[test]
+    fn class_on_the_node_line_is_a_syntax_error_like_mermaid() {
+        let e = parse("mindmap\n  root\n    a(A):::urgent", None).unwrap_err();
+        assert!(matches!(e, Error::Parse { line: 3, .. }), "{e:?}");
+        let mm = parse("mindmap\n  root\n    a(A)\n    :::urgent", None).unwrap();
+        assert_eq!(mm.nodes[1].classes, vec!["urgent"]);
     }
 }

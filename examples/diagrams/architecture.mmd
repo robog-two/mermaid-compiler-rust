@@ -11,7 +11,7 @@ architecture-beta
     service db(database)[Database] in storage
     service disk(disk)[Disk] in storage
     service bucket(logos:aws-s3)[Bucket] in storage
-    service ext("API")[Partner API]
+    service ext(internet)[Partner API]
     junction hub in api
 
     internet:R --> L:gateway

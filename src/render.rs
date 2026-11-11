@@ -35,7 +35,36 @@ fn graph_options(cfg: &MermaidConfig) -> diagram::graph::RenderOptions {
 }
 
 /// Parse, lay out and draw one mermaid definition.
+///
+/// Parse errors report line numbers the way mermaid does: counted in the text left
+/// after front-matter, directives and comment lines are removed
+/// ([`diagram::mermaid_line_numbers`]).
 pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
+    render_source(source, base).map_err(|e| match e {
+        Error::Parse { line, message } => {
+            let map = diagram::mermaid_line_numbers(source);
+            let to = |l: usize| map.get(l.wrapping_sub(1)).copied().flatten().unwrap_or(l);
+            let mermaid_line = to(line);
+            // Langium-style messages repeat the line inside the text.
+            let message = ["Parse error on line ", "Lexer error on line "]
+                .iter()
+                .find_map(|p| {
+                    let rest = message.strip_prefix(p)?;
+                    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+                    let n: usize = rest[..digits].parse().ok()?;
+                    Some(format!("{p}{}{}", to(n), &rest[digits..]))
+                })
+                .unwrap_or(message);
+            Error::Parse {
+                line: mermaid_line,
+                message,
+            }
+        }
+        other => other,
+    })
+}
+
+fn render_source(source: &str, base: &MermaidConfig) -> Result<Rendered> {
     let pre = diagram::preprocess(source)?;
     let mut cfg = base.clone();
     for layer in &pre.config_layers {

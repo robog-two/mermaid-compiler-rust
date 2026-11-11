@@ -154,6 +154,10 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   `automaticLaneOrdering`, no pools). Cynefin's wavy borders are seeded from the SVG id (stable output; set `cynefin.seed`
   for upstream's exact curves). Venn's 4+-set solver uses a fixed seed (deterministic). Wardley uses a serif font as
   mermaid's output does. Icon-pack icons (treeView, use case) draw mermaid's "?" placeholder. Eventmodeling data is not monospaced.
+- **Upstream bugs not reproduced:** mermaid 12.3 throws `this.calcIntersect is not a function` for a block-diagram
+  edge to or from a diamond (`id{"…"}`) node; this renders it.
+- **Parse error line numbers** follow mermaid: they count lines after front-matter, directives and `%%` comment lines
+  are removed, so they can be lower than the line in your file.
 - **Gantt is deterministic:** no today-marker (it would need the clock), and times are UTC.
 - **Approximate layouts** where mermaid uses force-directed or browser layout: architecture (grid from side hints),
   mindmap (two-sided tree rather than force layout), and C4 (flex rows rather than mermaid's grid; relationships can pass behind cards).

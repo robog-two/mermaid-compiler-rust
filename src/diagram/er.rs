@@ -824,6 +824,18 @@ fn statement(d: &mut ErDiagram, s: &str, line: usize) -> Result<(Vec<String>, Op
         register(d, &a);
         return Ok((vec![a.name.clone()], Some(a.name)));
     }
+    // erDiagram.jison only takes `name[Alias]` on an entity declaration (with or
+    // without a block), not as a relationship end.
+    let no_alias = |r: &EntityRef| -> Result<()> {
+        match r.alias {
+            Some(_) => Err(Error::parse(
+                line,
+                format!("{s}\nAn entity alias is only allowed when declaring the entity"),
+            )),
+            None => Ok(()),
+        }
+    };
+    no_alias(&a)?;
     let left = cardinality(&mut c).ok_or_else(|| {
         Error::parse(
             line,
@@ -850,6 +862,7 @@ fn statement(d: &mut ErDiagram, s: &str, line: usize) -> Result<(Vec<String>, Op
     c.ws();
     let b = entity_ref(&mut c, line)?
         .ok_or_else(|| Error::parse(line, format!("{s}\nExpecting the second entity name")))?;
+    no_alias(&b)?;
     c.ws();
     if !c.eat(":") {
         return Err(Error::parse(
@@ -1068,7 +1081,7 @@ mod tests {
     #[test]
     fn parses_aliases_classes_and_styles() {
         let d = parse(
-            "erDiagram\ndirection LR\np[Person] {\n string name\n}\na[\"Customer Account\"]:::hot ||--o{ p : owns\n\"Quoted Name\" { int x }\nclassDef hot fill:#f96\nstyle p stroke:#f00\nclass p hot",
+            "erDiagram\ndirection LR\np[Person] {\n string name\n}\na[\"Customer Account\"]:::hot\na ||--o{ p : owns\n\"Quoted Name\" { int x }\nclassDef hot fill:#f96\nstyle p stroke:#f00\nclass p hot",
             None,
         )
         .unwrap();
@@ -1394,5 +1407,13 @@ mod tests {
             && b.x < a.right() - 0.5
             && a.y < b.bottom() - 0.5
             && b.y < a.bottom() - 0.5
+    }
+
+    #[test]
+    fn aliases_are_rejected_on_relationship_ends_like_mermaid() {
+        assert!(parse("erDiagram\np[Person] ||--o{ q : x", None).is_err());
+        assert!(parse("erDiagram\np ||--o{ q[Q] : x", None).is_err());
+        let d = parse("erDiagram\np[Person]\np ||--o{ q : x", None).unwrap();
+        assert_eq!(d.entities[0].alias.as_deref(), Some("Person"));
     }
 }

@@ -8,7 +8,8 @@ erDiagram
     ORDER ||--|{ LINE-ITEM : contains
     PRODUCT |o--o{ LINE-ITEM : "ordered in"
     %% Word cardinalities and an alias
-    p[Person] one or more optionally to zero or one CUSTOMER : "acts as"
+    p[Person]
+    p one or more optionally to zero or one CUSTOMER : "acts as"
 
     CUSTOMER {
         string id PK "customer number"

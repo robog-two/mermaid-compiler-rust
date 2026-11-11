@@ -14,8 +14,8 @@ block-beta
   gw --> orders
   orders --> queue
   db -.-> search
-  decide --> ok
-  decide ==> alert
+  ok --> alert
+  queue ==> db
 
   classDef warn fill:#ffe0e0,stroke:#d33,color:#600
   class alert warn

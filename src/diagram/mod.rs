@@ -249,6 +249,80 @@ pub fn preprocess(src: &str) -> Result<Preprocessed> {
     })
 }
 
+/// For each 1-based source line, the line number mermaid reports for it in parse
+/// errors (index `line - 1`), or `None` for lines mermaid deletes before parsing.
+///
+/// mermaid's `preprocessDiagram` parses text from which it has removed the front-matter
+/// (and the blank lines straight after it), every `%%{...}%%` directive (a directive
+/// spanning lines collapses onto one), every `%% comment` line (`cleanupComments`), and
+/// then leading whitespace (`trimStart`). Error positions count lines of that text.
+pub fn mermaid_line_numbers(src: &str) -> Vec<Option<usize>> {
+    let src = src.replace("\r\n", "\n");
+    let lines: Vec<&str> = src.split('\n').collect();
+    let mut keep = vec![true; lines.len()];
+    // Front-matter: `---` on the very first line, up to the closing `---` and the
+    // blank lines after it.
+    if lines.first().map(|l| l.trim_end()) == Some("---") {
+        if let Some(end) = lines.iter().skip(1).position(|l| l.trim_end() == "---") {
+            let mut last = end + 1;
+            while last + 1 < lines.len() && lines[last + 1].trim().is_empty() {
+                last += 1;
+            }
+            keep[..=last].iter_mut().for_each(|k| *k = false);
+        }
+    }
+    // Directives: lines after the first of a multi-line directive merge into it.
+    let mut i = 0;
+    while i < lines.len() {
+        if keep[i] {
+            if let Some(start) = lines[i].find("%%{") {
+                if !lines[i][start..].contains("}%%") {
+                    let mut j = i + 1;
+                    while j < lines.len() && !lines[j].contains("}%%") {
+                        keep[j] = false;
+                        j += 1;
+                    }
+                    if j < lines.len() {
+                        keep[j] = false;
+                    }
+                    i = j;
+                }
+            }
+        }
+        i += 1;
+    }
+    // Comment lines (`/^\s*%%(?!{)[^\n]+\n?/gm`).
+    for (k, l) in lines.iter().enumerate() {
+        let t = l.trim_start();
+        if let Some(rest) = t.strip_prefix("%%") {
+            if !rest.is_empty() && !rest.starts_with('{') {
+                keep[k] = false;
+            }
+        }
+    }
+    // `trimStart`: leading lines that are blank (or held only a directive) go too.
+    for k in 0..lines.len() {
+        if !keep[k] {
+            continue;
+        }
+        let blank = lines[k].trim().is_empty()
+            || (lines[k].trim_start().starts_with("%%{") && lines[k].trim_end().ends_with("}%%"));
+        if !blank {
+            break;
+        }
+        keep[k] = false;
+    }
+    let mut n = 0;
+    keep.iter()
+        .map(|&k| {
+            k.then(|| {
+                n += 1;
+                n
+            })
+        })
+        .collect()
+}
+
 fn parse_directive(inner: &str) -> Option<Json> {
     let (kind, rest) = match inner.find(':') {
         Some(i) => (
@@ -462,5 +536,22 @@ mod tests {
         }
         assert!(detect("usecase-betax\n").is_err());
         assert!(detect("cynefin-betax\n").is_err());
+    }
+
+    #[test]
+    fn error_lines_count_like_mermaid_after_preprocessing() {
+        let src = "---\ntitle: T\n---\n\nerDiagram\n    %% a comment\n    A ||--o{ B : x\n%%{init: {\n 'theme':'dark'}}%%\n    bad line";
+        let m = mermaid_line_numbers(src);
+        assert_eq!(&m[..5], &[None, None, None, None, Some(1)]);
+        assert_eq!(m[5], None, "comment line removed");
+        assert_eq!(m[6], Some(2));
+        assert_eq!(m[7], Some(3), "a directive collapses onto its first line");
+        assert_eq!(m[8], None);
+        assert_eq!(m[9], Some(4));
+        // Without front-matter or comments the numbering is unchanged.
+        assert_eq!(
+            mermaid_line_numbers("graph TD\nA-->B"),
+            vec![Some(1), Some(2)]
+        );
     }
 }

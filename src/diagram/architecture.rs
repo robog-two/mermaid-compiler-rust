@@ -138,7 +138,7 @@ fn is_id_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
 }
 
-fn parse_decl(s: &str, line: usize, allow_icon: bool) -> Result<Decl> {
+fn parse_decl(s: &str, raw: &str, line: usize, allow_icon: bool) -> Result<Decl> {
     let len: usize = s
         .chars()
         .take_while(|&c| is_id_char(c))
@@ -149,20 +149,30 @@ fn parse_decl(s: &str, line: usize, allow_icon: bool) -> Result<Decl> {
     }
     let id = s[..len].to_string();
     let mut rest = s[len..].trim_start();
-    let (mut icon, mut icon_text, mut title, mut parent) = (None, None, None, None);
+    let (mut icon, mut title, mut parent) = (None, None, None);
+    let icon_text = None;
     if allow_icon {
         if let Some(r) = rest.strip_prefix('(') {
             let end = r
                 .find(')')
                 .ok_or_else(|| Error::parse(line, "Expecting ')' to close the icon"))?;
-            let inner = r[..end].trim();
-            if let Some(t) = inner.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
-                icon_text = Some(t.to_string());
-            } else if inner.is_empty() {
-                return Err(Error::parse(line, "Empty icon name"));
-            } else {
-                icon = Some(inner.to_string());
+            let inner = &r[..end];
+            // arch.langium: `terminal ARCH_ICON: /\([\w-:]+\)/`. Anything else (e.g. the
+            // older quoted text icons) leaves `(` unmatched, which the lexer skips.
+            if inner.is_empty()
+                || !inner
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == ':')
+            {
+                let col = raw.find(s).map_or(0, |o| o + len) + 1;
+                return Err(Error::parse(
+                    line,
+                    format!(
+                        "Lexer error on line {line}, column {col}: unexpected character: ->(<-"
+                    ),
+                ));
             }
+            icon = Some(inner.to_string());
             rest = r[end + 1..].trim_start();
         }
         if let Some(r) = rest.strip_prefix('[') {
@@ -259,9 +269,13 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Architecture> {
             "title" => {
                 d.title = Some(rest.to_string()).filter(|t| !t.is_empty());
             }
-            "group" => decls.push((DeclKind::Group, parse_decl(rest, line, true)?, line)),
-            "service" => decls.push((DeclKind::Service, parse_decl(rest, line, true)?, line)),
-            "junction" => decls.push((DeclKind::Junction, parse_decl(rest, line, false)?, line)),
+            "group" => decls.push((DeclKind::Group, parse_decl(rest, raw, line, true)?, line)),
+            "service" => decls.push((DeclKind::Service, parse_decl(rest, raw, line, true)?, line)),
+            "junction" => decls.push((
+                DeclKind::Junction,
+                parse_decl(rest, raw, line, false)?,
+                line,
+            )),
             "align" => {
                 let mut words = rest.split_whitespace();
                 let row = match words.next() {
@@ -1440,17 +1454,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_text_icons_and_nested_groups() {
+    fn parses_icons_and_nested_groups_and_rejects_quoted_icons() {
+        let e = parse("architecture-beta\n    service s(\"TXT\")[S]", None).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "Parsing failed: Lexer error on line 2, column 14: unexpected character: ->(<-"
+        );
         let d = parse(
-            "architecture-beta\ngroup outer[Outer]\ngroup inner(server)[\"Inner [x]\"] in outer\nservice s(\"TXT\")[S] in inner\nservice t(logos:aws-s3) in outer",
+            "architecture-beta\ngroup outer[Outer]\ngroup inner(server)[\"Inner [x]\"] in outer\nservice s(disk)[S] in inner\nservice t(logos:aws-s3) in outer",
             None,
         )
         .unwrap();
         assert_eq!(d.groups[1].parent, Some(0));
         assert_eq!(d.groups[1].title.as_deref(), Some("Inner [x]"));
-        assert!(
-            matches!(&d.nodes[0].kind, NodeKind::Service { icon_text: Some(t), .. } if t == "TXT")
-        );
         assert!(
             matches!(&d.nodes[1].kind, NodeKind::Service { icon: Some(i), title: None, .. } if i == "logos:aws-s3")
         );
