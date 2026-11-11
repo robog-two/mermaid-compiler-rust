@@ -491,13 +491,6 @@ pub fn render(
     ))
 }
 
-fn darker(c: &Color, amount: f64) -> Color {
-    match crate::color::parse(c.css()) {
-        Some(rgb) => Color::new(rgb.lighten(-amount).to_hex()),
-        None => c.clone(),
-    }
-}
-
 /// Draw laid-out cells.
 pub fn draw(
     tm: &Treemap,
@@ -529,20 +522,46 @@ pub fn draw(
             .map(|(_, s)| s.clone())
             .unwrap_or_default()
     };
+    // mermaid's ordinal scales: `colorScale` / `colorScalePeer` range over
+    // `['transparent', cScale0..11]` and see the root first, so section k (breadth-first)
+    // is entry k + 1 (mod 13); `colorScaleLabel` ranges over `cScaleLabel0..11` and sees
+    // the sections first, then the leaves in order (keyed by name).
+    let ordinal = |set: &[Color], i: Option<usize>| -> Option<Color> {
+        let k = (i? + 1) % (set.len() + 1);
+        (k > 0).then(|| set[k - 1].clone())
+    };
+    let transparent = Color::new("transparent");
+    let mut label_domain: Vec<&str> = Vec::new();
+    let mut sorted: Vec<&Cell> = cells.iter().filter(|c| c.section).collect();
+    sorted.sort_by_key(|c| c.color_index);
+    for c in sorted.iter().chain(
+        cells
+            .iter()
+            .filter(|c| !c.section)
+            .collect::<Vec<_>>()
+            .iter(),
+    ) {
+        if !label_domain.contains(&c.name.as_str()) {
+            label_domain.push(&c.name);
+        }
+    }
+    let label_of = |name: &str| -> Color {
+        let i = label_domain.iter().position(|n| *n == name).unwrap_or(0);
+        pal.scale_text_color(i).clone()
+    };
     let mut sections = Vec::new();
     let mut leaves = Vec::new();
     for cell in cells {
         let r = Rect::new(cell.rect.x, cell.rect.y + title_h, cell.rect.w, cell.rect.h);
         bounds.add_rect(r);
         let st = class_style(&cell.class);
-        let base = cell
-            .color_index
-            .map(|i| pal.scale_color(i).clone())
-            .unwrap_or_else(|| pal.main_bkg.clone());
-        let label_color = st.color.clone().unwrap_or_else(|| pal.text_color.clone());
+        let base = ordinal(&pal.scale, cell.color_index).unwrap_or_else(|| transparent.clone());
+        let label_color = st.color.clone().unwrap_or_else(|| label_of(&cell.name));
         if cell.section {
             let fill = st.fill.clone().unwrap_or_else(|| base.clone());
-            let stroke = st.stroke.clone().unwrap_or_else(|| darker(&base, 25.0));
+            let stroke = st.stroke.clone().unwrap_or_else(|| {
+                ordinal(&pal.scale_peer, cell.color_index).unwrap_or_else(|| transparent.clone())
+            });
             let mut g = vec![
                 Element::classed_shape(
                     crate::scene::Geometry::Rect { rect: r, rx: 0.0 },
@@ -551,7 +570,7 @@ pub fn draw(
                 ),
                 Element::classed_shape(
                     crate::scene::Geometry::Rect { rect: r, rx: 0.0 },
-                    Paint::stroke(&stroke, st.stroke_width.unwrap_or(2.0)).with_opacity(0.6),
+                    Paint::stroke(&stroke, st.stroke_width.unwrap_or(2.0)).with_opacity(0.4),
                     "treemapSectionBorder",
                 ),
             ];
@@ -586,11 +605,11 @@ pub fn draw(
             sections.push(Element::group("treemapSection", g));
         } else {
             let fill = st.fill.clone().unwrap_or_else(|| base.clone());
-            let stroke = st.stroke.clone().unwrap_or_else(|| darker(&base, 10.0));
+            let stroke = st.stroke.clone().unwrap_or_else(|| base.clone());
             let mut g = vec![
                 Element::classed_shape(
                     crate::scene::Geometry::Rect { rect: r, rx: 0.0 },
-                    Paint::fill(&fill).with_opacity(0.45),
+                    Paint::fill(&fill).with_opacity(0.3),
                     "treemapLeaf",
                 ),
                 Element::classed_shape(

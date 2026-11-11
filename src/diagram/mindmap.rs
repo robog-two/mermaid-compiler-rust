@@ -378,21 +378,24 @@ pub fn render(
     Ok(draw(&mm, &placed, pal))
 }
 
-fn section_colors(pal: &Palette, section: Option<usize>) -> (Color, Color) {
+/// `(fill, text, underline)` of a node: section `s` is `.section-s` (`cScale(s+1)`,
+/// `cScaleLabel(s+1)`, `cScaleInv(s+1)`); the root is `.section-root` (`git0`,
+/// `gitBranchLabel0`) and also `.section--1` (whose `line` is `cScaleInv0`).
+fn section_colors(pal: &Palette, section: Option<usize>) -> (Color, Color, Color) {
     match section {
-        None => (pal.scale_color(0).clone(), pal.scale_text_color(0).clone()),
+        None => {
+            let fill = pal.git.first().unwrap_or_else(|| pal.scale_color(0));
+            let text = pal
+                .git_branch_label
+                .first()
+                .unwrap_or_else(|| pal.scale_text_color(0));
+            (fill.clone(), text.clone(), pal.scale_inv_color(0).clone())
+        }
         Some(s) => (
             pal.scale_color(s + 1).clone(),
             pal.scale_text_color(s + 1).clone(),
+            pal.scale_inv_color(s + 1).clone(),
         ),
-    }
-}
-
-fn darken(c: &Color, by: f64) -> Color {
-    match crate::color::parse(c.css()) {
-        Some(rgb) if rgb.is_dark() => Color::new(rgb.lighten(by).to_hex()),
-        Some(rgb) => Color::new(rgb.lighten(-by).to_hex()),
-        None => c.clone(),
     }
 }
 
@@ -414,7 +417,7 @@ pub fn draw(mm: &Mindmap, placed: &[Placed], pal: &Palette) -> Scene {
             ];
             let depth = depth_of(mm, i);
             let width = (17.0 - 3.0 * (depth as f64 + 1.0)).max(2.0);
-            let (c, _) = section_colors(pal, p.section);
+            let (c, _, _) = section_colors(pal, p.section);
             edges.push(Element::classed_shape(
                 Geometry::Path(cmds),
                 Paint::stroke(&c, width),
@@ -424,10 +427,10 @@ pub fn draw(mm: &Mindmap, placed: &[Placed], pal: &Palette) -> Scene {
                 ),
             ));
         }
-        let (fill, text_color) = section_colors(pal, p.section);
+        let (fill, text_color, line) = section_colors(pal, p.section);
         let r = p.rect();
         bounds.add_rect(r.pad(4.0));
-        let mut els = shape_elements(nd.shape, r, &fill, pal);
+        let mut els = shape_elements(nd.shape, r, &fill, &line, pal);
         els.push(Element::text(Text::centered(
             r.center(),
             &p.lines,
@@ -478,9 +481,14 @@ fn depth_of(mm: &Mindmap, mut i: usize) -> usize {
     d
 }
 
-fn shape_elements(shape: NodeShape, r: Rect, fill: &Color, pal: &Palette) -> Vec<Element> {
+fn shape_elements(
+    shape: NodeShape,
+    r: Rect,
+    fill: &Color,
+    line: &Color,
+    pal: &Palette,
+) -> Vec<Element> {
     let c = r.center();
-    let line = darken(fill, 20.0);
     let paint = Paint::fill(fill);
     match shape {
         NodeShape::Default => {
@@ -511,7 +519,7 @@ fn shape_elements(shape: NodeShape, r: Rect, fill: &Color, pal: &Palette) -> Vec
                 Element::line(
                     Point::new(x0, y1),
                     Point::new(x1, y1),
-                    Paint::stroke(&line, 3.0),
+                    Paint::stroke(line, 3.0),
                 ),
             ]
         }
