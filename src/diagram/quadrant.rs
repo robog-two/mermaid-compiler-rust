@@ -1,15 +1,15 @@
 //! `quadrantChart` diagrams. Geometry follows mermaid's `quadrantBuilder.ts`
-//! defaults (500×500 chart, 16px axis/quadrant text, 12px point labels).
-//! The y-axis labels, rotated in mermaid, are drawn horizontally (wrapped)
-//! because scenes have no text rotation.
+//! defaults (500×500 chart, 16px axis/quadrant text, 12px point labels);
+//! the y-axis labels are rotated -90° in a `yAxisLabelPadding * 2 +
+//! yAxisLabelFontSize` side band, as in mermaid.
 
 use crate::color;
 use crate::config::MermaidConfig;
 use crate::diagram::xychart::{keyword, text_at, text_bounds, unquote};
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, Point, Rect};
-use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{TextBlock, line_width};
+use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene};
+use crate::text::line_width;
 use crate::theme::Palette;
 
 /// Optional per-point (or per-class) style.
@@ -333,7 +333,15 @@ pub fn render(
     Ok(draw(&chart, cfg, pal))
 }
 
-/// Lay out and draw a parsed chart.
+/// Alphabetic baseline offset for SVG `dominant-baseline: hanging` text
+/// (Blink places the hanging baseline at 0.8 × ascent; Arial ascent ≈ 0.905em).
+const HANGING: f64 = 0.72;
+/// Alphabetic baseline offset for `dominant-baseline: middle` text.
+const MIDDLE: f64 = 0.35;
+
+/// Lay out and draw a parsed chart, following `quadrantBuilder.ts` (space
+/// calculation, label anchors) and `quadrantRenderer.ts` (draw order; texts at
+/// `translate(x, y) rotate(r)` with `hanging`/`middle` baselines).
 pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let s = "quadrantChart";
     let width = cfg.section_f64(s, "chartWidth", 500.0).max(100.0);
@@ -362,67 +370,43 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
         == Some("bottom");
     let qc = colors(cfg, pal);
 
+    let nonempty = |t: &Option<String>| t.as_ref().is_some_and(|t| !t.is_empty());
     let has_points = !chart.points.is_empty();
     let x_bottom = has_points || x_bottom_cfg;
-    let has_x = chart.x_left.is_some() || chart.x_right.is_some();
-    let has_y = chart.y_bottom.is_some() || chart.y_top.is_some();
+    let show_x = nonempty(&chart.x_left) || nonempty(&chart.x_right);
+    let show_y = nonempty(&chart.y_bottom) || nonempty(&chart.y_top);
+    let title = chart.title.as_ref().filter(|t| !t.is_empty());
 
-    let mut els = Vec::new();
+    // `calculateSpace`.
+    let x_space = if show_x { x_pad * 2.0 + x_font } else { 0.0 };
+    let (x_top, x_bot) = if x_bottom {
+        (0.0, x_space)
+    } else {
+        (x_space, 0.0)
+    };
+    let y_space = if show_y { y_pad * 2.0 + y_font } else { 0.0 };
+    let (y_left, y_rgt) = if y_right {
+        (0.0, y_space)
+    } else {
+        (y_space, 0.0)
+    };
+    let title_top = if title.is_some() {
+        title_font + title_pad * 2.0
+    } else {
+        0.0
+    };
+    let quad = Rect::new(
+        qpad + y_left,
+        qpad + x_top + title_top,
+        (width - qpad * 2.0 - y_left - y_rgt).max(20.0),
+        (height - qpad * 2.0 - x_top - x_bot - title_top).max(20.0),
+    );
+    let (hw, hh) = (quad.w / 2.0, quad.h / 2.0);
+
     let mut bounds = Bounds::default();
     bounds.add_rect(Rect::new(0.0, 0.0, width, height));
 
-    // Vertical bands.
-    let mut top = qpad;
-    if let Some(t) = chart.title.as_ref().filter(|t| !t.is_empty()) {
-        let tb = TextBlock::new(vec![t.clone()], title_font, false);
-        let c = Point::new(width / 2.0, title_pad + tb.height / 2.0);
-        let txt = Text::centered(c, &tb.lines, title_font, tb.line_height, &qc.title);
-        bounds.add_rect(text_bounds(&txt));
-        els.push(Element::classed_text(txt, "quadrant-title"));
-        top = title_pad * 2.0 + tb.height;
-    }
-    let x_band = if has_x {
-        x_pad * 2.0 + x_font * 1.3
-    } else {
-        0.0
-    };
-    if !x_bottom {
-        top += x_band;
-    }
-    let bottom = height - qpad - if x_bottom { x_band } else { 0.0 };
-
-    // Horizontal y-axis labels, wrapped into the side band.
-    let y_max_w = (width * 0.22).max(60.0);
-    let y_lines: Vec<Vec<String>> = [&chart.y_bottom, &chart.y_top]
-        .iter()
-        .map(|l| {
-            l.as_ref()
-                .map_or_else(Vec::new, |t| wrap(t, y_font, y_max_w))
-        })
-        .collect();
-    let y_band_w = if has_y {
-        y_lines
-            .iter()
-            .flatten()
-            .map(|l| line_width(l, y_font, false))
-            .fold(0.0, f64::max)
-            + y_pad * 2.0
-    } else {
-        0.0
-    };
-    let (left, right) = if y_right {
-        (qpad, width - qpad - y_band_w)
-    } else {
-        (qpad + y_band_w, width - qpad)
-    };
-    let quad = Rect::new(
-        left,
-        top,
-        (right - left).max(20.0),
-        (bottom - top).max(20.0),
-    );
-    let (hw, hh) = (quad.w / 2.0, quad.h / 2.0);
-    // quadrant-1 top-right, 2 top-left, 3 bottom-left, 4 bottom-right.
+    // Quadrants: 1 top-right, 2 top-left, 3 bottom-left, 4 bottom-right.
     let qrects = [
         Rect::new(quad.x + hw, quad.y, hw, hh),
         Rect::new(quad.x, quad.y, hw, hh),
@@ -431,101 +415,48 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
     ];
     let mut quad_els = Vec::new();
     for (i, r) in qrects.iter().enumerate() {
-        quad_els.push(Element::rect(*r, 0.0, Paint::fill(&qc.fills[i])));
-    }
-    let mut text_els = Vec::new();
-    for (i, r) in qrects.iter().enumerate() {
-        let Some(t) = chart.quadrants[i].as_ref().filter(|t| !t.is_empty()) else {
-            continue;
-        };
-        let lines = wrap(t, q_font, r.w - 10.0);
-        let lh = q_font * 1.2;
-        let txt = if has_points {
-            text_at(
-                r.x + r.w / 2.0,
-                r.y + q_text_top + q_font,
-                &lines,
-                q_font,
-                Anchor::Middle,
-                &qc.texts[i],
-            )
-        } else {
-            let first = r.y + r.h / 2.0 - lh * (lines.len() as f64 - 1.0) / 2.0 + q_font * 0.35;
-            text_at(
+        let mut q = vec![Element::rect(*r, 0.0, Paint::fill(&qc.fills[i]))];
+        if let Some(t) = chart.quadrants[i].as_ref().filter(|t| !t.is_empty()) {
+            // mermaid never wraps; we only wrap texts wider than the quadrant.
+            let lines = wrap(t, q_font, r.w - 10.0);
+            let lh = q_font * 1.2;
+            let first = if has_points {
+                r.y + q_text_top + q_font * HANGING
+            } else {
+                r.y + r.h / 2.0 - lh * (lines.len() as f64 - 1.0) / 2.0 + q_font * MIDDLE
+            };
+            let txt = text_at(
                 r.x + r.w / 2.0,
                 first,
                 &lines,
                 q_font,
                 Anchor::Middle,
                 &qc.texts[i],
-            )
-        };
-        text_els.push(Element::classed_text(txt, "quadrant-text"));
-    }
-    // Borders: internal cross then the external frame.
-    let ip = Paint::stroke(&qc.internal, in_w);
-    quad_els.push(Element::line(
-        Point::new(quad.x + hw, quad.y),
-        Point::new(quad.x + hw, quad.bottom()),
-        ip.clone(),
-    ));
-    quad_els.push(Element::line(
-        Point::new(quad.x, quad.y + hh),
-        Point::new(quad.right(), quad.y + hh),
-        ip,
-    ));
-    quad_els.push(Element::rect(quad, 0.0, Paint::stroke(&qc.external, ex_w)));
-    els.push(Element::group("quadrants", quad_els));
-    els.push(Element::group("quadrant-texts", text_els));
-
-    // Axis labels.
-    let mut axis_els = Vec::new();
-    let x_base = if x_bottom {
-        quad.bottom() + x_pad + x_font * 0.95
-    } else {
-        quad.y - x_pad - x_font * 0.3
-    };
-    let x_slots: Vec<(f64, &String)> = match (&chart.x_left, &chart.x_right) {
-        (Some(l), Some(r)) => vec![(quad.x + hw / 2.0, l), (quad.x + hw * 1.5, r)],
-        (Some(l), None) => vec![(quad.x + hw / 2.0, l)],
-        (None, Some(r)) => vec![(quad.x + hw * 1.5, r)],
-        (None, None) => Vec::new(),
-    };
-    for (x, t) in x_slots {
-        let txt = text_at(
-            x,
-            x_base,
-            std::slice::from_ref(t),
-            x_font,
-            Anchor::Middle,
-            &qc.x_text,
-        );
-        bounds.add_rect(text_bounds(&txt));
-        axis_els.push(Element::classed_text(txt, "x-axis-label"));
-    }
-    let y_x = if y_right {
-        quad.right() + y_pad + (y_band_w - 2.0 * y_pad) / 2.0
-    } else {
-        quad.x - y_band_w / 2.0
-    };
-    for (k, lines) in y_lines.iter().enumerate() {
-        if lines.is_empty() {
-            continue;
+            );
+            q.push(Element::classed_text(txt, "quadrant-text"));
         }
-        let cy = if k == 0 {
-            quad.y + hh * 1.5
-        } else {
-            quad.y + hh * 0.5
-        };
-        let lh = y_font * 1.2;
-        let first = cy - lh * (lines.len() as f64 - 1.0) / 2.0 + y_font * 0.35;
-        let txt = text_at(y_x, first, lines, y_font, Anchor::Middle, &qc.y_text);
-        bounds.add_rect(text_bounds(&txt));
-        axis_els.push(Element::classed_text(txt, "y-axis-label"));
+        quad_els.push(Element::group("quadrant", q));
     }
-    els.push(Element::group("axis-labels", axis_els));
 
-    // Points.
+    // `getBorders`: external frame then the internal cross.
+    let he = ex_w / 2.0;
+    let ext = Paint::stroke(&qc.external, ex_w);
+    let int = Paint::stroke(&qc.internal, in_w);
+    let (l, t, r, b) = (quad.x, quad.y, quad.right(), quad.bottom());
+    let border_els = vec![
+        Element::line(Point::new(l - he, t), Point::new(r + he, t), ext.clone()),
+        Element::line(Point::new(r, t + he), Point::new(r, b - he), ext.clone()),
+        Element::line(Point::new(l - he, b), Point::new(r + he, b), ext.clone()),
+        Element::line(Point::new(l, t + he), Point::new(l, b - he), ext),
+        Element::line(
+            Point::new(l + hw, t + he),
+            Point::new(l + hw, b - he),
+            int.clone(),
+        ),
+        Element::line(Point::new(l + he, t + hh), Point::new(r - he, t + hh), int),
+    ];
+
+    // Points (labels sit `pointTextPadding` below the centre, hanging).
     let mut pt_els = Vec::new();
     for p in &chart.points {
         let class_style = p
@@ -535,7 +466,7 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
             .map(|(_, s)| s.clone())
             .unwrap_or_default();
         let st = p.style.over(&class_style);
-        let r = st.radius.unwrap_or(pt_radius);
+        let rad = st.radius.unwrap_or(pt_radius);
         let fill = st
             .color
             .as_deref()
@@ -544,31 +475,119 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
         let stroke = st
             .stroke_color
             .as_deref()
-            .map_or_else(|| fill.clone(), Color::new);
+            .map_or_else(|| qc.point.clone(), Color::new);
         let c = Point::new(quad.x + p.x * quad.w, quad.bottom() - p.y * quad.h);
         let paint = if sw > 0.0 {
             Paint::both(&fill, &stroke, sw)
         } else {
             Paint::fill(&fill)
         };
-        bounds.add_rect(Rect::centered(c, 2.0 * r + sw, 2.0 * r + sw));
-        pt_els.push(Element::classed_shape(
-            Geometry::Circle { c, r },
-            paint,
-            "quadrant-point",
-        ));
+        bounds.add_rect(Rect::centered(c, 2.0 * rad + sw, 2.0 * rad + sw));
         let txt = text_at(
             c.x,
-            c.y + r + pt_pad + pt_font * 0.85,
+            c.y + pt_pad + pt_font * HANGING,
             std::slice::from_ref(&p.name),
             pt_font,
             Anchor::Middle,
             &qc.point_text,
         );
         bounds.add_rect(text_bounds(&txt));
-        pt_els.push(Element::classed_text(txt, "quadrant-point-label"));
+        pt_els.push(Element::group(
+            "data-point",
+            vec![
+                Element::classed_shape(Geometry::Circle { c, r: rad }, paint, "quadrant-point"),
+                Element::classed_text(txt, "quadrant-point-label"),
+            ],
+        ));
     }
-    els.push(Element::group("data-points", pt_els));
+
+    // `getAxisLabels`.
+    let mut label_els = Vec::new();
+    if show_x {
+        let mid = nonempty(&chart.x_right);
+        let anchor = if mid { Anchor::Middle } else { Anchor::Start };
+        let y = if x_bottom {
+            x_pad + quad.bottom() + qpad
+        } else {
+            x_pad + title_top
+        };
+        let off = if mid { hw / 2.0 } else { 0.0 };
+        for (x, label) in [
+            (quad.x + off, &chart.x_left),
+            (quad.x + hw + off, &chart.x_right),
+        ] {
+            let Some(label) = label.as_ref().filter(|t| !t.is_empty()) else {
+                continue;
+            };
+            let txt = text_at(
+                x,
+                y + x_font * HANGING,
+                std::slice::from_ref(label),
+                x_font,
+                anchor,
+                &qc.x_text,
+            );
+            bounds.add_rect(text_bounds(&txt));
+            label_els.push(Element::classed_text(txt, "x-axis-label"));
+        }
+    }
+    if show_y {
+        let mid = nonempty(&chart.y_top);
+        let anchor = if mid { Anchor::Middle } else { Anchor::Start };
+        let x = if y_right {
+            y_pad + quad.right() + qpad
+        } else {
+            y_pad
+        };
+        let off = if mid { hh / 2.0 } else { 0.0 };
+        for (y, label) in [
+            (quad.bottom() - off, &chart.y_bottom),
+            (quad.y + hh - off, &chart.y_top),
+        ] {
+            let Some(label) = label.as_ref().filter(|t| !t.is_empty()) else {
+                continue;
+            };
+            // `translate(x, y) rotate(-90)`: the text runs upwards from (x, y)
+            // and its hanging top edge faces left.
+            let about = Point::new(x, y);
+            let txt = text_at(
+                x,
+                y + y_font * HANGING,
+                std::slice::from_ref(label),
+                y_font,
+                anchor,
+                &qc.y_text,
+            );
+            bounds.add_rotated_rect(text_bounds(&txt), about, -90.0);
+            label_els.push(Element::Rotated {
+                deg: -90.0,
+                about,
+                children: vec![Element::classed_text(txt, "y-axis-label")],
+            });
+        }
+    }
+
+    let mut els = vec![
+        Element::group("quadrants", quad_els),
+        Element::group("border", border_els),
+        Element::group("data-points", pt_els),
+        Element::group("labels", label_els),
+    ];
+    if let Some(t) = title {
+        let txt = text_at(
+            width / 2.0,
+            title_pad + title_font * HANGING,
+            std::slice::from_ref(t),
+            title_font,
+            Anchor::Middle,
+            &qc.title,
+        );
+        bounds.add_rect(text_bounds(&txt));
+        els.push(Element::group(
+            "title",
+            vec![Element::classed_text(txt, "quadrant-title")],
+        ));
+    }
 
     Scene {
         kind: DiagramKind::Quadrant,
@@ -651,5 +670,73 @@ mod tests {
         let scene = render(SRC, None, &cfg, &pal).unwrap();
         assert_eq!(scene.kind, DiagramKind::Quadrant);
         assert!(scene.view_box.w >= 500.0);
+    }
+
+    use crate::scene::Text;
+
+    /// All `Rotated` elements (deg, about, first child text) in the tree.
+    fn rotated(els: &[Element]) -> Vec<(f64, Point, Text)> {
+        let mut out = Vec::new();
+        for e in els {
+            match e {
+                Element::Group { children, .. } => out.extend(rotated(children)),
+                Element::Rotated {
+                    deg,
+                    about,
+                    children,
+                } => {
+                    if let Some(Element::Text { text, .. }) = children.first() {
+                        out.push((*deg, *about, text.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn y_axis_labels_are_rotated_like_mermaid() {
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let scene = render(SRC, None, &cfg, &pal).unwrap();
+        let rot = rotated(&scene.elements);
+        assert_eq!(rot.len(), 2, "{rot:?}");
+        // Title space 40, x-axis at the bottom (points exist) → quadrant top 45,
+        // height 500 - 10 - 26 - 40 = 424; y band = 5·2 + 16 → quadrant left 31.
+        let (top, h) = (45.0, 424.0);
+        let (deg, about, t) = &rot[0];
+        assert_eq!(*deg, -90.0);
+        assert_eq!(t.lines, vec!["Low Engagement".to_string()]);
+        assert_eq!(t.anchor, Anchor::Middle);
+        assert!((about.x - 5.0).abs() < 1e-9);
+        assert!((about.y - (top + h - h / 4.0)).abs() < 1e-9);
+        assert_eq!(rot[1].2.lines, vec!["High Engagement".to_string()]);
+        assert!((rot[1].1.y - (top + h / 4.0)).abs() < 1e-9);
+        // Without a top label the bottom one starts at the quadrant's bottom.
+        let c = parse("quadrantChart\ny-axis Only", None).unwrap();
+        let scene = draw(&c, &cfg, &pal);
+        let rot = rotated(&scene.elements);
+        assert_eq!(rot.len(), 1);
+        assert_eq!(rot[0].2.anchor, Anchor::Start);
+        assert!((rot[0].1.y - 495.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn right_y_axis_band() {
+        let cfg = MermaidConfig::default()
+            .with_directive(
+                &crate::json::parse(r#"{"quadrantChart":{"yAxisPosition":"right"}}"#).unwrap(),
+            )
+            .unwrap();
+        let pal = cfg.palette();
+        let scene = render(SRC, None, &cfg, &pal).unwrap();
+        let rot = rotated(&scene.elements);
+        // Quadrant spans 5..469 (500 - 10 - 26); labels at 5 + 469 + 5.
+        assert_eq!(rot.len(), 2);
+        assert!(
+            rot.iter().all(|(_, a, _)| (a.x - 479.0).abs() < 1e-9),
+            "{rot:?}"
+        );
     }
 }

@@ -6,16 +6,19 @@
 //! `cherry-pick id: "x"` (`parent:`, `tag:`), and the orientation header
 //! `gitGraph LR:` / `TB:` / `BT:`.
 //! Config (`gitGraph` section): `showBranches`, `showCommitLabel`,
-//! `mainBranchName`, `mainBranchOrder`, `parallelCommits`.
+//! `mainBranchName`, `mainBranchOrder`, `parallelCommits`, `rotateCommitLabel`.
 //!
 //! **Commit ids.** mermaid gives commits without an `id:` a random id
 //! `<seq>-<7 random hex>`. To keep rendering pure and reproducible we use
 //! `<seq>-<7 hex digits of FNV-1a(seq, branch, message)>` instead: same shape,
 //! stable across runs.
 //!
-//! Commit labels are drawn horizontally (this renderer has no text rotation,
-//! so mermaid's default `rotateCommitLabel` is not applied); the commit step
-//! grows when labels are wider than mermaid's 50px spacing so they never overlap.
+//! Commit labels follow `gitGraphRenderer.ts`: with `rotateCommitLabel` (the
+//! default) they and their backgrounds are turned -45°, and every lane gets
+//! 40px extra room; TB/BT tags are always turned +45°. With
+//! `rotateCommitLabel: false` the LR commit step grows when labels/tags are
+//! wider than mermaid's 50px spacing so horizontal labels never overlap
+//! (mermaid lets them overlap).
 
 use crate::color::{self, Rgba};
 use crate::config::MermaidConfig;
@@ -458,6 +461,8 @@ pub struct GitConfig {
     pub show_branches: bool,
     pub show_commit_label: bool,
     pub parallel_commits: bool,
+    /// `rotateCommitLabel`: commit labels turned -45° (mermaid default).
+    pub rotate_commit_label: bool,
     pub title_top_margin: f64,
     pub diagram_padding: f64,
 }
@@ -468,6 +473,7 @@ impl GitConfig {
             show_branches: cfg.section_bool("gitGraph", "showBranches", true),
             show_commit_label: cfg.section_bool("gitGraph", "showCommitLabel", true),
             parallel_commits: cfg.section_bool("gitGraph", "parallelCommits", false),
+            rotate_commit_label: cfg.section_bool("gitGraph", "rotateCommitLabel", true),
             title_top_margin: cfg.section_f64("gitGraph", "titleTopMargin", 25.0),
             diagram_padding: cfg.section_f64("gitGraph", "diagramPadding", 8.0),
         }
@@ -480,6 +486,7 @@ impl Default for GitConfig {
             show_branches: true,
             show_commit_label: true,
             parallel_commits: false,
+            rotate_commit_label: true,
             title_top_margin: 25.0,
             diagram_padding: 8.0,
         }
@@ -515,27 +522,19 @@ pub fn layout(g: &GitGraph, gc: &GitConfig) -> Layout {
     let order = g.lane_order();
     let mut lane = vec![0.0; g.branches.len()];
     let mut lane_index = vec![0; g.branches.len()];
-    let max_tags = g.commits.iter().map(|c| c.tags.len()).max().unwrap_or(0) as f64;
     let mut p = 0.0;
     for (idx, &b) in order.iter().enumerate() {
         lane[b] = p;
         lane_index[b] = idx;
-        let label_w = line_width(&g.branches[b].name, BRANCH_FONT, false);
-        p += if vertical {
-            // Labels sit left of commits, tags to the right.
-            let lw = g
-                .commits
-                .iter()
-                .filter(|c| c.branch == b && shown_label(c, gc))
-                .map(|c| line_width(&c.id, LABEL_FONT, false) + 26.0)
-                .fold(0.0, f64::max);
-            (50.0 + label_w / 2.0).max(lw + 40.0)
-        } else {
-            50.0 + if gc.show_commit_label { 15.0 } else { 0.0 } + 20.0 * max_tags
-        };
+        // mermaid's `setBranchPosition`.
+        p += 50.0 + if gc.rotate_commit_label { 40.0 } else { 0.0 };
+        if vertical {
+            p += line_width(&g.branches[b].name, BRANCH_FONT, false) / 2.0;
+        }
     }
-    // Commit step: mermaid uses 50; widen if horizontal labels/tags would collide.
-    let step = if vertical {
+    // Commit step: mermaid uses 50; with horizontal LR labels widen it so
+    // labels/tags never collide.
+    let step = if vertical || gc.rotate_commit_label {
         50.0
     } else {
         let widest = g
@@ -574,7 +573,9 @@ pub fn layout(g: &GitGraph, gc: &GitConfig) -> Layout {
     }
     if g.orientation == Orientation::BT {
         for p in &mut pos {
-            *p = max_pos + start - *p;
+            // mermaid walks the commits newest-first from `defaultPos`, so
+            // the newest sits at start + 10 and the branch labels at max_pos.
+            *p = max_pos - *p;
         }
     }
     Layout {
@@ -582,6 +583,50 @@ pub fn layout(g: &GitGraph, gc: &GitConfig) -> Layout {
         lane_index,
         pos,
         max_pos,
+    }
+}
+
+/// mermaid's `LAYOUT_OFFSET`: a commit sits this far past its slot start.
+const LAYOUT_OFFSET: f64 = 10.0;
+
+/// Commit label background, text (anchor start; fill set by the caller) and
+/// optional rotation `(about, deg)` for a commit at `p`, after mermaid's
+/// `drawCommitLabel` (PX = 4, PY = 2).
+fn commit_label_geometry(
+    o: Orientation,
+    p: Point,
+    id: &str,
+    rotate: bool,
+) -> (Rect, Text, Option<(Point, f64)>) {
+    let w = line_width(id, LABEL_FONT, false);
+    let h = LABEL_FONT * 1.2;
+    let text = |x: f64, y: f64| Text {
+        x,
+        y,
+        lines: vec![id.to_string()],
+        line_height: h,
+        font_size: LABEL_FONT,
+        bold: false,
+        anchor: Anchor::Start,
+        fill: Color::new("#000"),
+    };
+    if o == Orientation::LR {
+        // The whole label group is `translate(r_x, r_y) rotate(-45, pos, y)`
+        // with pos = along - LAYOUT_OFFSET; translate-then-rotate equals
+        // rotating the shifted label about the shifted centre.
+        let (dx, dy) = if rotate {
+            (-7.5 - (w + 10.0) / 25.0 * 9.5, 10.0 + w / 25.0 * 8.5)
+        } else {
+            (0.0, 0.0)
+        };
+        let rect = Rect::new(p.x - w / 2.0 - 2.0 + dx, p.y + 13.5 + dy, w + 4.0, h + 4.0);
+        let t = text(p.x - w / 2.0 + dx, p.y + 25.0 + dy);
+        let rot = rotate.then(|| (Point::new(p.x - LAYOUT_OFFSET + dx, p.y + dy), -45.0));
+        (rect, t, rot)
+    } else {
+        let rect = Rect::new(p.x - (w + 16.0 + 5.0), p.y - 12.0, w + 4.0, h + 4.0);
+        let t = text(p.x - (w + 16.0), p.y + h - 12.0);
+        (rect, t, rotate.then_some((p, -45.0)))
     }
 }
 
@@ -687,10 +732,15 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             ));
             let tb = TextBlock::new(vec![br.name.clone()], BRANCH_FONT, false);
             let (w, h) = (tb.width + 18.0, tb.height + 4.0);
+            // mermaid's `drawBranches`: LR labels move 30px further left when
+            // commit labels are rotated (they lean towards the branch label).
+            let rot_shift = if gc.rotate_commit_label { 30.0 } else { 0.0 };
             let rect = match o {
-                Orientation::LR => Rect::new(-w - 5.0 - 14.0, across - h / 2.0, w, h),
-                Orientation::TB => Rect::new(across - w / 2.0, lo - h - 10.0, w, h),
-                Orientation::BT => Rect::new(across - w / 2.0, hi + 10.0, w, h),
+                Orientation::LR => {
+                    Rect::new(-tb.width - 4.0 - rot_shift - 19.0, across - h / 2.0, w, h)
+                }
+                Orientation::TB => Rect::new(across - tb.width / 2.0 - 10.0, 0.0, w, h),
+                Orientation::BT => Rect::new(across - tb.width / 2.0 - 10.0, hi, w, h),
             };
             bounds.add_rect(rect);
             let fill = color_of(b);
@@ -845,34 +895,34 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             }
         }
         if shown_label(c, gc) {
-            let w = line_width(&c.id, LABEL_FONT, false);
-            let h = LABEL_FONT * 1.2;
-            let rect = if vertical {
-                Rect::new(
-                    p.x - w - 4.0 * 4.0 - 7.0,
-                    p.y - h / 2.0 - 2.0,
-                    w + 4.0,
-                    h + 4.0,
-                )
-            } else {
-                Rect::new(p.x - w / 2.0 - 2.0, p.y + 13.5, w + 4.0, h + 4.0)
-            };
-            bounds.add_rect(rect);
-            label_els.push(Element::classed_shape(
+            let (rect, text, rotation) = commit_label_geometry(o, p, &c.id, gc.rotate_commit_label);
+            let bkg = Element::classed_shape(
                 Geometry::Rect { rect, rx: 0.0 },
                 Paint::fill(&primary).with_opacity(0.5),
                 "commit-label-bkg",
-            ));
-            label_els.push(Element::classed_text(
-                Text::centered(
-                    rect.center(),
-                    std::slice::from_ref(&c.id),
-                    LABEL_FONT,
-                    h,
-                    &pal.text_color,
-                ),
+            );
+            let txt = Element::classed_text(
+                Text {
+                    fill: pal.text_color.clone(),
+                    ..text
+                },
                 "commit-label",
-            ));
+            );
+            match rotation {
+                Some((about, deg)) => {
+                    bounds.add_rotated_rect(rect, about, deg);
+                    label_els.push(Element::Rotated {
+                        deg,
+                        about,
+                        children: vec![bkg, txt],
+                    });
+                }
+                None => {
+                    bounds.add_rect(rect);
+                    label_els.push(bkg);
+                    label_els.push(txt);
+                }
+            }
         }
         // Tags: newest first, stacked away from the commit.
         let tag_w = c
@@ -882,23 +932,66 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             .fold(0.0, f64::max);
         for (k, t) in c.tags.iter().rev().enumerate() {
             let h2 = TAG_FONT * 1.2 / 2.0;
-            let (poly, hole, center) = if vertical {
-                let y = p.y + k as f64 * 20.0;
-                let x0 = p.x + 14.0;
-                let poly = vec![
-                    Point::new(x0, y - 2.0),
-                    Point::new(x0 + 8.0, y - h2 - 2.0),
-                    Point::new(x0 + 8.0 + tag_w + 8.0, y - h2 - 2.0),
-                    Point::new(x0 + 8.0 + tag_w + 8.0, y + h2 + 2.0),
-                    Point::new(x0 + 8.0, y + h2 + 2.0),
-                    Point::new(x0, y + 2.0),
-                ];
-                (
-                    poly,
-                    Point::new(x0 + 4.0, y),
-                    Point::new(x0 + 12.0 + tag_w / 2.0, y),
-                )
-            } else {
+            if vertical {
+                // mermaid's `drawCommitTags` (TB/BT): the tag is laid out to the
+                // right of the commit, then turned +45° about (x, pos) where
+                // pos = along - LAYOUT_OFFSET, after a (12,12) / (14,14) shift.
+                let pos = p.y - LAYOUT_OFFSET;
+                let y = pos + k as f64 * 20.0;
+                let poly: Vec<Point> = [
+                    (p.x, y + 2.0),
+                    (p.x, y - 2.0),
+                    (p.x + LAYOUT_OFFSET, y - h2 - 2.0),
+                    (p.x + LAYOUT_OFFSET + tag_w + 4.0, y - h2 - 2.0),
+                    (p.x + LAYOUT_OFFSET + tag_w + 4.0, y + h2 + 2.0),
+                    (p.x + LAYOUT_OFFSET, y + h2 + 2.0),
+                ]
+                .iter()
+                .map(|&(x, y)| Point::new(x + 12.0, y + 12.0))
+                .collect();
+                let about = Point::new(p.x + 12.0, pos + 12.0);
+                for q in &poly {
+                    bounds.add_point(q.rotated(about, 45.0));
+                }
+                label_els.push(Element::Rotated {
+                    deg: 45.0,
+                    about,
+                    children: vec![
+                        Element::classed_shape(
+                            Geometry::Path(geom::polygon(&poly)),
+                            Paint::both(&pal.label_box_bkg, &pal.label_box_border, 1.0),
+                            "tag-label-bkg",
+                        ),
+                        Element::classed_shape(
+                            Geometry::Circle {
+                                c: Point::new(p.x + 2.0 + 12.0, y + 12.0),
+                                r: 1.5,
+                            },
+                            Paint::fill(&pal.text_color),
+                            "tag-hole",
+                        ),
+                    ],
+                });
+                label_els.push(Element::Rotated {
+                    deg: 45.0,
+                    about: Point::new(p.x + 14.0, pos + 14.0),
+                    children: vec![Element::classed_text(
+                        Text {
+                            x: p.x + 5.0 + 14.0,
+                            y: y + 3.0 + 14.0,
+                            lines: vec![t.clone()],
+                            line_height: TAG_FONT * 1.2,
+                            font_size: TAG_FONT,
+                            bold: false,
+                            anchor: Anchor::Start,
+                            fill: pal.label_text.clone(),
+                        },
+                        "tag-label",
+                    )],
+                });
+                continue;
+            }
+            let (poly, hole, center) = {
                 let ly = p.y - 19.2 - k as f64 * 20.0;
                 let left = p.x - tag_w / 2.0 - 4.0;
                 let poly = vec![
@@ -1084,5 +1177,93 @@ mod tests {
             &crate::theme::palette(crate::theme::ThemeName::Default, &[]),
         );
         assert!(s.element_count() > 20);
+    }
+
+    /// `(deg, about, child count)` of every `Rotated` element.
+    fn rotations(els: &[Element]) -> Vec<(f64, Point, usize)> {
+        let mut out = Vec::new();
+        for e in els {
+            match e {
+                Element::Group { children, .. } => out.extend(rotations(children)),
+                Element::Rotated {
+                    deg,
+                    about,
+                    children,
+                } => out.push((*deg, *about, children.len())),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn scene_for(src: &str, gc: &GitConfig) -> Scene {
+        let g = parse(src, None, &ParseOptions::default()).unwrap();
+        let l = layout(&g, gc);
+        draw(
+            &g,
+            &l,
+            gc,
+            &crate::theme::palette(crate::theme::ThemeName::Default, &[]),
+        )
+    }
+
+    #[test]
+    fn commit_labels_rotate_by_default() {
+        let src = "gitGraph\n  commit id: \"abc\"\n  commit id: \"defgh\"";
+        let s = scene_for(src, &GitConfig::default());
+        let rot = rotations(&s.elements);
+        assert_eq!(rot.len(), 2);
+        // Background and text turn together by -45°.
+        assert!(rot.iter().all(|(d, _, n)| *d == -45.0 && *n == 2));
+        // LR: about (pos, y) shifted by mermaid's (r_x, r_y).
+        let w = line_width("abc", LABEL_FONT, false);
+        let (dx, dy) = (-7.5 - (w + 10.0) / 25.0 * 9.5, 10.0 + w / 25.0 * 8.5);
+        assert!((rot[0].1.x - (0.0 + dx)).abs() < 1e-9, "{rot:?}");
+        assert!((rot[0].1.y - dy).abs() < 1e-9);
+        // Lanes get mermaid's 40px of extra room.
+        let g = parse(
+            "gitGraph\ncommit\nbranch b\ncommit",
+            None,
+            &ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(layout(&g, &GitConfig::default()).lane, vec![0.0, 90.0]);
+    }
+
+    #[test]
+    fn no_rotation_when_disabled() {
+        let gc = GitConfig {
+            rotate_commit_label: false,
+            ..GitConfig::default()
+        };
+        let s = scene_for("gitGraph\n  commit id: \"abc\"", &gc);
+        assert!(rotations(&s.elements).is_empty());
+        let g = parse(
+            "gitGraph\ncommit\nbranch b\ncommit",
+            None,
+            &ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(layout(&g, &gc).lane, vec![0.0, 50.0]);
+    }
+
+    #[test]
+    fn vertical_labels_and_tags_rotate() {
+        let src = "gitGraph TB:\n  commit id: \"abc\" tag: \"v1\"";
+        let s = scene_for(src, &GitConfig::default());
+        let rot = rotations(&s.elements);
+        // Label about the commit centre (-45°), tag shape and tag text (+45°).
+        let p = Point::new(0.0, 40.0);
+        assert!(rot.contains(&(-45.0, p, 2)), "{rot:?}");
+        assert!(rot.contains(&(45.0, Point::new(12.0, 42.0), 2)));
+        assert!(rot.contains(&(45.0, Point::new(14.0, 44.0), 1)));
+        // BT puts the newest commit first, at defaultPos + LAYOUT_OFFSET.
+        let g = parse(
+            "gitGraph BT:\ncommit\ncommit",
+            None,
+            &ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(layout(&g, &GitConfig::default()).pos, vec![90.0, 40.0]);
     }
 }
