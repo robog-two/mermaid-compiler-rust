@@ -1,85 +1,25 @@
 //! `xychart-beta` / `xychart` diagrams: bar and line series over a categorical
 //! or numeric x-axis, vertical or horizontal.
 //!
+//! The layout is a port of mermaid's `chartBuilder` (fixed `width × height`
+//! canvas, value axis from d3 ticks, legend right of the plot).
+//!
 //! Also hosts small chart helpers shared by the other chart modules
-//! (quadrant, radar, sankey): "nice" tick computation, number formatting,
+//! (quadrant, radar, sankey): number formatting,
 //! quote-aware list splitting and a Taffy-based legend layout.
 
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
-use crate::geom::{self, Bounds, Point, Rect};
+use crate::geom::{self, Point, Rect};
+use crate::json::Json;
 use crate::layout::boxes::{self, BoxNode};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
-use crate::text::{TextBlock, line_width, normalize_label};
+use crate::text::{line_width, normalize_label};
 use crate::theme::{Palette, ThemeName};
 
 // ---------------------------------------------------------------------------
 // Shared chart helpers
 // ---------------------------------------------------------------------------
-
-/// A "nice" step (1, 2 or 5 × 10ⁿ) close to `span / count`.
-pub(crate) fn nice_step(span: f64, count: usize) -> f64 {
-    let span = span.abs();
-    if !span.is_finite() || span <= 0.0 {
-        return 1.0;
-    }
-    let raw = span / count.max(1) as f64;
-    let mag = 10f64.powf(raw.log10().floor());
-    let frac = raw / mag;
-    let nice = if frac <= 1.0 {
-        1.0
-    } else if frac <= 2.0 {
-        2.0
-    } else if frac <= 5.0 {
-        5.0
-    } else {
-        10.0
-    };
-    nice * mag
-}
-
-/// Tick values that are multiples of `step` within `[lo, hi]` (inclusive, with tolerance).
-pub(crate) fn ticks_in(lo: f64, hi: f64, step: f64) -> Vec<f64> {
-    if step.is_nan() || step <= 0.0 || !lo.is_finite() || !hi.is_finite() || hi < lo {
-        return Vec::new();
-    }
-    let eps = step * 1e-9;
-    let first = (lo / step - 1e-9).ceil();
-    let mut out = Vec::new();
-    let mut k = first;
-    while k * step <= hi + eps && out.len() < 1000 {
-        let v = k * step;
-        // Snap away floating noise (0.30000000000000004 → 0.3).
-        out.push(round_to_step(v, step));
-        k += 1.0;
-    }
-    out
-}
-
-fn round_to_step(v: f64, step: f64) -> f64 {
-    let decimals = (-step.log10().floor()).max(0.0) as i32 + 1;
-    let p = 10f64.powi(decimals.min(12));
-    let r = (v * p).round() / p;
-    if r == 0.0 { 0.0 } else { r }
-}
-
-/// Expand `[lo, hi]` outward to multiples of a nice step; returns `(lo, hi, step)`.
-pub(crate) fn nice_range(lo: f64, hi: f64, count: usize) -> (f64, f64, f64) {
-    let (mut lo, mut hi) = (lo.min(hi), lo.max(hi));
-    if (hi - lo).abs() < 1e-12 {
-        let d = if lo.abs() < 1e-12 {
-            1.0
-        } else {
-            lo.abs() * 0.1
-        };
-        lo -= d;
-        hi += d;
-    }
-    let step = nice_step(hi - lo, count);
-    let nlo = round_to_step((lo / step + 1e-9).floor() * step, step);
-    let nhi = round_to_step((hi / step - 1e-9).ceil() * step, step);
-    (nlo, nhi, step)
-}
 
 /// Format a number like JavaScript's `String(n)` for typical chart values
 /// (no exponent, no trailing zeros, no floating noise).
@@ -512,10 +452,77 @@ pub fn parse(body: &str, title: Option<String>) -> Result<XyChart> {
 }
 
 // ---------------------------------------------------------------------------
-// Renderer
+// Renderer: a port of mermaid's `xychart/chartBuilder` (orchestrator, axes,
+// plots, title, legend) and `xychartRenderer` (data labels).
 // ---------------------------------------------------------------------------
 
-/// Settings read from the `xyChart` config section.
+/// One axis' settings (`xyChart.xAxis` / `xyChart.yAxis`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AxisConfig {
+    pub show_label: bool,
+    pub label_font: f64,
+    pub label_padding: f64,
+    pub show_title: bool,
+    pub title_font: f64,
+    pub title_padding: f64,
+    pub show_tick: bool,
+    pub tick_length: f64,
+    pub tick_width: f64,
+    pub show_axis_line: bool,
+    pub axis_line_width: f64,
+    /// `labelRotation` in degrees; 0 when outside -90..=90 (mermaid's
+    /// `normalizedLabelRotationInRad`). Only an axis drawn at the bottom uses it.
+    pub label_rotation: f64,
+}
+
+impl Default for AxisConfig {
+    fn default() -> Self {
+        AxisConfig {
+            show_label: true,
+            label_font: 14.0,
+            label_padding: 5.0,
+            show_title: true,
+            title_font: 16.0,
+            title_padding: 5.0,
+            show_tick: true,
+            tick_length: 5.0,
+            tick_width: 2.0,
+            show_axis_line: true,
+            axis_line_width: 2.0,
+            label_rotation: 0.0,
+        }
+    }
+}
+
+impl AxisConfig {
+    fn from_config(cfg: &MermaidConfig, axis: &str) -> Self {
+        let d = AxisConfig::default();
+        let get = |k: &str| cfg.section_nested("xyChart", axis, k);
+        let f = |k: &str, v: f64| get(k).and_then(Json::as_f64).unwrap_or(v);
+        let b = |k: &str, v: bool| get(k).and_then(Json::as_bool).unwrap_or(v);
+        let rot = f("labelRotation", 0.0);
+        AxisConfig {
+            show_label: b("showLabel", d.show_label),
+            label_font: f("labelFontSize", d.label_font),
+            label_padding: f("labelPadding", d.label_padding),
+            show_title: b("showTitle", d.show_title),
+            title_font: f("titleFontSize", d.title_font),
+            title_padding: f("titlePadding", d.title_padding),
+            show_tick: b("showTick", d.show_tick),
+            tick_length: f("tickLength", d.tick_length),
+            tick_width: f("tickWidth", d.tick_width),
+            show_axis_line: b("showAxisLine", d.show_axis_line),
+            axis_line_width: f("axisLineWidth", d.axis_line_width),
+            label_rotation: if (-90.0..=90.0).contains(&rot) {
+                rot
+            } else {
+                0.0
+            },
+        }
+    }
+}
+
+/// Settings read from the `xyChart` config section (defaults from mermaid's schema).
 #[derive(Debug, Clone, PartialEq)]
 pub struct XyConfig {
     pub width: f64,
@@ -525,168 +532,1415 @@ pub struct XyConfig {
     pub show_title: bool,
     pub show_legend: bool,
     pub legend_font: f64,
-    pub label_font: f64,
-    pub axis_title_font: f64,
-    pub tick_length: f64,
+    pub legend_padding: f64,
     pub show_data_label: bool,
     pub data_label_outside: bool,
     pub horizontal_cfg: bool,
-    /// Axis `titlePadding` (space around the axis titles).
-    pub axis_title_padding: f64,
-    /// `xAxis.labelRotation` in degrees (0 outside -90..=90, like mermaid's
-    /// `normalizedLabelRotationInRad`). mermaid only rotates the labels of an
-    /// axis drawn at the bottom, i.e. the x-axis of a vertical chart.
-    pub x_label_rotation: f64,
+    pub plot_reserved_percent: f64,
+    pub x_axis: AxisConfig,
+    pub y_axis: AxisConfig,
+}
+
+impl Default for XyConfig {
+    fn default() -> Self {
+        XyConfig {
+            width: 700.0,
+            height: 500.0,
+            title_font: 20.0,
+            title_padding: 10.0,
+            show_title: true,
+            show_legend: true,
+            legend_font: 14.0,
+            legend_padding: 10.0,
+            show_data_label: false,
+            data_label_outside: false,
+            horizontal_cfg: false,
+            plot_reserved_percent: 50.0,
+            x_axis: AxisConfig::default(),
+            y_axis: AxisConfig::default(),
+        }
+    }
 }
 
 impl XyConfig {
     pub fn from_config(cfg: &MermaidConfig) -> Self {
         let s = "xyChart";
-        let axis_of = |axis: &str, key: &str, d: f64| {
-            cfg.section(s, axis)
-                .and_then(|a| a.get(key))
-                .and_then(crate::json::Json::as_f64)
-                .unwrap_or(d)
-        };
-        let axis_f64 = |key: &str, d: f64| axis_of("xAxis", key, d);
-        let rotation = |axis: &str| {
-            let r = axis_of(axis, "labelRotation", 0.0);
-            if (-90.0..=90.0).contains(&r) { r } else { 0.0 }
-        };
+        let d = XyConfig::default();
         XyConfig {
-            width: cfg.section_f64(s, "width", 700.0),
-            height: cfg.section_f64(s, "height", 500.0),
-            title_font: cfg.section_f64(s, "titleFontSize", 20.0),
-            title_padding: cfg.section_f64(s, "titlePadding", 10.0),
-            show_title: cfg.section_bool(s, "showTitle", true),
-            show_legend: cfg.section_bool(s, "showLegend", true),
-            legend_font: cfg.section_f64(s, "legendFontSize", 14.0),
-            label_font: axis_f64("labelFontSize", 14.0),
-            axis_title_font: axis_f64("titleFontSize", 16.0),
-            tick_length: axis_f64("tickLength", 5.0),
-            show_data_label: cfg.section_bool(s, "showDataLabel", false),
+            width: cfg.section_f64(s, "width", d.width),
+            height: cfg.section_f64(s, "height", d.height),
+            title_font: cfg.section_f64(s, "titleFontSize", d.title_font),
+            title_padding: cfg.section_f64(s, "titlePadding", d.title_padding),
+            show_title: cfg.section_bool(s, "showTitle", d.show_title),
+            show_legend: cfg.section_bool(s, "showLegend", d.show_legend),
+            legend_font: cfg.section_f64(s, "legendFontSize", d.legend_font),
+            legend_padding: cfg.section_f64(s, "legendPadding", d.legend_padding),
+            show_data_label: cfg.section_bool(s, "showDataLabel", d.show_data_label),
             data_label_outside: cfg.section_bool(s, "showDataLabelOutsideBar", false),
-            horizontal_cfg: cfg
-                .section(s, "chartOrientation")
-                .and_then(crate::json::Json::as_str)
+            horizontal_cfg: cfg.section(s, "chartOrientation").and_then(Json::as_str)
                 == Some("horizontal"),
-            axis_title_padding: axis_f64("titlePadding", 5.0),
-            x_label_rotation: rotation("xAxis"),
+            plot_reserved_percent: cfg.section_f64(
+                s,
+                "plotReservedSpacePercent",
+                d.plot_reserved_percent,
+            ),
+            x_axis: AxisConfig::from_config(cfg, "xAxis"),
+            y_axis: AxisConfig::from_config(cfg, "yAxis"),
         }
     }
 }
 
-/// Series colours: `themeVariables.xyChart.plotColorPalette`, else a theme default.
-fn plot_colors(cfg: &MermaidConfig, pal: &Palette) -> Vec<Color> {
-    if let Some(list) = cfg
-        .section("themeVariables", "xyChart")
-        .and_then(|x| x.get("plotColorPalette"))
-        .and_then(crate::json::Json::as_str)
-    {
-        let v: Vec<Color> = list
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(Color::new)
-            .collect();
-        if !v.is_empty() {
-            return v;
-        }
-    }
-    if cfg.theme == ThemeName::Default {
-        return [
-            "#ECECFF", "#8493A6", "#FFC3A0", "#DCDDE1", "#B8E994", "#D6A2E8", "#FFC300", "#F8B4B6",
-            "#AEC6CF", "#A8D8EA",
-        ]
-        .iter()
-        .map(|s| Color::new(*s))
-        .collect();
-    }
-    if pal.dark {
-        return [
-            "#5b8ff9", "#5ad8a6", "#f6bd16", "#e86452", "#6dc8ec", "#945fb9", "#ff9845", "#1e9493",
-            "#ff99c3", "#5d7092",
-        ]
-        .iter()
-        .map(|s| Color::new(*s))
-        .collect();
-    }
-    let mut v = vec![pal.main_bkg.clone(), pal.node_border.clone()];
-    v.extend(pal.pie_colors.iter().skip(2).cloned());
-    v
-}
-
-/// Value axis after range resolution.
+/// Colours of one axis.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValueScale {
-    pub lo: f64,
-    pub hi: f64,
-    pub ticks: Vec<f64>,
+pub struct AxisColors {
+    pub title: Color,
+    pub label: Color,
+    pub tick: Color,
+    pub line: Color,
 }
 
-impl ValueScale {
-    /// Resolve the value axis: explicit range keeps its bounds, otherwise the data
-    /// range (including 0 when there are bars) is widened to nice ticks.
-    pub fn resolve(chart: &XyChart, target_ticks: usize) -> ValueScale {
-        if let Some((a, b)) = chart.y_range {
-            let (lo, hi) = (a.min(b), a.max(b));
-            let hi = if (hi - lo).abs() < 1e-12 {
-                lo + 1.0
-            } else {
-                hi
-            };
-            let step = nice_step(hi - lo, target_ticks);
-            return ValueScale {
-                lo,
-                hi,
-                ticks: ticks_in(lo, hi, step),
-            };
-        }
-        let all = chart.series.iter().flat_map(|s| s.values.iter().copied());
-        let (mut lo, mut hi) = all.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| {
-            (a.min(v), b.max(v))
-        });
-        if !lo.is_finite() {
-            lo = 0.0;
-            hi = 1.0;
-        }
-        if chart.series.iter().any(|s| s.kind == SeriesKind::Bar) {
-            lo = lo.min(0.0);
-            hi = hi.max(0.0);
-        }
-        let (lo, hi, step) = nice_range(lo, hi, target_ticks);
-        ValueScale {
-            lo,
-            hi,
-            ticks: ticks_in(lo, hi, step),
-        }
-    }
+/// mermaid's `themeVariables.xyChart`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XyTheme {
+    pub background: Color,
+    pub title: Color,
+    pub data_label: Color,
+    pub legend_text: Color,
+    pub x_axis: AxisColors,
+    pub y_axis: AxisColors,
+    pub plot_colors: Vec<Color>,
+}
 
-    fn frac(&self, v: f64) -> f64 {
-        if (self.hi - self.lo).abs() < 1e-12 {
-            0.0
-        } else {
-            (v - self.lo) / (self.hi - self.lo)
+const PALETTE_DEFAULT: &str =
+    "#ECECFF,#8493A6,#FFC3A0,#DCDDE1,#B8E994,#D1A36F,#C3CDE6,#FFB6C1,#496078,#F8F3E3";
+const PALETTE_DARK: &str =
+    "#3498db,#2ecc71,#e74c3c,#f1c40f,#bdc3c7,#ffffff,#34495e,#9b59b6,#1abc9c,#e67e22";
+const PALETTE_FOREST: &str =
+    "#CDE498,#FF6B6B,#A0D2DB,#D7BDE2,#F0F0F0,#FFC3A0,#7FD8BE,#FF9A8B,#FAF3E0,#FFF176";
+const PALETTE_NEUTRAL: &str =
+    "#EEE,#6BB8E4,#8ACB88,#C7ACD6,#E8DCC2,#FFB2A8,#FFF380,#7E8D91,#FFD8B1,#FAF3E0";
+const PALETTE_BASE: &str =
+    "#FFF4DD,#FFD8B1,#FFA07A,#ECEFF1,#D6DBDF,#C3E0A8,#FFB6A4,#FFD74D,#738FA7,#FFFFF0";
+
+fn split_palette(s: &str) -> Vec<Color> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(Color::new)
+        .collect()
+}
+
+impl XyTheme {
+    /// Per-theme `xyChart` defaults (`background`, `primaryTextColor` and the
+    /// theme's `plotColorPalette`, as mermaid 12.3 resolves them), then the flat
+    /// `background` / `primaryTextColor` variables, then `themeVariables.xyChart.*`.
+    pub fn from_config(cfg: &MermaidConfig) -> Self {
+        use ThemeName as T;
+        let (bg, text, palette) = match cfg.theme {
+            T::Dark => ("#333", "#e0dfdf", PALETTE_DARK),
+            T::Forest => ("white", "#321b67", PALETTE_FOREST),
+            T::Neutral => ("#ffffff", "#111111", PALETTE_NEUTRAL),
+            T::Base => ("#f4f4f4", "#333", PALETTE_BASE),
+            T::Neo => ("#ffffff", "#333", PALETTE_BASE),
+            T::Redux | T::ReduxColor => ("#ffffff", "#28253D", PALETTE_BASE),
+            T::NeoDark | T::ReduxDark | T::ReduxDarkColor => ("#333", "#e0dfdf", PALETTE_BASE),
+            T::Default | T::Null => ("white", "#131300", PALETTE_DEFAULT),
+        };
+        let flat = |k: &str| {
+            cfg.theme_variables
+                .iter()
+                .rev()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.trim().to_string())
+        };
+        let bg = flat("background").unwrap_or_else(|| bg.to_string());
+        let text = flat("primaryTextColor").unwrap_or_else(|| text.to_string());
+        let var = |k: &str, d: &str| {
+            cfg.section_nested("themeVariables", "xyChart", k)
+                .and_then(Json::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map_or_else(|| Color::new(d), Color::new)
+        };
+        let axis = |p: &str| AxisColors {
+            title: var(&format!("{p}AxisTitleColor"), &text),
+            label: var(&format!("{p}AxisLabelColor"), &text),
+            tick: var(&format!("{p}AxisTickColor"), &text),
+            line: var(&format!("{p}AxisLineColor"), &text),
+        };
+        let mut plot_colors = split_palette(var("plotColorPalette", palette).css());
+        if plot_colors.is_empty() {
+            plot_colors = split_palette(palette);
+        }
+        XyTheme {
+            background: var("backgroundColor", &bg),
+            title: var("titleColor", &text),
+            data_label: var("dataLabelColor", &text),
+            legend_text: var("legendTextColor", &text),
+            x_axis: axis("x"),
+            y_axis: axis("y"),
+            plot_colors,
         }
     }
 }
 
-/// Wrap a category label onto lines no wider than `max_w` (word boundaries).
-fn wrap_words(s: &str, font: f64, max_w: f64) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for word in s.split_whitespace() {
-        match lines.last_mut() {
-            Some(last) if line_width(&format!("{last} {word}"), font, false) <= max_w => {
-                last.push(' ');
-                last.push_str(word);
+// --- Chart data (mermaid's `xychartDb`) ------------------------------------
+
+/// A data point's x value: a category of a band axis or a number of a linear one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum XKey {
+    Cat(String),
+    Num(f64),
+}
+
+/// The data of an axis after `xychartDb` has resolved it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AxisData {
+    Band(Vec<String>),
+    Linear(f64, f64),
+}
+
+/// One plot after `xychartDb` has resolved it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlotData {
+    pub kind: SeriesKind,
+    /// `""` when the plot has no title (no legend entry).
+    pub title: String,
+    pub color: Color,
+    /// `(x, y)`; `y` is `None` where a band axis has more categories than values.
+    pub data: Vec<(XKey, Option<f64>)>,
+    pub point_labels: Option<Vec<String>>,
+}
+
+/// mermaid's `XYChartData`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartData {
+    pub x: AxisData,
+    pub x_title: String,
+    pub y: (f64, f64),
+    pub y_title: String,
+    pub title: String,
+    pub plots: Vec<PlotData>,
+}
+
+/// JavaScript's `Number.prototype.toString` for chart values.
+pub(crate) fn js_num(v: f64) -> String {
+    if v == 0.0 {
+        "0".into()
+    } else if v.is_finite() && v == v.trunc() && v.abs() < 1e21 {
+        format!("{v:.0}")
+    } else {
+        format!("{v}")
+    }
+}
+
+/// `xychartDb`: axis ranges from the data, band truncation, numeric x values
+/// spread over a linear x-axis and palette colours by plot index.
+pub fn chart_data(chart: &XyChart, palette: &[Color]) -> ChartData {
+    let mut x = match &chart.x_axis {
+        XAxis::Categories(c) => Some(AxisData::Band(c.clone())),
+        XAxis::Range(a, b) => Some(AxisData::Linear(*a, *b)),
+        XAxis::Auto => None,
+    };
+    let mut y = chart.y_range;
+    let has_set_y = y.is_some();
+    let mut y_data = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut plots = Vec::new();
+    for (i, s) in chart.series.iter().enumerate() {
+        let mut values: &[f64] = &s.values;
+        let mut data = Vec::new();
+        if !values.is_empty() {
+            let xa = x.get_or_insert(AxisData::Linear(1.0, values.len() as f64));
+            if let AxisData::Band(c) = xa {
+                values = &values[..values.len().min(c.len())];
             }
-            _ => lines.push(word.to_string()),
+            if !has_set_y {
+                for v in values {
+                    y_data = (y_data.0.min(*v), y_data.1.max(*v));
+                }
+            }
+            data = match xa {
+                AxisData::Band(c) => c
+                    .iter()
+                    .enumerate()
+                    .map(|(k, c)| (XKey::Cat(c.clone()), values.get(k).copied()))
+                    .collect(),
+                AxisData::Linear(min, max) if values.len() == 1 => {
+                    vec![(XKey::Num(*min), Some(values[0]))]
+                }
+                AxisData::Linear(min, max) => {
+                    let step = (*max - *min) / (values.len() - 1) as f64;
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(k, v)| (XKey::Num(*min + k as f64 * step), Some(*v)))
+                        .collect()
+                }
+            };
+        }
+        let labels: Vec<String> = s
+            .labels
+            .iter()
+            .map(|l| l.clone().unwrap_or_default())
+            .collect();
+        let point_labels =
+            (s.kind == SeriesKind::Line && labels.iter().any(|l| !l.is_empty())).then_some(labels);
+        plots.push(PlotData {
+            kind: s.kind,
+            title: s.name.clone().unwrap_or_default(),
+            color: palette
+                .get(i % palette.len().max(1))
+                .cloned()
+                .unwrap_or_else(|| Color::new("#ECECFF")),
+            data,
+            point_labels,
+        });
+    }
+    if !has_set_y {
+        y = Some(y_data);
+    }
+    ChartData {
+        x: x.unwrap_or(AxisData::Band(Vec::new())),
+        x_title: chart.x_title.clone().unwrap_or_default(),
+        y: y.unwrap_or((0.0, 1.0)),
+        y_title: chart.y_title.clone().unwrap_or_default(),
+        title: chart.title.clone().unwrap_or_default(),
+        plots,
+    }
+}
+
+// --- Text measurement ------------------------------------------------------
+
+/// Chromium's `getBoundingClientRect().height` of one `<tspan>` at integer font
+/// sizes 6..=48 (mermaid's `computeDimensionOfText`), without and with glyphs
+/// that reach below the baseline. Measured in the reference renderer.
+const TSPAN_HEIGHTS: [(u8, u8); 43] = [
+    (6, 7),
+    (7, 8),
+    (9, 9),
+    (10, 10),
+    (11, 12),
+    (12, 13),
+    (14, 14),
+    (15, 15),
+    (16, 16),
+    (17, 18),
+    (17, 18),
+    (19, 19),
+    (20, 20),
+    (21, 21),
+    (22, 23),
+    (23, 24),
+    (25, 25),
+    (26, 26),
+    (27, 27),
+    (28, 29),
+    (30, 30),
+    (30, 30),
+    (31, 31),
+    (32, 33),
+    (33, 34),
+    (35, 35),
+    (36, 36),
+    (37, 37),
+    (38, 39),
+    (39, 40),
+    (41, 41),
+    (41, 41),
+    (42, 42),
+    (43, 44),
+    (44, 45),
+    (46, 46),
+    (47, 47),
+    (48, 48),
+    (49, 50),
+    (51, 51),
+    (52, 52),
+    (53, 53),
+    (53, 53),
+];
+
+/// Height of one line of chart text as the browser measures it.
+pub(crate) fn tspan_height(s: &str, font_size: f64) -> f64 {
+    if s.is_empty() {
+        return 0.0;
+    }
+    let desc = s.chars().any(|c| "gjpqy(),;[]{}|_@Q$".contains(c));
+    if font_size.fract() == 0.0 && (6.0..=48.0).contains(&font_size) {
+        let (a, b) = TSPAN_HEIGHTS[font_size as usize - 6];
+        return f64::from(if desc { b } else { a });
+    }
+    font_size * 1.115 + if desc { 0.6 } else { 0.0 }
+}
+
+/// mermaid's `getMaxDimension`: the widest and tallest of `texts`.
+fn max_dimension<S: AsRef<str>>(texts: &[S], font_size: f64) -> (f64, f64) {
+    texts.iter().fold((0.0, 0.0), |(w, h), t| {
+        let t = t.as_ref();
+        (
+            f64::max(w, line_width(t, font_size, false)),
+            f64::max(h, tspan_height(t, font_size)),
+        )
+    })
+}
+
+// --- Drawing helpers -------------------------------------------------------
+
+/// Alphabetic-baseline offsets for SVG `dominant-baseline` values.
+/// (`middle` sits half an x-height above the baseline, not at `central`.)
+const BASELINE_MIDDLE: f64 = 0.27;
+const BASELINE_BEFORE_EDGE: f64 = 0.9;
+const BASELINE_HANGING: f64 = 0.72;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VPos {
+    Top,
+    Middle,
+}
+
+/// A mermaid `TextElem`: `translate(x, y) rotate(rotation)` with the given
+/// `dominant-baseline` and `text-anchor`.
+#[allow(clippy::too_many_arguments)]
+fn text_elem(
+    s: &str,
+    x: f64,
+    y: f64,
+    fs: f64,
+    fill: &Color,
+    vpos: VPos,
+    anchor: Anchor,
+    rotation: f64,
+) -> Element {
+    let off = match vpos {
+        VPos::Top => BASELINE_BEFORE_EDGE,
+        VPos::Middle => BASELINE_MIDDLE,
+    };
+    let t = text_at(x, y + off * fs, &[s.to_string()], fs, anchor, fill);
+    let deg = rotation.rem_euclid(360.0);
+    let deg = if deg > 180.0 { deg - 360.0 } else { deg };
+    if deg == 0.0 {
+        Element::text(t)
+    } else {
+        Element::Rotated {
+            deg,
+            about: Point::new(x, y),
+            children: vec![Element::text(t)],
         }
     }
-    if lines.is_empty() {
-        lines.push(String::new());
+}
+
+fn path_line(a: Point, b: Point, c: &Color, w: f64) -> Element {
+    Element::line(a, b, Paint::stroke(c, w))
+}
+
+/// Push a `<g class>` unless it would be empty (mermaid skips empty shapes).
+fn push_group(out: &mut Vec<Element>, class: &str, children: Vec<Element>) {
+    if !children.is_empty() {
+        out.push(Element::group(class, children));
     }
-    lines
+}
+
+// --- d3 scales -------------------------------------------------------------
+
+/// d3-array's `tickSpec`.
+fn tick_spec(start: f64, stop: f64, count: f64) -> (f64, f64, f64) {
+    let js_round = |v: f64| (v + 0.5).floor();
+    let step = (stop - start) / count.max(0.0);
+    let power = step.log10().floor();
+    let error = step / 10f64.powi(power as i32);
+    let factor = if error >= 50f64.sqrt() {
+        10.0
+    } else if error >= 10f64.sqrt() {
+        5.0
+    } else if error >= 2f64.sqrt() {
+        2.0
+    } else {
+        1.0
+    };
+    let (mut i1, mut i2, inc);
+    if power < 0.0 {
+        let p = 10f64.powi(-power as i32) / factor;
+        i1 = js_round(start * p);
+        i2 = js_round(stop * p);
+        if i1 / p < start {
+            i1 += 1.0;
+        }
+        if i2 / p > stop {
+            i2 -= 1.0;
+        }
+        inc = -p;
+    } else {
+        inc = 10f64.powi(power as i32) * factor;
+        i1 = js_round(start / inc);
+        i2 = js_round(stop / inc);
+        if i1 * inc < start {
+            i1 += 1.0;
+        }
+        if i2 * inc > stop {
+            i2 -= 1.0;
+        }
+    }
+    if i2 < i1 && (0.5..2.0).contains(&count) {
+        return tick_spec(start, stop, count * 2.0);
+    }
+    (i1, i2, inc)
+}
+
+/// d3-array's `ticks(start, stop, count)` (what `scaleLinear().ticks()` uses).
+pub(crate) fn d3_ticks(start: f64, stop: f64, count: f64) -> Vec<f64> {
+    if count.is_nan() || count <= 0.0 || !start.is_finite() || !stop.is_finite() {
+        return Vec::new();
+    }
+    if start == stop {
+        return vec![start];
+    }
+    let reverse = stop < start;
+    let (i1, i2, inc) = if reverse {
+        tick_spec(stop, start, count)
+    } else {
+        tick_spec(start, stop, count)
+    };
+    if i2.is_nan() || i1.is_nan() || i2 < i1 {
+        return Vec::new();
+    }
+    let n = (i2 - i1 + 1.0) as usize;
+    (0..n.min(10_000))
+        .map(|i| {
+            let k = if reverse {
+                i2 - i as f64
+            } else {
+                i1 + i as f64
+            };
+            if inc < 0.0 { k / -inc } else { k * inc }
+        })
+        .collect()
+}
+
+// --- Axes ------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisPos {
+    Left,
+    Bottom,
+    Top,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum AxisKind {
+    /// Categories as given (tick labels) and their de-duplicated domain.
+    Band {
+        categories: Vec<String>,
+        domain: Vec<String>,
+    },
+    Linear {
+        domain: (f64, f64),
+    },
+}
+
+const BAR_WIDTH_TO_TICK_WIDTH_RATIO: f64 = 0.7;
+const MAX_OUTER_PADDING_PERCENT_FOR_WRT_LABEL: f64 = 0.2;
+
+/// mermaid's `BaseAxis` with its `BandAxis` / `LinearAxis` scale.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Axis {
+    cfg: AxisConfig,
+    colors: AxisColors,
+    title: String,
+    kind: AxisKind,
+    pub pos: AxisPos,
+    range: (f64, f64),
+    pub bbox: Rect,
+    show_title: bool,
+    show_label: bool,
+    show_tick: bool,
+    show_axis_line: bool,
+    pub outer_padding: f64,
+    title_text_height: f64,
+    rot: f64,
+}
+
+impl Axis {
+    pub fn new(data: &AxisData, title: &str, cfg: &AxisConfig, colors: &AxisColors) -> Axis {
+        let kind = match data {
+            AxisData::Band(c) => {
+                let mut domain: Vec<String> = Vec::new();
+                for x in c {
+                    if !domain.contains(x) {
+                        domain.push(x.clone());
+                    }
+                }
+                AxisKind::Band {
+                    categories: c.clone(),
+                    domain,
+                }
+            }
+            AxisData::Linear(a, b) => AxisKind::Linear { domain: (*a, *b) },
+        };
+        Axis {
+            cfg: cfg.clone(),
+            colors: colors.clone(),
+            title: title.to_string(),
+            kind,
+            pos: AxisPos::Left,
+            range: (0.0, 10.0),
+            bbox: Rect::new(0.0, 0.0, 0.0, 0.0),
+            show_title: false,
+            show_label: false,
+            show_tick: false,
+            show_axis_line: false,
+            outer_padding: 0.0,
+            title_text_height: 0.0,
+            rot: cfg.label_rotation.to_radians(),
+        }
+    }
+
+    fn vertical(&self) -> bool {
+        self.pos == AxisPos::Left
+    }
+
+    pub fn set_range(&mut self, a: f64, b: f64) {
+        self.range = (a, b);
+        if self.vertical() {
+            self.bbox.h = b - a;
+        } else {
+            self.bbox.w = b - a;
+        }
+    }
+
+    /// The range inset by the outer padding.
+    pub fn get_range(&self) -> (f64, f64) {
+        (
+            self.range.0 + self.outer_padding,
+            self.range.1 - self.outer_padding,
+        )
+    }
+
+    pub fn set_position(&mut self, pos: AxisPos) {
+        self.pos = pos;
+        self.set_range(self.range.0, self.range.1);
+    }
+
+    fn linear_domain(&self) -> Option<(f64, f64)> {
+        match self.kind {
+            AxisKind::Linear { domain: (a, b) } if self.pos == AxisPos::Left => Some((b, a)),
+            AxisKind::Linear { domain } => Some(domain),
+            AxisKind::Band { .. } => None,
+        }
+    }
+
+    /// Tick values as `(position, label)`.
+    pub fn ticks(&self) -> Vec<(f64, String)> {
+        match &self.kind {
+            AxisKind::Band { categories, .. } => categories
+                .iter()
+                .map(|c| (self.scale_cat(c), c.clone()))
+                .collect(),
+            AxisKind::Linear { .. } => {
+                let (a, b) = self.linear_domain().unwrap_or((0.0, 1.0));
+                d3_ticks(a, b, 10.0)
+                    .into_iter()
+                    .map(|v| (self.scale_num(v), js_num(v)))
+                    .collect()
+            }
+        }
+    }
+
+    fn tick_count(&self) -> usize {
+        match &self.kind {
+            AxisKind::Band { categories, .. } => categories.len(),
+            AxisKind::Linear { .. } => {
+                let (a, b) = self.linear_domain().unwrap_or((0.0, 1.0));
+                d3_ticks(a, b, 10.0).len()
+            }
+        }
+    }
+
+    fn tick_labels(&self) -> Vec<String> {
+        self.ticks().into_iter().map(|t| t.1).collect()
+    }
+
+    /// d3 `scaleBand().paddingInner(1).paddingOuter(0).align(0.5)`.
+    fn scale_cat(&self, c: &str) -> f64 {
+        let (r0, r1) = self.get_range();
+        let AxisKind::Band { domain, .. } = &self.kind else {
+            return c.parse().map_or(r0, |v| self.scale_num(v));
+        };
+        let Some(i) = domain.iter().position(|d| d == c) else {
+            return r0;
+        };
+        let n = domain.len() as f64;
+        let step = (r1 - r0) / f64::max(1.0, n - 1.0);
+        let start = r0 + (r1 - r0 - step * (n - 1.0)) * 0.5;
+        start + step * i as f64
+    }
+
+    /// d3 `scaleLinear()` (domain reversed for a left axis).
+    fn scale_num(&self, v: f64) -> f64 {
+        let (r0, r1) = self.get_range();
+        let Some((d0, d1)) = self.linear_domain() else {
+            return self.scale_cat(&js_num(v));
+        };
+        let span = d1 - d0;
+        let t = if span != 0.0 && span.is_finite() {
+            (v - d0) / span
+        } else {
+            0.5
+        };
+        r0 + t * (r1 - r0)
+    }
+
+    pub fn scale(&self, x: &XKey) -> f64 {
+        match x {
+            XKey::Cat(c) => self.scale_cat(c),
+            XKey::Num(v) => self.scale_num(*v),
+        }
+    }
+
+    pub fn tick_distance(&self) -> f64 {
+        let (a, b) = self.get_range();
+        (a - b).abs() / self.tick_count() as f64
+    }
+
+    fn label_dimension(&self) -> (f64, f64) {
+        max_dimension(&self.tick_labels(), self.cfg.label_font)
+    }
+
+    pub fn recalculate_outer_padding_to_draw_bar(&mut self) {
+        let d = BAR_WIDTH_TO_TICK_WIDTH_RATIO * self.tick_distance();
+        if d > self.outer_padding * 2.0 {
+            self.outer_padding = (d / 2.0).floor();
+        }
+    }
+
+    fn space_horizontal(&mut self, aw: f64, ah: f64) {
+        let c = self.cfg.clone();
+        let mut avail = ah;
+        if c.show_axis_line && avail > c.axis_line_width {
+            avail -= c.axis_line_width;
+            self.show_axis_line = true;
+        }
+        if c.show_label {
+            let (lw, lh) = self.label_dimension();
+            self.outer_padding = f64::min(lw / 2.0, MAX_OUTER_PADDING_PERCENT_FOR_WRT_LABEL * aw);
+            let mut need = lh;
+            if self.pos == AxisPos::Bottom && self.rot != 0.0 {
+                need = need.max((self.rot.sin() * lw).abs() + (self.rot.cos() * lh).abs());
+            }
+            need += c.label_padding * 2.0;
+            if need <= avail {
+                avail -= need;
+                self.show_label = true;
+            }
+        }
+        if c.show_tick && avail >= c.tick_length {
+            self.show_tick = true;
+            avail -= c.tick_length;
+        }
+        if c.show_title && !self.title.is_empty() {
+            let (_, th) = max_dimension(&[&self.title], c.title_font);
+            let need = th + c.title_padding * 2.0;
+            self.title_text_height = th;
+            if need <= avail {
+                avail -= need;
+                self.show_title = true;
+            }
+        }
+        self.bbox.w = aw;
+        self.bbox.h = ah - avail;
+    }
+
+    fn space_vertical(&mut self, aw: f64, ah: f64) {
+        let c = self.cfg.clone();
+        let mut avail = aw;
+        if c.show_axis_line && avail > c.axis_line_width {
+            avail -= c.axis_line_width;
+            self.show_axis_line = true;
+        }
+        if c.show_label {
+            let (lw, lh) = self.label_dimension();
+            self.outer_padding = f64::min(lh / 2.0, MAX_OUTER_PADDING_PERCENT_FOR_WRT_LABEL * ah);
+            let need = lw + c.label_padding * 2.0;
+            if need <= avail {
+                avail -= need;
+                self.show_label = true;
+            }
+        }
+        if c.show_tick && avail >= c.tick_length {
+            self.show_tick = true;
+            avail -= c.tick_length;
+        }
+        if c.show_title && !self.title.is_empty() {
+            let (_, th) = max_dimension(&[&self.title], c.title_font);
+            let need = th + c.title_padding * 2.0;
+            self.title_text_height = th;
+            if need <= avail {
+                avail -= need;
+                self.show_title = true;
+            }
+        }
+        self.bbox.w = aw - avail;
+        self.bbox.h = ah;
+    }
+
+    /// Space the axis needs out of `(aw, ah)`.
+    pub fn calculate_space(&mut self, aw: f64, ah: f64) -> (f64, f64) {
+        if self.vertical() {
+            self.space_vertical(aw, ah);
+        } else {
+            self.space_horizontal(aw, ah);
+        }
+        (self.bbox.w, self.bbox.h)
+    }
+
+    pub fn set_xy(&mut self, x: f64, y: f64) {
+        self.bbox.x = x;
+        self.bbox.y = y;
+    }
+
+    fn offset_by_rotation(&self, use_height: bool) -> f64 {
+        if self.rot == 0.0 {
+            return 0.0;
+        }
+        let (w, h) = self.label_dimension();
+        self.rot.sin() * if use_height { h } else { w } / 2.0
+    }
+
+    fn draw_left(&self) -> Vec<Element> {
+        let (c, k, b) = (&self.cfg, &self.colors, self.bbox);
+        let line_w = if self.show_axis_line {
+            c.axis_line_width
+        } else {
+            0.0
+        };
+        let tick_l = if self.show_tick { c.tick_length } else { 0.0 };
+        let mut out = Vec::new();
+        if self.show_axis_line {
+            let x = b.x + b.w - c.axis_line_width / 2.0;
+            let l = path_line(
+                Point::new(x, b.y),
+                Point::new(x, b.y + b.h),
+                &k.line,
+                c.axis_line_width,
+            );
+            out.push(Element::group("axisl-line", vec![l]));
+        }
+        let ticks = self.ticks();
+        if self.show_label {
+            let x = b.x + b.w - c.label_padding - tick_l - line_w;
+            let els = ticks
+                .iter()
+                .map(|(p, s)| {
+                    text_elem(
+                        s,
+                        x,
+                        *p,
+                        c.label_font,
+                        &k.label,
+                        VPos::Middle,
+                        Anchor::End,
+                        0.0,
+                    )
+                })
+                .collect();
+            push_group(&mut out, "label", els);
+        }
+        if self.show_tick {
+            let x = b.x + b.w - line_w;
+            let els = ticks
+                .iter()
+                .map(|(p, _)| {
+                    path_line(
+                        Point::new(x, *p),
+                        Point::new(x - c.tick_length, *p),
+                        &k.tick,
+                        c.tick_width,
+                    )
+                })
+                .collect();
+            push_group(&mut out, "ticks", els);
+        }
+        if self.show_title {
+            let t = text_elem(
+                &self.title,
+                b.x + c.title_padding,
+                b.y + b.h / 2.0,
+                c.title_font,
+                &k.title,
+                VPos::Top,
+                Anchor::Middle,
+                270.0,
+            );
+            out.push(Element::group("title", vec![t]));
+        }
+        out
+    }
+
+    fn draw_bottom(&self) -> Vec<Element> {
+        let (c, k, b) = (&self.cfg, &self.colors, self.bbox);
+        let line_w = if self.show_axis_line {
+            c.axis_line_width
+        } else {
+            0.0
+        };
+        let tick_l = if self.show_tick { c.tick_length } else { 0.0 };
+        let mut out = Vec::new();
+        if self.show_axis_line {
+            let y = b.y + c.axis_line_width / 2.0;
+            let l = path_line(
+                Point::new(b.x, y),
+                Point::new(b.x + b.w, y),
+                &k.line,
+                c.axis_line_width,
+            );
+            out.push(Element::group("axis-line", vec![l]));
+        }
+        let ticks = self.ticks();
+        if self.show_label {
+            let dx = self.offset_by_rotation(true);
+            let y = b.y + c.label_padding + tick_l + line_w + self.offset_by_rotation(false).abs();
+            let deg = self.rot.to_degrees();
+            let els = ticks
+                .iter()
+                .map(|(p, s)| {
+                    text_elem(
+                        s,
+                        p + dx,
+                        y,
+                        c.label_font,
+                        &k.label,
+                        VPos::Top,
+                        Anchor::Middle,
+                        deg,
+                    )
+                })
+                .collect();
+            push_group(&mut out, "label", els);
+        }
+        if self.show_tick {
+            let y = b.y + line_w;
+            let els = ticks
+                .iter()
+                .map(|(p, _)| {
+                    path_line(
+                        Point::new(*p, y),
+                        Point::new(*p, y + c.tick_length),
+                        &k.tick,
+                        c.tick_width,
+                    )
+                })
+                .collect();
+            push_group(&mut out, "ticks", els);
+        }
+        if self.show_title {
+            let t = text_elem(
+                &self.title,
+                self.range.0 + (self.range.1 - self.range.0) / 2.0,
+                b.y + b.h - c.title_padding - self.title_text_height,
+                c.title_font,
+                &k.title,
+                VPos::Top,
+                Anchor::Middle,
+                0.0,
+            );
+            out.push(Element::group("title", vec![t]));
+        }
+        out
+    }
+
+    fn draw_top(&self) -> Vec<Element> {
+        let (c, k, b) = (&self.cfg, &self.colors, self.bbox);
+        let line_w = if self.show_axis_line {
+            c.axis_line_width
+        } else {
+            0.0
+        };
+        let mut out = Vec::new();
+        if self.show_axis_line {
+            let y = b.y + b.h - c.axis_line_width / 2.0;
+            let l = path_line(
+                Point::new(b.x, y),
+                Point::new(b.x + b.w, y),
+                &k.line,
+                c.axis_line_width,
+            );
+            out.push(Element::group("axis-line", vec![l]));
+        }
+        let ticks = self.ticks();
+        if self.show_label {
+            let title_h = if self.show_title {
+                self.title_text_height + c.title_padding * 2.0
+            } else {
+                0.0
+            };
+            let y = b.y + title_h + c.label_padding;
+            let els = ticks
+                .iter()
+                .map(|(p, s)| {
+                    text_elem(
+                        s,
+                        *p,
+                        y,
+                        c.label_font,
+                        &k.label,
+                        VPos::Top,
+                        Anchor::Middle,
+                        0.0,
+                    )
+                })
+                .collect();
+            push_group(&mut out, "label", els);
+        }
+        if self.show_tick {
+            let y0 = b.y + b.h - line_w;
+            let els = ticks
+                .iter()
+                .map(|(p, _)| {
+                    path_line(
+                        Point::new(*p, y0),
+                        Point::new(*p, y0 - c.tick_length),
+                        &k.tick,
+                        c.tick_width,
+                    )
+                })
+                .collect();
+            push_group(&mut out, "ticks", els);
+        }
+        if self.show_title {
+            let t = text_elem(
+                &self.title,
+                b.x + b.w / 2.0,
+                b.y + c.title_padding,
+                c.title_font,
+                &k.title,
+                VPos::Top,
+                Anchor::Middle,
+                0.0,
+            );
+            out.push(Element::group("title", vec![t]));
+        }
+        out
+    }
+
+    /// The axis' drawing, wrapped in its `left-axis` / `bottom-axis` / `top-axis` group.
+    pub fn draw(&self) -> Element {
+        let (class, els) = match self.pos {
+            AxisPos::Left => ("left-axis", self.draw_left()),
+            AxisPos::Bottom => ("bottom-axis", self.draw_bottom()),
+            AxisPos::Top => ("top-axis", self.draw_top()),
+        };
+        Element::group(class, els)
+    }
+}
+
+// --- Title and legend --------------------------------------------------------
+
+/// mermaid's `ChartTitle`.
+#[derive(Debug, Clone, PartialEq)]
+struct ChartTitle {
+    bbox: Rect,
+    show: bool,
+    width: f64,
+}
+
+impl ChartTitle {
+    fn calculate_space(&mut self, data: &ChartData, c: &XyConfig, aw: f64, ah: f64) -> (f64, f64) {
+        let (tw, th) = max_dimension(&[&data.title], c.title_font);
+        let need_h = th + 2.0 * c.title_padding;
+        if need_h <= ah && c.show_title && !data.title.is_empty() {
+            self.bbox.w = tw.max(aw);
+            self.bbox.h = need_h;
+            self.width = tw;
+            self.show = true;
+        }
+        (self.bbox.w, self.bbox.h)
+    }
+
+    /// Centre over `[start, end]`, kept inside the chart.
+    fn align_to(&mut self, c: &XyConfig, start: f64, end: f64) {
+        let half = self.width.min(c.width) / 2.0;
+        let center = ((start + end) / 2.0).max(half).min(c.width - half);
+        self.bbox.x = center - half;
+        self.bbox.w = half * 2.0;
+    }
+}
+
+const LEGEND_MARKER_TO_FONT_RATIO: f64 = 0.75;
+const LEGEND_ITEM_SPACING_TO_FONT_RATIO: f64 = 0.5;
+const LEGEND_MARKER_SPACING_TO_FONT_RATIO: f64 = 0.35;
+
+/// mermaid's `ChartLegend`: one row per titled plot, right of the plot area.
+#[derive(Debug, Clone, PartialEq)]
+struct Legend {
+    bbox: Rect,
+    visible: Vec<usize>,
+}
+
+impl Legend {
+    fn calculate_space(&mut self, data: &ChartData, c: &XyConfig, aw: f64, ah: f64) -> (f64, f64) {
+        self.visible = if c.show_legend {
+            (0..data.plots.len())
+                .filter(|&i| !data.plots[i].title.is_empty())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.bbox.w = 0.0;
+        self.bbox.h = 0.0;
+        if self.visible.is_empty() {
+            return (0.0, 0.0);
+        }
+        let fs = c.legend_font;
+        let titles: Vec<&str> = self
+            .visible
+            .iter()
+            .map(|&i| data.plots[i].title.as_str())
+            .collect();
+        let (tw, _) = max_dimension(&titles, fs);
+        let n = self.visible.len() as f64;
+        let w = c.legend_padding * 2.0
+            + fs * LEGEND_MARKER_TO_FONT_RATIO
+            + fs * LEGEND_MARKER_SPACING_TO_FONT_RATIO
+            + tw;
+        let h =
+            c.legend_padding * 2.0 + n * fs + (n - 1.0) * fs * LEGEND_ITEM_SPACING_TO_FONT_RATIO;
+        if w <= aw && h <= ah {
+            self.bbox.w = w;
+            self.bbox.h = h;
+        } else {
+            self.visible.clear();
+        }
+        (self.bbox.w, self.bbox.h)
+    }
+
+    fn draw(&self, data: &ChartData, c: &XyConfig, theme: &XyTheme) -> Vec<Element> {
+        if self.visible.is_empty() {
+            return Vec::new();
+        }
+        let fs = c.legend_font;
+        let marker = fs * LEGEND_MARKER_TO_FONT_RATIO;
+        let spacing = fs * LEGEND_MARKER_SPACING_TO_FONT_RATIO;
+        let row = fs + fs * LEGEND_ITEM_SPACING_TO_FONT_RATIO;
+        let x0 = self.bbox.x + c.legend_padding;
+        let y0 = self.bbox.y + c.legend_padding;
+        let mut rects = Vec::new();
+        let mut lines = Vec::new();
+        let mut labels = Vec::new();
+        for (k, &i) in self.visible.iter().enumerate() {
+            let p = &data.plots[i];
+            let y = y0 + k as f64 * row;
+            match p.kind {
+                SeriesKind::Bar => rects.push(Element::rect(
+                    Rect::new(x0, y, marker, marker),
+                    0.0,
+                    Paint::fill(&p.color),
+                )),
+                SeriesKind::Line => lines.push(path_line(
+                    Point::new(x0, y + marker / 2.0),
+                    Point::new(x0 + marker, y + marker / 2.0),
+                    &p.color,
+                    LINE_WIDTH,
+                )),
+            }
+            labels.push(text_elem(
+                &p.title,
+                x0 + marker + spacing,
+                y + marker / 2.0,
+                fs,
+                &theme.legend_text,
+                VPos::Middle,
+                Anchor::Start,
+                0.0,
+            ));
+        }
+        rects.extend(lines);
+        let mut out = Vec::new();
+        push_group(&mut out, "markers", rects);
+        push_group(&mut out, "label", labels);
+        vec![Element::group("legend", out)]
+    }
+}
+
+// --- Orchestrator ------------------------------------------------------------
+
+/// Stroke width of line plots (`xychartDb.setLineData`).
+const LINE_WIDTH: f64 = 2.0;
+
+/// The laid-out chart: every component positioned like mermaid's `Orchestrator`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartLayout {
+    pub plot: Rect,
+    pub x_axis: Axis,
+    pub y_axis: Axis,
+    title: ChartTitle,
+    legend: Legend,
+}
+
+/// mermaid's `Orchestrator.calculateSpace` (vertical and horizontal variants).
+pub fn layout(data: &ChartData, c: &XyConfig, theme: &XyTheme, horizontal: bool) -> ChartLayout {
+    let mut x_axis = Axis::new(&data.x, &data.x_title, &c.x_axis, &theme.x_axis);
+    let y_data = AxisData::Linear(data.y.0, data.y.1);
+    let mut y_axis = Axis::new(&y_data, &data.y_title, &c.y_axis, &theme.y_axis);
+    let mut title = ChartTitle {
+        bbox: Rect::new(0.0, 0.0, 0.0, 0.0),
+        show: false,
+        width: 0.0,
+    };
+    let mut legend = Legend {
+        bbox: Rect::new(0.0, 0.0, 0.0, 0.0),
+        visible: Vec::new(),
+    };
+    let mut aw = c.width;
+    let mut ah = c.height;
+    let mut chart_w = (aw * c.plot_reserved_percent / 100.0).floor();
+    let mut chart_h = (ah * c.plot_reserved_percent / 100.0).floor();
+    aw -= chart_w;
+    ah -= chart_h;
+    let t = title.calculate_space(data, c, c.width, ah);
+    ah -= t.1;
+    let (plot_x, plot_y, legend_space);
+    if horizontal {
+        let title_y_end = t.1;
+        x_axis.set_position(AxisPos::Left);
+        let s = x_axis.calculate_space(aw, ah);
+        aw -= s.0;
+        plot_x = s.0;
+        y_axis.set_position(AxisPos::Top);
+        let s = y_axis.calculate_space(aw, ah);
+        ah -= s.1;
+        plot_y = title_y_end + s.1;
+        legend_space = legend.calculate_space(data, c, aw, chart_h);
+        aw -= legend_space.0;
+        if aw > 0.0 {
+            chart_w += aw;
+        }
+        if ah > 0.0 {
+            chart_h += ah;
+        }
+        y_axis.set_range(plot_x, plot_x + chart_w);
+        y_axis.set_xy(plot_x, title_y_end);
+        x_axis.set_range(plot_y, plot_y + chart_h);
+        x_axis.set_xy(0.0, plot_y);
+    } else {
+        plot_y = t.1;
+        x_axis.set_position(AxisPos::Bottom);
+        let s = x_axis.calculate_space(aw, ah);
+        ah -= s.1;
+        y_axis.set_position(AxisPos::Left);
+        let s = y_axis.calculate_space(aw, ah);
+        plot_x = s.0;
+        aw -= s.0;
+        legend_space = legend.calculate_space(data, c, aw, chart_h);
+        aw -= legend_space.0;
+        if aw > 0.0 {
+            chart_w += aw;
+        }
+        if ah > 0.0 {
+            chart_h += ah;
+        }
+        x_axis.set_range(plot_x, plot_x + chart_w);
+        x_axis.set_xy(plot_x, plot_y + chart_h);
+        y_axis.set_range(plot_y, plot_y + chart_h);
+        y_axis.set_xy(0.0, plot_y);
+    }
+    title.align_to(c, plot_x, plot_x + chart_w);
+    legend.bbox.x = plot_x + chart_w;
+    legend.bbox.y = plot_y + ((chart_h - legend_space.1) / 2.0).max(0.0);
+    if data.plots.iter().any(|p| p.kind == SeriesKind::Bar) {
+        x_axis.recalculate_outer_padding_to_draw_bar();
+    }
+    ChartLayout {
+        plot: Rect::new(plot_x, plot_y, chart_w, chart_h),
+        x_axis,
+        y_axis,
+        title,
+        legend,
+    }
+}
+
+// --- Plots -----------------------------------------------------------------
+
+/// `xychartRenderer`'s data labels for one bar plot (values of the first plot,
+/// as mermaid does).
+fn bar_data_labels(
+    rects: &[(Rect, usize)],
+    labels: &[Option<f64>],
+    c: &XyConfig,
+    theme: &XyTheme,
+    horizontal: bool,
+) -> Vec<Element> {
+    const CHAR_W: f64 = 0.7;
+    const MARGIN: f64 = 10.0;
+    let valid: Vec<(Rect, String)> = rects
+        .iter()
+        .filter(|(r, _)| r.w > 0.0 && r.h > 0.0)
+        .filter_map(|(r, i)| Some((*r, js_num(labels.get(*i).copied().flatten()?))))
+        .collect();
+    let len = |s: &str| s.encode_utf16().count() as f64;
+    let sizes = valid.iter().map(|(r, s)| {
+        let n = len(s);
+        if horizontal {
+            let mut fs = r.h * 0.7;
+            while fs * n * CHAR_W > r.w - MARGIN && fs > 0.0 {
+                fs -= 1.0;
+            }
+            fs
+        } else {
+            let fits = |fs: f64| {
+                let tw = fs * n * CHAR_W;
+                let cx = r.x + r.w / 2.0;
+                cx - tw / 2.0 >= r.x && cx + tw / 2.0 <= r.x + r.w && r.y + MARGIN + fs <= r.y + r.h
+            };
+            let mut fs = r.w / (n * CHAR_W);
+            while !fits(fs) && fs > 0.0 {
+                fs -= 1.0;
+            }
+            fs
+        }
+    });
+    let fs = sizes.fold(f64::INFINITY, f64::min).floor();
+    if !(fs > 0.0 && fs.is_finite()) {
+        return Vec::new();
+    }
+    let out = c.data_label_outside;
+    valid
+        .iter()
+        .map(|(r, s)| {
+            let t = if horizontal {
+                let (x, anchor) = if out {
+                    (r.x + r.w + MARGIN, Anchor::Start)
+                } else {
+                    (r.x + r.w - MARGIN, Anchor::End)
+                };
+                text_at(
+                    x,
+                    r.y + r.h / 2.0 + BASELINE_MIDDLE * fs,
+                    std::slice::from_ref(s),
+                    fs,
+                    anchor,
+                    &theme.data_label,
+                )
+            } else {
+                let y = if out {
+                    r.y - MARGIN
+                } else {
+                    r.y + MARGIN + BASELINE_HANGING * fs
+                };
+                text_at(
+                    r.x + r.w / 2.0,
+                    y,
+                    std::slice::from_ref(s),
+                    fs,
+                    Anchor::Middle,
+                    &theme.data_label,
+                )
+            };
+            Element::text(t)
+        })
+        .collect()
+}
+
+/// mermaid's `BasePlot`: bar and line plots in declaration order.
+fn draw_plots(
+    data: &ChartData,
+    l: &ChartLayout,
+    c: &XyConfig,
+    theme: &XyTheme,
+    horizontal: bool,
+) -> Vec<Element> {
+    let (xa, ya, plot) = (&l.x_axis, &l.y_axis, l.plot);
+    let label_data: Vec<Option<f64>> = data
+        .plots
+        .first()
+        .map(|p| p.data.iter().map(|d| d.1).collect())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (i, p) in data.plots.iter().enumerate() {
+        let pts: Vec<(usize, f64, f64)> = p
+            .data
+            .iter()
+            .enumerate()
+            .filter_map(|(k, (x, y))| Some((k, xa.scale(x), ya.scale_num((*y)?))))
+            .collect();
+        match p.kind {
+            SeriesKind::Bar => {
+                let bw = (xa.outer_padding * 2.0).min(xa.tick_distance()) * (1.0 - 0.05);
+                let rects: Vec<(Rect, usize)> = pts
+                    .iter()
+                    .map(|&(k, xp, yp)| {
+                        let r = if horizontal {
+                            Rect::new(plot.x, xp - bw / 2.0, yp - plot.x, bw)
+                        } else {
+                            Rect::new(xp - bw / 2.0, yp, bw, plot.y + plot.h - yp)
+                        };
+                        (r, k)
+                    })
+                    .collect();
+                let mut els: Vec<Element> = rects
+                    .iter()
+                    .map(|(r, _)| Element::rect(*r, 0.0, Paint::fill(&p.color)))
+                    .collect();
+                if c.show_data_label && !els.is_empty() {
+                    els.extend(bar_data_labels(&rects, &label_data, c, theme, horizontal));
+                }
+                push_group(&mut out, &format!("bar-plot-{i}"), els);
+            }
+            SeriesKind::Line => {
+                let points: Vec<Point> = pts
+                    .iter()
+                    .map(|&(_, xp, yp)| {
+                        if horizontal {
+                            Point::new(yp, xp)
+                        } else {
+                            Point::new(xp, yp)
+                        }
+                    })
+                    .collect();
+                if points.is_empty() {
+                    continue;
+                }
+                let mut els = vec![Element::path(
+                    geom::polyline(&points),
+                    Paint::stroke(&p.color, LINE_WIDTH),
+                )];
+                if let Some(labels) = &p.point_labels {
+                    // `LinePlot`: 12px labels 10px above (or right of) each point.
+                    let texts: Vec<Element> = pts
+                        .iter()
+                        .zip(&points)
+                        .filter_map(|(&(k, _, _), pt)| {
+                            let s = labels.get(k).filter(|s| !s.is_empty())?;
+                            Some(if horizontal {
+                                text_elem(
+                                    s,
+                                    pt.x + 10.0,
+                                    pt.y,
+                                    12.0,
+                                    &p.color,
+                                    VPos::Middle,
+                                    Anchor::Start,
+                                    0.0,
+                                )
+                            } else {
+                                text_elem(
+                                    s,
+                                    pt.x,
+                                    pt.y - 10.0,
+                                    12.0,
+                                    &p.color,
+                                    VPos::Middle,
+                                    Anchor::Middle,
+                                    0.0,
+                                )
+                            })
+                        })
+                        .collect();
+                    push_group(&mut els, "labels", texts);
+                }
+                out.push(Element::group(format!("line-plot-{i}"), els));
+            }
+        }
+    }
+    out
 }
 
 /// Render an `xychart-beta` diagram body (already preprocessed).
@@ -701,585 +1955,66 @@ pub fn render(
     if xc.horizontal_cfg {
         chart.orientation = Orientation::Horizontal;
     }
-    Ok(draw(&chart, &xc, &plot_colors(cfg, pal), pal))
+    if chart.series.is_empty() {
+        return Err(Error::parse(
+            1,
+            "No Plot to render, please provide a plot with some data",
+        ));
+    }
+    let theme = XyTheme::from_config(cfg);
+    Ok(draw(&chart, &xc, &theme, &pal.font_family))
 }
 
-/// Lay out and draw a parsed chart.
-pub fn draw(chart: &XyChart, xc: &XyConfig, colors: &[Color], pal: &Palette) -> Scene {
-    let text_c = pal.text_color.clone();
-    let axis_c = pal.text_color.clone();
-    let color_of = |i: usize| colors[i % colors.len().max(1)].clone();
-    let w = xc.width.max(200.0);
-    let h = xc.height.max(150.0);
+/// Lay out and draw a parsed chart on mermaid's fixed `width × height` canvas.
+pub fn draw(chart: &XyChart, xc: &XyConfig, theme: &XyTheme, font_family: &str) -> Scene {
     let horizontal = chart.orientation == Orientation::Horizontal;
-    let n_points = chart
-        .series
-        .iter()
-        .map(|s| s.values.len())
-        .max()
-        .unwrap_or(0);
-
-    let categories: Vec<String> = match &chart.x_axis {
-        XAxis::Categories(c) => c.clone(),
-        XAxis::Auto => (1..=n_points.max(1)).map(|i| i.to_string()).collect(),
-        XAxis::Range(..) => Vec::new(),
-    };
-    let n_slots = if categories.is_empty() {
-        n_points.max(1)
-    } else {
-        categories.len().max(n_points).max(1)
-    };
-
-    let mut els: Vec<Element> = Vec::new();
-    let mut bounds = Bounds::default();
-    bounds.add_rect(Rect::new(0.0, 0.0, w, h));
-
-    // --- Title band.
-    let mut top = 10.0;
-    if let Some(t) = chart
-        .title
-        .as_ref()
-        .filter(|t| xc.show_title && !t.is_empty())
-    {
-        let tb = TextBlock::new(vec![t.clone()], xc.title_font, false);
-        top = xc.title_padding;
-        let c = Point::new(w / 2.0, top + tb.height / 2.0);
-        els.push(Element::classed_text(
-            Text::centered(
-                c,
-                &tb.lines,
-                xc.title_font,
-                tb.line_height,
-                &pal.title_color,
-            ),
+    let data = chart_data(chart, &theme.plot_colors);
+    let l = layout(&data, xc, theme, horizontal);
+    let mut els = vec![Element::classed_shape(
+        crate::scene::Geometry::Rect {
+            rect: Rect::new(0.0, 0.0, xc.width, xc.height),
+            rx: 0.0,
+        },
+        Paint::fill(&theme.background),
+        "background",
+    )];
+    if l.title.show {
+        let b = l.title.bbox;
+        els.push(Element::group(
             "chart-title",
-        ));
-        top += tb.height + xc.title_padding;
-    }
-
-    // --- Legend band (only when some series is named).
-    let legend_names: Vec<(usize, String)> = chart
-        .series
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| s.name.clone().map(|n| (i, n)))
-        .collect();
-    if xc.show_legend && !legend_names.is_empty() {
-        let labels: Vec<String> = legend_names.iter().map(|(_, n)| n.clone()).collect();
-        let lg = legend_layout(&labels, xc.legend_font, 12.0, false, w - 40.0);
-        let ox = (w - lg.size.0) / 2.0;
-        let mut items = Vec::new();
-        for (k, (si, name)) in legend_names.iter().enumerate() {
-            let (Some(sw), Some(lp)) = (lg.swatches.get(k), lg.labels.get(k)) else {
-                continue;
-            };
-            let r = Rect::new(sw.x + ox, sw.y + top, sw.w, sw.h);
-            let col = color_of(*si);
-            if chart.series[*si].kind == SeriesKind::Line {
-                let col = line_color(&col, pal.dark);
-                let y = r.y + r.h / 2.0;
-                items.push(Element::line(
-                    Point::new(r.x - 2.0, y),
-                    Point::new(r.right() + 2.0, y),
-                    Paint::stroke(&col, 3.0),
-                ));
-            } else {
-                items.push(Element::rect(r, 2.0, Paint::both(&col, &axis_c, 0.5)));
-            }
-            items.push(Element::text(text_at(
-                lp.x + ox,
-                lp.y + top,
-                std::slice::from_ref(name),
-                xc.legend_font,
-                Anchor::Start,
-                &text_c,
-            )));
-        }
-        els.push(Element::group("legend", items));
-        top += lg.size.1 + 10.0;
-    }
-
-    // --- Axes geometry.
-    let lf = xc.label_font;
-    let tf = xc.axis_title_font;
-    let tick = xc.tick_length;
-    let (cat_title, val_title) = (&chart.x_title, &chart.y_title);
-    // The left axis title is turned -90° inside the left band (mermaid's
-    // `getDrawableElementsForLeftAxis`: rotation 270 at titlePadding from the
-    // band's edge, taking titleHeight + 2 × titlePadding of width).
-    let left_title = if horizontal { cat_title } else { val_title };
-    let bottom_title = if horizontal { val_title } else { cat_title };
-    let tp = xc.axis_title_padding;
-    let left_title_space = if left_title.as_ref().is_some_and(|t| !t.is_empty()) {
-        tf * 1.2 + 2.0 * tp
-    } else {
-        0.0
-    };
-    let plot_top = top + lf * 0.6;
-    let mut bottom_band = tick + 5.0 + lf * 1.3 + 10.0;
-    if bottom_title.as_ref().is_some_and(|t| !t.is_empty()) {
-        bottom_band += tf * 1.5 + 5.0;
-    }
-
-    // Category / numeric x labels.
-    let x_ticks: Vec<(f64, String)> = match chart.x_axis {
-        XAxis::Range(a, b) => {
-            let step = nice_step((b - a).abs(), 8);
-            ticks_in(a.min(b), a.max(b), step)
-                .into_iter()
-                .map(|v| (v, fmt_num(v)))
-                .collect()
-        }
-        _ => Vec::new(),
-    };
-
-    // Rotated bottom-axis labels (`labelRotation`) need
-    // |sin r|·maxWidth + |cos r|·height instead of one line height.
-    let bottom_rot = if horizontal { 0.0 } else { xc.x_label_rotation };
-    let label_h = lf * 1.2;
-    let mut bottom_label_w = 0.0;
-    let mut rot_extra = 0.0;
-    if bottom_rot != 0.0 {
-        bottom_label_w = categories
-            .iter()
-            .chain(x_ticks.iter().map(|t| &t.1))
-            .map(|l| line_width(l, lf, false))
-            .fold(0.0, f64::max);
-        let (s, c) = bottom_rot.to_radians().sin_cos();
-        let need = (s * bottom_label_w).abs() + (c * label_h).abs();
-        rot_extra = (need - label_h).max(0.0);
-        bottom_band += rot_extra;
-    }
-
-    // Value scale (tick density depends on axis length; estimate it first).
-    let est_len = if horizontal {
-        w * 0.7
-    } else {
-        h - plot_top - bottom_band
-    };
-    let target = ((est_len / if horizontal { 80.0 } else { 50.0 }).round() as usize).clamp(2, 10);
-    let vs = ValueScale::resolve(chart, target);
-    let tick_labels: Vec<String> = vs.ticks.iter().map(|v| fmt_num(*v)).collect();
-
-    let left_band;
-    let plot_left;
-    let plot_right = w - 20.0;
-    let mut cat_lines: Vec<Vec<String>> = Vec::new();
-    if horizontal {
-        let max_cat_w = categories
-            .iter()
-            .chain(x_ticks.iter().map(|t| &t.1))
-            .map(|c| line_width(c, lf, false))
-            .fold(0.0, f64::max)
-            .min(w * 0.3);
-        left_band = left_title_space + 10.0 + max_cat_w + 5.0 + tick;
-        plot_left = left_band;
-        for c in &categories {
-            cat_lines.push(wrap_words(c, lf, w * 0.3));
-        }
-    } else {
-        let max_tick_w = tick_labels
-            .iter()
-            .map(|c| line_width(c, lf, false))
-            .fold(0.0, f64::max);
-        left_band = left_title_space + 10.0 + max_tick_w + 5.0 + tick;
-        plot_left = left_band;
-        let band = (plot_right - plot_left) / n_slots as f64;
-        for c in &categories {
-            // Rotated labels stay on one line (mermaid never wraps them).
-            cat_lines.push(if bottom_rot != 0.0 {
-                vec![c.clone()]
-            } else {
-                wrap_words(c, lf, (band - 4.0).max(20.0))
-            });
-        }
-        let extra = cat_lines.iter().map(Vec::len).max().unwrap_or(1).max(1) - 1;
-        bottom_band += extra as f64 * lf * 1.2;
-    }
-    let plot_bottom = h - bottom_band;
-    let plot = Rect::new(
-        plot_left,
-        plot_top,
-        (plot_right - plot_left).max(10.0),
-        (plot_bottom - plot_top).max(10.0),
-    );
-
-    // Category axis: position along its own direction.
-    let cat_len = if horizontal { plot.h } else { plot.w };
-    let band = cat_len / n_slots as f64;
-    let cat_start = if horizontal { plot.y } else { plot.x };
-    let slot_pos = |i: usize| -> f64 {
-        match chart.x_axis {
-            XAxis::Range(a, b) if n_slots > 1 => {
-                let v = a + (b - a) * i as f64 / (n_slots - 1) as f64;
-                range_pos(v, a, b, cat_start, cat_len, band)
-            }
-            _ => cat_start + band * (i as f64 + 0.5),
-        }
-    };
-    // Value axis: v → coordinate.
-    let val_pos = |v: f64| -> f64 {
-        let f = vs.frac(v);
-        if horizontal {
-            plot.x + f * plot.w
-        } else {
-            plot.bottom() - f * plot.h
-        }
-    };
-
-    // --- Axes drawing.
-    // A bottom-axis tick label; with `labelRotation` it is placed like
-    // mermaid's `getDrawableElementsForBottomAxis` (x shifted by
-    // sin(r)·height/2, y by |sin(r)·width/2|, text-before-edge baseline) and
-    // turned by r about that point.
-    let bottom_label = |p: f64, lines: &[String], bounds: &mut Bounds| -> Element {
-        let y0 = plot.bottom() + tick + 5.0;
-        if bottom_rot == 0.0 {
-            let t = text_at(p, y0 + lf * 0.85, lines, lf, Anchor::Middle, &text_c);
-            bounds.add_rect(text_bounds(&t));
-            return Element::text(t);
-        }
-        let s = bottom_rot.to_radians().sin();
-        let about = Point::new(p + s * label_h / 2.0, y0 + (s * bottom_label_w / 2.0).abs());
-        let t = text_at(
-            about.x,
-            about.y + lf * 0.9,
-            lines,
-            lf,
-            Anchor::Middle,
-            &text_c,
-        );
-        bounds.add_rotated_rect(text_bounds(&t), about, bottom_rot);
-        Element::Rotated {
-            deg: bottom_rot,
-            about,
-            children: vec![Element::text(t)],
-        }
-    };
-    let mut axis_els = Vec::new();
-    let line_paint = Paint::stroke(&axis_c, 2.0);
-    let tick_paint = Paint::stroke(&axis_c, 2.0);
-    // Light grid lines along value ticks for readability.
-    let grid_paint = Paint::stroke(&axis_c, 0.5).with_opacity(0.15);
-    for (v, label) in vs.ticks.iter().zip(&tick_labels) {
-        let p = val_pos(*v);
-        if horizontal {
-            axis_els.push(Element::line(
-                Point::new(p, plot.y),
-                Point::new(p, plot.bottom()),
-                grid_paint.clone(),
-            ));
-            axis_els.push(Element::line(
-                Point::new(p, plot.bottom()),
-                Point::new(p, plot.bottom() + tick),
-                tick_paint.clone(),
-            ));
-            axis_els.push(bottom_label(p, std::slice::from_ref(label), &mut bounds));
-        } else {
-            axis_els.push(Element::line(
-                Point::new(plot.x, p),
-                Point::new(plot.right(), p),
-                grid_paint.clone(),
-            ));
-            axis_els.push(Element::line(
-                Point::new(plot.x - tick, p),
-                Point::new(plot.x, p),
-                tick_paint.clone(),
-            ));
-            let t = text_at(
-                plot.x - tick - 5.0,
-                p + lf * 0.35,
-                std::slice::from_ref(label),
-                lf,
-                Anchor::End,
-                &text_c,
-            );
-            bounds.add_rect(text_bounds(&t));
-            axis_els.push(Element::text(t));
-        }
-    }
-    // Category / x ticks.
-    let cat_ticks: Vec<(f64, Vec<String>)> = if x_ticks.is_empty() {
-        cat_lines
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (slot_pos(i), l.clone()))
-            .collect()
-    } else if let XAxis::Range(a, b) = chart.x_axis {
-        x_ticks
-            .iter()
-            .map(|(v, l)| {
-                (
-                    range_pos(*v, a, b, cat_start, cat_len, band),
-                    vec![l.clone()],
-                )
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    for (p, lines) in &cat_ticks {
-        if horizontal {
-            axis_els.push(Element::line(
-                Point::new(plot.x - tick, *p),
-                Point::new(plot.x, *p),
-                tick_paint.clone(),
-            ));
-            let lh = lf * 1.2;
-            let first = *p - lh * (lines.len() as f64 - 1.0) / 2.0 + lf * 0.35;
-            let t = text_at(plot.x - tick - 5.0, first, lines, lf, Anchor::End, &text_c);
-            bounds.add_rect(text_bounds(&t));
-            axis_els.push(Element::text(t));
-        } else {
-            axis_els.push(Element::line(
-                Point::new(*p, plot.bottom()),
-                Point::new(*p, plot.bottom() + tick),
-                tick_paint.clone(),
-            ));
-            axis_els.push(bottom_label(*p, lines, &mut bounds));
-        }
-    }
-    // Axis lines (left and bottom).
-    axis_els.push(Element::line(
-        Point::new(plot.x, plot.y),
-        Point::new(plot.x, plot.bottom()),
-        line_paint.clone(),
-    ));
-    axis_els.push(Element::line(
-        Point::new(plot.x, plot.bottom()),
-        Point::new(plot.right(), plot.bottom()),
-        line_paint,
-    ));
-    // Axis titles.
-    if let Some(t) = left_title.as_ref().filter(|t| !t.is_empty()) {
-        // translate(titlePadding, mid-height) rotate(270), text-before-edge,
-        // anchored at its middle: reads bottom-to-top with its top facing left.
-        let about = Point::new(plot.x - left_band + tp, plot.y + plot.h / 2.0);
-        let tt = text_at(
-            about.x,
-            about.y + tf * 0.9,
-            std::slice::from_ref(t),
-            tf,
-            Anchor::Middle,
-            &text_c,
-        );
-        bounds.add_rotated_rect(text_bounds(&tt), about, -90.0);
-        axis_els.push(Element::Rotated {
-            deg: -90.0,
-            about,
-            children: vec![Element::classed_text(tt, "axis-title")],
-        });
-    }
-    if let Some(t) = bottom_title.as_ref().filter(|t| !t.is_empty()) {
-        let extra = if horizontal {
-            0.0
-        } else {
-            (cat_lines.iter().map(Vec::len).max().unwrap_or(1).max(1) - 1) as f64 * lf * 1.2
-        };
-        let tt = text_at(
-            plot.x + plot.w / 2.0,
-            plot.bottom() + tick + 5.0 + lf * 1.3 + extra + rot_extra + 5.0 + tf,
-            std::slice::from_ref(t),
-            tf,
-            Anchor::Middle,
-            &text_c,
-        );
-        bounds.add_rect(text_bounds(&tt));
-        axis_els.push(Element::classed_text(tt, "axis-title"));
-    }
-
-    // --- Plots.
-    let mut plot_els = Vec::new();
-    let mut label_els = Vec::new();
-    let bars: Vec<usize> = chart
-        .series
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.kind == SeriesKind::Bar)
-        .map(|(i, _)| i)
-        .collect();
-    let group_w = band * 0.8;
-    let bar_w = group_w / bars.len().max(1) as f64;
-    let base = val_pos(0.0f64.clamp(vs.lo, vs.hi));
-    for (bk, &si) in bars.iter().enumerate() {
-        let s = &chart.series[si];
-        let col = color_of(si);
-        for (i, v) in s.values.iter().enumerate().take(n_slots) {
-            let c = slot_pos(i);
-            let off = c - group_w / 2.0 + bar_w * bk as f64;
-            let vp = val_pos(v.clamp(vs.lo, vs.hi));
-            let r = if horizontal {
-                Rect::new(base.min(vp), off, (vp - base).abs(), bar_w)
-            } else {
-                Rect::new(off, base.min(vp), bar_w, (vp - base).abs())
-            };
-            plot_els.push(Element::rect(
-                r,
+            vec![text_elem(
+                &data.title,
+                b.x + b.w / 2.0,
+                b.y + b.h / 2.0,
+                xc.title_font,
+                &theme.title,
+                VPos::Middle,
+                Anchor::Middle,
                 0.0,
-                Paint::both(&col, &outline_of(&col), 1.0),
-            ));
-            if xc.show_data_label {
-                let label = fmt_num(*v);
-                let fs = (bar_w * 0.5).clamp(8.0, 14.0);
-                let lw = line_width(&label, fs, false);
-                let t = if horizontal {
-                    let inside = !xc.data_label_outside && r.w > lw + 8.0;
-                    let (x, anchor) = if inside {
-                        (r.right() - 4.0, Anchor::End)
-                    } else {
-                        (r.right() + 4.0, Anchor::Start)
-                    };
-                    text_at(
-                        x,
-                        r.y + r.h / 2.0 + fs * 0.35,
-                        &[label],
-                        fs,
-                        anchor,
-                        &text_c,
-                    )
-                } else {
-                    let inside = !xc.data_label_outside && r.h > fs + 8.0;
-                    let y = if inside { r.y + fs + 2.0 } else { r.y - 4.0 };
-                    text_at(r.x + r.w / 2.0, y, &[label], fs, Anchor::Middle, &text_c)
-                };
-                bounds.add_rect(text_bounds(&t));
-                label_els.push(Element::text(t));
-            }
-        }
+            )],
+        ));
     }
-    for (si, s) in chart.series.iter().enumerate() {
-        if s.kind != SeriesKind::Line {
-            continue;
-        }
-        let col = line_color(&color_of(si), pal.dark);
-        let pts: Vec<Point> = s
-            .values
-            .iter()
-            .enumerate()
-            .take(n_slots)
-            .map(|(i, v)| {
-                let (a, b) = (slot_pos(i), val_pos(v.clamp(vs.lo, vs.hi)));
-                if horizontal {
-                    Point::new(b, a)
-                } else {
-                    Point::new(a, b)
-                }
-            })
-            .collect();
-        if pts.len() == 1 {
-            plot_els.push(Element::shape(
-                crate::scene::Geometry::Circle { c: pts[0], r: 3.0 },
-                Paint::fill(&col),
-            ));
-        } else {
-            plot_els.push(Element::path(
-                geom::polyline(&pts),
-                Paint::stroke(&col, 2.0),
-            ));
-        }
-        for (i, p) in pts.iter().enumerate() {
-            let label = match s.labels.get(i).cloned().flatten() {
-                Some(l) => Some(l),
-                None if xc.show_data_label => Some(fmt_num(s.values[i])),
-                None => None,
-            };
-            if let Some(l) = label {
-                plot_els.push(Element::shape(
-                    crate::scene::Geometry::Circle { c: *p, r: 3.0 },
-                    Paint::fill(&col),
-                ));
-                let t = text_at(p.x, p.y - 8.0, &[l], 12.0, Anchor::Middle, &text_c);
-                bounds.add_rect(text_bounds(&t));
-                label_els.push(Element::text(t));
-            }
-        }
-    }
-
-    els.push(Element::group("plot", plot_els));
-    els.push(Element::group("axes", axis_els));
-    els.push(Element::group("data-labels", label_els));
+    els.push(Element::group(
+        "plot",
+        draw_plots(&data, &l, xc, theme, horizontal),
+    ));
+    els.extend(l.legend.draw(&data, xc, theme));
+    els.push(l.x_axis.draw());
+    els.push(l.y_axis.draw());
     Scene {
         kind: DiagramKind::XyChart,
-        view_box: bounds.rect().pad(4.0),
+        view_box: Rect::new(0.0, 0.0, xc.width, xc.height),
         elements: vec![Element::group("main", els)],
         acc_title: None,
         acc_descr: None,
-        font_family: pal.font_family.clone(),
+        font_family: font_family.to_string(),
         css: String::new(),
     }
-}
-
-/// Lines are thin, so a near-background colour (e.g. `#ECECFF` on white) is
-/// pushed toward the foreground to stay visible.
-fn line_color(c: &Color, dark: bool) -> Color {
-    match crate::color::parse(c.css()) {
-        Some(rgba) => {
-            let (h, sat, l) = rgba.to_hsl();
-            if !dark && l > 80.0 {
-                Color::new(crate::color::Rgba::from_hsl(h, sat.min(45.0), 50.0, 1.0).to_hex())
-            } else if dark && l < 25.0 {
-                Color::new(rgba.lighten(45.0 - l).to_hex())
-            } else {
-                c.clone()
-            }
-        }
-        None => c.clone(),
-    }
-}
-
-/// A slightly darker outline so very light bar colours stay visible on white.
-pub(crate) fn outline_of(c: &Color) -> Color {
-    crate::color::parse(c.css())
-        .map(|rgba| Color::new(rgba.lighten(-12.0).to_hex()))
-        .unwrap_or_else(|| c.clone())
-}
-
-/// Position of numeric x value `v` on an axis spanning `[a, b]`, inset by half a band.
-fn range_pos(v: f64, a: f64, b: f64, start: f64, len: f64, band: f64) -> f64 {
-    let f = if (b - a).abs() < 1e-12 {
-        0.5
-    } else {
-        (v - a) / (b - a)
-    };
-    start + band / 2.0 + f * (len - band)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn nice_steps() {
-        assert_eq!(nice_step(10.0, 10), 1.0);
-        assert_eq!(nice_step(7000.0, 7), 1000.0);
-        assert_eq!(nice_step(15.0, 10), 2.0);
-        assert_eq!(nice_step(0.3, 10), 0.05);
-        assert_eq!(nice_step(40.0, 10), 5.0);
-        for (span, n) in [(123.4, 6), (0.07, 5), (98765.0, 9), (3.0, 3)] {
-            let s = nice_step(span, n);
-            let mant = s / 10f64.powf(s.log10().floor());
-            assert!(
-                [1.0, 2.0, 5.0].iter().any(|m| (mant - m).abs() < 1e-9),
-                "{s} is not 1/2/5 × 10^n"
-            );
-            assert!(span / s <= n as f64 + 1e-9);
-        }
-    }
-
-    #[test]
-    fn nice_range_covers_data() {
-        let (lo, hi, step) = nice_range(-3.4, 45.0, 10);
-        assert!(lo <= -3.4 && hi >= 45.0);
-        assert_eq!(step, 5.0);
-        assert_eq!((lo, hi), (-5.0, 45.0));
-        assert_eq!(nice_range(0.0, 540.0, 6), (0.0, 600.0, 100.0));
-        assert_eq!(nice_range(0.0, 500.0, 5), (0.0, 500.0, 100.0));
-        let t = ticks_in(0.0, 0.3, 0.1);
-        assert_eq!(t, vec![0.0, 0.1, 0.2, 0.3]);
-        assert_eq!(fmt_num(0.1 + 0.2), "0.3");
-        assert_eq!(fmt_num(4000.0), "4000");
-        assert_eq!(fmt_num(-0.34), "-0.34");
-    }
 
     #[test]
     fn parses_full_chart() {
@@ -1328,17 +2063,265 @@ mod tests {
         assert!(parse("pie\n", None).is_err());
     }
 
-    #[test]
-    fn auto_scale_includes_zero_for_bars() {
-        let c = parse("xychart-beta\nbar [3, 7, 12]", None).unwrap();
-        let vs = ValueScale::resolve(&c, 5);
-        assert_eq!(vs.lo, 0.0);
-        assert!(vs.hi >= 12.0);
-        assert!(vs.ticks.windows(2).all(|w| w[1] > w[0]));
+    fn base_chart() -> XyChart {
+        parse(
+            "xychart-beta\n    title \"Sales Revenue\"\n    x-axis \"Month of year\" [jan, feb, mar, apr, may, jun, jul, aug, sep, oct, nov, dec]\n    y-axis \"Revenue (in $)\" 4000 --> 11000\n    bar \"2024\" [5000, 6000, 7500, 8200, 9500, 10500, 11000, 10200, 9200, 8500, 7000, 6000]\n    bar \"2025\" [5400, 6300, 7100, 8800, 9900, 10800, 10600, 9800, 9000, 8300, 7400, 6600]\n    line \"Target\" [5000, 6200, 7000, 8000, 9000, 10000, 10500, 10000, 9500, 8800, 7600, 6400]",
+            None,
+        )
+        .unwrap()
+    }
+
+    fn default_theme() -> XyTheme {
+        XyTheme::from_config(&MermaidConfig::default())
     }
 
     #[test]
-    fn renders_scene() {
+    fn d3_ticks_match_d3() {
+        let t = d3_ticks(4000.0, 11000.0, 10.0);
+        assert_eq!(t.len(), 15);
+        assert_eq!((t[0], t[1], t[14]), (4000.0, 4500.0, 11000.0));
+        assert_eq!(
+            d3_ticks(0.0, 1.0, 10.0),
+            vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        );
+        assert_eq!(
+            d3_ticks(-20.0, 48.0, 10.0),
+            (-4..=9).map(|k| k as f64 * 5.0).collect::<Vec<_>>()
+        );
+        // Reversed domains give descending ticks (left axes).
+        assert_eq!(d3_ticks(5.0, 1.0, 10.0)[0], 5.0);
+        assert_eq!(d3_ticks(1.0, 5.0, 10.0).len(), 9);
+        assert_eq!(d3_ticks(3.0, 3.0, 10.0), vec![3.0]);
+        assert!(d3_ticks(f64::INFINITY, f64::NEG_INFINITY, 10.0).is_empty());
+        assert_eq!(js_num(0.30000000000000004), "0.30000000000000004");
+        assert_eq!(js_num(11000.0), "11000");
+        assert_eq!(js_num(-0.0), "0");
+        assert_eq!(js_num(-5.5), "-5.5");
+    }
+
+    #[test]
+    fn band_scale_has_points_at_range_ends() {
+        let cfg = AxisConfig::default();
+        let colors = default_theme().x_axis;
+        let data = AxisData::Band(vec!["a".into(), "b".into(), "c".into(), "a".into()]);
+        let mut ax = Axis::new(&data, "", &cfg, &colors);
+        ax.set_position(AxisPos::Bottom);
+        ax.set_range(0.0, 100.0);
+        // Duplicates collapse in the domain but stay as tick labels.
+        let ticks = ax.ticks();
+        assert_eq!(ticks.len(), 4);
+        assert_eq!((ticks[0].0, ticks[1].0, ticks[2].0), (0.0, 50.0, 100.0));
+        assert_eq!(ticks[3].0, 0.0);
+        assert_eq!(ax.tick_distance(), 25.0);
+        ax.recalculate_outer_padding_to_draw_bar();
+        assert_eq!(ax.outer_padding, 8.0); // floor(0.7 × 25 / 2)
+        assert_eq!(ax.scale(&XKey::Cat("b".into())), 50.0);
+        assert_eq!(ax.scale(&XKey::Cat("zzz".into())), 8.0);
+        // A single category sits in the middle.
+        let mut one = Axis::new(&AxisData::Band(vec!["x".into()]), "", &cfg, &colors);
+        one.set_position(AxisPos::Bottom);
+        one.set_range(10.0, 30.0);
+        assert_eq!(one.ticks()[0].0, 20.0);
+    }
+
+    #[test]
+    fn linear_left_axis_is_reversed() {
+        let cfg = AxisConfig::default();
+        let colors = default_theme().y_axis;
+        let mut ax = Axis::new(&AxisData::Linear(0.0, 10.0), "", &cfg, &colors);
+        ax.set_position(AxisPos::Left);
+        ax.set_range(0.0, 100.0);
+        assert_eq!(ax.scale_num(10.0), 0.0);
+        assert_eq!(ax.scale_num(0.0), 100.0);
+        ax.set_position(AxisPos::Top);
+        assert_eq!(ax.scale_num(10.0), 100.0);
+        // A degenerate domain maps to the middle, like d3.
+        let mut flat = Axis::new(&AxisData::Linear(5.0, 5.0), "", &cfg, &colors);
+        flat.set_position(AxisPos::Top);
+        flat.set_range(0.0, 100.0);
+        assert_eq!(flat.scale_num(5.0), 50.0);
+    }
+
+    #[test]
+    fn chart_data_mirrors_xychart_db() {
+        let pal = default_theme().plot_colors;
+        // No x-axis: linear 1..n from the first plot; y range from data (no zero).
+        let c = parse("xychart-beta\nline [3, 7, 12]\nbar [1, 2]", None).unwrap();
+        let d = chart_data(&c, &pal);
+        assert_eq!(d.x, AxisData::Linear(1.0, 3.0));
+        assert_eq!(d.y, (1.0, 12.0));
+        assert_eq!(d.plots[0].data[1], (XKey::Num(2.0), Some(7.0)));
+        assert_eq!(d.plots[1].data[1], (XKey::Num(3.0), Some(2.0)));
+        assert_eq!(d.plots[1].color.css(), "#8493A6");
+        // Band axes truncate longer data (and the y range) and leave gaps.
+        let c = parse(
+            "xychart-beta\nx-axis [a, b]\nbar [1, 2, 99]\nline [5]",
+            None,
+        )
+        .unwrap();
+        let d = chart_data(&c, &pal);
+        assert_eq!(d.y, (1.0, 5.0));
+        assert_eq!(d.plots[0].data.len(), 2);
+        assert_eq!(d.plots[1].data[1], (XKey::Cat("b".into()), None));
+        // An explicit range wins and is kept as written.
+        let d = chart_data(&base_chart(), &pal);
+        assert_eq!(d.y, (4000.0, 11000.0));
+        assert_eq!(d.plots[2].title, "Target");
+    }
+
+    #[test]
+    fn vertical_layout_matches_mermaid() {
+        let xc = XyConfig::default();
+        let theme = default_theme();
+        let d = chart_data(&base_chart(), &theme.plot_colors);
+        let l = layout(&d, &xc, &theme, false);
+        // Title row: 22px text + 2 × 10 padding.
+        assert_eq!(l.plot.y, 42.0);
+        // Bottom axis: line 2 + label 16 + 2 × 5 + tick 5 + title 18 + 2 × 5.
+        assert_eq!(l.x_axis.bbox.h, 61.0);
+        assert_eq!(l.plot.y + l.plot.h, 439.0);
+        assert_eq!(l.x_axis.pos, AxisPos::Bottom);
+        assert_eq!(l.y_axis.pos, AxisPos::Left);
+        assert_eq!(l.y_axis.bbox.x, 0.0);
+        // Value axis inset by half a label height; 15 ticks of 500.
+        let yt = l.y_axis.ticks();
+        assert_eq!(yt.len(), 15);
+        assert_eq!((yt[0].1.as_str(), yt[0].0), ("11000", 50.0));
+        assert_eq!(yt[14].0, 431.0);
+        // Category axis padded for bars: floor(0.7 × tickDistance / 2).
+        // (15 in Chromium; our label widths are approximate.)
+        let op = l.x_axis.outer_padding;
+        assert_eq!(op, op.floor());
+        assert!((14.0..=15.0).contains(&op), "{op}");
+        let xt = l.x_axis.ticks();
+        assert_eq!(xt[0].0, l.plot.x + op);
+        assert!((xt[11].0 - (l.plot.x + l.plot.w - op)).abs() < 1e-9);
+        // Legend right of the plot, vertically centred.
+        assert_eq!(l.legend.bbox.x, l.plot.x + l.plot.w);
+        assert!(l.legend.bbox.y > l.plot.y);
+        assert!(l.plot.x + l.plot.w + l.legend.bbox.w <= 700.0 + 1e-9);
+    }
+
+    /// Every `(class, rects)` of bar plot groups.
+    fn bar_groups(els: &[Element]) -> Vec<(String, Vec<Rect>)> {
+        let mut out = Vec::new();
+        for e in els {
+            if let Element::Group {
+                class, children, ..
+            } = e
+            {
+                let class = class.clone().unwrap_or_default();
+                if class.starts_with("bar-plot-") {
+                    let rs = children
+                        .iter()
+                        .filter_map(|c| match c {
+                            Element::Shape {
+                                geom: crate::scene::Geometry::Rect { rect, .. },
+                                ..
+                            } => Some(*rect),
+                            _ => None,
+                        })
+                        .collect();
+                    out.push((class, rs));
+                } else {
+                    out.extend(bar_groups(children));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn bars_of_several_series_overlap() {
+        let theme = default_theme();
+        let s = draw(&base_chart(), &XyConfig::default(), &theme, "x");
+        let d = chart_data(&base_chart(), &theme.plot_colors);
+        let l = layout(&d, &XyConfig::default(), &theme, false);
+        let bw = (l.x_axis.outer_padding * 2.0).min(l.x_axis.tick_distance()) * 0.95;
+        let bars = bar_groups(&s.elements);
+        assert_eq!(bars.len(), 2);
+        assert_eq!(bars[0].0, "bar-plot-0");
+        for (a, b) in bars[0].1.iter().zip(&bars[1].1) {
+            assert_eq!((a.x, a.w), (b.x, b.w));
+            assert_eq!(a.w, bw); // min(2 × outerPadding, tickDistance) × 0.95
+            assert_eq!(a.y + a.h, 439.0); // bars start at the plot bottom
+        }
+        assert_eq!(s.view_box, Rect::new(0.0, 0.0, 700.0, 500.0));
+    }
+
+    #[test]
+    fn horizontal_puts_value_axis_on_top() {
+        let mut c = base_chart();
+        c.orientation = Orientation::Horizontal;
+        let theme = default_theme();
+        let xc = XyConfig::default();
+        let d = chart_data(&c, &theme.plot_colors);
+        let l = layout(&d, &xc, &theme, true);
+        assert_eq!(l.x_axis.pos, AxisPos::Left);
+        assert_eq!(l.y_axis.pos, AxisPos::Top);
+        assert_eq!(l.x_axis.bbox.x, 0.0);
+        assert_eq!(l.y_axis.bbox.y, 42.0);
+        assert_eq!(l.plot.y, 42.0 + l.y_axis.bbox.h);
+        // Categories run top to bottom, values left to right.
+        let xt = l.x_axis.ticks();
+        assert!(xt[0].0 < xt[1].0);
+        let yt = l.y_axis.ticks();
+        assert_eq!(yt[0].1, "4000");
+        assert!(yt[0].0 < yt[1].0);
+        let bars = bar_groups(&draw(&c, &xc, &theme, "x").elements);
+        assert!(bars[0].1.iter().all(|r| r.x == l.plot.x));
+    }
+
+    #[test]
+    fn toggles_hide_parts() {
+        let cfg = MermaidConfig::default()
+            .with_directive(
+                &crate::json::parse(
+                    r#"{"xyChart":{"showTitle":false,"showLegend":false,"xAxis":{"showTick":false},"yAxis":{"showLabel":false,"showAxisLine":false}}}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let xc = XyConfig::from_config(&cfg);
+        assert!(!xc.show_title && !xc.show_legend);
+        assert!(!xc.x_axis.show_tick && xc.x_axis.show_label);
+        assert!(!xc.y_axis.show_label && !xc.y_axis.show_axis_line);
+        let theme = default_theme();
+        let d = chart_data(&base_chart(), &theme.plot_colors);
+        let l = layout(&d, &xc, &theme, false);
+        assert_eq!(l.plot.y, 0.0);
+        assert!(l.legend.visible.is_empty());
+        // Only tick (5) + title (18 + 10) remain on the left.
+        assert_eq!(l.y_axis.bbox.w, 33.0);
+    }
+
+    #[test]
+    fn theme_colors() {
+        let t = default_theme();
+        assert_eq!(t.title.css(), "#131300");
+        assert_eq!(t.plot_colors[2].css(), "#FFC3A0");
+        let dark = MermaidConfig::default()
+            .with_directive(&crate::json::parse(r#"{"theme":"dark"}"#).unwrap())
+            .unwrap();
+        let t = XyTheme::from_config(&dark);
+        assert_eq!(t.background.css(), "#333");
+        assert_eq!(t.plot_colors[0].css(), "#3498db");
+        let custom = MermaidConfig::default()
+            .with_directive(
+                &crate::json::parse(
+                    r##"{"themeVariables":{"xyChart":{"plotColorPalette":"#f00, #0f0","titleColor":"#123456"}}}"##,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let t = XyTheme::from_config(&custom);
+        assert_eq!(t.plot_colors.len(), 2);
+        assert_eq!(t.plot_colors[1].css(), "#0f0");
+        assert_eq!(t.title.css(), "#123456");
+    }
+
+    #[test]
+    fn renders_scene_and_rejects_empty_charts() {
         let cfg = MermaidConfig::default();
         let pal = cfg.palette();
         let s = render(
@@ -1349,7 +2332,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.kind, DiagramKind::XyChart);
-        assert!(s.view_box.w >= 700.0 && s.view_box.h >= 500.0);
+        assert_eq!((s.view_box.w, s.view_box.h), (700.0, 500.0));
+        assert!(render("xychart-beta\ntitle T", None, &cfg, &pal).is_err());
     }
 
     /// `(deg, about, text)` of every `Rotated` element holding a text.
@@ -1409,24 +2393,26 @@ mod tests {
             )
             .unwrap();
         let xc = XyConfig::from_config(&cfg);
-        assert_eq!(xc.x_label_rotation, -45.0);
+        assert_eq!(xc.x_axis.label_rotation, -45.0);
         let s = render(src, None, &cfg, &cfg.palette()).unwrap();
         let rot = rotated_texts(&s.elements);
         assert_eq!(rot.len(), 2, "{rot:?}");
         assert!(rot.iter().all(|(d, _, _)| *d == -45.0));
-        // Shifted by sin(r)·height/2 from the tick position.
-        let lf = xc.label_font;
-        let shift = (-45f64).to_radians().sin() * lf * 1.2 / 2.0;
-        assert!(rot[0].1.x < rot[1].1.x);
+        // Shifted left by sin(r)·labelHeight/2 from the tick position.
+        let theme = default_theme();
+        let c = parse(src, None).unwrap();
+        let l = layout(&chart_data(&c, &theme.plot_colors), &xc, &theme, false);
+        let tick = l.x_axis.ticks()[0].0;
+        let shift = (-45f64).to_radians().sin() * tspan_height("alpha", 14.0) / 2.0;
+        assert!((rot[0].1.x - (tick + shift)).abs() < 1e-9);
         assert!((rot[0].2.x - rot[0].1.x).abs() < 1e-9);
-        assert!(shift < 0.0);
         // Out-of-range rotations are ignored, like mermaid.
         let cfg = MermaidConfig::default()
             .with_directive(
                 &crate::json::parse(r#"{"xyChart":{"xAxis":{"labelRotation":120}}}"#).unwrap(),
             )
             .unwrap();
-        assert_eq!(XyConfig::from_config(&cfg).x_label_rotation, 0.0);
+        assert_eq!(XyConfig::from_config(&cfg).x_axis.label_rotation, 0.0);
         let s = render(src, None, &cfg, &cfg.palette()).unwrap();
         assert!(rotated_texts(&s.elements).is_empty());
     }

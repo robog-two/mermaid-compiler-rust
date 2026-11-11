@@ -491,6 +491,15 @@ impl MermaidConfig {
             .find_map(|j| j.get(section).and_then(|s| s.get(key)))
     }
 
+    /// Latest value of `section.sub.key` across all layers, merged key by key
+    /// (e.g. `("xyChart", "xAxis", "showTick")`).
+    pub fn section_nested(&self, section: &str, sub: &str, key: &str) -> Option<&Json> {
+        self.raw
+            .iter()
+            .rev()
+            .find_map(|j| j.get(section)?.get(sub)?.get(key))
+    }
+
     /// Numeric `section.key`, or `default`.
     pub fn section_f64(&self, section: &str, key: &str, default: f64) -> f64 {
         self.section(section, key)
