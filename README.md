@@ -67,7 +67,7 @@ compare the two directly.
 | Kanban (`kanban`) | **Taffy** flex | columns, cards, ticket/assignee/priority |
 | Block (`block-beta`) | port of mermaid's block layout | nested `block:id:span`, `columns`, `space:N`, shapes, block arrows, edges, styles/classes |
 | Packet (`packet-beta`) | **Taffy** CSS grid | bit ranges, `+N`, row splitting |
-| C4 (`C4Context/Container/Component/Dynamic/Deployment`) | **Taffy** flex/wrap | boundaries, all element/rel kinds, style updates |
+| C4 (`C4Context/Container/Component/Dynamic/Deployment`) | **Taffy** flex/wrap | unified shapes (person, cylinder, queue), Structurizr type lines, boundaries, all element/rel kinds, curved rels, style updates |
 | xychart (`xychart-beta`) | geometry | bars/lines, horizontal, auto "nice" axes |
 | Quadrant (`quadrantChart`) | geometry | points with styles/classes |
 | Radar (`radar-beta`) | geometry | circle/polygon graticule, legend |
@@ -139,7 +139,7 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
 - **Rotated text** follows mermaid (xychart left-axis title and `xAxis.labelRotation`, gitGraph `rotateCommitLabel`
   and TB/BT tags, quadrant y-labels, wardley, swimlane). With `rotateCommitLabel: false` the LR gitGraph widens its
   commit step so horizontal labels don't overlap (mermaid lets them overlap).
-- **Icons** (architecture, mindmap `::icon`, C4 sprites) are generic glyphs; icon packs are not loaded.
+- **Icons** (architecture, mindmap `::icon`) are generic glyphs; icon packs are not loaded.
 - **Themes / looks:** the colour themes' per-item palette (`data-color-id`) is resolved to concrete colours for flowchart
   subgraphs, state composites, class boxes, ER entities, requirement boxes and sequence actors/activations, in upstream's
   `colorIndex` order. Gitgraph, mindmap, journey and the other diagrams use the theme's colours but not its
@@ -155,7 +155,7 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   mermaid's output does. Icon-pack icons (treeView, use case) draw mermaid's "?" placeholder. Eventmodeling data is not monospaced.
 - **Gantt is deterministic:** no today-marker (it would need the clock), and times are UTC.
 - **Approximate layouts** where mermaid uses force-directed or browser layout: architecture (grid from side hints),
-  mindmap (two-sided tree rather than force layout), and C4 relationships (straight lines that can pass behind cards).
+  mindmap (two-sided tree rather than force layout), and C4 (flex rows rather than mermaid's grid; relationships can pass behind cards).
 
 ## Design
 
