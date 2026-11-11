@@ -15,8 +15,8 @@
 //! remaining ("integrated") clusters stay clusters of the parent's layered pass.
 
 use super::{
-    Direction, EdgeRoute, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode, LayoutOutput,
-    cluster_chains, layout_flat,
+    Direction, EdgeRoute, EdgeRouting, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode,
+    LayoutOutput, OrthoSpacing, cluster_chains, layout_flat,
 };
 use crate::geom::{Point, Rect};
 
@@ -438,6 +438,11 @@ fn layout_level(
         None => (input.node_sep, input.rank_sep),
         Some(_) => (input.inner_node_sep, input.inner_rank_sep),
     };
+    // A container laid out on its own routes with its own (wider) edge spacing.
+    let routing = match (input.routing, scope) {
+        (EdgeRouting::Orthogonal(_), Some(_)) => EdgeRouting::Orthogonal(OrthoSpacing::CONTAINER),
+        (r, _) => r,
+    };
     let flat = LayoutInput {
         nodes,
         edges,
@@ -445,6 +450,7 @@ fn layout_level(
         direction: tree.direction(scope),
         node_sep,
         rank_sep,
+        routing,
         ..input.clone()
     };
     let out = layout_flat(&flat);
@@ -470,6 +476,12 @@ fn layout_level(
     for (e, route) in flat.edges.iter().zip(&out.edges) {
         if let (Some((w, h)), Some(p)) = (e.label, route.label) {
             add(Rect::centered(p, w, h));
+        }
+        // Orthogonal self-loops stand off their node's side.
+        if e.from == e.to && matches!(flat.routing, EdgeRouting::Orthogonal(_)) {
+            for p in &route.points {
+                add(Rect::new(p.x, p.y, 0.0, 0.0));
+            }
         }
     }
     for r in &out.clusters {
@@ -515,6 +527,7 @@ mod tests {
             cluster_padding: 24.0,
             inner_node_sep: 50.0,
             inner_rank_sep: 24.0,
+            routing: EdgeRouting::Splines,
         }
     }
 

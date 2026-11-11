@@ -235,6 +235,7 @@ fn graph_config(cfg: &MermaidConfig) -> GraphConfig {
         title_top_margin: cfg.section_f64("er", "titleTopMargin", 25.0),
         min_node_width: 0.0,
         wrapping_width: 0.0,
+        layout: cfg.layout,
     }
 }
 
