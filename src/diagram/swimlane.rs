@@ -15,6 +15,8 @@
 //! 3. [`route`] is a small orthogonal router in the same spirit as upstream's
 //!    `routeEdgesOrthogonal`: straight runs where nodes line up, L/Z handoffs between
 //!    lanes, side rails for back edges and a rail around blocked same-rank edges (pure).
+//!    Subgraphs nested in a lane (any depth) get a titled, padded box; their
+//!    members are kept in their own track across the flow so siblings stay out.
 //! 4. [`render`] draws lanes (title band + body), nodes through the shared flowchart
 //!    shape code, rounded orthogonal edges with line hops, and labels.
 
@@ -184,6 +186,23 @@ pub fn prepare(g: GraphDiagram, with_content: &HashSet<String>) -> Swimlanes {
             slot: c.color_slot.unwrap_or(ColorSlot(ci)),
         });
     }
+    // `prepareLayoutForSwimlanes`: the synthesised lane takes the slot after the
+    // highest one of the subgraphs that are still drawn.
+    if lanes.first().is_some_and(|l| l.cluster.is_none()) {
+        let kept = |ci: usize| {
+            let t = top(ClusterId(ci));
+            lanes.iter().any(|l| l.cluster == Some(t))
+        };
+        let next = g
+            .clusters
+            .iter()
+            .enumerate()
+            .filter(|(ci, _)| kept(*ci))
+            .map(|(ci, c)| c.color_slot.unwrap_or(ColorSlot(ci)).0 + 1)
+            .max()
+            .unwrap_or(0);
+        lanes[0].slot = ColorSlot(next);
+    }
     let lane_of = node_top
         .iter()
         .map(|t| {
@@ -210,6 +229,20 @@ pub struct LayoutNode {
     pub w: f64,
     pub h: f64,
     pub lane: usize,
+    /// Innermost subgraph nested in the lane that holds the node.
+    pub group: Option<usize>,
+}
+
+/// A subgraph nested in a lane (at any depth): a titled, padded box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayoutGroup {
+    /// The nested subgraph around this one, `None` when the lane holds it directly.
+    pub parent: Option<usize>,
+    pub lane: usize,
+    /// Title text size, `(0, 0)` without a title.
+    pub title: (f64, f64),
+    /// Padding kept between the box and what it holds.
+    pub pad: f64,
 }
 
 /// An edge between two nodes, with its label size if it has one.
@@ -229,6 +262,8 @@ pub struct LayoutInput {
     pub edges: Vec<LayoutEdge>,
     /// Title text size of every lane.
     pub lanes: Vec<(f64, f64)>,
+    /// Subgraphs nested in lanes, parents before children not required.
+    pub groups: Vec<LayoutGroup>,
     pub direction: Direction,
     /// `flowchart.nodeSpacing`.
     pub node_gap: f64,
@@ -253,6 +288,8 @@ pub struct LayoutOutput {
     /// Seed position of every edge label (anchored onto the route later).
     pub labels: Vec<Option<Point>>,
     pub lanes: Vec<LaneBand>,
+    /// Box of every nested subgraph (zero-sized when it holds no node).
+    pub groups: Vec<Rect>,
 }
 
 /// String order used by upstream's `localeCompare` / `<` tie breaks.
@@ -427,6 +464,268 @@ fn flow_stretch(nodes: &[LayoutNode]) -> f64 {
     if h > 0.0 { (w / h).max(1.0) } else { 1.0 }
 }
 
+/// Something a lane or nested subgraph holds directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Item {
+    Node(usize),
+    Group(usize),
+}
+
+/// Placement across the flow of lanes that hold nested subgraphs. Each subgraph is
+/// a block over the ranks of its members; the blocks and nodes a container holds go
+/// into side-by-side tracks so that nothing shares a rank inside one track, which
+/// keeps sibling nodes out of a subgraph's box. Upstream frames the members where
+/// they land (and lets its title sit under the first node); reserving room keeps the
+/// title readable and the boxes clear of their siblings.
+struct Nesting<'a> {
+    input: &'a LayoutInput,
+    ranks: &'a [usize],
+    /// First and last rank of every group's members, `None` for an empty group.
+    span: Vec<Option<(usize, usize)>>,
+    /// Lowest node index inside every group (source order tie break).
+    first: Vec<usize>,
+    /// Across-flow width of every group's box.
+    block: Vec<f64>,
+}
+
+impl<'a> Nesting<'a> {
+    fn new(input: &'a LayoutInput, ranks: &'a [usize]) -> Self {
+        let count = input.groups.len();
+        let mut span: Vec<Option<(usize, usize)>> = vec![None; count];
+        let mut first = vec![usize::MAX; count];
+        for (v, nd) in input.nodes.iter().enumerate() {
+            for g in ancestors(&input.groups, nd.group) {
+                let r = ranks[v];
+                span[g] = Some(span[g].map_or((r, r), |(a, b)| (a.min(r), b.max(r))));
+                first[g] = first[g].min(v);
+            }
+        }
+        let mut nest = Nesting {
+            input,
+            ranks,
+            span,
+            first,
+            block: vec![0.0; count],
+        };
+        let mut order: Vec<usize> = (0..count).collect();
+        let depth = |g: usize| ancestors(&input.groups, Some(g)).count();
+        order.sort_by_key(|&g| std::cmp::Reverse(depth(g)));
+        for g in order {
+            let gr = &input.groups[g];
+            nest.block[g] = nest.content_width(g) + 2.0 * gr.pad + nest.header_across(g);
+        }
+        nest
+    }
+
+    fn horizontal(&self) -> bool {
+        self.input.direction.is_horizontal()
+    }
+
+    /// Title room across the flow: LR/RL titles sit above the box, which is the
+    /// canonical left side.
+    fn header_across(&self, g: usize) -> f64 {
+        let t = self.input.groups[g].title;
+        if self.horizontal() && t.0 > 0.0 {
+            t.1
+        } else {
+            0.0
+        }
+    }
+
+    /// Title room along the flow: TB titles sit above the box (BT: below, mirrored).
+    fn header_along(&self, g: usize) -> f64 {
+        let t = self.input.groups[g].title;
+        if !self.horizontal() && t.0 > 0.0 {
+            t.1
+        } else {
+            0.0
+        }
+    }
+
+    fn content_width(&self, g: usize) -> f64 {
+        let tracks = self.tracks(Some(g), self.input.groups[g].lane);
+        let title = if self.horizontal() {
+            0.0
+        } else {
+            self.input.groups[g].title.0
+        };
+        tracks_width(&tracks, self.input.node_gap).max(title)
+    }
+
+    fn item_span(&self, it: Item) -> (usize, usize) {
+        match it {
+            Item::Node(v) => (self.ranks[v], self.ranks[v]),
+            Item::Group(g) => self.span[g].unwrap_or_default(),
+        }
+    }
+
+    fn item_width(&self, it: Item) -> f64 {
+        match it {
+            Item::Node(v) => self.input.nodes[v].w,
+            Item::Group(g) => self.block[g],
+        }
+    }
+
+    /// What `container` (a group, or the lane itself) holds directly, by first rank.
+    fn items(&self, container: Option<usize>, lane: usize) -> Vec<Item> {
+        let mut items: Vec<(usize, usize, Item)> = Vec::new();
+        for (v, nd) in self.input.nodes.iter().enumerate() {
+            if nd.group == container && nd.lane == lane {
+                items.push((self.ranks[v], v, Item::Node(v)));
+            }
+        }
+        for (g, gr) in self.input.groups.iter().enumerate() {
+            if gr.parent == container && gr.lane == lane {
+                if let Some((lo, _)) = self.span[g] {
+                    items.push((lo, self.first[g], Item::Group(g)));
+                }
+            }
+        }
+        items.sort_by_key(|&(r, v, _)| (r, v));
+        items.into_iter().map(|(_, _, it)| it).collect()
+    }
+
+    /// First-fit tracks: an item joins the first track none of whose items share a
+    /// rank with it. Returns each track's width and items.
+    fn tracks(&self, container: Option<usize>, lane: usize) -> Vec<(f64, Vec<Item>)> {
+        let mut tracks: Vec<(f64, Vec<Item>)> = Vec::new();
+        for it in self.items(container, lane) {
+            let (lo, hi) = self.item_span(it);
+            let free = tracks.iter().position(|(_, items)| {
+                items.iter().all(|&o| {
+                    let (a, b) = self.item_span(o);
+                    b < lo || hi < a
+                })
+            });
+            let w = self.item_width(it);
+            match free {
+                Some(t) => {
+                    tracks[t].0 = tracks[t].0.max(w);
+                    tracks[t].1.push(it);
+                }
+                None => tracks.push((w, vec![it])),
+            }
+        }
+        tracks
+    }
+
+    /// Place everything `container` holds, its tracks centred in `[left, left + width]`.
+    fn place(&self, container: Option<usize>, lane: usize, left: f64, width: f64, x: &mut [f64]) {
+        let gap = self.input.node_gap;
+        let tracks = self.tracks(container, lane);
+        let mut cursor = left + (width - tracks_width(&tracks, gap)) / 2.0;
+        for (tw, items) in &tracks {
+            for &it in items {
+                match it {
+                    Item::Node(v) => x[v] = cursor + tw / 2.0,
+                    Item::Group(g) => {
+                        let pad = self.input.groups[g].pad;
+                        let inner_left =
+                            cursor + (tw - self.block[g]) / 2.0 + pad + self.header_across(g);
+                        let inner_w = self.block[g] - 2.0 * pad - self.header_across(g);
+                        self.place(Some(g), lane, inner_left, inner_w, x);
+                    }
+                }
+            }
+            cursor += tw + gap;
+        }
+    }
+
+    /// Extra room along the flow after rank `r`, so that the boxes ending at `r` and
+    /// those starting at `r + 1` fit their padding and titles.
+    fn gap_after(&self, r: usize) -> f64 {
+        let bt = self.input.direction == Direction::BottomTop;
+        let groups = &self.input.groups;
+        // Room a box needs before its first rank (canonical top) and after its last.
+        let before = |g: usize| groups[g].pad + if bt { 0.0 } else { self.header_along(g) };
+        let after = |g: usize| groups[g].pad + if bt { self.header_along(g) } else { 0.0 };
+        let chain = |g: usize, end: bool| -> f64 {
+            ancestors(groups, Some(g))
+                .take_while(|&a| {
+                    let (lo, hi) = self.span[a].unwrap_or_default();
+                    let (glo, ghi) = self.span[g].unwrap_or_default();
+                    if end { hi == ghi } else { lo == glo }
+                })
+                .map(|a| if end { after(a) } else { before(a) })
+                .sum()
+        };
+        let mut ending = 0.0f64;
+        let mut starting = 0.0f64;
+        for g in 0..groups.len() {
+            if let Some((lo, hi)) = self.span[g] {
+                if hi == r {
+                    ending = ending.max(chain(g, true));
+                }
+                if lo == r + 1 {
+                    starting = starting.max(chain(g, false));
+                }
+            }
+        }
+        ending + starting
+    }
+}
+
+fn tracks_width(tracks: &[(f64, Vec<Item>)], gap: f64) -> f64 {
+    tracks.iter().map(|(w, _)| w).sum::<f64>() + gap * tracks.len().saturating_sub(1) as f64
+}
+
+/// `g` and the groups around it, innermost first.
+fn ancestors(groups: &[LayoutGroup], g: Option<usize>) -> impl Iterator<Item = usize> + '_ {
+    let mut cur = g;
+    let mut guard = groups.len() + 1;
+    std::iter::from_fn(move || {
+        let g = cur.filter(|_| guard > 0)?;
+        guard -= 1;
+        cur = groups.get(g).and_then(|gr| gr.parent);
+        Some(g)
+    })
+}
+
+/// Boxes of the nested groups around node rects centred on `centers`: members plus
+/// padding, with the title band on top (or at the bottom, for BT before mirroring).
+fn fit_groups(input: &LayoutInput, centers: &[Point], title_below: bool) -> Vec<Rect> {
+    let groups = &input.groups;
+    let mut order: Vec<usize> = (0..groups.len()).collect();
+    order.sort_by_key(|&g| std::cmp::Reverse(ancestors(groups, Some(g)).count()));
+    let mut rects = vec![Rect::default(); groups.len()];
+    let mut filled = vec![false; groups.len()];
+    for g in order {
+        let mut b = Bounds::default();
+        let mut any = false;
+        for (v, nd) in input.nodes.iter().enumerate() {
+            if nd.group == Some(g) {
+                b.add_rect(Rect::centered(centers[v], nd.w, nd.h));
+                any = true;
+            }
+        }
+        for (c, gr) in groups.iter().enumerate() {
+            if gr.parent == Some(g) && filled[c] {
+                b.add_rect(rects[c]);
+                any = true;
+            }
+        }
+        if !any {
+            continue;
+        }
+        let gr = &groups[g];
+        let mut r = b.rect().pad(gr.pad);
+        if gr.title.0 > 0.0 {
+            if !title_below {
+                r.y -= gr.title.1;
+            }
+            r.h += gr.title.1;
+            let min_w = gr.title.0 + 2.0 * gr.pad;
+            if r.w < min_w {
+                r.x -= (min_w - r.w) / 2.0;
+                r.w = min_w;
+            }
+        }
+        rects[g] = r;
+        filled[g] = true;
+    }
+    rects
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Side {
     Before,
@@ -526,6 +825,13 @@ pub fn layout(input: &LayoutInput) -> LayoutOutput {
     for (e, need) in extra.iter_mut().zip(&gap_need) {
         *e += need;
     }
+    let nesting = Nesting::new(input, &ranks);
+    let nested_lanes: HashSet<usize> = input.groups.iter().map(|g| g.lane).collect();
+    if !input.groups.is_empty() {
+        for (r, e) in extra.iter_mut().enumerate() {
+            *e += nesting.gap_after(r) / stretch;
+        }
+    }
 
     // Lane widths across the flow.
     let mut lane_w: HashMap<usize, f64> = columns.iter().map(|&l| (l, 0.0)).collect();
@@ -541,6 +847,13 @@ pub fn layout(input: &LayoutInput) -> LayoutOutput {
             let w = lane_w.entry(l).or_default();
             *w = w.max(total);
         }
+    }
+    let mut nested_w: HashMap<usize, f64> = HashMap::new();
+    for &l in &nested_lanes {
+        let w = tracks_width(&nesting.tracks(None, l), node_gap);
+        nested_w.insert(l, w);
+        let lw = lane_w.entry(l).or_default();
+        *lw = lw.max(w);
     }
     let mut gap_groups: Vec<((usize, usize), Vec<usize>)> = Vec::new();
     for (gi, gl) in gap_labels.iter().enumerate() {
@@ -622,6 +935,10 @@ pub fn layout(input: &LayoutInput) -> LayoutOutput {
         offset += lh + gap;
     }
 
+    for (&l, &w) in &nested_w {
+        nesting.place(None, l, center_x[&l] - w / 2.0, w, &mut x);
+    }
+
     // Label seeds.
     let mut labels: Vec<Option<Point>> = vec![None; input.edges.len()];
     let mut row_edge: HashMap<(usize, usize, Side), f64> = HashMap::new();
@@ -689,10 +1006,12 @@ pub fn layout(input: &LayoutInput) -> LayoutOutput {
         ranks,
         labels,
         lanes: Vec::new(),
+        groups: Vec::new(),
     };
     match input.direction {
         Direction::TopBottom | Direction::BottomTop => {
-            out.lanes = tb_lanes(input, &out.centers, &label_boxes);
+            out.groups = fit_groups(input, &out.centers, input.direction == Direction::BottomTop);
+            out.lanes = tb_lanes(input, &out.centers, &out.groups, &label_boxes);
             if input.direction == Direction::BottomTop {
                 mirror(&mut out, input, false);
             }
@@ -712,6 +1031,7 @@ pub fn layout(input: &LayoutInput) -> LayoutOutput {
 fn tb_lanes(
     input: &LayoutInput,
     centers: &[Point],
+    groups: &[Rect],
     labels: &[(usize, usize, Point)],
 ) -> Vec<LaneBand> {
     let lane_count = input.lanes.len();
@@ -735,6 +1055,9 @@ fn tb_lanes(
             c.y + nd.h / 2.0,
             true,
         );
+    }
+    for (gr, r) in input.groups.iter().zip(groups).filter(|(_, r)| r.w > 0.0) {
+        grow(gr.lane, r.x, r.right(), r.y, r.bottom(), true);
     }
     for &(ei, l, p) in labels {
         let (_, h) = input.edges[ei].label.unwrap_or_default();
@@ -877,6 +1200,15 @@ fn lr_transform(
             grow(l, p, w, h);
         }
     }
+    out.groups = fit_groups(input, &out.centers, false);
+    for (gr, r) in input
+        .groups
+        .iter()
+        .zip(&out.groups)
+        .filter(|(_, r)| r.w > 0.0)
+    {
+        grow(gr.lane, r.center(), r.w, r.h);
+    }
     let (gx0, gx1) = bx
         .iter()
         .flatten()
@@ -968,6 +1300,9 @@ fn mirror(out: &mut LayoutOutput, input: &LayoutInput, along_x: bool) {
             Rect::new(r.x, m(r.bottom()), r.w, r.h)
         }
     };
+    for r in out.groups.iter_mut().filter(|r| r.w > 0.0) {
+        *r = flip_rect(*r);
+    }
     for (l, band) in out.lanes.iter_mut().enumerate() {
         band.rect = flip_rect(band.rect);
         if along_x {
@@ -1369,16 +1704,16 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .iter()
         .map(|l| TextBlock::label(&l.title, font))
         .collect();
-    // Edges between nodes take part in the layout; edges to a subgraph only get routed.
-    let node_edges: Vec<(usize, usize, usize)> = g
-        .edges
-        .iter()
-        .enumerate()
-        .filter_map(|(ei, e)| match (e.from, e.to) {
-            (Endpoint::Node(a), Endpoint::Node(b)) => Some((ei, a.0, b.0)),
-            _ => None,
-        })
-        .collect();
+    let (group_of, groups) = nested_groups(sl, |t| {
+        let t = TextBlock::label(t, font);
+        if t.is_empty() {
+            (0.0, 0.0)
+        } else {
+            (t.width, t.height)
+        }
+    });
+    let lane_of_cluster = |ci: usize| lane_of_cluster(sl, ClusterId(ci));
+    let node_edges = layout_edges(sl, &group_of);
     let input = LayoutInput {
         ids: g.nodes.iter().map(|n| n.id.clone()).collect(),
         nodes: g
@@ -1389,8 +1724,10 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 w: sizes[i].0,
                 h: sizes[i].1,
                 lane: sl.lane_of[i],
+                group: g.nodes[i].cluster.and_then(|c| group_of[c.0]),
             })
             .collect(),
+        groups,
         edges: node_edges
             .iter()
             .map(|&(ei, a, b)| LayoutEdge {
@@ -1401,7 +1738,14 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             .collect(),
         lanes: lane_titles
             .iter()
-            .map(|t| (t.width, if t.is_empty() { font * 1.5 } else { t.height }))
+            // An untitled lane has no title strip (its label box is empty).
+            .map(|t| {
+                if t.is_empty() {
+                    (0.0, 0.0)
+                } else {
+                    (t.width, t.height)
+                }
+            })
             .collect(),
         direction: g.direction,
         node_gap: gcfg.node_spacing,
@@ -1426,7 +1770,17 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             {
                 return out.lanes[l].rect;
             }
-            nested_rect(g, ci, &node_rects, font)
+            // An empty nested subgraph has no box (upstream sizes it to nothing):
+            // edges to it end on the nearest box around it.
+            let mut c = Some(ClusterId(ci));
+            for _ in 0..=g.clusters.len() {
+                match c.and_then(|c| group_of[c.0]).map(|gi| out.groups[gi]) {
+                    Some(r) if r.w > 0.0 => return r,
+                    Some(_) => c = c.and_then(|c| g.clusters[c.0].parent),
+                    None => break,
+                }
+            }
+            out.lanes[lane_of_cluster(ci)].rect
         })
         .collect();
     let mut boxes = node_rects.clone();
@@ -1472,24 +1826,24 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             .unwrap_or_else(|| pal.cluster_border.clone());
         let mut paint = Paint::both(&fill, &stroke, style.stroke_width.unwrap_or(1.0));
         paint.dash = style.dash.clone();
-        let mut children = vec![
-            Element::classed_shape(
-                Geometry::Rect {
-                    rect: band.rect,
-                    rx: 0.0,
-                },
-                paint.clone(),
-                "swimlane-body",
-            ),
-            Element::classed_shape(
+        let mut children = vec![Element::classed_shape(
+            Geometry::Rect {
+                rect: band.rect,
+                rx: 0.0,
+            },
+            paint.clone(),
+            "swimlane-body",
+        )];
+        if band.title.w > 0.0 && band.title.h > 0.0 {
+            children.push(Element::classed_shape(
                 Geometry::Rect {
                     rect: band.title,
                     rx: 0.0,
                 },
                 paint,
                 "swimlane-title",
-            ),
-        ];
+            ));
+        }
         let t = &lane_titles[l];
         if !t.is_empty() {
             let color = style
@@ -1515,23 +1869,43 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             children,
         });
     }
-    // Subgraphs nested in a lane: plain boxes.
-    for (ci, c) in g.clusters.iter().enumerate() {
-        if c.parent.is_none() {
-            continue;
+    // Subgraphs nested in a lane: titled boxes, outermost first, coloured from the
+    // palette slot of their subgraph like the lanes.
+    let mut nested: Vec<usize> = (0..g.clusters.len())
+        .filter(|&ci| group_of[ci].is_some_and(|gi| out.groups[gi].w > 0.0))
+        .collect();
+    let depth = |ci: usize| {
+        let mut d = 0;
+        let mut c = g.clusters[ci].parent;
+        while let Some(p) = c.filter(|_| d <= g.clusters.len()) {
+            d += 1;
+            c = g.clusters[p.0].parent;
         }
+        d
+    };
+    nested.sort_by_key(|&ci| depth(ci));
+    for ci in nested {
+        let c = &g.clusters[ci];
         let r = cluster_rects[ci];
+        let slot = pal
+            .color_slots
+            .as_ref()
+            .map(|p| p.slot(c.color_slot.unwrap_or(ColorSlot(ci))));
         let fill = c
             .style
             .fill
             .clone()
+            .or_else(|| slot.as_ref().and_then(|s| s.fill.clone()))
             .unwrap_or_else(|| pal.cluster_bkg.clone());
         let stroke = c
             .style
             .stroke
             .clone()
+            .or_else(|| slot.as_ref().map(|s| s.border.clone()))
             .unwrap_or_else(|| pal.cluster_border.clone());
-        let mut children = vec![Element::rect(r, 0.0, Paint::both(&fill, &stroke, 1.0))];
+        let mut paint = Paint::both(&fill, &stroke, c.style.stroke_width.unwrap_or(1.0));
+        paint.dash = c.style.dash.clone();
+        let mut children = vec![Element::rect(r, 0.0, paint)];
         let t = TextBlock::label(&c.title, font);
         if !t.is_empty() {
             let color = c
@@ -1539,9 +1913,10 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 .color
                 .clone()
                 .unwrap_or_else(|| pal.title_color.clone());
+            let cy = r.y + t.height / 2.0;
             children.push(Element::classed_text(
                 Text::centered(
-                    Point::new(r.x + r.w / 2.0, r.y + 4.0 + t.height / 2.0),
+                    Point::new(r.x + r.w / 2.0, cy),
                     &t.lines,
                     font,
                     t.line_height,
@@ -1715,35 +2090,87 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
 }
 
-/// Box of a subgraph nested in a lane: its members plus padding and title room.
-fn nested_rect(g: &GraphDiagram, ci: usize, node_rects: &[Rect], font: f64) -> Rect {
-    let within = |mut c: ClusterId| {
-        for _ in 0..=g.clusters.len() {
-            if c.0 == ci {
-                return true;
-            }
-            match g.clusters[c.0].parent {
-                Some(p) => c = p,
-                None => return false,
-            }
-        }
-        false
-    };
-    let mut b = Bounds::default();
-    for (i, nd) in g.nodes.iter().enumerate() {
-        if nd.cluster.is_some_and(within) {
-            b.add_rect(node_rects[i]);
+/// The lane a subgraph belongs to: the lane of its top-level ancestor.
+fn lane_of_cluster(sl: &Swimlanes, ci: ClusterId) -> usize {
+    let g = &sl.graph;
+    let mut c = ci;
+    for _ in 0..=g.clusters.len() {
+        match g.clusters[c.0].parent {
+            Some(p) => c = p,
+            None => break,
         }
     }
-    let r = b.rect();
-    let title = TextBlock::label(&g.clusters[ci].title, font);
-    let top = if title.is_empty() { 0.0 } else { title.height };
-    Rect::new(
-        r.x - LANE_PADDING,
-        r.y - LANE_PADDING - top,
-        r.w + 2.0 * LANE_PADDING,
-        r.h + 2.0 * LANE_PADDING + top,
-    )
+    sl.lanes
+        .iter()
+        .position(|l| l.cluster == Some(c))
+        .unwrap_or_default()
+}
+
+/// Subgraphs nested in a lane, at any depth: the group index of every subgraph
+/// (`None` for lanes) and the groups, sized by `title`.
+fn nested_groups(
+    sl: &Swimlanes,
+    title: impl Fn(&str) -> (f64, f64),
+) -> (Vec<Option<usize>>, Vec<LayoutGroup>) {
+    let g = &sl.graph;
+    let mut next = 0;
+    let group_of: Vec<Option<usize>> = g
+        .clusters
+        .iter()
+        .map(|c| {
+            c.parent.map(|_| {
+                next += 1;
+                next - 1
+            })
+        })
+        .collect();
+    let groups = g
+        .clusters
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.parent.is_some())
+        .map(|(ci, c)| LayoutGroup {
+            parent: c.parent.and_then(|p| group_of[p.0]),
+            lane: lane_of_cluster(sl, ClusterId(ci)),
+            title: title(&c.title),
+            pad: LANE_PADDING,
+        })
+        .collect();
+    (group_of, groups)
+}
+
+/// The edges that take part in the layout as `(edge, from, to)` node indices: edges
+/// between nodes, and edges to a subgraph nested in a lane, which are ranked as edges
+/// to its first node in source order (as dagre does with clusters). Edges to a lane
+/// only get routed.
+fn layout_edges(sl: &Swimlanes, group_of: &[Option<usize>]) -> Vec<(usize, usize, usize)> {
+    let g = &sl.graph;
+    let representative = |c: ClusterId| -> Option<usize> {
+        group_of[c.0]?;
+        g.nodes.iter().position(|nd| {
+            let mut cur = nd.cluster;
+            for _ in 0..=g.clusters.len() {
+                match cur {
+                    Some(x) if x == c => return true,
+                    Some(x) => cur = g.clusters[x.0].parent,
+                    None => return false,
+                }
+            }
+            false
+        })
+    };
+    let layout_end = |ep: Endpoint| match ep {
+        Endpoint::Node(i) => Some(i.0),
+        Endpoint::Cluster(c) => representative(c),
+    };
+    g.edges
+        .iter()
+        .enumerate()
+        .filter_map(|(ei, e)| match (layout_end(e.from), layout_end(e.to)) {
+            (Some(a), Some(b)) if a != b || e.from == e.to => Some((ei, a, b)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn endpoint_id(g: &GraphDiagram, e: Endpoint) -> String {
@@ -1785,6 +2212,13 @@ mod tests {
 
     fn input_for(sl: &Swimlanes, dir: Direction) -> LayoutInput {
         let g = &sl.graph;
+        let (group_of, groups) = nested_groups(sl, |t| {
+            if t.is_empty() {
+                (0.0, 0.0)
+            } else {
+                (60.0, 21.0)
+            }
+        });
         LayoutInput {
             ids: g.nodes.iter().map(|n| n.id.clone()).collect(),
             nodes: (0..g.nodes.len())
@@ -1792,18 +2226,16 @@ mod tests {
                     w: 150.0,
                     h: 45.0,
                     lane: sl.lane_of[i],
+                    group: g.nodes[i].cluster.and_then(|c| group_of[c.0]),
                 })
                 .collect(),
-            edges: g
-                .edges
-                .iter()
-                .filter_map(|e| match (e.from, e.to) {
-                    (Endpoint::Node(a), Endpoint::Node(b)) => Some(LayoutEdge {
-                        from: a.0,
-                        to: b.0,
-                        label: e.label.as_ref().map(|_| (60.0, 21.0)),
-                    }),
-                    _ => None,
+            groups,
+            edges: layout_edges(sl, &group_of)
+                .into_iter()
+                .map(|(ei, a, b)| LayoutEdge {
+                    from: a,
+                    to: b,
+                    label: g.edges[ei].label.as_ref().map(|_| (60.0, 21.0)),
                 })
                 .collect(),
             lanes: sl.lanes.iter().map(|_| (60.0, 21.0)).collect(),
@@ -2040,6 +2472,222 @@ mod tests {
         assert!(hop_points(&routes, 1, 0).is_empty());
         let path = route_path(&routes, 0, true);
         assert!(path.iter().any(|c| matches!(c, PathCmd::CubicTo(..))));
+    }
+
+    /// Sales holds Intake (with Inner checks nested in it) and a sibling step that
+    /// shares ranks with the nested boxes; Warehouse holds two plain steps.
+    const NESTED: &str = "swimlane-beta TB
+subgraph L1[Sales]
+  subgraph G1[Intake]
+    subgraph G2[Inner checks]
+      A[Receive order] --> B[Check stock]
+    end
+    X[Log]
+  end
+  S[Side task]
+  C[Confirm]
+end
+subgraph L2[Warehouse]
+  D[Pick] --> E[Ship]
+end
+P --> S
+A --> X
+B --> C
+X --> C
+C --> D
+P --> G1
+G2 --> E";
+
+    fn contains(outer: Rect, inner: Rect) -> bool {
+        outer.x <= inner.x + 1e-6
+            && outer.right() >= inner.right() - 1e-6
+            && outer.y <= inner.y + 1e-6
+            && outer.bottom() >= inner.bottom() - 1e-6
+    }
+
+    #[test]
+    fn nested_subgraphs_hold_their_nodes_inside_their_lane() {
+        for dir in ["TB", "LR", "BT", "RL"] {
+            let sl = parse(&NESTED.replacen("TB", dir, 1), None).unwrap();
+            let input = input_for(&sl, Direction::parse(dir).unwrap());
+            assert_eq!(input.groups.len(), 2);
+            let out = layout(&input);
+            let rect =
+                |v: usize| Rect::centered(out.centers[v], input.nodes[v].w, input.nodes[v].h);
+            for (gi, gr) in input.groups.iter().enumerate() {
+                let r = out.groups[gi];
+                assert!(r.w > 0.0 && r.h > 0.0, "{dir}: group {gi} has a box");
+                // Inside its lane, and inside the group around it.
+                assert!(
+                    contains(out.lanes[gr.lane].rect, r),
+                    "{dir}: group {gi} leaves its lane"
+                );
+                assert!(
+                    !r.intersects(&out.lanes[gr.lane].title),
+                    "{dir}: group {gi} under the lane title"
+                );
+                if let Some(p) = gr.parent {
+                    assert!(
+                        contains(out.groups[p], r.pad(gr.pad - 1.0)),
+                        "{dir}: {gi} not padded inside {p}"
+                    );
+                }
+                // The title band at the top holds no node.
+                let band = Rect::new(r.x, r.y, r.w, gr.title.1);
+                for (v, nd) in input.nodes.iter().enumerate() {
+                    let inside = ancestors(&input.groups, nd.group).any(|a| a == gi);
+                    if inside {
+                        assert!(
+                            contains(r, rect(v).pad(gr.pad - 1.0)),
+                            "{dir}: node {v} not padded inside {gi}"
+                        );
+                        assert!(
+                            !band.intersects(&rect(v)),
+                            "{dir}: node {v} under the title of {gi}"
+                        );
+                    } else {
+                        assert!(
+                            !r.intersects(&rect(v)),
+                            "{dir}: sibling node {v} overlaps group {gi}"
+                        );
+                    }
+                }
+            }
+            // Siblings at one level do not overlap each other either.
+            for v in 0..input.nodes.len() {
+                for w in v + 1..input.nodes.len() {
+                    assert!(
+                        !rect(v).intersects(&rect(w)),
+                        "{dir}: nodes {v} and {w} overlap"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_subgraphs_reserve_room_for_their_box() {
+        // Two steps in Sales, directly or inside a titled subgraph: the lane grows by
+        // the padding (both sides) and, in TB, the flow by padding and title.
+        let lane = |nested: bool, dir: &str| {
+            let body = if nested {
+                "subgraph G[Intake]\n a --> b\n end"
+            } else {
+                "a --> b"
+            };
+            let src = format!("swimlane-beta {dir}\nsubgraph L[Sales]\n {body}\nend");
+            let sl = parse(&src, None).unwrap();
+            let input = input_for(&sl, Direction::parse(dir).unwrap());
+            layout(&input).lanes[0].rect
+        };
+        let (plain, nested) = (lane(false, "TB"), lane(true, "TB"));
+        assert!((nested.w - plain.w - 2.0 * LANE_PADDING).abs() < 1e-6);
+        assert!(nested.h - plain.h >= 2.0 * LANE_PADDING + 21.0 - 1e-6);
+        let (plain, nested) = (lane(false, "LR"), lane(true, "LR"));
+        assert!(nested.h - plain.h >= 2.0 * LANE_PADDING + 21.0 - 1e-6);
+    }
+
+    #[test]
+    fn edges_to_nested_subgraphs_rank_and_route_to_their_box() {
+        let s = scene(NESTED);
+        let find = |id: &str| -> bool {
+            fn walk(e: &Element, id: &str) -> bool {
+                match e {
+                    Element::Group { id: Some(i), .. } if i.starts_with(id) => true,
+                    Element::Group { children, .. } => children.iter().any(|c| walk(c, id)),
+                    _ => false,
+                }
+            }
+            s.elements.iter().any(|e| walk(e, id))
+        };
+        assert!(find("G1") && find("G2"), "nested boxes are drawn");
+        assert!(
+            find("L-P-G1-") && find("L-G2-E-"),
+            "edges to subgraphs are drawn"
+        );
+        // Within a lane, an edge into a subgraph ranks it after its source.
+        let sl = parse(
+            "swimlane-beta\nsubgraph L\n p\n subgraph G\n a\n end\nend\np --> G",
+            None,
+        )
+        .unwrap();
+        let input = input_for(&sl, Direction::TopBottom);
+        let out = layout(&input);
+        assert!(out.groups[0].y > out.centers[0].y, "G below p");
+        let (group_of, _) = nested_groups(&sl, |_| (0.0, 0.0));
+        assert_eq!(group_of, [None, Some(0)]);
+    }
+
+    #[test]
+    fn empty_nested_subgraph_has_no_box() {
+        for src in [
+            "swimlane-beta LR\nsubgraph A\na --> b\nsubgraph B\nend\nend\nsubgraph C\nc\nend\nb --> c",
+            "swimlane-beta TB\nn9\nsubgraph s0\nn2\nsubgraph s1\nsubgraph s2\nend\nend\nend\nn9 --> s1\ns2 --> n2",
+        ] {
+            let sl = parse(src, None).unwrap();
+            let input = input_for(&sl, sl.graph.direction);
+            let out = layout(&input);
+            assert!(out.groups.iter().all(|r| r.w == 0.0));
+            let s = scene(src);
+            let drawn = |id: &str| {
+                s.elements.iter().any(|e| match e {
+                    Element::Group { children, .. } => children
+                        .iter()
+                        .any(|c| matches!(c, Element::Group { id: Some(i), .. } if i == id)),
+                    _ => false,
+                })
+            };
+            assert!(
+                !drawn("B") && !drawn("s1") && !drawn("s2"),
+                "no box for an empty subgraph"
+            );
+            // Every point stays within the drawing, near the lanes, not at the origin.
+            assert!(s.view_box.w > 0.0);
+        }
+    }
+
+    #[test]
+    fn default_lane_takes_the_slot_after_the_kept_subgraphs() {
+        // Lane B lost its only node to A and is dropped: the default lane gets slot 1.
+        let sl = parse(
+            "swimlane-beta\nsubgraph A\na\nend\nsubgraph B\na\nend\na-->b",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sl.lanes.len(), 2);
+        assert_eq!(sl.lanes[0].cluster, None);
+        assert_eq!(sl.lanes[0].slot, ColorSlot(1));
+        let sl = parse(
+            "swimlane-beta\nsubgraph A\na\nend\nsubgraph B\nc\nend\na-->b",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sl.lanes[0].slot, ColorSlot(2));
+    }
+
+    #[test]
+    fn untitled_default_lane_has_no_title_strip() {
+        let s = scene("swimlane-beta\nsubgraph A\na\nend\na-->b");
+        let lanes = match &s.elements[0] {
+            Element::Group { children, .. } => children.clone(),
+            _ => unreachable!(),
+        };
+        let strips = |id: &str| {
+            lanes
+                .iter()
+                .filter_map(|l| match l {
+                    Element::Group {
+                        id: Some(i),
+                        children,
+                        ..
+                    } if i == id => Some(children.len()),
+                    _ => None,
+                })
+                .next()
+                .unwrap()
+        };
+        assert_eq!(strips("__swimlane_default__"), 1, "body only");
+        assert!(strips("A") >= 2, "body, title strip and label");
     }
 
     #[test]
