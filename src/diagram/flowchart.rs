@@ -1176,8 +1176,8 @@ pub(crate) fn shape_by_name(name: &str) -> Option<Shape> {
             Shape::InvTrapezoid
         }
         "odd" | "rect_left_inv_arrow" => Shape::Asymmetric,
-        "f-circ" | "filled-circle" | "junction" | "sm-circ" | "small-circle" | "start"
-        | "stateStart" => Shape::StateStart,
+        "f-circ" | "filled-circle" | "junction" => Shape::StateStart,
+        "sm-circ" | "small-circle" | "start" | "stateStart" => Shape::SmallCircle,
         "fr-circ" | "framed-circle" | "stop" | "stateEnd" => Shape::StateEnd,
         "fork" | "join" | "forkJoin" => Shape::ForkBar,
         "text" => Shape::Text,

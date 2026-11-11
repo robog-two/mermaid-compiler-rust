@@ -321,7 +321,7 @@ pub fn size(
             at(w, h)
         }
         // stateStart.ts / stateEnd.ts / filledCircle.ts: 14px circles.
-        Shape::StateStart | Shape::StateEnd => at(14.0, 14.0),
+        Shape::StateStart | Shape::SmallCircle | Shape::StateEnd => at(14.0, 14.0),
         // forkJoin.ts: 70×10, rotated for LR/RL.
         Shape::ForkBar if horizontal => at(10.0, 70.0),
         Shape::ForkBar => at(70.0, 10.0),
@@ -338,6 +338,7 @@ pub fn shows_label(shape: Shape) -> bool {
     !matches!(
         shape,
         Shape::StateStart
+            | Shape::SmallCircle
             | Shape::StateEnd
             | Shape::ForkBar
             | Shape::Choice

@@ -20,7 +20,6 @@
 //! wider than mermaid's 50px spacing so horizontal labels never overlap
 //! (mermaid lets them overlap).
 
-use crate::color::{self, Rgba};
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
@@ -637,38 +636,173 @@ fn to_xy(o: Orientation, along: f64, across: f64) -> Point {
     }
 }
 
-/// Saturated branch colour derived from the theme's section scale. Lanes step
-/// five scale entries at a time (150° of hue) so neighbouring lanes contrast.
+/// Which branch of upstream's `styles.js` styles the graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    /// `normalTheme`: `git{i}` / `gitInv{i}` / `gitBranchLabel{i}`.
+    Classic,
+    /// `neo`, `neo-dark`: lane 0 in `nodeBorder`, the rest as `normalTheme`.
+    Neo,
+    /// `redux`, `redux-dark`: everything in `nodeBorder`.
+    Redux,
+    /// `redux-color`, `redux-dark-color`: lane 0 in `nodeBorder`, the rest
+    /// `borderColorArray`.
+    ReduxColor,
+}
+
+/// The theme-dependent colours and sizes of upstream's `styles.js` (`genColor` /
+/// `normalTheme`) and `gitGraphRenderer.ts` (`REDUX_GEOMETRY_THEMES`, `DARK_THEMES`).
 ///
-/// The classic themes define `git0..7`, which upstream's `normalTheme` styles use
-/// (`.commit{i}` / `.arrow{i}` / `.label{i}` = `git{i % 8}`).
-fn git_color(pal: &Palette, i: usize) -> Color {
-    if !pal.git.is_empty() {
-        return pal.git[i % pal.git.len()].clone();
-    }
-    let base = pal.scale_color(i * 5 % 12 + i / 12);
-    match color::parse(base.css()) {
-        Some(rgb) => {
-            let (h, s, _) = rgb.to_hsl();
-            let l = if pal.dark { 55.0 } else { 45.0 };
-            Color::new(Rgba::from_hsl(h, s.max(70.0), l, 1.0).to_hex())
+/// Class index `k` is the lane index reduced as upstream's `calcColorIndex` does.
+/// Elements whose class sets no fill inherit the root `fill: textColor`.
+struct GitStyle<'a> {
+    pal: &'a Palette,
+    family: Family,
+    /// `REDUX_GEOMETRY_THEMES`: smaller bullets, thin arrows, bold branch labels.
+    redux: bool,
+    /// `DARK_THEMES`: the cherry-pick marks are drawn black.
+    dark: bool,
+}
+
+impl<'a> GitStyle<'a> {
+    fn new(pal: &'a Palette) -> Self {
+        use crate::theme::ThemeName as T;
+        let family = match pal.theme {
+            T::Neo | T::NeoDark => Family::Neo,
+            T::Redux | T::ReduxDark => Family::Redux,
+            T::ReduxColor | T::ReduxDarkColor => Family::ReduxColor,
+            _ => Family::Classic,
+        };
+        GitStyle {
+            pal,
+            family,
+            redux: matches!(family, Family::Redux | Family::ReduxColor),
+            dark: matches!(
+                pal.theme,
+                T::Dark | T::ReduxDark | T::ReduxDarkColor | T::NeoDark
+            ),
         }
-        None => base.clone(),
     }
-}
 
-/// `gitBranchLabel{i % 8}`, or a readable colour on `fill` without the git set.
-fn branch_label_color(pal: &Palette, i: usize, fill: &Color) -> Color {
-    match pal.git_branch_label.get(i % 8) {
-        Some(c) => c.clone(),
-        None => readable_on(fill),
+    /// `calcColorIndex(lane, limit, useColorTheme)`.
+    fn index(&self, lane: usize, limit: usize) -> usize {
+        if self.family == Family::ReduxColor && lane > 0 {
+            (lane - 1) % (limit - 1) + 1
+        } else {
+            lane % limit
+        }
     }
-}
 
-fn readable_on(c: &Color) -> Color {
-    match color::parse(c.css()) {
-        Some(rgb) if rgb.is_dark() => Color::new("#ffffff"),
-        _ => Color::new("#000000"),
+    /// Class index of commits and arrows (`THEME_COLOR_LIMIT` = 8).
+    fn commit_index(&self, lane: usize) -> usize {
+        self.index(lane, 8)
+    }
+
+    /// Class index of branch labels (the theme's 12 under redux geometry).
+    fn branch_index(&self, lane: usize) -> usize {
+        self.index(lane, if self.redux { 12 } else { 8 })
+    }
+
+    fn git(&self, k: usize) -> Color {
+        self.pal.git[k % 8].clone()
+    }
+
+    fn border(&self, k: usize) -> Color {
+        match &self.pal.color_slots {
+            Some(slots) => slots.border[k % slots.border.len()].clone(),
+            None => self.pal.node_border.clone(),
+        }
+    }
+
+    /// The lane colour: `.commit{k}` stroke and `.arrow{k}`.
+    fn lane(&self, k: usize) -> Color {
+        match self.family {
+            Family::Classic => self.git(k),
+            Family::Neo if k > 0 => self.git(k),
+            Family::ReduxColor if k > 0 => self.border(k),
+            _ => self.pal.node_border.clone(),
+        }
+    }
+
+    /// `.commit{k}` fill, or the inherited one where the class sets none.
+    fn commit_fill(&self, k: usize) -> Color {
+        match self.family {
+            Family::Classic => self.git(k),
+            Family::Neo | Family::ReduxColor if k > 0 => self.lane(k),
+            _ => self.inherited_fill(),
+        }
+    }
+
+    /// The fill a bullet without its own inherits: `.commit-bullets { fill: nodeBorder }`
+    /// under the neo colour generator, the root's `textColor` otherwise.
+    fn inherited_fill(&self) -> Color {
+        if self.neo_gen() {
+            self.pal.node_border.clone()
+        } else {
+            self.pal.text_color.clone()
+        }
+    }
+
+    /// `.branch` stroke: `commitLineColor ?? lineColor` (the redux themes set
+    /// `commitLineColor = #BDBCCC`).
+    fn branch_line(&self) -> Color {
+        if self.redux {
+            Color::new("#BDBCCC")
+        } else {
+            self.pal.line_color.clone()
+        }
+    }
+
+    /// `.commit-highlight{k}` (fill, stroke).
+    fn highlight(&self, k: usize) -> (Color, Color) {
+        let inv = || self.pal.git_inv[k % 8].clone();
+        match self.family {
+            Family::Classic => (inv(), inv()),
+            Family::Neo if k > 0 => (inv(), inv()),
+            Family::ReduxColor if k > 0 => (self.border(k), self.border(k)),
+            Family::ReduxColor => (self.pal.main_bkg.clone(), self.pal.node_border.clone()),
+            _ => (self.pal.node_border.clone(), self.pal.node_border.clone()),
+        }
+    }
+
+    fn stroke_width(&self) -> f64 {
+        self.pal.stroke_width.unwrap_or(1.0)
+    }
+
+    /// `.arrow`: the theme's `strokeWidth` under redux geometry, else 8.
+    fn arrow_width(&self) -> f64 {
+        if self.redux { self.stroke_width() } else { 8.0 }
+    }
+
+    /// `.label{k}` of the branch-label box: fill, and stroke with its width.
+    fn label_box(&self, k: usize) -> (Color, Option<(Color, f64)>) {
+        let sw = self.stroke_width();
+        let main = self.pal.main_bkg.clone();
+        match self.family {
+            Family::Classic => (self.git(k), None),
+            // `genGitGraphGradient`: `url(#gradient)` from `gradientStart` (#0042eb) to
+            // `gradientStop` (#eb0042); drawn in the start colour.
+            Family::Neo => (main, Some((Color::new("#0042eb"), sw))),
+            Family::ReduxColor if k > 0 => {
+                let b = self.border(k);
+                (if self.dark { main } else { b.clone() }, Some((b, sw)))
+            }
+            _ => (main, Some((self.pal.node_border.clone(), sw))),
+        }
+    }
+
+    /// `.branch-label{k}` text colour.
+    fn branch_label(&self, k: usize) -> Color {
+        match self.family {
+            Family::Classic => self.pal.git_branch_label[k % 8].clone(),
+            Family::Neo if k > 0 => self.pal.git_branch_label[k % 8].clone(),
+            _ => self.pal.node_border.clone(),
+        }
+    }
+
+    /// `NEO_COLOR_GEN_THEMES`.
+    fn neo_gen(&self) -> bool {
+        self.family != Family::Classic
     }
 }
 
@@ -726,7 +860,8 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
     let vertical = o != Orientation::LR;
     let mut bounds = Bounds::default();
     let pt = |c: usize| to_xy(o, lay.pos[c], lay.lane[g.commits[c].branch]);
-    let color_of = |b: usize| git_color(pal, lay.lane_index[b]);
+    let st = GitStyle::new(pal);
+    let ck = |b: usize| st.commit_index(lay.lane_index[b]);
     let start: f64 = if vertical { 30.0 } else { 0.0 };
     let (lo, hi) = (start.min(lay.max_pos), lay.max_pos.max(start));
 
@@ -741,8 +876,12 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             bounds.add_point(z);
             branch_els.push(Element::classed_shape(
                 Geometry::Path(vec![PathCmd::MoveTo(a), PathCmd::LineTo(z)]),
-                Paint::stroke(&pal.line_color, 1.0).dashed(vec![2.0]),
-                format!("branch branch{}", lay.lane_index[b] % 8),
+                Paint::stroke(&st.branch_line(), st.stroke_width()).dashed(if st.neo_gen() {
+                    vec![4.0, 2.0]
+                } else {
+                    vec![2.0]
+                }),
+                format!("branch branch{}", st.branch_index(lay.lane_index[b])),
             ));
             let tb = TextBlock::new(vec![br.name.clone()], BRANCH_FONT, false);
             let (w, h) = (tb.width + 18.0, tb.height + 4.0);
@@ -757,21 +896,30 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 Orientation::BT => Rect::new(across - tb.width / 2.0 - 10.0, hi, w, h),
             };
             bounds.add_rect(rect);
-            let fill = color_of(b);
+            let k = st.branch_index(lay.lane_index[b]);
+            let (fill, stroke) = st.label_box(k);
+            let paint = match &stroke {
+                Some((c, w)) => Paint::both(&fill, c, *w),
+                None => Paint::fill(&fill),
+            };
             branch_els.push(Element::classed_shape(
-                Geometry::Rect { rect, rx: 4.0 },
-                Paint::fill(&fill),
-                format!("branchLabelBkg label{}", lay.lane_index[b] % 8),
+                Geometry::Rect {
+                    rect,
+                    rx: if st.redux { 0.0 } else { 4.0 },
+                },
+                paint,
+                format!("branchLabelBkg label{k}"),
             ));
+            let text = Text::centered(
+                rect.center(),
+                &tb.lines,
+                BRANCH_FONT,
+                tb.line_height,
+                &st.branch_label(k),
+            );
             branch_els.push(Element::classed_text(
-                Text::centered(
-                    rect.center(),
-                    &tb.lines,
-                    BRANCH_FONT,
-                    tb.line_height,
-                    &branch_label_color(pal, lay.lane_index[b], &fill),
-                ),
-                format!("branch-label{}", lay.lane_index[b] % 8),
+                if st.redux { text.bold() } else { text },
+                format!("branch-label{k}"),
             ));
         }
     }
@@ -816,42 +964,52 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             let xy: Vec<Point> = pts.iter().map(|&(al, ac)| to_xy(o, al, ac)).collect();
             arrow_els.push(Element::classed_shape(
                 Geometry::Path(rounded(&xy, radius)),
-                Paint::stroke(&color_of(color_branch), 8.0),
-                format!("arrow arrow{}", lay.lane_index[color_branch] % 8),
+                Paint::stroke(&st.lane(ck(color_branch)), st.arrow_width()),
+                format!("arrow arrow{}", ck(color_branch)),
             ));
         }
     }
 
     // Commit bullets, labels and tags.
     let mut bullet_els = Vec::new();
+    let (tag_bkg, tag_border) = if st.neo_gen() {
+        (pal.main_bkg.clone(), pal.node_border.clone())
+    } else {
+        (pal.label_box_bkg.clone(), pal.label_box_border.clone())
+    };
     let mut label_els = Vec::new();
+    // `.commit-merge` / `-reverse` / `-highlight-inner`: `mainBkg` under the neo colour
+    // generator, `primaryColor` (the same colour in the classic themes) otherwise.
     let primary = pal.main_bkg.clone();
+    // Bullet, merge-hole and cherry-pick dot radii, reverse-cross half size, highlight
+    // outer / inner sizes (`useReduxGeometry`).
+    let (bullet_r, hole_r, dot_r, cross, (hi_out, hi_in)) = if st.redux {
+        (7.0, 5.0, 2.5, 4.0, (14.0, 8.0))
+    } else {
+        (10.0, 6.0, 2.75, 5.0, (20.0, 12.0))
+    };
     for (ci, c) in g.commits.iter().enumerate() {
         let p = pt(ci);
-        let col = color_of(c.branch);
+        let k = ck(c.branch);
+        let (col, col_fill) = (st.lane(k), st.commit_fill(k));
         bounds.add_rect(Rect::centered(p, 24.0, 24.0));
-        let cls = format!("commit {} commit{}", c.id, lay.lane_index[c.branch] % 8);
+        let cls = format!("commit {} commit{k}", c.id);
         let symbol = c.custom_type.unwrap_or(c.kind);
         match symbol {
             CommitType::Highlight => {
-                // `.commit-highlight{i}`: `gitInv{i % 8}`.
-                let inv = match pal.git_inv.get(lay.lane_index[c.branch] % 8) {
-                    Some(c) => c.clone(),
-                    None => color::parse(col.css())
-                        .map(|r| Color::new(r.invert().to_hex()))
-                        .unwrap_or_else(|| col.clone()),
-                };
+                // `.commit-highlight{k}`.
+                let (hf, hs) = st.highlight(k);
                 bullet_els.push(Element::classed_shape(
                     Geometry::Rect {
-                        rect: Rect::centered(p, 20.0, 20.0),
+                        rect: Rect::centered(p, hi_out, hi_out),
                         rx: 0.0,
                     },
-                    Paint::both(&inv, &inv, 1.0),
+                    Paint::both(&hf, &hs, 1.0),
                     format!("{cls} commit-highlight-outer"),
                 ));
                 bullet_els.push(Element::classed_shape(
                     Geometry::Rect {
-                        rect: Rect::centered(p, 12.0, 12.0),
+                        rect: Rect::centered(p, hi_in, hi_in),
                         rx: 0.0,
                     },
                     Paint::both(&primary, &primary, 1.0),
@@ -859,41 +1017,43 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 ));
             }
             CommitType::CherryPick => {
+                // Classed `commit commit-cherry-pick` only (no `commit{k}`): no stroke,
+                // and an inherited fill.
                 bullet_els.push(Element::classed_shape(
-                    Geometry::Circle { c: p, r: 10.0 },
-                    Paint::both(&col, &col, 1.0),
-                    format!("{cls} commit-cherry-pick"),
+                    Geometry::Circle { c: p, r: bullet_r },
+                    Paint::fill(&st.inherited_fill()),
+                    format!("commit {} commit-cherry-pick", c.id),
                 ));
-                let white = Color::new("#fff");
+                let mark = Color::new(if st.dark { "#000000" } else { "#fff" });
                 for dx in [-3.0, 3.0] {
                     bullet_els.push(Element::shape(
                         Geometry::Circle {
                             c: Point::new(p.x + dx, p.y + 2.0),
-                            r: 2.75,
+                            r: dot_r,
                         },
-                        Paint::fill(&white),
+                        Paint::fill(&mark),
                     ));
                     bullet_els.push(Element::line(
                         Point::new(p.x + dx, p.y + 1.0),
                         Point::new(p.x, p.y - 5.0),
-                        Paint::stroke(&white, 1.0),
+                        Paint::stroke(&mark, 1.0),
                     ));
                 }
             }
             _ => {
                 let r = if c.kind == CommitType::Merge {
-                    9.0
+                    bullet_r - 1.0
                 } else {
-                    10.0
+                    bullet_r
                 };
                 bullet_els.push(Element::classed_shape(
                     Geometry::Circle { c: p, r },
-                    Paint::both(&col, &col, 1.0),
+                    Paint::both(&col_fill, &col, 1.0),
                     cls.clone(),
                 ));
                 if symbol == CommitType::Merge {
                     bullet_els.push(Element::classed_shape(
-                        Geometry::Circle { c: p, r: 6.0 },
+                        Geometry::Circle { c: p, r: hole_r },
                         Paint::both(&primary, &primary, 1.0),
                         format!("{cls} commit-merge"),
                     ));
@@ -901,12 +1061,12 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 if symbol == CommitType::Reverse {
                     bullet_els.push(Element::classed_shape(
                         Geometry::Path(vec![
-                            PathCmd::MoveTo(Point::new(p.x - 5.0, p.y - 5.0)),
-                            PathCmd::LineTo(Point::new(p.x + 5.0, p.y + 5.0)),
-                            PathCmd::MoveTo(Point::new(p.x - 5.0, p.y + 5.0)),
-                            PathCmd::LineTo(Point::new(p.x + 5.0, p.y - 5.0)),
+                            PathCmd::MoveTo(Point::new(p.x - cross, p.y - cross)),
+                            PathCmd::LineTo(Point::new(p.x + cross, p.y + cross)),
+                            PathCmd::MoveTo(Point::new(p.x - cross, p.y + cross)),
+                            PathCmd::LineTo(Point::new(p.x + cross, p.y - cross)),
                         ]),
-                        Paint::stroke(&primary, 3.0),
+                        Paint::stroke(&primary, if st.neo_gen() { st.stroke_width() } else { 3.0 }),
                         format!("{cls} commit-reverse"),
                     ));
                 }
@@ -914,14 +1074,21 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
         }
         if shown_label(c, gc) {
             let (rect, text, rotation) = commit_label_geometry(o, p, &c.id, gc.rotate_commit_label);
+            // Neo colour generator: transparent box, `nodeBorder` text (weight 600
+            // under redux geometry).
             let bkg = Element::classed_shape(
                 Geometry::Rect { rect, rx: 0.0 },
-                Paint::fill(&primary).with_opacity(0.5),
+                Paint::fill(&primary).with_opacity(if st.neo_gen() { 0.0 } else { 0.5 }),
                 "commit-label-bkg",
             );
             let txt = Element::classed_text(
                 Text {
-                    fill: pal.text_color.clone(),
+                    fill: if st.neo_gen() {
+                        pal.node_border.clone()
+                    } else {
+                        pal.text_color.clone()
+                    },
+                    bold: st.redux,
                     ..text
                 },
                 "commit-label",
@@ -977,7 +1144,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                     children: vec![
                         Element::classed_shape(
                             Geometry::Path(geom::polygon(&poly)),
-                            Paint::both(&pal.label_box_bkg, &pal.label_box_border, 1.0),
+                            Paint::both(&tag_bkg, &tag_border, 1.0),
                             "tag-label-bkg",
                         ),
                         Element::classed_shape(
@@ -1027,7 +1194,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             }
             label_els.push(Element::classed_shape(
                 Geometry::Path(geom::polygon(&poly)),
-                Paint::both(&pal.label_box_bkg, &pal.label_box_border, 1.0),
+                Paint::both(&tag_bkg, &tag_border, 1.0),
                 "tag-label-bkg",
             ));
             label_els.push(Element::classed_shape(
@@ -1060,7 +1227,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
         let w = line_width(t, 18.0, false);
         bounds.add_rect(Rect::centered(c, w, 22.0));
         els.push(Element::classed_text(
-            Text::centered(c, std::slice::from_ref(t), 18.0, 22.0, &pal.title_color),
+            Text::centered(c, std::slice::from_ref(t), 18.0, 22.0, &pal.text_color),
             "gitTitleText",
         ));
     }
@@ -1283,5 +1450,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(layout(&g, &GitConfig::default()).pos, vec![90.0, 40.0]);
+    }
+
+    #[test]
+    fn theme_styles_follow_upstream() {
+        use crate::theme::{ThemeName, palette};
+        let css = |c: &Color| c.css().to_ascii_lowercase();
+        let classic = palette(ThemeName::Default, &[]);
+        let st = GitStyle::new(&classic);
+        assert_eq!(css(&st.lane(1)), css(&classic.git[1]));
+        // The cherry-pick bullet has no `commit{k}` class: it inherits `textColor`.
+        assert_eq!(css(&st.inherited_fill()), "#333");
+        let neo = palette(ThemeName::Neo, &[]);
+        let st = GitStyle::new(&neo);
+        assert_eq!(css(&st.lane(0)), "#000000"); // nodeBorder
+        assert_eq!(css(&st.lane(2)), css(&neo.git[2]));
+        assert_eq!(st.arrow_width(), 8.0);
+        let rdc = palette(ThemeName::ReduxDarkColor, &[]);
+        let st = GitStyle::new(&rdc);
+        // calcColorIndex skips slot 0 for lanes > 0: lane 8 -> class 1.
+        assert_eq!(st.commit_index(8), 1);
+        assert_eq!(css(&st.lane(1)), "#2dd4bf");
+        assert_eq!(st.arrow_width(), 2.0);
+        assert!(st.dark && st.redux);
+        assert_eq!(css(&st.label_box(1).0), "#111113"); // dark: mainBkg fill
     }
 }

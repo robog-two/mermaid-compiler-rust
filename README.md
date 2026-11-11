@@ -152,6 +152,10 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   The redux drop shadow (hard 4px offset, 6% opacity) is exact; the neo themes' blurred `drop-shadow()` is drawn
   without blur, and the `neo`/`neo-dark` gradient node borders (`useGradient`) are drawn with the solid `nodeBorder`.
   `borderColorArray`/`bkgColorArray` cannot be overridden through `themeVariables`.
+  Smaller colour differences: neo gitGraph branch-label boxes use a solid rather than gradient stroke, and redux
+  gitGraph label padding is not ported; neo-look state end/fork rough styles are not ported; ER zero-cardinality markers
+  are outlined rather than filled under dark themes; gantt milestone labels are not italic; sankey gradient ribbons
+  are blended against white, so they look off on a non-white `-b` background.
 - **Mermaid 12.1–12.3 diagrams:** agentflow and use case use the layered layout rather than upstream's default ELK
   (curved rather than right-angled edges). Swimlane has a simplified orthogonal router (no crossing cleanup or
   `automaticLaneOrdering`, no pools). Cynefin's wavy borders are seeded from the SVG id (stable output; set `cynefin.seed`

@@ -413,8 +413,15 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             .map(|l| line_width(l, 20.0, true))
             .fold(0.0, f64::max);
         bounds.add_rect(Rect::new(left, 10.0, tw, 30.0));
+        // `fill` = `journey.titleColor`, default `''`: an empty attribute, so the title
+        // inherits the root's `fill: textColor`.
+        let title_fill = cfg
+            .section("journey", "titleColor")
+            .and_then(|j| j.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map_or_else(|| pal.text_color.clone(), Color::new);
         fore.push(Element::classed_text(
-            Text::centered(Point::new(0.0, 28.0), lines, 20.0, 24.0, &pal.title_color)
+            Text::centered(Point::new(0.0, 28.0), lines, 20.0, 24.0, &title_fill)
                 .bold()
                 .anchored(Anchor::Start, left),
             "titleText",

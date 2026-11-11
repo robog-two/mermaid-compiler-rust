@@ -1171,6 +1171,10 @@ fn resolve(g: &Gantt, raws: Vec<RawTask>) -> Result<Vec<Task>> {
 // Drawing
 // ---------------------------------------------------------------------------
 
+/// `.vertText { font-size: 15px }`.
+const VERT_FONT: f64 = 15.0;
+
+/// The gantt theme variables (`theme-*.js` gantt blocks), as `gantt/styles.js` uses them.
 struct Colors {
     task: Color,
     task_border: Color,
@@ -1180,57 +1184,232 @@ struct Colors {
     done_border: Color,
     crit: Color,
     crit_border: Color,
+    /// `.section0..3`: `sectionBkgColor`, `altSectionBkgColor`, `sectionBkgColor2`,
+    /// `altSectionBkgColor`, each at opacity 0.2.
     sections: [(Color, f64); 4],
     grid: Color,
     exclude: Color,
     vert: Color,
+    /// `textColor`: axis labels.
     text: Color,
+    /// `titleColor`: section titles and (`titleColor || textColor`) the chart title.
     title: Color,
+    /// `taskTextColor`: labels inside plain and critical bars.
+    task_text: Color,
+    /// `taskTextDarkColor`: labels inside active / done bars (and active ones outside).
+    task_text_dark: Color,
+    /// `taskTextOutsideColor`: labels beside a bar.
+    task_text_outside: Color,
 }
 
 impl Colors {
-    fn new(pal: &Palette) -> Self {
-        let base = color::parse(pal.main_bkg.css()).unwrap_or(Rgba {
-            r: 0xec,
-            g: 0xec,
-            b: 0xff,
-            a: 1.0,
-        });
-        let (h, s, _) = base.to_hsl();
-        let s = if s < 5.0 { 0.0 } else { s.max(40.0) };
-        let hsl =
-            |dh: f64, sat: f64, l: f64| Color::new(Rgba::from_hsl(h + dh, sat, l, 1.0).to_hex());
-        let dark = pal.dark;
-        let pick = |light: &str, dark_c: &str| Color::new(if dark { dark_c } else { light });
-        Colors {
-            task: hsl(-5.0, s * 0.56, if dark { 42.0 } else { 70.0 }),
-            task_border: hsl(2.0, s * 0.45, if dark { 65.0 } else { 52.0 }),
-            active: hsl(-7.0, s, if dark { 28.0 } else { 87.0 }),
-            active_border: hsl(2.0, s * 0.45, if dark { 65.0 } else { 52.0 }),
-            done: pick("#d3d3d3", "#4d4d4d"),
-            done_border: pick("#808080", "#9a9a9a"),
-            crit: pick("#f04848", "#b52f2f"),
-            crit_border: pick("#ff8888", "#ff8888"),
-            sections: [
-                (hsl(0.0, s, if dark { 45.0 } else { 70.0 }), 0.2),
-                (pal.background.clone(), 0.2),
-                (pick("#fff400", "#8a8400"), 0.2),
-                (pal.background.clone(), 0.2),
+    fn new(pal: &Palette, vars: &[(String, String)]) -> Self {
+        use crate::theme::ThemeName as T;
+        // `(taskBkg, taskBorder, activeBkg, activeBorder, doneBkg, doneBorder, critBkg,
+        //   critBorder, sectionBkg, altSectionBkg, sectionBkg2, exclude, grid, vert,
+        //   taskText, taskTextDark, taskTextOutside)` as mermaid 12.3 resolves them.
+        let table: [&str; 17] = match pal.theme {
+            T::Dark => [
+                "hsl(180, 1.5873015873%, 35.3529411765%)",
+                "#ffffff",
+                "#81B1DB",
+                "#ffffff",
+                "lightgrey",
+                "grey",
+                "#E83737",
+                "#E83737",
+                "hsl(52.9411764706, 28.813559322%, 58.431372549%)",
+                "#333",
+                "#EAE8D9",
+                "hsl(52.9411764706, 28.813559322%, 48.431372549%)",
+                "lightgrey",
+                "#00BFFF",
+                "hsl(28.5714285714, 17.3553719008%, 86.2745098039%)",
+                "#2c2c2c",
+                "lightgrey",
             ],
-            grid: pick("#d3d3d3", "#555555"),
-            exclude: pick("#eeeeee", "#2b2b2b"),
-            vert: pick("#7a00b3", "#d38cff"),
+            T::Forest => [
+                "#487e3a",
+                "#13540c",
+                "#cde498",
+                "#13540c",
+                "lightgrey",
+                "grey",
+                "red",
+                "#ff8888",
+                "#6eaa49",
+                "white",
+                "#6eaa49",
+                "#eeeeee",
+                "lightgrey",
+                "#00BFFF",
+                "white",
+                "black",
+                "black",
+            ],
+            T::Neutral => [
+                "#707070",
+                "hsl(0, 0%, 33.9215686275%)",
+                "#eee",
+                "hsl(0, 0%, 33.9215686275%)",
+                "#bbb",
+                "#666",
+                "#d42",
+                "hsl(10.9090909091, 73.3333333333%, 40%)",
+                "hsl(0, 0%, 73.9215686275%)",
+                "white",
+                "hsl(0, 0%, 73.9215686275%)",
+                "#eeeeee",
+                "hsl(0, 0%, 90%)",
+                "#d42",
+                "white",
+                "#333",
+                "#333",
+            ],
+            T::Neo | T::Redux | T::ReduxColor => {
+                let color = pal.theme == T::ReduxColor;
+                [
+                    "#ECECFE",
+                    "",
+                    "hsl(240, 90%, 100%)",
+                    "#ECECFE",
+                    "lightgrey",
+                    "grey",
+                    "red",
+                    "#ff8888",
+                    if color {
+                        "#f4a8ff"
+                    } else {
+                        "hsl(60, 90%, 100%)"
+                    },
+                    "white",
+                    if color { "#46ecd5" } else { "#ECECFE" },
+                    "#eeeeee",
+                    "lightgrey",
+                    "",
+                    "",
+                    "",
+                    "",
+                ]
+            }
+            T::NeoDark | T::ReduxDark | T::ReduxDarkColor => {
+                let color = pal.theme == T::ReduxDarkColor;
+                [
+                    "#1f2020",
+                    "",
+                    "hsl(180, 1.5873015873%, 35.3529411765%)",
+                    "#1f2020",
+                    if pal.theme == T::NeoDark {
+                        "hsl(0, 13.5135135135%, 30.5098039216%)"
+                    } else {
+                        "hsl(240, 5.5555555556%, 23.0588235294%)"
+                    },
+                    "grey",
+                    "red",
+                    "#ff8888",
+                    if color {
+                        "#f4a8ff"
+                    } else {
+                        "hsl(20, 1.5873015873%, 12.3529411765%)"
+                    },
+                    if color { "#333" } else { "white" },
+                    if color { "#46ecd5" } else { "#1f2020" },
+                    "#eeeeee",
+                    "lightgrey",
+                    "",
+                    "",
+                    "",
+                    "",
+                ]
+            }
+            T::Base => [
+                "",
+                "",
+                "",
+                "",
+                "lightgrey",
+                "grey",
+                "red",
+                "#ff8888",
+                "",
+                "white",
+                "",
+                "#eeeeee",
+                "lightgrey",
+                "navy",
+                "",
+                "",
+                "",
+            ],
+            T::Default | T::Null => [
+                "#8a90dd",
+                "#534fbc",
+                "#bfc7ff",
+                "#534fbc",
+                "lightgrey",
+                "grey",
+                "red",
+                "#ff8888",
+                "rgba(102, 102, 255, 0.49)",
+                "white",
+                "#fff400",
+                "#eeeeee",
+                "lightgrey",
+                "navy",
+                "white",
+                "black",
+                "black",
+            ],
+        };
+        // Blank slots follow the theme's own derivations: the neo / redux family's task
+        // border and `vertLineColor` are `primaryBorderColor` and its texts `textColor`;
+        // theme-base.js derives everything from `primaryColor`.
+        let base = |i: usize| -> Color {
+            if !table[i].is_empty() {
+                return Color::new(table[i]);
+            }
+            let main = color::parse(pal.main_bkg.css()).unwrap_or(Rgba::WHITE);
+            match i {
+                1 | 13 => pal.primary_border.clone(),
+                14..=16 => pal.text_color.clone(),
+                0 | 3 | 10 => pal.main_bkg.clone(),
+                2 => Color::new(main.lighten(23.0).to_hex()),
+                // `sectionBkgColor = tertiaryColor` (the base palette's cluster fill).
+                8 => pal.cluster_bkg.clone(),
+                _ => pal.main_bkg.clone(),
+            }
+        };
+        let var = |k: &str, i: usize| {
+            vars.iter()
+                .rev()
+                .find(|(n, _)| n == k)
+                .map_or_else(|| base(i), |(_, v)| Color::new(v.trim()))
+        };
+        let alt = var("altSectionBkgColor", 9);
+        Colors {
+            task: var("taskBkgColor", 0),
+            task_border: var("taskBorderColor", 1),
+            active: var("activeTaskBkgColor", 2),
+            active_border: var("activeTaskBorderColor", 3),
+            done: var("doneTaskBkgColor", 4),
+            done_border: var("doneTaskBorderColor", 5),
+            crit: var("critBkgColor", 6),
+            crit_border: var("critBorderColor", 7),
+            sections: [
+                (var("sectionBkgColor", 8), 0.2),
+                (alt.clone(), 0.2),
+                (var("sectionBkgColor2", 10), 0.2),
+                (alt, 0.2),
+            ],
+            exclude: var("excludeBkgColor", 11),
+            grid: var("gridColor", 12),
+            vert: var("vertLineColor", 13),
+            task_text: var("taskTextColor", 14),
+            task_text_dark: var("taskTextDarkColor", 15),
+            task_text_outside: var("taskTextOutsideColor", 16),
             text: pal.text_color.clone(),
             title: pal.title_color.clone(),
         }
-    }
-}
-
-fn contrast_text(fill: &Color, light: &Color) -> Color {
-    match color::parse(fill.css()) {
-        Some(c) if c.is_dark() => Color::new("#ffffff"),
-        Some(_) => Color::new("#000000"),
-        None => light.clone(),
     }
 }
 
@@ -1266,7 +1445,7 @@ fn assign_rows(g: &Gantt, compact: bool) -> (Vec<Option<usize>>, usize) {
 
 /// Lay out and draw a resolved gantt chart.
 pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
-    let c = Colors::new(pal);
+    let c = Colors::new(pal, &cfg.theme_variables);
     let bar_h = cfg.section_f64("gantt", "barHeight", 20.0);
     let bar_gap = cfg.section_f64("gantt", "barGap", 4.0);
     let top_pad = cfg.section_f64("gantt", "topPadding", 50.0);
@@ -1431,15 +1610,14 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         } else {
             (c.task.clone(), c.task_border.clone())
         };
-        let mut sw = 1.0;
+        // `.task`, `.done*` and `.crit*` all draw a 2px outline.
         if t.crit {
             stroke = c.crit_border.clone();
-            sw = 2.0;
             if !t.done && !t.active {
                 fill = c.crit.clone();
             }
         }
-        let paint = Paint::both(&fill, &stroke, sw);
+        let paint = Paint::both(&fill, &stroke, 2.0);
         let label = normalize_label(&t.label);
         let tw = line_width(&label, font, false);
         let (bx0, bx1) = if t.milestone {
@@ -1471,16 +1649,29 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             (x0, x1)
         };
         let inside = !t.milestone && tw + 6.0 <= bx1 - bx0;
+        // `taskText{n}` = `taskTextColor`; `activeText` / `doneText` / `activeCritText` /
+        // `doneCritText` = `taskTextDarkColor` (!important), except that done labels outside
+        // the bar take `taskTextOutsideColor`; other outside labels `taskTextOutsideColor`.
+        let dark_label = t.active || t.done;
+        let outside_fill = if t.active {
+            c.task_text_dark.clone()
+        } else {
+            c.task_text_outside.clone()
+        };
         let (x, anchor, fill_text) = if inside {
             (
                 (bx0 + bx1) / 2.0,
                 Anchor::Middle,
-                contrast_text(&fill, &c.text),
+                if dark_label {
+                    c.task_text_dark.clone()
+                } else {
+                    c.task_text.clone()
+                },
             )
         } else if bx1 + 5.0 + tw <= w || bx0 - 5.0 - tw < left_pad {
-            (bx1 + 5.0, Anchor::Start, c.text.clone())
+            (bx1 + 5.0, Anchor::Start, outside_fill)
         } else {
-            (bx0 - 5.0, Anchor::End, c.text.clone())
+            (bx0 - 5.0, Anchor::End, outside_fill)
         };
         let lx = match anchor {
             Anchor::Start => x,
@@ -1528,7 +1719,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             lines,
             sec_font,
             sec_font * 1.3,
-            &c.text,
+            &c.title,
         )
         .anchored(Anchor::Start, 10.0);
         labels.push(Element::classed_text(t, "sectionTitle"));
@@ -1537,16 +1728,19 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     // Vertical markers.
     for t in g.tasks.iter().filter(|t| t.vert) {
         let x = x_of(t.start);
+        // A `0.08 * barHeight` wide task rect classed `vert task{n}`: `taskBkgColor`
+        // fill, 2px `vertLineColor` outline.
+        let vw = 0.08 * bar_h;
         grid.push(Element::classed_shape(
-            Geometry::Path(vec![
-                geom::PathCmd::MoveTo(Point::new(x, grid_top)),
-                geom::PathCmd::LineTo(Point::new(x, axis_y)),
-            ]),
-            Paint::stroke(&c.vert, 2.0).dashed(vec![6.0, 3.0]),
+            Geometry::Rect {
+                rect: Rect::new(x - vw / 2.0, grid_top, vw, axis_y - grid_top),
+                rx: 3.0_f64.min(vw / 2.0),
+            },
+            Paint::both(&c.task, &c.vert, 2.0),
             "vert",
         ));
         let label = normalize_label(&t.label);
-        let tw = line_width(&label, font, true);
+        let tw = line_width(&label, VERT_FONT, false);
         let y = axis_y + 3.0 + axis_font + 16.0;
         bounds.add_rect(Rect::new(x - tw / 2.0, y - font, tw, font * 1.4));
         overlay.push(Element::classed_text(
@@ -1554,9 +1748,9 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 x,
                 y,
                 lines: vec![label],
-                line_height: font * 1.2,
-                font_size: font,
-                bold: true,
+                line_height: VERT_FONT * 1.2,
+                font_size: VERT_FONT,
+                bold: false,
                 anchor: Anchor::Middle,
                 fill: c.vert.clone(),
             },

@@ -1696,9 +1696,9 @@ pub fn draw(d: &C4Diagram, lay: &C4Layout, conf: &C4Conf, pal: &Palette) -> Scen
     // mermaid's C4 renderer uses a fixed scheme regardless of theme.
     let ink = Color::new("#444444");
     let label_bg = Color::new("white");
-    // Arrow markers and the title take the svg's default text fill (`#333`),
-    // not the relationship colour.
-    let marker = Color::new("#333333");
+    // Arrow markers and the title take the svg root's `fill: textColor`, not the
+    // relationship colour.
+    let marker = pal.text_color.clone();
     let mut bounds = Bounds::default();
     let mut boundary_els = Vec::new();
     let mut boundary_title_els = Vec::new();

@@ -1385,7 +1385,7 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         let c = Point::new(r.center().x, r.y - 20.0);
         bounds.add_rect(Rect::centered(c, tb.width, tb.height));
         els.push(Element::classed_text(
-            Text::centered(c, &tb.lines, 18.0, tb.line_height, &pal.title_color),
+            Text::centered(c, &tb.lines, 18.0, tb.line_height, &pal.text_color),
             "blockTitle",
         ));
     }
