@@ -166,6 +166,8 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         if v.redux {
             p.cluster_bkg = c("#F9F9FB");
             p.cluster_border = c("#BDBCCC");
+            p.composite_title_background = Some(c("#F9F9FB"));
+            p.alt_background = Some(c("#F9F9FB"));
         } else {
             p.cluster_bkg = hex(tertiary);
             p.cluster_border = hex(mk_border(tertiary));
@@ -244,6 +246,9 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         if v.redux {
             p.cluster_bkg = c("#1E1A2E");
             p.cluster_border = c("#BDBCCC");
+            p.composite_title_background = Some(c("#16141F"));
+            p.composite_background = Some(c("#16141F"));
+            p.alt_background = Some(c("#16141F"));
         } else {
             p.cluster_bkg = hex(tertiary);
             p.cluster_border = hex(mk_border(tertiary));

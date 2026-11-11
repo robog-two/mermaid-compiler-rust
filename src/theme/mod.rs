@@ -121,6 +121,11 @@ pub struct Palette {
     pub er_edge_label_background: Option<Color>,
     /// The drop shadow the neo look applies to nodes and clusters (`dropShadow`).
     pub drop_shadow: Option<DropShadow>,
+    /// State composites: `compositeTitleBackground` (`None` = `main_bkg`),
+    /// `compositeBackground` (`None` = `background`) and `altBackground` (`None` = `#f0f0f0`).
+    pub composite_title_background: Option<Color>,
+    pub composite_background: Option<Color>,
+    pub alt_background: Option<Color>,
 }
 
 /// A palette slot (`colorIndex` upstream): the n-th participant of a diagram that takes
@@ -243,6 +248,9 @@ fn default_palette() -> Palette {
         er_row_odd: Some(c("white")),
         er_edge_label_background: None,
         drop_shadow: None,
+        composite_title_background: None,
+        composite_background: None,
+        alt_background: None,
     }
 }
 
@@ -286,6 +294,7 @@ fn forest_palette() -> Palette {
 
 fn dark_palette() -> Palette {
     let mut p = default_palette();
+    p.alt_background = Some(c("#555"));
     p.background = c("#333");
     p.main_bkg = c("#1f2020");
     p.node_border = c("#ccc");
@@ -337,6 +346,7 @@ fn dark_palette() -> Palette {
 
 fn neutral_palette() -> Palette {
     let mut p = default_palette();
+    p.alt_background = Some(c("#f4f4f4"));
     p.main_bkg = c("#eee");
     p.node_border = c("#999");
     p.node_text = c("#333");
@@ -540,6 +550,9 @@ fn apply_variable(p: &mut Palette, key: &str, value: &str) {
         "titleColor" => p.title_color = v,
         "secondaryColor" | "clusterBkg" => p.cluster_bkg = v,
         "clusterBorder" => p.cluster_border = v,
+        "compositeTitleBackground" => p.composite_title_background = Some(v),
+        "compositeBackground" => p.composite_background = Some(v),
+        "altBackground" => p.alt_background = Some(v),
         "tertiaryColor" => {}
         "edgeLabelBackground" => p.edge_label_background = v,
         "actorBkg" => p.actor_bkg = v,

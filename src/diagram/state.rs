@@ -4,8 +4,8 @@
 //! scoped to the enclosing composite, as in mermaid.
 
 use super::graph::{
-    Cluster, ClusterId, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId, Section, Shape,
-    StyleOverrides,
+    Cluster, ClusterId, ClusterKind, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId,
+    Section, Shape, StyleOverrides,
 };
 use super::statements;
 use crate::error::{Error, Result};
@@ -21,7 +21,13 @@ struct Builder {
     clusters: Vec<Cluster>,
     cluster_index: HashMap<String, usize>,
     composite_ids: HashSet<String>,
+    /// Composites whose body is split into concurrency regions by `--`.
+    divided: HashSet<String>,
     stack: Vec<ClusterId>,
+    /// Palette slots handed out so far (regions reuse their composite's).
+    composite_slots: usize,
+    /// stateDb's `divider-id-N` counter.
+    dividers: usize,
     edges: Vec<Edge>,
     descriptions: HashMap<String, Vec<String>>,
     class_defs: HashMap<String, StyleOverrides>,
@@ -33,12 +39,20 @@ struct Builder {
 pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
     let stmts = statements(body);
     let mut b = Builder::default();
-    // Pass 1: which ids are composite states.
+    // Pass 1: which ids are composite states, and which of them hold `--` regions.
+    let mut open: Vec<String> = Vec::new();
     for (_, s) in &stmts {
         if let Some(rest) = s.strip_prefix("state ") {
             if rest.trim_end().ends_with('{') {
-                b.composite_ids
-                    .insert(state_decl_id(rest.trim_end().trim_end_matches('{').trim()));
+                let id = state_decl_id(rest.trim_end().trim_end_matches('{').trim());
+                b.composite_ids.insert(id.clone());
+                open.push(id);
+            }
+        } else if s == "}" {
+            open.pop();
+        } else if s == "--" {
+            if let Some(id) = open.last() {
+                b.divided.insert(id.clone());
             }
         }
     }
@@ -54,21 +68,38 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
             continue;
         }
         if let Some(d) = s.strip_prefix("direction ") {
-            if b.stack.is_empty() {
-                direction = Direction::parse(d.trim()).ok_or_else(|| {
-                    Error::parse(line, format!("Invalid direction '{}'", d.trim()))
-                })?;
+            let d = Direction::parse(d.trim())
+                .ok_or_else(|| Error::parse(line, format!("Invalid direction '{}'", d.trim())))?;
+            match b.composite_on_top() {
+                // A composite's own `direction` (stateDb keeps it as the state's `dir`).
+                Some(c) => b.clusters[c.0].direction = Some(d),
+                None => direction = d,
             }
             continue;
         }
         if s == "}" {
-            b.stack
+            let c = b
+                .stack
                 .pop()
                 .ok_or_else(|| Error::parse(line, "Unexpected '}'"))?;
+            if b.clusters[c.0].kind == ClusterKind::Region {
+                b.stack.pop();
+            }
             continue;
         }
-        if s == "--" || s.starts_with("hide ") || s.starts_with("scale ") || s.starts_with("click ")
-        {
+        if s == "--" {
+            // Close the current region of the composite and open the next one.
+            if let Some(&c) = b.stack.last() {
+                if b.clusters[c.0].kind == ClusterKind::Region {
+                    b.stack.pop();
+                    if let Some(&parent) = b.stack.last() {
+                        b.open_region(parent);
+                    }
+                }
+            }
+            continue;
+        }
+        if s.starts_with("hide ") || s.starts_with("scale ") || s.starts_with("click ") {
             continue;
         }
         if let Some(rest) = s.strip_prefix("classDef ") {
@@ -110,11 +141,18 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
             };
             let t = b.touch(&target);
             b.notes += 1;
-            let mut note = Node::new(format!("note{}", b.notes), text, Shape::Note);
-            note.cluster = b.stack.last().copied();
+            // dataFetcher wraps the note in an invisible `noteGroup` at the top level,
+            // whatever composite the annotated state lives in: the note sits outside
+            // it, and its edge crosses the composite's border.
+            let note = Node::new(format!("note{}", b.notes), text, Shape::Note);
             b.nodes.push(note);
             let n = b.nodes.len() - 1;
-            let mut e = Edge::new(Endpoint::Node(NodeId(t)), Endpoint::Node(NodeId(n)));
+            let (from, to) = if rest.starts_with("left of") {
+                (n, t)
+            } else {
+                (t, n)
+            };
+            let mut e = Edge::new(Endpoint::Node(NodeId(from)), Endpoint::Node(NodeId(to)));
             e.line = LineKind::Dotted;
             e.end = Head::None;
             b.edges.push(e);
@@ -216,17 +254,35 @@ impl Builder {
         if let Some(&c) = self.cluster_index.get(id) {
             return ClusterId(c);
         }
-        self.clusters.push(Cluster {
-            id: id.to_string(),
-            title: id.to_string(),
-            parent: self.stack.last().copied(),
-            style: StyleOverrides::default(),
-            // Composites take slots in the order dataFetcher inserts them (pre-order).
-            color_slot: Some(ColorSlot(self.clusters.len())),
-        });
+        let mut c = Cluster::new(id, id, self.stack.last().copied());
+        c.kind = ClusterKind::Composite;
+        // Composites take slots in the order dataFetcher inserts them (pre-order).
+        c.color_slot = Some(ColorSlot(self.composite_slots));
+        self.composite_slots += 1;
+        self.clusters.push(c);
         self.cluster_index
             .insert(id.to_string(), self.clusters.len() - 1);
         ClusterId(self.clusters.len() - 1)
+    }
+
+    /// A concurrency region of `parent` (stateDb's `divider` state): untitled, and
+    /// painted with its composite's slot.
+    fn open_region(&mut self, parent: ClusterId) {
+        self.dividers += 1;
+        let mut r = Cluster::new(format!("divider-id-{}", self.dividers), "", Some(parent));
+        r.kind = ClusterKind::Region;
+        r.color_slot = self.clusters[parent.0].color_slot;
+        self.clusters.push(r);
+        self.stack.push(ClusterId(self.clusters.len() - 1));
+    }
+
+    /// The innermost open composite (skipping the region it may be split into).
+    fn composite_on_top(&self) -> Option<ClusterId> {
+        self.stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|c| self.clusters[c.0].kind == ClusterKind::Composite)
     }
 
     fn endpoint(&mut self, raw: &str, is_source: bool) -> Endpoint {
@@ -274,6 +330,9 @@ impl Builder {
                 self.clusters[c.0].title = d;
             }
             self.stack.push(c);
+            if self.divided.contains(&id) {
+                self.open_region(c);
+            }
             return Ok(());
         }
         let i = self.touch(&id);
@@ -421,5 +480,71 @@ mod tests {
     fn unbalanced_braces() {
         assert!(parse("stateDiagram-v2\nstate A {\nB-->C", None).is_err());
         assert!(parse("stateDiagram-v2\n}", None).is_err());
+        // Regions do not change the brace count.
+        assert!(parse("stateDiagram-v2\nstate A {\nB\n--\nC\n}\nD", None).is_ok());
+    }
+
+    #[test]
+    fn concurrency_regions() {
+        let g = parse(
+            "stateDiagram-v2\nstate Active {\n[*] --> A1\n--\n[*] --> B1\n--\n[*] --> C1\n}\nActive --> Done",
+            None,
+        )
+        .unwrap();
+        let regions: Vec<&Cluster> = g
+            .clusters
+            .iter()
+            .filter(|c| c.kind == ClusterKind::Region)
+            .collect();
+        assert_eq!(regions.len(), 3);
+        let active = &g.clusters[0];
+        assert_eq!(active.kind, ClusterKind::Composite);
+        for r in &regions {
+            assert_eq!(r.parent, Some(ClusterId(0)));
+            assert!(r.title.is_empty());
+            assert_eq!(
+                r.color_slot, active.color_slot,
+                "regions share the composite's slot"
+            );
+        }
+        // Each region has its own start state and its own member.
+        let starts: Vec<&Node> = g
+            .nodes
+            .iter()
+            .filter(|n| n.shape == Shape::StateStart)
+            .collect();
+        assert_eq!(starts.len(), 3);
+        let mut owners: Vec<_> = starts.iter().map(|n| n.cluster).collect();
+        owners.dedup();
+        assert_eq!(owners.len(), 3);
+        for id in ["A1", "B1", "C1"] {
+            let n = g.nodes.iter().find(|n| n.id == id).unwrap();
+            assert_eq!(g.clusters[n.cluster.unwrap().0].kind, ClusterKind::Region);
+        }
+        // `Done` is outside, and a later composite takes the next slot.
+        let g2 = parse(
+            "stateDiagram-v2\nstate A {\nx\n--\ny\n}\nstate B {\nz\n}",
+            None,
+        )
+        .unwrap();
+        let b = g2.clusters.iter().find(|c| c.id == "B").unwrap();
+        assert_eq!(b.color_slot, Some(ColorSlot(1)));
+    }
+
+    #[test]
+    fn composite_direction_and_notes() {
+        let g = parse(
+            "stateDiagram-v2\ndirection LR\nstate B {\ndirection TB\na --> b\nnote left of b : hi\n}",
+            None,
+        )
+        .unwrap();
+        assert_eq!(g.direction, Direction::LeftRight);
+        assert_eq!(g.clusters[0].direction, Some(Direction::TopBottom));
+        // dataFetcher puts the note's group at the top level, outside the composite,
+        // and a `left of` note's edge runs from the note to the state.
+        let note = g.nodes.iter().position(|n| n.shape == Shape::Note).unwrap();
+        assert_eq!(g.nodes[note].cluster, None);
+        let e = g.edges.last().unwrap();
+        assert_eq!(e.from, Endpoint::Node(NodeId(note)));
     }
 }
