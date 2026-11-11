@@ -806,7 +806,7 @@ impl Scanner {
 /// `@{ shape: … }` names → shapes, following the alias table in mermaid's
 /// `rendering-util/rendering-elements/shapes.ts`. Valid names we do not draw
 /// yet fall back to a rectangle; unknown names are an error, as upstream.
-fn shape_by_name(name: &str) -> Option<Shape> {
+pub(crate) fn shape_by_name(name: &str) -> Option<Shape> {
     Some(match name {
         "rect" | "proc" | "process" | "rectangle" | "squareRect" => Shape::Rect,
         "rounded" | "event" | "roundedRect" => Shape::Rounded,
