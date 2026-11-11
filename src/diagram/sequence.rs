@@ -429,7 +429,11 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
     for ev in &d.events {
         match ev {
             Event::Message(m) if m.from != m.to => {
-                let w = TextBlock::label(&m.text, font).width + 2.0 * cfg.wrap_padding;
+                let mut w = TextBlock::label(&m.text, font).width + 2.0 * cfg.wrap_padding;
+                // mermaid sizes the margin between neighbours as message + actorMargin.
+                if m.from.abs_diff(m.to) == 1 {
+                    w += cfg.actor_margin;
+                }
                 spans.push((m.from.min(m.to), m.from.max(m.to), w));
             }
             Event::Message(m) => {
@@ -479,22 +483,79 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
         }
     }
 
+    // Participant boxes (`box ... end`), as in mermaid's `calculateActorMargins`
+    // and `addActorRenderingData`: each box gets an inner `margin`
+    // (`boxTextMargin`, more if its title is wider than its members) on both
+    // sides, and `boxMargin` more separates it from what follows.
+    let box_of: Vec<Option<usize>> = (0..n)
+        .map(|i| d.boxes.iter().position(|b| b.members.contains(&i)))
+        .collect();
+    let box_title_h = d
+        .boxes
+        .iter()
+        .filter(|b| !b.label.is_empty())
+        .map(|b| TextBlock::label(&b.label, font).height)
+        .fold(0.0f64, f64::max);
+    let box_inner: Vec<f64> = d
+        .boxes
+        .iter()
+        .map(|b| {
+            let total: f64 = b
+                .members
+                .iter()
+                .map(|&m| {
+                    let margin = if m + 1 < n {
+                        gaps[m] - widths[m] / 2.0 - widths[m + 1] / 2.0
+                    } else {
+                        cfg.actor_margin
+                    };
+                    widths[m] + margin
+                })
+                .sum::<f64>()
+                + 8.0 * cfg.box_margin
+                - 2.0 * cfg.box_text_margin;
+            let title_w = if b.label.is_empty() {
+                0.0
+            } else {
+                TextBlock::label(&b.label, font).width
+            };
+            let min_w = total.max(title_w + 2.0 * cfg.wrap_padding);
+            cfg.box_text_margin + (min_w - total).max(0.0) / 2.0
+        })
+        .collect();
+    for i in 0..n.saturating_sub(1) {
+        if box_of[i] != box_of[i + 1] {
+            if let Some(b) = box_of[i] {
+                gaps[i] += cfg.box_margin + box_inner[b];
+            }
+            if let Some(c) = box_of[i + 1] {
+                gaps[i] += box_inner[c];
+            }
+        }
+    }
+    let lead = box_of
+        .first()
+        .copied()
+        .flatten()
+        .map_or(0.0, |b| box_inner[b]);
     let has_box_labels = d.boxes.iter().any(|b| !b.label.is_empty());
     let title_band = if d.title.as_ref().is_some_and(|t| !t.is_empty()) {
         40.0
     } else {
         0.0
     };
+    // Boxes start `boxMargin / 2` above the diagram top; actors follow after
+    // `boxMargin` plus the tallest box title.
     let box_band = if d.boxes.is_empty() {
         0.0
     } else if has_box_labels {
-        34.0
+        1.5 * cfg.box_margin + box_title_h
     } else {
-        10.0
+        1.5 * cfg.box_margin
     };
     let top = cfg.diagram_margin_y + title_band + box_band;
     let mut xs = Vec::with_capacity(n);
-    let mut x = cfg.diagram_margin_x + widths.first().copied().unwrap_or(0.0) / 2.0;
+    let mut x = cfg.diagram_margin_x + lead + widths.first().copied().unwrap_or(0.0) / 2.0;
     for i in 0..n {
         if i > 0 {
             x += gaps[i - 1];
@@ -755,7 +816,8 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
             }
             Event::BlockStart { kind, label } => {
                 let block = TextBlock::label(label, font);
-                let top_y = cursor + 10.0;
+                let has_title = !label.is_empty();
+                let top_y = cursor + cfg.box_margin;
                 let (color, label) = if *kind == BlockKind::Rect {
                     (Some(label.clone()), String::new())
                 } else {
@@ -770,20 +832,33 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
                     max_x: f64::NEG_INFINITY,
                     color,
                 });
+                // mermaid `adjustLoopHeightForWrap`: after the frame top come
+                // `boxMargin + boxTextMargin` plus the title (at least
+                // `labelBoxHeight`); a `rect` only gets `boxMargin`.
                 cursor = top_y
                     + if *kind == BlockKind::Rect {
-                        0.0
+                        cfg.box_margin
+                    } else if !has_title {
+                        cfg.box_margin + cfg.box_text_margin
                     } else {
-                        block.height.max(20.0) + 4.0
+                        cfg.box_margin + cfg.box_text_margin + block.height.max(LABEL_BOX_H)
                     };
             }
             Event::BlockSection { label } => {
                 let block = TextBlock::label(label, font);
-                let y = cursor + 10.0;
+                // Sections: `boxMargin + boxTextMargin` before the divider,
+                // `boxMargin` plus the (non-empty) title after it.
+                let y = cursor + cfg.box_margin + cfg.box_text_margin;
                 if let Some(f) = frames.last_mut() {
                     f.sections.push((y, label.clone()));
                 }
-                cursor = y + block.height.max(10.0) + 4.0;
+                cursor = y
+                    + cfg.box_margin
+                    + if label.is_empty() {
+                        0.0
+                    } else {
+                        block.height.max(LABEL_BOX_H)
+                    };
             }
             Event::BlockEnd => {
                 cursor += 10.0;
@@ -803,20 +878,27 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
                 }
                 let r = Rect::new(left, f.top, right - left, cursor - f.top);
                 bounds.add_rect(r);
+                // Frames sit 11px outside their content and each enclosing
+                // level adds `boxMargin` (10) more, as in mermaid's nested loops.
                 for parent in frames.iter_mut() {
-                    parent.min_x = parent.min_x.min(left);
-                    parent.max_x = parent.max_x.max(right);
+                    parent.min_x = parent.min_x.min(left + 11.0 - cfg.box_margin);
+                    parent.max_x = parent.max_x.max(right - 11.0 + cfg.box_margin);
                 }
                 if f.kind == BlockKind::Rect {
                     let fill =
                         Color::new(f.color.clone().unwrap_or_else(|| "rgba(0,0,0,0.1)".into()));
-                    background.push(Element::classed_shape(
-                        Geometry::Rect { rect: r, rx: 0.0 },
-                        Paint::fill(&fill),
-                        "rect",
-                    ));
+                    // mermaid lowers each finished rect below the earlier ones, so
+                    // an enclosing rect (which ends later) stays behind nested ones.
+                    background.insert(
+                        0,
+                        Element::classed_shape(
+                            Geometry::Rect { rect: r, rx: 0.0 },
+                            Paint::fill(&fill),
+                            "rect",
+                        ),
+                    );
                 } else {
-                    frames_el.push(frame_elements(&f, r, pal, font));
+                    frames_el.push(frame_elements(&f, r, pal, font, cfg.look == Look::Neo));
                 }
                 cursor += 2.0;
             }
@@ -857,27 +939,29 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
     } else {
         bottom_top
     };
-    for bx in &d.boxes {
+    for (bi, bx) in d.boxes.iter().enumerate() {
         if bx.members.is_empty() {
             continue;
         }
+        // mermaid pads the box by `2 * boxMargin` beyond its inner margin.
+        let pad = box_inner[bi] + 2.0 * cfg.box_margin;
         let l = bx
             .members
             .iter()
             .map(|&m| xs[m] - widths[m] / 2.0)
             .fold(f64::INFINITY, f64::min)
-            - 10.0;
+            - pad;
         let r = bx
             .members
             .iter()
             .map(|&m| xs[m] + widths[m] / 2.0)
             .fold(f64::NEG_INFINITY, f64::max)
-            + 10.0;
+            + pad;
         let rect = Rect::new(
             l,
             top - box_band,
             r - l,
-            content_bottom - top + box_band + 10.0,
+            content_bottom - top + box_band + 2.0 * cfg.box_margin,
         );
         bounds.add_rect(rect);
         let fill = Color::new(bx.color.clone().unwrap_or_else(|| "none".into()));
@@ -888,7 +972,10 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
         if !bx.label.is_empty() {
             let t = TextBlock::label(&bx.label, font);
             els.push(Element::text(Text::centered(
-                Point::new(rect.center().x, rect.y + 4.0 + t.height / 2.0),
+                Point::new(
+                    rect.center().x,
+                    rect.y + 0.5 * cfg.box_margin + cfg.box_text_margin + box_title_h / 2.0,
+                ),
                 &t.lines,
                 font,
                 t.line_height,
@@ -976,7 +1063,12 @@ fn msg_head(head: MsgHead, tip: Point, dir: Point, color: &Color) -> Vec<Element
     }
 }
 
-fn frame_elements(f: &Frame, r: Rect, pal: &Palette, font: f64) -> Element {
+/// `labelBoxHeight` (sequence config default).
+const LABEL_BOX_H: f64 = 20.0;
+/// `labelBoxWidth` (sequence config default).
+const LABEL_BOX_W: f64 = 50.0;
+
+fn frame_elements(f: &Frame, r: Rect, pal: &Palette, font: f64, neo: bool) -> Element {
     let line = Paint::stroke(&pal.label_box_border, 2.0).dashed(vec![2.0, 2.0]);
     let mut els = vec![Element::classed_shape(
         Geometry::Rect { rect: r, rx: 0.0 },
@@ -984,29 +1076,33 @@ fn frame_elements(f: &Frame, r: Rect, pal: &Palette, font: f64) -> Element {
         "loopLine",
     )];
     let word = f.kind.word();
-    let word_w = crate::text::line_width(word, 14.0, true).max(30.0) + 20.0;
+    // svgDraw `drawLabel`: a 50-wide tag (`labelBoxHeight`, +15 in the neo
+    // look) with its bottom-right corner cut by 7, label in the message font.
+    let word_w = LABEL_BOX_W.max(crate::text::line_width(word, font, false) + 10.0);
+    let tag_h = LABEL_BOX_H + if neo { 15.0 } else { 0.0 };
+    let cut = 7.0;
     let (x, y) = (r.x, r.y);
     let tag = geom::polygon(&[
         Point::new(x, y),
         Point::new(x + word_w, y),
-        Point::new(x + word_w, y + 13.0),
-        Point::new(x + word_w - 8.0, y + 20.0),
-        Point::new(x, y + 20.0),
+        Point::new(x + word_w, y + tag_h - cut),
+        Point::new(x + word_w - cut * 1.2, y + tag_h),
+        Point::new(x, y + tag_h),
     ]);
     els.push(Element::classed_shape(
         Geometry::Path(tag),
         Paint::both(&pal.label_box_bkg, &pal.label_box_border, 1.0),
         "labelBox",
     ));
+    let lh = TextBlock::label(word, font).line_height;
     els.push(Element::classed_text(
         Text::centered(
-            Point::new(x + (word_w - 4.0) / 2.0, y + 10.0),
+            Point::new(x + word_w / 2.0, y + tag_h / 2.0),
             &[word.to_string()],
-            14.0,
-            14.0,
+            font,
+            lh,
             &pal.label_text,
-        )
-        .bold(),
+        ),
         "labelText",
     ));
     if !f.label.is_empty() {
@@ -1193,6 +1289,120 @@ mod tests {
         assert!(parse("sequenceDiagram\nloop x\nA->>B: hi", None).is_err());
         assert!(parse("sequenceDiagram\nend", None).is_err());
         assert!(parse("sequenceDiagram\nthis is not a message", None).is_err());
+    }
+
+    /// Top-level group `class` of a scene, by class name.
+    fn scene_group<'a>(s: &'a Scene, class: &str) -> &'a [Element] {
+        s.elements
+            .iter()
+            .find_map(|e| match e {
+                Element::Group {
+                    class: Some(c),
+                    children,
+                    ..
+                } if c == class => Some(children.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    fn first_rect(e: &Element) -> Option<Rect> {
+        match e {
+            Element::Shape {
+                geom: Geometry::Rect { rect, .. },
+                ..
+            } => Some(*rect),
+            Element::Group { children, .. } => children.iter().find_map(first_rect),
+            _ => None,
+        }
+    }
+
+    fn lifeline_xs(s: &Scene) -> Vec<f64> {
+        scene_group(s, "lifelines")
+            .iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Path(cmds),
+                    ..
+                } => match cmds.first() {
+                    Some(PathCmd::MoveTo(p)) => Some(p.x),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn participant_boxes_follow_mermaid_margins() {
+        let d = parse(
+            "sequenceDiagram\nbox Aqua One\nparticipant A\nend\nbox Two\nparticipant B\nend\nparticipant C",
+            None,
+        )
+        .unwrap();
+        let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let cfg = SequenceConfig::default();
+        let s = render(&d, &cfg, &p);
+        let xs = lifeline_xs(&s);
+        let boxes: Vec<Rect> = scene_group(&s, "boxes")
+            .iter()
+            .filter_map(first_rect)
+            .collect();
+        assert_eq!(boxes.len(), 2);
+        // Box = actor (150) + boxTextMargin (5) + 2 * boxMargin (20) on each side.
+        assert!(
+            (boxes[0].x - (xs[0] - 100.0)).abs() < 1e-6,
+            "{boxes:?} {xs:?}"
+        );
+        assert!((boxes[0].right() - (xs[0] + 100.0)).abs() < 1e-6);
+        // Neighbouring boxes: actorMargin + boxMargin + 2 * boxTextMargin - 2 * 25 apart.
+        assert!((boxes[1].x - boxes[0].right() - 20.0).abs() < 1e-6);
+        // The participant after a box is pushed out by boxMargin + boxTextMargin.
+        assert!((xs[2] - xs[1] - (150.0 + 50.0 + 15.0)).abs() < 1e-6);
+        // Both boxes start `boxMargin / 2` above the band holding the titles.
+        assert!((boxes[0].y - boxes[1].y).abs() < 1e-6);
+        assert!((boxes[0].y - cfg.diagram_margin_y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nested_rects_paint_inner_on_top() {
+        let d = parse(
+            "sequenceDiagram\nA->>B: x\nrect rgb(1, 2, 3)\nA->>B: y\nrect rgb(4, 5, 6)\nA->>B: z\nend\nend",
+            None,
+        )
+        .unwrap();
+        let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let s = render(&d, &SequenceConfig::default(), &p);
+        let rects: Vec<(Rect, String)> = scene_group(&s, "rects")
+            .iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    paint,
+                    ..
+                } => Some((*rect, paint.fill.0.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rects.len(), 2);
+        // Outer first (painted below), inner inset by boxMargin on each side.
+        assert_eq!(rects[0].1, "rgb(1, 2, 3)");
+        assert!((rects[1].0.x - rects[0].0.x - 10.0).abs() < 1e-6);
+        assert!(rects[1].0.y > rects[0].0.y && rects[1].0.bottom() < rects[0].0.bottom());
+    }
+
+    #[test]
+    fn frame_spacing_follows_mermaid() {
+        // loop title: boxMargin before the frame, boxMargin + boxTextMargin + max(text, 20) after.
+        let d = parse("sequenceDiagram\nA->>B: x\nloop L\nA->>B: y\nend", None).unwrap();
+        let d2 = parse("sequenceDiagram\nA->>B: x\nloop\nA->>B: y\nend", None).unwrap();
+        let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let cfg = SequenceConfig::default();
+        let h = |d: &SequenceDiagram| render(d, &cfg, &p).view_box.h;
+        let title_h = TextBlock::label("[L]", cfg.message_font_size)
+            .height
+            .max(LABEL_BOX_H);
+        assert!((h(&d) - h(&d2) - title_h).abs() < 1e-6);
     }
 
     #[test]

@@ -59,13 +59,13 @@ compare the two directly.
 | Class (`classDiagram`) | layered graph | members, generics, relations, cardinalities, namespaces |
 | ER (`erDiagram`) | layered graph | attribute tables, keys, crow's-foot cardinalities |
 | Requirement (`requirementDiagram`) | layered graph | all requirement/element types and relationships |
-| Architecture (`architecture-beta`) | grid from side hints | groups, services, junctions. Generic icon glyphs only |
+| Architecture (`architecture-beta`) | grid from port sides, nested groups | groups (`in`, nesting, icons), services, junctions, `{group}` edges, `align row/column`. Generic icon glyphs only |
 | Pie (`pie`) | geometry | `showData`, mermaid's geometry |
 | Gantt (`gantt`) | time axis | date formats, `after`/`until`, excludes, milestones, markers |
 | Timeline (`timeline`) | **Taffy** flex | sections, multi-event periods |
 | User journey (`journey`) | **Taffy** flex | scores as faces, actors |
 | Kanban (`kanban`) | **Taffy** flex | columns, cards, ticket/assignee/priority |
-| Block (`block-beta`) | **Taffy** CSS grid | columns, spans, nested blocks, edges, block arrows |
+| Block (`block-beta`) | port of mermaid's block layout | nested `block:id:span`, `columns`, `space:N`, shapes, block arrows, edges, styles/classes |
 | Packet (`packet-beta`) | **Taffy** CSS grid | bit ranges, `+N`, row splitting |
 | C4 (`C4Context/Container/Component/Dynamic/Deployment`) | **Taffy** flex/wrap | boundaries, all element/rel kinds, style updates |
 | xychart (`xychart-beta`) | geometry | bars/lines, horizontal, auto "nice" axes |
@@ -96,12 +96,13 @@ Shared features: front-matter (`title`, `config`), `%%{init: …}%%` directives,
 
 [Taffy](https://github.com/DioxusLabs/taffy) implements the CSS box-layout algorithms (flexbox, grid, block). Diagrams
 that are nested rectangles in rows, columns or grids are built as a box tree and laid out by Taffy through a small
-pure wrapper (`src/layout/boxes.rs`): block, packet, kanban, timeline, journey, C4 boundaries and chart legends.
+pure wrapper (`src/layout/boxes.rs`): packet, kanban, timeline, journey, C4 boundaries and chart legends.
 
 Taffy cannot lay out node-link graphs. CSS has no concept of ranking nodes, minimising edge crossings or routing
 edges. Flowchart, state, class, ER and requirement diagrams therefore use the purpose-built layered engine
 (`src/layout/`: network-simplex ranking, barycentric ordering, Brandes–Köpf coordinates as in dagre), just as mermaid uses
-dagre rather than CSS for them.
+dagre/ELK rather than CSS for them. Block diagrams use a direct port of mermaid's own block layout, because its
+quirks (siblings taking a composite's height, `space:N` as N slots) do not map onto CSS grid.
 
 ### Flags
 

@@ -101,6 +101,15 @@ pub struct Architecture {
     pub groups: Vec<Group>,
     pub nodes: Vec<ArchNode>,
     pub edges: Vec<ArchEdge>,
+    /// `align row|column a b c` layout hints.
+    pub aligns: Vec<Align>,
+}
+
+/// `align row a b ...` (same y) or `align column a b ...` (same x).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Align {
+    pub row: bool,
+    pub members: Vec<usize>,
 }
 
 /// Parse and render an `architecture-beta` diagram body (already preprocessed).
@@ -195,13 +204,39 @@ fn parse_decl(s: &str, line: usize, allow_icon: bool) -> Result<Decl> {
     })
 }
 
+/// Which declaration kind a statement is (for mermaid's error wording).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclKind {
+    Group,
+    Service,
+    Junction,
+}
+
+impl DeclKind {
+    fn name(self) -> &'static str {
+        match self {
+            DeclKind::Group => "group",
+            DeclKind::Service => "service",
+            DeclKind::Junction => "junction",
+        }
+    }
+}
+
 /// Parse an architecture diagram body.
+///
+/// Like mermaid's langium-based parser, statements are collected first and
+/// then applied by kind: all groups, then services, junctions, edges and
+/// `align` hints. So a service may sit `in` a group declared further down,
+/// and an edge may name a service declared after it.
 pub fn parse(body: &str, title: Option<String>) -> Result<Architecture> {
     let mut d = Architecture {
         title,
         ..Architecture::default()
     };
     let mut header = false;
+    let mut decls: Vec<(DeclKind, Decl, usize)> = Vec::new();
+    let mut edges: Vec<(&str, usize)> = Vec::new();
+    let mut aligns: Vec<(bool, Vec<&str>, usize)> = Vec::new();
     for (idx, raw) in body.lines().enumerate() {
         let line = idx + 1;
         let s = raw.trim();
@@ -224,72 +259,141 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Architecture> {
             "title" => {
                 d.title = Some(rest.to_string()).filter(|t| !t.is_empty());
             }
-            "group" => {
-                let decl = parse_decl(rest, line, true)?;
-                check_new_id(&d, &decl.id, line)?;
-                let parent = resolve_group(&d, decl.parent.as_deref(), line)?;
-                d.groups.push(Group {
-                    id: decl.id,
-                    icon: decl.icon.or(decl.icon_text),
-                    title: decl.title,
-                    parent,
-                });
+            "group" => decls.push((DeclKind::Group, parse_decl(rest, line, true)?, line)),
+            "service" => decls.push((DeclKind::Service, parse_decl(rest, line, true)?, line)),
+            "junction" => decls.push((DeclKind::Junction, parse_decl(rest, line, false)?, line)),
+            "align" => {
+                let mut words = rest.split_whitespace();
+                let row = match words.next() {
+                    Some("row") => true,
+                    Some("column") => false,
+                    other => {
+                        return Err(Error::parse(
+                            line,
+                            format!(
+                                "{s}\nExpecting 'row' or 'column' after 'align', got '{}'",
+                                other.unwrap_or("")
+                            ),
+                        ));
+                    }
+                };
+                aligns.push((row, words.collect(), line));
             }
-            "service" => {
-                let decl = parse_decl(rest, line, true)?;
-                check_new_id(&d, &decl.id, line)?;
-                let parent = resolve_group(&d, decl.parent.as_deref(), line)?;
-                d.nodes.push(ArchNode {
-                    id: decl.id,
-                    kind: NodeKind::Service {
-                        icon: decl.icon,
-                        icon_text: decl.icon_text,
-                        title: decl.title,
-                    },
-                    parent,
-                });
-            }
-            "junction" => {
-                let decl = parse_decl(rest, line, false)?;
-                check_new_id(&d, &decl.id, line)?;
-                let parent = resolve_group(&d, decl.parent.as_deref(), line)?;
-                d.nodes.push(ArchNode {
-                    id: decl.id,
-                    kind: NodeKind::Junction,
-                    parent,
-                });
-            }
-            _ => {
-                let e = parse_edge(&d, s, line)?;
-                d.edges.push(e);
-            }
+            _ => edges.push((s, line)),
         }
     }
     if !header {
         return Err(Error::parse(1, "Expecting 'architecture-beta'"));
     }
+    for want in [DeclKind::Group, DeclKind::Service, DeclKind::Junction] {
+        for (kind, decl, line) in decls.iter().filter(|x| x.0 == want) {
+            add_decl(&mut d, *kind, decl, *line)?;
+        }
+    }
+    for (s, line) in edges {
+        let e = parse_edge(&d, s, line)?;
+        d.edges.push(e);
+    }
+    for (row, members, line) in aligns {
+        let dir = if row { "row" } else { "column" };
+        if members.len() < 2 {
+            return Err(Error::parse(
+                line,
+                format!(
+                    "An align directive requires at least two members; got {}",
+                    members.len()
+                ),
+            ));
+        }
+        let mut ids: Vec<usize> = Vec::new();
+        for m in members {
+            let n = d.nodes.iter().position(|n| n.id == m).ok_or_else(|| {
+                Error::parse(
+                    line,
+                    format!("align {dir} references [{m}], which is not a service or junction"),
+                )
+            })?;
+            if ids.contains(&n) {
+                return Err(Error::parse(
+                    line,
+                    format!("align {dir} lists [{m}] more than once"),
+                ));
+            }
+            ids.push(n);
+        }
+        d.aligns.push(Align { row, members: ids });
+    }
     Ok(d)
 }
 
-fn check_new_id(d: &Architecture, id: &str, line: usize) -> Result<()> {
-    if d.groups.iter().any(|g| g.id == id) || d.nodes.iter().any(|n| n.id == id) {
+fn add_decl(d: &mut Architecture, kind: DeclKind, decl: &Decl, line: usize) -> Result<()> {
+    let what = kind.name();
+    let id = &decl.id;
+    if let Some(other) = registered(d, id) {
         return Err(Error::parse(
             line,
-            format!("The id '{id}' is already in use"),
+            format!("The {what} id [{id}] is already in use by another {other}"),
         ));
+    }
+    let parent = match decl.parent.as_deref() {
+        None => None,
+        Some(p) if p == id => {
+            return Err(Error::parse(
+                line,
+                format!("The {what} [{id}] cannot be placed within itself"),
+            ));
+        }
+        Some(p) => match registered(d, p) {
+            None => {
+                return Err(Error::parse(
+                    line,
+                    format!(
+                        "The {what} [{id}]'s parent does not exist. Please make sure the parent is created before this {what}"
+                    ),
+                ));
+            }
+            Some("node") => {
+                return Err(Error::parse(
+                    line,
+                    format!("The {what} [{id}]'s parent is not a group"),
+                ));
+            }
+            Some(_) => d.groups.iter().position(|g| g.id == p),
+        },
+    };
+    match kind {
+        DeclKind::Group => d.groups.push(Group {
+            id: id.clone(),
+            icon: decl.icon.clone().or(decl.icon_text.clone()),
+            title: decl.title.clone(),
+            parent,
+        }),
+        DeclKind::Service => d.nodes.push(ArchNode {
+            id: id.clone(),
+            kind: NodeKind::Service {
+                icon: decl.icon.clone(),
+                icon_text: decl.icon_text.clone(),
+                title: decl.title.clone(),
+            },
+            parent,
+        }),
+        DeclKind::Junction => d.nodes.push(ArchNode {
+            id: id.clone(),
+            kind: NodeKind::Junction,
+            parent,
+        }),
     }
     Ok(())
 }
 
-fn resolve_group(d: &Architecture, name: Option<&str>, line: usize) -> Result<Option<usize>> {
-    match name {
-        None => Ok(None),
-        Some(n) => d
-            .groups
-            .iter()
-            .position(|g| g.id == n)
-            .map(Some)
-            .ok_or_else(|| Error::parse(line, format!("Unknown group '{n}'"))),
+/// mermaid's `registeredIds` kind of an id: `"group"` or `"node"`.
+fn registered(d: &Architecture, id: &str) -> Option<&'static str> {
+    if d.groups.iter().any(|g| g.id == id) {
+        Some("group")
+    } else if d.nodes.iter().any(|n| n.id == id) {
+        Some("node")
+    } else {
+        None
     }
 }
 
@@ -364,23 +468,41 @@ fn parse_edge(d: &Architecture, s: &str, line: usize) -> Result<ArchEdge> {
         Some(x) => (x.trim(), true),
         None => (rhs, false),
     };
-    let find = |id: &str| {
+    let find = |id: &str, hand: &str| {
         d.nodes.iter().position(|n| n.id == id).ok_or_else(|| {
             Error::parse(
                 line,
-                format!("Unknown service or junction '{id}' (declare it before use)"),
+                format!(
+                    "The {hand} id [{id}] does not yet exist. Please create the service/group before declaring an edge to it."
+                ),
             )
         })
     };
+    let (lhs_node, rhs_node) = (find(lhs_id, "left-hand")?, find(rhs_id, "right-hand")?);
+    let (gl, gr) = (d.nodes[lhs_node].parent, d.nodes[rhs_node].parent);
+    let same_group = gl.is_some() && gl == gr;
+    for (flag, hand, id) in [
+        (lhs_group, "left-hand", lhs_id),
+        (rhs_group, "right-hand", rhs_id),
+    ] {
+        if flag && same_group {
+            return Err(Error::parse(
+                line,
+                format!(
+                    "The {hand} id [{id}] is modified to traverse the group boundary, but the edge does not pass through two groups."
+                ),
+            ));
+        }
+    }
     Ok(ArchEdge {
         lhs: EdgeEnd {
-            node: find(lhs_id)?,
+            node: lhs_node,
             side: lhs_side,
             group: lhs_group,
             arrow: lhs_arrow,
         },
         rhs: EdgeEnd {
-            node: find(rhs_id)?,
+            node: rhs_node,
             side: rhs_side,
             group: rhs_group,
             arrow: rhs_arrow,
@@ -391,11 +513,20 @@ fn parse_edge(d: &Architecture, s: &str, line: usize) -> Result<ArchEdge> {
 
 // ---------------------------------------------------------------- layout
 
+// Sizes follow mermaid's architecture defaults (`iconSize: 80`, `padding: 40`,
+// ideal same-group edge length `1.5 * iconSize`), measured against fcose output.
 const ICON: f64 = 80.0;
-const GAP: f64 = 70.0;
-/// `architecture.padding` (cytoscape compound-node padding; the title sits inside it).
+/// Horizontal gap between two columns holding only services/junctions.
+const GAP_X: f64 = 120.0;
+/// Vertical gap between two rows of services (the service label hangs into it).
+const GAP_Y: f64 = 96.0;
+/// Gaps next to a nested group (fcose's cross-group edges are shorter).
+const GROUP_GAP_X: f64 = 100.0;
+const GROUP_GAP_Y: f64 = 75.0;
+/// `architecture.padding`: space between a group's border and its contents.
 const GROUP_PAD: f64 = 40.0;
-const JUNCTION: f64 = 4.0;
+/// Group icon size: `padding * 0.75`.
+const GROUP_ICON: f64 = 30.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Item {
@@ -408,6 +539,10 @@ struct Layout {
     node_box: Vec<Rect>,
     icon_box: Vec<Rect>,
     group_box: Vec<Rect>,
+    /// Grid cell each node was placed in (bounds for alignment nudges).
+    cell_box: Vec<Rect>,
+    /// Grid cell each group was placed in.
+    group_cell: Vec<Rect>,
 }
 
 /// `(lhs item, rhs item, dx, dy)`: rhs sits at lhs + (dx, dy) on the grid.
@@ -417,6 +552,9 @@ struct Grid {
     cells: Vec<(Item, i32, i32)>,
     col_w: Vec<f64>,
     row_h: Vec<f64>,
+    /// Gap after each column / row (last entry unused).
+    col_gap: Vec<f64>,
+    row_gap: Vec<f64>,
     w: f64,
     h: f64,
 }
@@ -481,17 +619,22 @@ fn service_label(d: &Architecture, n: usize, font: f64) -> Option<TextBlock> {
     }
 }
 
-fn group_title_size(g: &Group, font: f64) -> (f64, f64) {
+/// Width the group's header (icon + title) needs inside its border.
+fn group_title_width(g: &Group, font: f64) -> f64 {
     let t = g
         .title
         .as_ref()
         .map(|t| TextBlock::label(t, font))
         .filter(|b| !b.is_empty());
-    let icon_w = if g.icon.is_some() { 26.0 } else { 0.0 };
+    let icon_w = if g.icon.is_some() {
+        GROUP_ICON + 4.0
+    } else {
+        4.0
+    };
     match t {
-        Some(b) => (b.width + icon_w + 12.0, b.height.max(24.0) + 6.0),
-        None if g.icon.is_some() => (icon_w + 12.0, 30.0),
-        None => (0.0, 0.0),
+        Some(b) => icon_w + b.width + 8.0,
+        None if g.icon.is_some() => icon_w,
+        None => 0.0,
     }
 }
 
@@ -513,13 +656,27 @@ fn layout(d: &Architecture, font: f64) -> Layout {
             constraints.entry(c).or_default().push((ia, ib, dx, dy));
         }
     }
+    // `align` hints rank after edges: consecutive members side by side.
+    for a in &d.aligns {
+        for w in a.members.windows(2) {
+            let (c, ia, ib) = common_items(d, w[0], w[1]);
+            if ia != ib {
+                let step = if a.row { (1, 0) } else { (0, 1) };
+                constraints
+                    .entry(c)
+                    .or_default()
+                    .push((ia, ib, step.0, step.1));
+            }
+        }
+    }
 
     // Size items bottom-up: groups are declared after their parents, so
     // iterating in reverse visits children before parents.
     let mut sizes: HashMap<Item, (f64, f64)> = HashMap::new();
     for (i, n) in d.nodes.iter().enumerate() {
         let s = match n.kind {
-            NodeKind::Junction => (JUNCTION, JUNCTION),
+            // Junctions are invisible icon-sized boxes in mermaid.
+            NodeKind::Junction => (ICON, ICON),
             NodeKind::Service { .. } => match service_label(d, i, font) {
                 Some(b) => (ICON.max(b.width + 4.0), ICON + 6.0 + b.height),
                 None => (ICON, ICON),
@@ -534,11 +691,11 @@ fn layout(d: &Architecture, font: f64) -> Layout {
             constraints.get(&Some(gi)).map(Vec::as_slice).unwrap_or(&[]),
             &sizes,
         );
-        let (tw, th) = group_title_size(&d.groups[gi], font);
+        // The header sits inside the top padding, like mermaid's group label.
         let w = (grid.w + 2.0 * GROUP_PAD)
-            .max(tw + 2.0 * GROUP_PAD)
+            .max(group_title_width(&d.groups[gi], font))
             .max(ICON);
-        let h = (grid.h + 2.0 * GROUP_PAD).max(th + 2.0 * GROUP_PAD);
+        let h = grid.h + 2.0 * GROUP_PAD;
         sizes.insert(Item::Group(gi), (w, h));
         grids.insert(Some(gi), grid);
     }
@@ -553,15 +710,17 @@ fn layout(d: &Architecture, font: f64) -> Layout {
         node_box: vec![Rect::default(); d.nodes.len()],
         icon_box: vec![Rect::default(); d.nodes.len()],
         group_box: vec![Rect::default(); ng],
+        cell_box: vec![Rect::default(); d.nodes.len()],
+        group_cell: vec![Rect::default(); ng],
     };
     place(
-        d,
         None,
         Rect::new(0.0, 0.0, 0.0, 0.0),
         &grids,
         &sizes,
         &mut out,
     );
+    align_cross_group_edges(d, &mut out);
     out
 }
 
@@ -613,31 +772,52 @@ fn grid_for(items: &[Item], cons: &[Constraint], sizes: &HashMap<Item, (f64, f64
     let nrows = (max_y - min_y + 1).max(0) as usize;
     let mut col_w = vec![0.0f64; ncols];
     let mut row_h = vec![0.0f64; nrows];
+    let mut col_group = vec![false; ncols];
+    let mut row_group = vec![false; nrows];
     let mut cells = Vec::new();
     for &it in items {
         let Some(&(x, y)) = pos.get(&it) else {
             continue;
         };
-        let (cx, cy) = (x - min_x, y - min_y);
+        let (cx, cy) = ((x - min_x) as usize, (y - min_y) as usize);
         let (w, h) = sizes.get(&it).copied().unwrap_or((0.0, 0.0));
-        col_w[cx as usize] = col_w[cx as usize].max(w);
-        row_h[cy as usize] = row_h[cy as usize].max(h);
-        cells.push((it, cx, cy));
+        col_w[cx] = col_w[cx].max(w);
+        row_h[cy] = row_h[cy].max(h);
+        if matches!(it, Item::Group(_)) {
+            col_group[cx] = true;
+            row_group[cy] = true;
+        }
+        cells.push((it, cx as i32, cy as i32));
     }
-    let span = |v: &[f64]| v.iter().sum::<f64>() + GAP * (v.len().saturating_sub(1)) as f64;
+    let gaps = |grp: &[bool], plain: f64, group: f64| -> Vec<f64> {
+        (0..grp.len())
+            .map(|i| {
+                if grp[i] || grp.get(i + 1).copied().unwrap_or(false) {
+                    group
+                } else {
+                    plain
+                }
+            })
+            .collect()
+    };
+    let col_gap = gaps(&col_group, GAP_X, GROUP_GAP_X);
+    let row_gap = gaps(&row_group, GAP_Y, GROUP_GAP_Y);
+    let span = |v: &[f64], g: &[f64]| {
+        v.iter().sum::<f64>() + g.iter().take(v.len().saturating_sub(1)).sum::<f64>()
+    };
     Grid {
-        w: span(&col_w),
-        h: span(&row_h),
+        w: span(&col_w, &col_gap),
+        h: span(&row_h, &row_gap),
         cells,
         col_w,
         row_h,
+        col_gap,
+        row_gap,
     }
 }
 
 /// Assign absolute rectangles. `frame` is the container's box (unused for root).
-#[allow(clippy::too_many_arguments)]
 fn place(
-    d: &Architecture,
     container: Option<usize>,
     frame: Rect,
     grids: &HashMap<Option<usize>, Grid>,
@@ -651,86 +831,156 @@ fn place(
         None => Point::new(0.0, 0.0),
         Some(_) => Point::new(frame.x + (frame.w - grid.w) / 2.0, frame.y + GROUP_PAD),
     };
-    let col_x: Vec<f64> = grid
-        .col_w
-        .iter()
-        .scan(origin.x, |x, w| {
-            let at = *x;
-            *x += w + GAP;
-            Some(at)
-        })
-        .collect();
-    let row_y: Vec<f64> = grid
-        .row_h
-        .iter()
-        .scan(origin.y, |y, h| {
-            let at = *y;
-            *y += h + GAP;
-            Some(at)
-        })
-        .collect();
+    let starts = |sizes: &[f64], gaps: &[f64], o: f64| -> Vec<f64> {
+        let mut at = o;
+        sizes
+            .iter()
+            .zip(gaps)
+            .map(|(s, g)| {
+                let here = at;
+                at += s + g;
+                here
+            })
+            .collect()
+    };
+    let col_x = starts(&grid.col_w, &grid.col_gap, origin.x);
+    let row_y = starts(&grid.row_h, &grid.row_gap, origin.y);
     for &(it, cx, cy) in &grid.cells {
         let (w, h) = sizes.get(&it).copied().unwrap_or((0.0, 0.0));
         let (cw, ch) = (grid.col_w[cx as usize], grid.row_h[cy as usize]);
         let (x0, y0) = (col_x[cx as usize], row_y[cy as usize]);
         match it {
             Item::Node(n) => {
-                // Align icons along the row's top band so equal-height icons line up.
-                let icon_h = if matches!(d.nodes[n].kind, NodeKind::Junction) {
-                    JUNCTION
-                } else {
-                    ICON
-                };
-                let band = grid
-                    .cells
-                    .iter()
-                    .filter(|c| c.2 == cy)
-                    .filter_map(|c| match c.0 {
-                        Item::Node(m) if !matches!(d.nodes[m].kind, NodeKind::Junction) => {
-                            Some(ICON)
-                        }
-                        _ => None,
-                    })
-                    .fold(0.0f64, f64::max);
-                let top = if band > 0.0 && h < ch {
-                    // Centre the icon on the band of service icons in this row.
-                    let band_top = y0 + (ch - sizes_row_max(grid, sizes, cy)) / 2.0;
-                    band_top + (band - icon_h) / 2.0
-                } else {
-                    y0 + (ch - h) / 2.0
-                };
+                // Icons of a row share their top edge (labels hang below).
+                let top = y0 + (ch - sizes_row_max(grid, sizes, cy)) / 2.0;
                 let r = Rect::new(x0 + (cw - w) / 2.0, top, w, h);
                 out.node_box[n] = r;
-                out.icon_box[n] =
-                    Rect::new(r.x + (w - icon_h.min(w)) / 2.0, r.y, icon_h.min(w), icon_h);
-                if matches!(d.nodes[n].kind, NodeKind::Junction) {
-                    out.icon_box[n] = Rect::centered(
-                        Point::new(x0 + cw / 2.0, top + JUNCTION / 2.0),
-                        JUNCTION,
-                        JUNCTION,
-                    );
-                }
+                out.icon_box[n] = Rect::new(r.x + (w - ICON) / 2.0, r.y, ICON, ICON);
+                out.cell_box[n] = Rect::new(x0, y0, cw, ch);
             }
             Item::Group(g) => {
                 let r = Rect::new(x0 + (cw - w) / 2.0, y0 + (ch - h) / 2.0, w, h);
                 out.group_box[g] = r;
-                place(d, Some(g), r, grids, sizes, out);
+                out.group_cell[g] = Rect::new(x0, y0, cw, ch);
+                place(Some(g), r, grids, sizes, out);
             }
         }
     }
 }
 
-/// Tallest service node in a grid row (icons are aligned to its top).
+/// Tallest service/junction in a grid row (icons are aligned to its top).
 fn sizes_row_max(grid: &Grid, sizes: &HashMap<Item, (f64, f64)>, row: i32) -> f64 {
     grid.cells
         .iter()
         .filter(|c| c.2 == row && matches!(c.0, Item::Node(_)))
         .filter_map(|c| sizes.get(&c.0).map(|s| s.1))
-        .filter(|h| *h > JUNCTION)
         .fold(0.0f64, f64::max)
 }
 
+/// fcose aligns the two ends of a straight edge even when it crosses a group
+/// border. Our grid only aligns the items of one container, so slide one of
+/// the two items holding the edge's ends (a node or a whole nested group)
+/// across its grid cell to line the ends up, when it fits in the cell and no
+/// other straight edge along the same axis pins that item.
+fn align_cross_group_edges(d: &Architecture, lay: &mut Layout) {
+    // (a, b, horizontal): pairs of nodes that should share a y (or an x).
+    let mut pairs: Vec<(usize, usize, bool)> = d
+        .edges
+        .iter()
+        .filter(|e| e.lhs.side.horizontal() == e.rhs.side.horizontal())
+        .map(|e| (e.lhs.node, e.rhs.node, e.lhs.side.horizontal()))
+        .collect();
+    for a in &d.aligns {
+        pairs.extend(a.members.windows(2).map(|w| (w[0], w[1], a.row)));
+    }
+    for (pi, &(na, nb, horizontal)) in pairs.iter().enumerate() {
+        let (_, ia, ib) = common_items(d, na, nb);
+        if ia == ib || (matches!(ia, Item::Node(_)) && matches!(ib, Item::Node(_))) {
+            continue;
+        }
+        let (want, have) = (lay.icon_box[nb].center(), lay.icon_box[na].center());
+        let delta = if horizontal {
+            Point::new(0.0, want.y - have.y)
+        } else {
+            Point::new(want.x - have.x, 0.0)
+        };
+        if delta.len() < 0.5 {
+            continue;
+        }
+        // Prefer moving a plain node, then the smaller group.
+        let area = |it: Item| match it {
+            Item::Node(_) => 0.0,
+            Item::Group(g) => lay.group_box[g].w * lay.group_box[g].h,
+        };
+        let mut order = [(ia, delta), (ib, delta.scale(-1.0))];
+        if area(ib) < area(ia) {
+            order.swap(0, 1);
+        }
+        for (mover, dv) in order {
+            let pinned = pairs.iter().enumerate().any(|(pj, &(fa, fb, fh))| {
+                let (_, fa, fb) = common_items(d, fa, fb);
+                pj != pi && fh == horizontal && fa != fb && (fa == mover || fb == mover)
+            });
+            let (r, cell) = match mover {
+                Item::Node(n) => (lay.node_box[n], lay.cell_box[n]),
+                Item::Group(g) => (lay.group_box[g], lay.group_cell[g]),
+            };
+            let moved = Rect::new(r.x + dv.x, r.y + dv.y, r.w, r.h);
+            let fits = moved.x >= cell.x - 0.5
+                && moved.right() <= cell.right() + 0.5
+                && moved.y >= cell.y - 0.5
+                && moved.bottom() <= cell.bottom() + 0.5;
+            if !pinned && fits {
+                shift_item(d, lay, mover, dv);
+                break;
+            }
+        }
+    }
+}
+
+/// Translate a node, or a group with everything inside it.
+fn shift_item(d: &Architecture, lay: &mut Layout, it: Item, dv: Point) {
+    let mv = |r: &mut Rect| {
+        r.x += dv.x;
+        r.y += dv.y;
+    };
+    let inside = |chain: Vec<Option<usize>>, g: usize| chain.contains(&Some(g));
+    match it {
+        Item::Node(n) => {
+            mv(&mut lay.node_box[n]);
+            mv(&mut lay.icon_box[n]);
+        }
+        Item::Group(g) => {
+            for gi in 0..d.groups.len() {
+                if inside(group_chain(d, Some(gi)), g) {
+                    mv(&mut lay.group_box[gi]);
+                    mv(&mut lay.group_cell[gi]);
+                }
+            }
+            for n in 0..d.nodes.len() {
+                if inside(group_chain(d, d.nodes[n].parent), g) {
+                    mv(&mut lay.node_box[n]);
+                    mv(&mut lay.icon_box[n]);
+                    mv(&mut lay.cell_box[n]);
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- drawing
+
+/// `archGroupBorderColor`: the theme's `primaryBorderColor`, i.e. mermaid's
+/// `mkBorder(primaryColor)` (saturation -40, lightness -10 / +10 when dark).
+fn group_border_color(pal: &Palette) -> Color {
+    match crate::color::parse(&pal.main_bkg.0) {
+        Some(c) => Color::new(
+            c.adjust_hsl(0.0, -40.0, if pal.dark { 10.0 } else { -10.0 })
+                .to_hex(),
+        ),
+        None => pal.node_border.clone(),
+    }
+}
 
 fn port(r: &Rect, side: Side) -> Point {
     let c = r.center();
@@ -951,26 +1201,31 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let mut label_els = Vec::new();
     let mut node_els = Vec::new();
 
+    // mermaid: `.node-bkg { stroke: archGroupBorderColor (= primaryBorderColor);
+    // stroke-width: 2px; stroke-dasharray: 8 }`.
+    let group_border = group_border_color(pal);
     for (gi, g) in d.groups.iter().enumerate() {
         let r = lay.group_box[gi];
         bounds.add_rect(r);
         let mut children = vec![Element::classed_shape(
             Geometry::Rect { rect: r, rx: 0.0 },
-            // `.node-bkg { stroke-width: 2px; stroke-dasharray: 8 }`.
-            Paint::stroke(&pal.cluster_border, 2.0).dashed(vec![8.0]),
+            Paint::stroke(&group_border, 2.0).dashed(vec![8.0]),
             "node-bkg",
         )];
-        let mut x = r.x + 8.0;
-        let ty = r.y + 6.0;
+        // Icon (padding * 0.75 square) in the top-left corner, title after it.
+        let mut x = r.x + 4.0;
+        let mut label_cy = r.y + 12.0;
         if let Some(icon) = &g.icon {
-            let ir = Rect::new(x, ty, 22.0, 22.0);
-            children.push(Element::rect(ir, 3.0, Paint::fill(&icon_bg)));
+            let ir = Rect::new(r.x + 1.0, r.y + 1.0, GROUP_ICON, GROUP_ICON);
+            children.push(Element::rect(ir, 0.0, Paint::fill(&icon_bg)));
             children.extend(icon_glyph(Some(icon), ir));
-            x += 28.0;
+            x = ir.right() + 3.0;
+            label_cy = r.y + 17.0;
         }
         if let Some(t) = g.title.as_ref().map(|t| TextBlock::label(t, font)) {
             if !t.is_empty() {
-                let center = Point::new(x, ty + 11.0);
+                let extra = t.line_height * (t.lines.len() as f64 - 1.0) / 2.0;
+                let center = Point::new(x, label_cy + extra);
                 children.push(Element::classed_text(
                     Text::centered(center, &t.lines, font, t.line_height, &pal.text_color)
                         .anchored(Anchor::Start, x),
@@ -990,12 +1245,10 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let nb = lay.node_box[i];
         bounds.add_rect(nb);
         let children = match &n.kind {
+            // mermaid draws junctions as fully transparent icon-sized rects.
             NodeKind::Junction => vec![Element::shape(
-                Geometry::Circle {
-                    c: ib.center(),
-                    r: 2.0,
-                },
-                Paint::fill(&pal.line_color),
+                Geometry::Rect { rect: ib, rx: 0.0 },
+                Paint::fill(&pal.line_color).with_opacity(0.0),
             )],
             NodeKind::Service {
                 icon,
@@ -1043,14 +1296,19 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let ra = end_rect(d, &lay, &e.lhs, e.rhs.node);
         let rb = end_rect(d, &lay, &e.rhs, e.lhs.node);
         let junction = |n: usize| matches!(d.nodes[n].kind, NodeKind::Junction);
-        // Bottom ports of services sit below the label so the line does not cross it.
         let end_point = |end: &EdgeEnd, r: &Rect| {
             if end.group {
-                port(r, end.side)
+                // Leave the group border level with the node (mermaid shifts
+                // the node's port by `padding + 4` towards the border).
+                let c = lay.icon_box[end.node].center();
+                let p = port(r, end.side);
+                if end.side.horizontal() {
+                    Point::new(p.x, c.y.clamp(r.y, r.bottom()))
+                } else {
+                    Point::new(c.x.clamp(r.x, r.right()), p.y)
+                }
             } else if junction(end.node) {
                 r.center()
-            } else if end.side == Side::B {
-                Point::new(r.center().x, lay.node_box[end.node].bottom() + 2.0)
             } else {
                 port(r, end.side)
             }
@@ -1070,7 +1328,7 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
         }
         let mut children = vec![Element::classed_shape(
             Geometry::Path(geom::polyline(&pts)),
-            // architectureStyles.ts: `.edge { stroke-width: archEdgeWidth (3) }`.
+            // `archEdgeWidth: 3`
             Paint::stroke(&pal.line_color, 3.0),
             "edge",
         )];
@@ -1159,7 +1417,9 @@ mod tests {
     db:L -- R:server
     disk1:T -- B:server
     disk2:T --> B:db
-    server{group}:R <-[calls]-> L:db{group}
+    server:T <-[calls]-> T:db
+    out:L -- R:server{group}
+    service out(internet)[Out]
 ";
 
     #[test]
@@ -1168,16 +1428,19 @@ mod tests {
         assert_eq!(d.groups.len(), 1);
         assert_eq!(d.groups[0].icon.as_deref(), Some("cloud"));
         assert_eq!(d.groups[0].title.as_deref(), Some("API"));
-        assert_eq!(d.nodes.len(), 5);
+        assert_eq!(d.nodes.len(), 6);
         assert_eq!(d.nodes[0].parent, Some(0));
-        assert!(matches!(d.nodes[4].kind, NodeKind::Junction));
+        // Junctions are applied after every service (mermaid's statement order).
+        assert!(matches!(d.nodes[5].kind, NodeKind::Junction));
+        assert_eq!(d.nodes[4].id, "out");
         let e = &d.edges[0];
         assert_eq!((e.lhs.side, e.rhs.side), (Side::L, Side::R));
         assert!(!e.lhs.arrow && !e.rhs.arrow);
         assert!(d.edges[2].rhs.arrow);
         let e = &d.edges[3];
-        assert!(e.lhs.group && e.rhs.group && e.lhs.arrow && e.rhs.arrow);
+        assert!(!e.lhs.group && e.lhs.arrow && e.rhs.arrow);
         assert_eq!(e.label.as_deref(), Some("calls"));
+        assert!(d.edges[4].rhs.group && !d.edges[4].lhs.group);
     }
 
     #[test]
@@ -1217,11 +1480,117 @@ mod tests {
         let d = parse(SRC, None).unwrap();
         let lay = layout(&d, 16.0);
         let g = lay.group_box[0];
-        for nb in &lay.node_box {
+        for (n, nb) in d.nodes.iter().zip(&lay.node_box) {
+            if n.parent.is_none() {
+                assert!(!g.intersects(nb));
+                continue;
+            }
             assert!(
                 g.x <= nb.x && nb.right() <= g.right() && g.y <= nb.y && nb.bottom() <= g.bottom()
             );
         }
+    }
+
+    const NESTED: &str = "architecture-beta
+    group cloud(cloud)[Cloud]
+    group private(server)[Private] in cloud
+    group public(internet)[Public] in cloud
+    service web(internet)[Web] in public
+    service app(server)[App] in private
+    service db(database)[DB] in private
+    service user(internet)[User]
+    user:R --> L:web
+    web{group}:B --> T:app{group}
+    app:R -- L:db
+";
+
+    fn inside(outer: Rect, inner: Rect, pad: f64) -> bool {
+        outer.x + pad <= inner.x + 1e-6
+            && inner.right() <= outer.right() - pad + 1e-6
+            && outer.y + pad <= inner.y + 1e-6
+            && inner.bottom() <= outer.bottom() - pad + 1e-6
+    }
+
+    #[test]
+    fn nested_groups_contain_children_with_padding() {
+        let d = parse(NESTED, None).unwrap();
+        let lay = layout(&d, 16.0);
+        let (cloud, private, public) = (lay.group_box[0], lay.group_box[1], lay.group_box[2]);
+        assert!(inside(cloud, private, GROUP_PAD));
+        assert!(inside(cloud, public, GROUP_PAD));
+        assert!(!private.intersects(&public));
+        assert!(inside(public, lay.node_box[0], GROUP_PAD));
+        assert!(inside(private, lay.node_box[1], GROUP_PAD));
+        assert!(inside(private, lay.node_box[2], GROUP_PAD));
+        // The ungrouped service stays outside every group.
+        assert!(!cloud.intersects(&lay.node_box[3]));
+    }
+
+    #[test]
+    fn straight_edges_across_group_borders_are_aligned() {
+        let d = parse(NESTED, None).unwrap();
+        let lay = layout(&d, 16.0);
+        let c = |n: usize| lay.icon_box[n].center();
+        // user:R --> L:web is horizontal, web:B --> T:app vertical (fcose aligns both).
+        assert!((c(3).y - c(0).y).abs() < 1e-6);
+        assert!((c(0).x - c(1).x).abs() < 1e-6);
+        // Moving the Public group kept it inside Cloud.
+        assert!(inside(lay.group_box[0], lay.group_box[2], GROUP_PAD));
+    }
+
+    #[test]
+    fn statements_apply_groups_first_like_mermaid() {
+        // Service before its group and an edge before its target: both fine upstream.
+        let d = parse(
+            "architecture-beta\nservice a(server)[A] in g\na:R -- L:b\nservice b(disk)[B]\ngroup g[G]",
+            None,
+        )
+        .unwrap();
+        assert_eq!(d.nodes[0].parent, Some(0));
+        assert_eq!(d.edges.len(), 1);
+    }
+
+    #[test]
+    fn align_hints() {
+        let d = parse(
+            "architecture-beta\ngroup g[G]\nservice a(server)[A] in g\nservice b(server)[B] in g\nservice c(server)[C]\nalign row a b c",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            d.aligns,
+            vec![Align {
+                row: true,
+                members: vec![0, 1, 2]
+            }]
+        );
+        let lay = layout(&d, 16.0);
+        let (a, b, c) = (lay.icon_box[0], lay.icon_box[1], lay.icon_box[2]);
+        assert!(a.right() < b.x && b.right() < c.x);
+        assert!((a.y - b.y).abs() < 1e-6 && (b.y - c.y).abs() < 1e-6);
+        assert!(!lay.group_box[0].intersects(&c));
+    }
+
+    #[test]
+    fn group_errors_match_mermaid() {
+        let msg = |src: &str| match parse(src, None) {
+            Err(Error::Parse { message, .. }) => message,
+            other => panic!("expected error, got {other:?}"),
+        };
+        assert!(
+            msg("architecture-beta\ngroup g[G]\nservice a in g\nservice b in g\na{group}:R -- L:b")
+                .contains("modified to traverse the group boundary")
+        );
+        assert!(
+            msg("architecture-beta\nservice a\nservice b in a").contains("parent is not a group")
+        );
+        assert!(msg("architecture-beta\ngroup g in g").contains("cannot be placed within itself"));
+        assert!(msg("architecture-beta\ngroup g in h\ngroup h").contains("parent does not exist"));
+        assert!(msg("architecture-beta\nservice a\nalign row a").contains("at least two members"));
+        assert!(
+            msg("architecture-beta\ngroup g\nservice a\nalign column a g")
+                .contains("not a service or junction")
+        );
     }
 
     fn err_line(src: &str) -> usize {

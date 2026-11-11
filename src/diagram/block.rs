@@ -9,16 +9,18 @@
 //! `a --o b`, `a -- "label" --> b`, `a -->|label| b` (chains allowed);
 //! `style id css`, `classDef name css`, `class a,b name`, `id:::name`.
 //!
-//! Layout is CSS grid via Taffy: every container is a grid of equal-width
-//! column tracks (the widest block decides, like mermaid), spans are
-//! `grid-column: c / span n`, nested blocks are nested grid nodes. Edges are
-//! straight lines between block centres clipped to the block outlines.
+//! Layout is a port of mermaid's own block layout (`setBlockSizes` /
+//! `layoutBlocks`): all children of a container share the widest per-column
+//! width and the tallest height (so a composite makes its siblings as tall as
+//! itself), rows of `columns` slots are separated by `block.padding`, and a
+//! wider container stretches its children. `space:N` is N one-slot spaces.
+//! Edges are straight lines between block centres clipped to the outlines.
 
 use crate::config::MermaidConfig;
 use crate::diagram::graph::StyleOverrides;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
-use crate::layout::boxes::{self, BoxNode, Placed, taffy};
+use crate::layout::boxes::Placed;
 use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
 use crate::theme::Palette;
@@ -517,7 +519,6 @@ pub fn parse(body: &str, title: Option<String>) -> Result<BlockDiagram> {
                     span,
                     classes,
                 } => {
-                    let real_id;
                     if id == "space" && shape.is_none() {
                         prev = None;
                         if !pending.is_empty() {
@@ -526,17 +527,19 @@ pub fn parse(body: &str, title: Option<String>) -> Result<BlockDiagram> {
                                 format!("{s}\n'space' cannot be linked"),
                             ));
                         }
-                        space_n += 1;
-                        real_id = format!("__space{space_n}");
+                        // mermaid expands `space:N` into N one-column spaces.
                         let top = stack.last_mut().expect("the root frame is never popped");
-                        top.children.push(Block {
-                            id: real_id,
-                            kind: BlockKind::Space,
-                            span: span.unwrap_or(1).max(1),
-                        });
+                        for _ in 0..span.unwrap_or(1).max(1) {
+                            space_n += 1;
+                            top.children.push(Block {
+                                id: format!("__space{space_n}"),
+                                kind: BlockKind::Space,
+                                span: 1,
+                            });
+                        }
                         continue;
                     }
-                    real_id = id.clone();
+                    let real_id = id.clone();
                     for c in classes {
                         d.classes.push((id.clone(), c));
                     }
@@ -647,7 +650,7 @@ fn make_edge(from: String, to: String, toks: &[Tok], line_no: usize, s: &str) ->
 #[derive(Debug, Clone, Copy)]
 pub struct Metrics {
     pub font: f64,
-    pub gap: f64,
+    /// `block.padding`: gap between blocks and inset of composites.
     pub pad: f64,
 }
 
@@ -676,111 +679,234 @@ fn node_size(label: &str, shape: BlockShape, font: f64) -> (f64, f64) {
         | BlockShape::Trapezoid
         | BlockShape::InvTrapezoid => (tw + 2.0 * pad + th, th + pad),
         BlockShape::Asymmetric => (tw + 2.0 * pad + th / 2.0, th + pad),
-        BlockShape::Arrow(d) => match d {
-            ArrowDir::Up | ArrowDir::Down | ArrowDir::Y => (tw + pad, th + 2.0 * pad + 30.0),
-            _ => (tw + 2.0 * pad + th, th + pad + 16.0),
-        },
+        // mermaid `block_arrow`: height = label + 2 * padding(8), width = label + height + 8.
+        BlockShape::Arrow(_) => (tw + th + pad + 8.0, th + pad),
         _ => (tw + 2.0 * pad, th + pad),
     };
     (w.max(40.0), h.max(40.0))
 }
 
-fn columns_of(cols: Option<usize>, children: &[Block]) -> usize {
-    cols.unwrap_or_else(|| children.iter().map(|c| c.span).sum::<usize>())
-        .max(1)
+/// Working copy of a block for mermaid's sizing passes (`block.size`).
+#[derive(Debug, Clone)]
+struct Sized {
+    /// `columns` setting, `-1` for auto (mermaid's encoding).
+    columns: i64,
+    span: usize,
+    space: bool,
+    w: f64,
+    h: f64,
+    x: f64,
+    y: f64,
+    children: Vec<Sized>,
 }
 
-/// Natural (minimum) width of a block.
-fn natural_width(b: &Block, m: &Metrics) -> f64 {
-    match &b.kind {
-        BlockKind::Node { label, shape } => node_size(label, *shape, m.font).0,
-        BlockKind::Space => 0.0,
-        BlockKind::Composite { columns, children } => {
-            let cols = columns_of(*columns, children);
-            let track = track_width(children, cols, m);
-            cols as f64 * track + (cols - 1) as f64 * m.gap + 2.0 * m.pad
-        }
-    }
-}
-
-fn track_width(children: &[Block], cols: usize, m: &Metrics) -> f64 {
-    children
+/// Initial `getBBox()` size of each block, before layout.
+fn sized_tree(blocks: &[Block], m: &Metrics) -> Vec<Sized> {
+    blocks
         .iter()
-        .map(|c| {
-            let span = c.span.min(cols).max(1) as f64;
-            (natural_width(c, m) - m.gap * (span - 1.0)) / span
-        })
-        .fold(0.0, f64::max)
-}
-
-/// Row-major placement with wrapping: (row, column) 1-based per child.
-pub fn place(children: &[Block], cols: usize) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let (mut row, mut col) = (1usize, 0usize);
-    for c in children {
-        let span = c.span.min(cols).max(1);
-        if col + span > cols && col > 0 {
-            row += 1;
-            col = 0;
-        }
-        out.push((row, col + 1));
-        col += span;
-        if col >= cols {
-            row += 1;
-            col = 0;
-        }
-    }
-    out
-}
-
-fn grid_node(children: &[Block], cols: usize, track: f64, m: &Metrics) -> Vec<BoxNode> {
-    let pos = place(children, cols);
-    children
-        .iter()
-        .zip(pos)
-        .map(|(c, (row, col))| {
-            let span = c.span.min(cols).max(1);
-            let width = span as f64 * track + (span - 1) as f64 * m.gap;
-            let mut style = match &c.kind {
+        .map(|b| {
+            let (w, h, columns, children) = match &b.kind {
                 BlockKind::Node { label, shape } => {
-                    let (_, h) = node_size(label, *shape, m.font);
-                    boxes::min_size(taffy::Style::default(), 0.0, h)
+                    let (w, h) = node_size(label, *shape, m.font);
+                    (w, h, -1, Vec::new())
                 }
-                BlockKind::Space => taffy::Style::default(),
-                BlockKind::Composite { .. } => taffy::Style::default(),
+                // Spaces are measured as empty rects; their size is never read.
+                BlockKind::Space => (2.0 * m.pad, m.pad, -1, Vec::new()),
+                // An unlabelled composite measures 0 wide, i.e. "no size yet".
+                BlockKind::Composite { columns, children } => (
+                    0.0,
+                    0.0,
+                    columns.map_or(-1, |c| c as i64),
+                    sized_tree(children, m),
+                ),
             };
-            style = boxes::grid_span(style, col as i16, span as u16);
-            style.grid_row = taffy::Line {
-                start: taffy::style_helpers::line(row as i16),
-                end: taffy::style_helpers::span(1),
-            };
-            match &c.kind {
-                BlockKind::Composite { columns, children } => {
-                    let inner_cols = columns_of(*columns, children);
-                    let inner_track = ((width - 2.0 * m.pad - (inner_cols - 1) as f64 * m.gap)
-                        / inner_cols as f64)
-                        .max(track_width(children, inner_cols, m));
-                    let mut g =
-                        boxes::padded(boxes::uniform_grid(inner_cols, inner_track, m.gap), m.pad);
-                    g.grid_column = style.grid_column;
-                    g.grid_row = style.grid_row;
-                    BoxNode::new(g, grid_node(children, inner_cols, inner_track, m))
-                }
-                _ => BoxNode::new(style, Vec::new()),
+            Sized {
+                columns,
+                span: b.span.max(1),
+                space: matches!(b.kind, BlockKind::Space),
+                w,
+                h,
+                x: 0.0,
+                y: 0.0,
+                children,
             }
         })
         .collect()
 }
 
-/// Lay out the diagram; the result mirrors `d.children` (root is a padded grid).
+/// Port of mermaid's `setBlockSizes` (diagrams/block/layout.ts): every child
+/// of a container gets the widest (per column) and tallest child size, the
+/// container wraps them in `padding`, and children grow to fill a container
+/// that is wider than they need.
+fn set_block_sizes(b: &mut Sized, sibling_w: f64, sibling_h: f64, pad: f64) {
+    if b.w == 0.0 || b.w.is_nan() {
+        b.w = sibling_w;
+        b.h = sibling_h;
+        b.x = 0.0;
+        b.y = 0.0;
+    }
+    if b.children.is_empty() {
+        return;
+    }
+    for c in &mut b.children {
+        set_block_sizes(c, 0.0, 0.0, pad);
+    }
+    let (mut max_w, mut max_h) = (0.0f64, 0.0f64);
+    for c in b.children.iter().filter(|c| !c.space) {
+        max_w = max_w.max(c.w / c.span as f64);
+        max_h = max_h.max(c.h);
+    }
+    for c in &mut b.children {
+        let span = c.span as f64;
+        c.w = max_w * span + pad * (span - 1.0);
+        c.h = max_h;
+        c.x = 0.0;
+        c.y = 0.0;
+    }
+    for c in &mut b.children {
+        set_block_sizes(c, max_w, max_h, pad);
+    }
+    let num_items: usize = b.children.iter().map(|c| c.span).sum();
+    let mut x_size = b.children.len();
+    if b.columns > 0 && (b.columns as usize) < num_items {
+        x_size = b.columns as usize;
+    }
+    let y_size = num_items.div_ceil(x_size);
+    let (xs, ys) = (x_size as f64, y_size as f64);
+    let mut width = xs * (max_w + pad) + pad;
+    let mut height = ys * (max_h + pad) + pad;
+    if width < sibling_w {
+        width = sibling_w;
+        height = sibling_h;
+        let cw = (sibling_w - xs * pad - pad) / xs;
+        let ch = (sibling_h - ys * pad - pad) / ys;
+        for c in &mut b.children {
+            c.w = cw;
+            c.h = ch;
+            c.x = 0.0;
+            c.y = 0.0;
+        }
+    }
+    if width < b.w {
+        width = b.w;
+        let num = if b.columns > 0 {
+            b.children.len().min(b.columns as usize)
+        } else {
+            b.children.len()
+        };
+        if num > 0 {
+            let cw = (width - num as f64 * pad - pad) / num as f64;
+            for c in &mut b.children {
+                c.w = cw;
+            }
+        }
+    }
+    b.w = width;
+    b.h = height;
+    b.x = 0.0;
+    b.y = 0.0;
+}
+
+/// mermaid's `calculateBlockPosition`: grid cell of the `position`-th column slot.
+fn block_position(columns: i64, position: usize) -> (usize, usize) {
+    if columns < 0 {
+        (position, 0)
+    } else if columns == 1 {
+        (0, position)
+    } else {
+        let c = columns as usize;
+        (position % c, position / c)
+    }
+}
+
+/// Port of mermaid's `layoutBlocks`: children flow left to right in rows of
+/// `columns` slots, each row as tall as its tallest child; a new row restarts
+/// at the container's left edge. Centres are absolute (`size.x/y`).
+fn layout_blocks(b: &mut Sized, pad: f64) {
+    if b.children.is_empty() {
+        return;
+    }
+    let columns = b.columns;
+    let filled = |span: usize, pos: usize| {
+        if columns > 0 {
+            span.min(columns as usize - pos % columns as usize)
+        } else {
+            span
+        }
+    };
+    let mut row_h: std::collections::BTreeMap<usize, f64> = Default::default();
+    let mut pos = 0usize;
+    for c in &b.children {
+        let (_, py) = block_position(columns, pos);
+        let e = row_h.entry(py).or_insert(0.0);
+        *e = e.max(c.h);
+        pos += filled(c.span, pos);
+    }
+    let mut row_off = std::collections::BTreeMap::new();
+    let mut off = 0.0;
+    for (row, h) in &row_h {
+        row_off.insert(*row, off);
+        off += h + pad;
+    }
+    // `block.size.x ? x - width / 2 : -padding` (a container centred at 0 starts at -padding).
+    let row_start = if b.x != 0.0 { b.x - b.w / 2.0 } else { -pad };
+    let (by, bh) = (b.y, b.h);
+    let mut start_x = row_start;
+    let mut row_pos = 0usize;
+    let mut pos = 0usize;
+    for c in &mut b.children {
+        let (_, py) = block_position(columns, pos);
+        if py != row_pos {
+            row_pos = py;
+            start_x = row_start;
+        }
+        let half = c.w / 2.0;
+        c.x = start_x + pad + half;
+        start_x = c.x + half;
+        let rh = row_h.get(&py).copied().unwrap_or(c.h);
+        c.y = by - bh / 2.0 + row_off.get(&py).copied().unwrap_or(0.0) + rh / 2.0 + pad;
+        layout_blocks(c, pad);
+        pos += filled(c.span, pos);
+    }
+}
+
+fn to_placed(s: &Sized) -> Placed {
+    Placed {
+        rect: Rect::centered(Point::new(s.x, s.y), s.w, s.h),
+        children: s.children.iter().map(to_placed).collect(),
+    }
+}
+
+/// Lay out the diagram exactly like mermaid's block layout; the result
+/// mirrors `d.children` (the root rect is the diagram's bounds).
 pub fn layout(d: &BlockDiagram, m: &Metrics) -> Placed {
-    let cols = columns_of(d.columns, &d.children);
-    let track = track_width(&d.children, cols, m);
-    let root = BoxNode::new(
-        boxes::uniform_grid(cols, track, m.gap),
-        grid_node(&d.children, cols, track, m),
-    );
-    boxes::compute(&root)
+    let mut root = Sized {
+        columns: d.columns.map_or(-1, |c| c as i64),
+        span: 1,
+        space: false,
+        w: 0.0,
+        h: 0.0,
+        x: 0.0,
+        y: 0.0,
+        children: sized_tree(&d.children, m),
+    };
+    set_block_sizes(&mut root, 0.0, 0.0, m.pad);
+    layout_blocks(&mut root, m.pad);
+    let children: Vec<Placed> = root.children.iter().map(to_placed).collect();
+    let mut bounds = Rect::new(0.0, 0.0, 0.0, 0.0);
+    fn grow(b: &mut Rect, p: &Placed) {
+        *b = b.union(&p.rect);
+        for c in &p.children {
+            grow(b, c);
+        }
+    }
+    for c in &children {
+        grow(&mut bounds, c);
+    }
+    Placed {
+        rect: bounds,
+        children,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,14 +1177,26 @@ pub fn render(
     pal: &Palette,
 ) -> Result<Scene> {
     let d = parse(body, title)?;
-    let gap = if d.edges.is_empty() { 8.0 } else { 24.0 };
     let m = Metrics {
         font: pal.font_size,
-        gap: cfg.section_f64("block", "padding", gap).max(gap),
-        pad: 8.0,
+        pad: cfg.section_f64("block", "padding", 8.0),
     };
     let placed = layout(&d, &m);
     Ok(draw(&d, &placed, &m, pal))
+}
+
+/// khroma's `fade(c, alpha)`: the colour with its alpha scaled to `alpha`.
+fn fade(c: &Color, alpha: f64) -> Color {
+    match crate::color::parse(&c.0) {
+        Some(rgba) => Color::new(format!(
+            "rgba({}, {}, {}, {})",
+            rgba.r,
+            rgba.g,
+            rgba.b,
+            rgba.a * alpha
+        )),
+        None => c.clone(),
+    }
 }
 
 fn style_for(d: &BlockDiagram, id: &str) -> StyleOverrides {
@@ -1100,14 +1238,19 @@ fn draw_blocks(
             BlockKind::Space => {}
             BlockKind::Composite { children, .. } => {
                 bounds.add_rect(r);
+                // `.node .cluster { fill: fade(clusterBkg, 0.5); stroke: fade(clusterBorder, 0.2) }`
                 let mut paint = Paint::both(
-                    st.fill.as_ref().unwrap_or(&pal.cluster_bkg),
-                    st.stroke.as_ref().unwrap_or(&pal.cluster_border),
+                    &st.fill
+                        .clone()
+                        .unwrap_or_else(|| fade(&pal.cluster_bkg, 0.5)),
+                    &st.stroke
+                        .clone()
+                        .unwrap_or_else(|| fade(&pal.cluster_border, 0.2)),
                     st.stroke_width.unwrap_or(1.0),
                 );
                 paint.dash = st.dash.clone();
                 let mut g = vec![Element::classed_shape(
-                    Geometry::Rect { rect: r, rx: 4.0 },
+                    Geometry::Rect { rect: r, rx: 0.0 },
                     paint,
                     "composite",
                 )];
@@ -1123,7 +1266,11 @@ fn draw_blocks(
                         let s = r.w.min(r.h).min(nw.max(nh));
                         Rect::centered(r.center(), s, s)
                     }
-                    BlockShape::Diamond | BlockShape::Arrow(_) => {
+                    // Block arrows keep their natural size unless they span columns.
+                    BlockShape::Arrow(_) => {
+                        Rect::centered(r.center(), if b.span > 1 { r.w.max(nw) } else { nw }, nh)
+                    }
+                    BlockShape::Diamond => {
                         Rect::centered(r.center(), r.w.min(nw.max(r.w * 0.6)), r.h.min(nh.max(r.h)))
                     }
                     _ => r,
@@ -1319,7 +1466,6 @@ class c hot
     fn m() -> Metrics {
         Metrics {
             font: 16.0,
-            gap: 24.0,
             pad: 8.0,
         }
     }
@@ -1328,7 +1474,7 @@ class c hot
     fn parses_blocks_and_edges() {
         let d = parse(SRC, None).unwrap();
         assert_eq!(d.columns, Some(3));
-        assert_eq!(d.children.len(), 6);
+        assert_eq!(d.children.len(), 7);
         assert_eq!(d.children[1].span, 2);
         let BlockKind::Composite { columns, children } = &d.children[2].kind else {
             panic!("expected composite");
@@ -1351,9 +1497,9 @@ class c hot
         );
         assert_eq!(d.children[2].span, 2);
         assert!(matches!(d.children[4].kind, BlockKind::Space));
-        assert_eq!(d.children[4].span, 2);
+        assert!(matches!(d.children[5].kind, BlockKind::Space));
         assert_eq!(
-            d.children[5].kind,
+            d.children[6].kind,
             BlockKind::Node {
                 label: "go".into(),
                 shape: BlockShape::Arrow(ArrowDir::Down)
@@ -1414,10 +1560,45 @@ class c hot
     }
 
     #[test]
-    fn grid_placement_wraps_rows() {
-        let d = parse(SRC, None).unwrap();
-        let pos = place(&d.children, 3);
-        assert_eq!(pos, vec![(1, 1), (1, 2), (2, 1), (2, 3), (3, 1), (3, 3)]);
+    fn space_n_expands_to_n_spaces() {
+        let d = parse("block-beta\nspace:3 a", None).unwrap();
+        assert_eq!(d.children.len(), 4);
+        assert!(
+            d.children[..3]
+                .iter()
+                .all(|c| c.kind == BlockKind::Space && c.span == 1)
+        );
+    }
+
+    /// Geometry of mermaid 12.3.0's rendering of this diagram (centre x, y, w, h).
+    #[test]
+    fn nested_layout_matches_mermaid() {
+        let src = "block-beta\ncolumns 3\na b c\nblock:outer:3\ncolumns 2\nblock:inner1\nx y\nend\nblock:inner2\ncolumns 1\nz w\nend\nend\nspace:2 d";
+        let d = parse(src, None).unwrap();
+        let p = layout(&d, &m());
+        let check = |r: Rect, cx: f64, cy: f64, w: f64, h: f64| {
+            let c = r.center();
+            assert!(
+                (c.x - cx).abs() < 0.01 && (c.y - cy).abs() < 0.01,
+                "{r:?} vs centre ({cx}, {cy})"
+            );
+            assert!(
+                (r.w - w).abs() < 0.01 && (r.h - h).abs() < 0.01,
+                "{r:?} vs {w}x{h}"
+            );
+        };
+        let third = 232.0 / 3.0;
+        // Siblings of a composite take its height (mermaid's quirk).
+        check(p.children[0].rect, third / 2.0, -128.0, third, 120.0);
+        check(p.children[1].rect, 124.0, -128.0, third, 120.0);
+        let outer = &p.children[3];
+        check(outer.rect, 124.0, 0.0, 248.0, 120.0);
+        check(outer.children[0].rect, 64.0, 0.0, 112.0, 56.0);
+        check(outer.children[0].children[0].rect, 36.0, 0.0, 40.0, 40.0);
+        check(outer.children[1].rect, 184.0, 0.0, 112.0, 104.0);
+        check(outer.children[1].children[0].rect, 180.0, -24.0, 88.0, 40.0);
+        check(outer.children[1].children[1].rect, 180.0, 24.0, 88.0, 40.0);
+        check(p.children[6].rect, 124.0 + third + 8.0, 128.0, third, 120.0);
     }
 
     #[test]
@@ -1425,14 +1606,16 @@ class c hot
         let d = parse(SRC, None).unwrap();
         let p = layout(&d, &m());
         let r: Vec<Rect> = p.children.iter().map(|c| c.rect).collect();
-        // Equal tracks: b spans two tracks plus one gap.
+        // Equal tracks: b spans two tracks plus one padding.
         let track = r[0].w;
-        assert!((r[1].w - (2.0 * track + 24.0)).abs() < 0.5, "{r:?}");
+        assert!((r[1].w - (2.0 * track + 8.0)).abs() < 0.5, "{r:?}");
         assert!((r[2].w - r[1].w).abs() < 0.5);
         for i in 0..r.len() {
             for j in i + 1..r.len() {
-                if i == 4 || j == 4 {
-                    continue; // space
+                if matches!(d.children[i].kind, BlockKind::Space)
+                    || matches!(d.children[j].kind, BlockKind::Space)
+                {
+                    continue;
                 }
                 assert!(!r[i].intersects(&r[j]), "{i} {:?} vs {j} {:?}", r[i], r[j]);
             }
