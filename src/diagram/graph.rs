@@ -966,6 +966,76 @@ pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
     }
 }
 
+/// A node drawn by a layout other than the layered one (swimlanes): its size, as
+/// [`render`] measures it, for the caller to place.
+pub fn node_size(
+    n: &Node,
+    kind: DiagramKind,
+    cfg: &GraphConfig,
+    pal: &Palette,
+    horizontal: bool,
+) -> (f64, f64) {
+    let m = measure_node(
+        n,
+        kind,
+        cfg.padding,
+        cfg.diagram_padding,
+        pal.font_size,
+        horizontal,
+        cfg.look,
+    );
+    (m.w, m.h)
+}
+
+/// Draw node `index` of a graph centred on `c`, exactly as [`render`] would (palette
+/// slot, neo drop shadow, `node` group); returns the group and its clipping boundary.
+pub fn draw_node(
+    n: &Node,
+    index: usize,
+    kind: DiagramKind,
+    cfg: &GraphConfig,
+    pal: &Palette,
+    horizontal: bool,
+    c: Point,
+) -> (Element, Boundary) {
+    let lk = themed_look(look(kind), kind, cfg.look, pal);
+    let font = pal.font_size;
+    let m = measure_node(
+        n,
+        kind,
+        cfg.padding,
+        cfg.diagram_padding,
+        font,
+        horizontal,
+        cfg.look,
+    );
+    let slot = slot_colors(n.color_slot, pal);
+    let painted = Node {
+        style: slot_styled(&n.style, slot.as_ref()),
+        ..n.clone()
+    };
+    let (mut els, boundary) = node_elements(&painted, &m, c, pal, &lk, font);
+    let shadow = pal
+        .drop_shadow
+        .as_ref()
+        .filter(|_| cfg.look == ConfigLook::Neo && n.shape != Shape::Invisible);
+    if let Some(s) = shadow.and_then(|sh| els.first().and_then(|e| drop_shadow(e, sh))) {
+        els.insert(0, s);
+    }
+    let class = ["node", "default"]
+        .into_iter()
+        .map(str::to_string)
+        .chain(n.classes.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let group = Element::Group {
+        id: Some(format!("{}-{}-{}", node_prefix(kind), n.id, index)),
+        class: Some(class),
+        children: els,
+    };
+    (group, boundary)
+}
+
 fn node_prefix(kind: DiagramKind) -> &'static str {
     match kind {
         DiagramKind::State => "state",

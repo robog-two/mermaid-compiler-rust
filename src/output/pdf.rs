@@ -222,6 +222,26 @@ impl Ctx {
             Element::Group { children, .. } => children.iter().for_each(|c| self.element(c)),
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
             Element::Text { text, .. } => self.text(text),
+            Element::Rotated {
+                degrees,
+                origin,
+                children,
+            } => {
+                let (sin, cos) = degrees.to_radians().sin_cos();
+                let (ox, oy) = (origin.x, origin.y);
+                let _ = writeln!(
+                    self.out,
+                    "q {} {} {} {} {} {} cm",
+                    n(cos),
+                    n(sin),
+                    n(-sin),
+                    n(cos),
+                    n(ox - ox * cos + oy * sin),
+                    n(oy - ox * sin - oy * cos)
+                );
+                children.iter().for_each(|c| self.element(c));
+                self.out.push_str("Q\n");
+            }
         }
     }
 }

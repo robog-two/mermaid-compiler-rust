@@ -176,6 +176,13 @@ pub enum Element {
         text: Text,
         class: Option<String>,
     },
+    /// `children` rotated by `degrees` (clockwise on screen) about `origin`, like SVG's
+    /// `rotate(degrees origin.x origin.y)`; used for vertical lane titles.
+    Rotated {
+        degrees: f64,
+        origin: Point,
+        children: Vec<Element>,
+    },
 }
 
 impl Element {
@@ -362,7 +369,9 @@ impl Scene {
         fn count(e: &[Element]) -> usize {
             e.iter()
                 .map(|el| match el {
-                    Element::Group { children, .. } => 1 + count(children),
+                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                        1 + count(children)
+                    }
                     _ => 1,
                 })
                 .sum()
