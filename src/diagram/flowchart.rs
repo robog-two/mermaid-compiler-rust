@@ -530,7 +530,7 @@ impl Builder {
                 Some(e)
             })
             .collect();
-        let g = GraphDiagram {
+        let mut g = GraphDiagram {
             kind: DiagramKind::Flowchart,
             direction,
             nodes,
@@ -538,8 +538,55 @@ impl Builder {
             clusters: self.clusters,
             title,
         };
+        for n in &mut g.nodes {
+            n.label = icon_placeholders(&n.label);
+        }
+        for e in &mut g.edges {
+            for l in [&mut e.label, &mut e.start_label, &mut e.end_label]
+                .into_iter()
+                .flatten()
+            {
+                *l = icon_placeholders(l);
+            }
+        }
+        for c in &mut g.clusters {
+            c.title = icon_placeholders(&c.title);
+        }
         Ok(collapse(g, &self.collapsed))
     }
+}
+
+/// Font Awesome references (`fa:fa-car`, `fab:fa-github`, ...; createText's
+/// `replaceIconSubstring`). mmdc draws them with its bundled Font Awesome font; no
+/// icon font is bundled here, so each becomes a generic `•` glyph rather than literal text.
+fn icon_placeholders(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut rest = label;
+    while let Some(i) = rest.find("fa") {
+        let (before, at) = rest.split_at(i);
+        out.push_str(before);
+        let prefix_len = match at.as_bytes().get(2) {
+            Some(b'b' | b'k' | b'l' | b'r' | b's') => 3,
+            _ => 2,
+        };
+        let tail = &at[prefix_len..];
+        let name_len = tail
+            .strip_prefix(":fa-")
+            .map(|t| {
+                t.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
+                    .unwrap_or(t.len())
+            })
+            .unwrap_or(0);
+        if name_len > 0 {
+            out.push('\u{2022}');
+            rest = &tail[4 + name_len..];
+        } else {
+            out.push_str(&at[..2]);
+            rest = &at[2..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// flowDb's `getData` for `@{ view: collapsed }` subgraphs: the outermost collapsed
@@ -1267,6 +1314,19 @@ pub(crate) fn shape_by_name(name: &str) -> Option<Shape> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_awesome_references_become_icon_placeholders() {
+        assert_eq!(icon_placeholders("fa:fa-car Car"), "\u{2022} Car");
+        assert_eq!(icon_placeholders("a fab:fa-github-alt b"), "a \u{2022} b");
+        assert_eq!(
+            icon_placeholders("fake fa: fa-x fas:fb"),
+            "fake fa: fa-x fas:fb"
+        );
+        let g = p("flowchart TD\n A[fa:fa-car Car] -->|fa:fa-ban no| B");
+        assert_eq!(g.nodes[0].label, "\u{2022} Car");
+        assert_eq!(g.edges[0].label.as_deref(), Some("\u{2022} no"));
+    }
 
     fn p(src: &str) -> GraphDiagram {
         parse(src, None).unwrap()

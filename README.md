@@ -150,7 +150,8 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
 - **Rotated text** follows mermaid (xychart left-axis title and `xAxis.labelRotation`, gitGraph `rotateCommitLabel`
   and TB/BT tags, quadrant y-labels, wardley, swimlane). With `rotateCommitLabel: false` the LR gitGraph widens its
   commit step so horizontal labels don't overlap (mermaid lets them overlap).
-- **Icons** (architecture, mindmap `::icon`) are generic glyphs; icon packs are not loaded.
+- **Icons** (architecture, mindmap `::icon`) are generic glyphs; icon packs are not loaded. Font Awesome references in
+  flowchart labels (`fa:fa-car`), which mmdc draws with its bundled Font Awesome font, become a `•` placeholder.
 - **Themes / looks:** the colour themes' per-item palette (`data-color-id`) is resolved to concrete colours for flowchart
   subgraphs, state composites, class boxes, ER entities, requirement boxes and sequence actors/activations, in upstream's
   `colorIndex` order. Gitgraph, mindmap, journey and the other diagrams use the theme's colours but not its

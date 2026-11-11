@@ -1283,7 +1283,7 @@ fn clip_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
 pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
     let center = match b {
         Boundary::Rect(r) => r.center(),
-        Boundary::Ellipse(c, _, _) | Boundary::Polygon(c, _) => *c,
+        Boundary::Ellipse(c, _, _) | Boundary::Polygon(c, _) | Boundary::Outline(c, _) => *c,
     };
     let inward = port.minus(next);
     if inward.len() < 1e-9 {
@@ -1326,6 +1326,11 @@ pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
         }
         Boundary::Polygon(_, poly) => {
             let hit = geom::clip_polygon(inner, poly, inner.plus(out));
+            hit.minus(inner).len()
+        }
+        // The crossing nearest the port, as `intersect.polygon` picks it.
+        Boundary::Outline(_, pts) => {
+            let hit = Boundary::Outline(inner, pts.clone()).clip(port);
             hit.minus(inner).len()
         }
     };
