@@ -595,6 +595,20 @@ pub struct RenderOptions {
     pub subgraph_title_margin: (f64, f64),
 }
 
+/// `node` with its label wrapped at `cfg.wrapping_width`, as labelHelper's `createText`
+/// does (mermaid 12 wraps every flowchart / state node label at `wrappingWidth`).
+fn wrapped(node: &Node, cfg: &GraphConfig, font: f64) -> Node {
+    if cfg.wrapping_width <= 0.0 || node.label.trim().is_empty() {
+        return node.clone();
+    }
+    let bold = node.style.bold == Some(true);
+    let lines = super::timeline::wrap_text(&node.label, cfg.wrapping_width, font, bold);
+    Node {
+        label: lines.join("<br>"),
+        ..node.clone()
+    }
+}
+
 /// Pure renderer for graph diagrams.
 pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
     render_with(g, cfg, pal, &RenderOptions::default())
@@ -621,7 +635,7 @@ pub fn render_with(
 
     // A cluster with nothing in it is a plain leaf upstream: its title alone, with no
     // visible box. A placeholder node (sized to the title) stands in for it.
-    let mut nodes = g.nodes.clone();
+    let mut nodes: Vec<Node> = g.nodes.iter().map(|n| wrapped(n, cfg, font)).collect();
     let mut empty_of: Vec<Option<usize>> = vec![None; g.clusters.len()];
     for (ci, c) in g.clusters.iter().enumerate() {
         let has_member = nodes.iter().any(|n| {
@@ -653,7 +667,7 @@ pub fn render_with(
                 font,
                 horizontal,
                 cfg.look,
-                opts.min_label_width,
+                opts.min_label_width.max(cfg.min_node_width),
             )
         })
         .collect();
@@ -1138,14 +1152,14 @@ pub fn node_size(
     horizontal: bool,
 ) -> (f64, f64) {
     let m = measure_node(
-        n,
+        &wrapped(n, cfg, pal.font_size),
         kind,
         cfg.padding,
         cfg.diagram_padding,
         pal.font_size,
         horizontal,
         cfg.look,
-        0.0,
+        cfg.min_node_width,
     );
     (m.w, m.h)
 }
@@ -1163,6 +1177,8 @@ pub fn draw_node(
 ) -> (Element, Boundary) {
     let lk = themed_look(look(kind), kind, cfg.look, pal);
     let font = pal.font_size;
+    let wrapped_node = wrapped(n, cfg, font);
+    let n = &wrapped_node;
     let m = measure_node(
         n,
         kind,
@@ -1171,7 +1187,7 @@ pub fn draw_node(
         font,
         horizontal,
         cfg.look,
-        0.0,
+        cfg.min_node_width,
     );
     let slot = slot_colors(n.color_slot, pal);
     let painted = Node {
@@ -1506,11 +1522,19 @@ fn nested_route(
         let ext = 22.0;
         let (cx, cy) = (frame.x + frame.w / 2.0, frame.y + frame.h / 2.0);
         let (top, right) = (frame.y, frame.right());
+        // The outer corners are repeated so the basis curve runs out to them instead of
+        // cutting back across the frame's corner.
+        let (c1, c2) = (
+            Point::new(right + ext, top - ext),
+            Point::new(right + ext, cy),
+        );
         let pts = vec![
             Point::new(cx + frame.w / 4.0, top),
             Point::new(cx + frame.w / 4.0, top - ext),
-            Point::new(right + ext, top - ext),
-            Point::new(right + ext, cy),
+            c1,
+            c1,
+            c2,
+            c2,
             Point::new(right, cy),
         ];
         let label = Point::new(right + ext + label_w.unwrap_or(0.0) / 2.0 + 4.0, top - ext);
@@ -2272,7 +2296,8 @@ mod tests {
         assert!((lp[0].y - frame.y).abs() < eps, "{lp:?} {frame:?}");
         assert!(
             lp.iter()
-                .any(|p| p.x > frame.right() + 10.0 && p.y < frame.y)
+                .any(|p| p.x > frame.right() + 10.0 && p.y < frame.y),
+            "{lp:?} {frame:?}"
         );
         assert!((lp.last().unwrap().x - frame.right()).abs() < 10.0);
         // A --> a1: from the frame's top edge into a1 (not between a1 and a2).
@@ -2377,5 +2402,34 @@ mod tests {
             frame_of(&moved, "S"),
             "layout unchanged"
         );
+    }
+
+    #[test]
+    fn labels_take_min_node_width_and_wrap_at_wrapping_width() {
+        // mermaid 12 labelHelper: `minNodeWidth` 120 widens short labels, `wrappingWidth`
+        // 120 wraps long ones; classic rect padding 2*30 gives 180 wide (reference SVG).
+        let cfg = crate::config::MermaidConfig::default().scoped("flowchart");
+        let mut fc = cfg.flowchart.clone();
+        fc.look = ConfigLook::Classic;
+        let pal = cfg.palette();
+        let size = |fc: &GraphConfig, label: &str, shape: Shape| {
+            node_size(
+                &Node::new("n", label, shape),
+                DiagramKind::Flowchart,
+                fc,
+                &pal,
+                false,
+            )
+        };
+        let short = size(&fc, "Hi", Shape::Rect);
+        let long = size(&fc, "A much longer label here", Shape::Rect);
+        assert_eq!(short.0, 180.0);
+        assert_eq!(long.0, 180.0);
+        assert!(long.1 > short.1, "the long label wraps onto a second line");
+        // Circles size from both axes and opt out of the minimum width.
+        assert!(size(&fc, "x", Shape::Circle).0 < 120.0);
+        fc.min_node_width = 0.0;
+        fc.wrapping_width = 0.0;
+        assert!(size(&fc, "Hi", Shape::Rect).0 < 120.0);
     }
 }

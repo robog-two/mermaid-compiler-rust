@@ -159,6 +159,8 @@ pub fn render(
         curve: Curve::Basis,
         use_max_width: cfg.use_max_width("requirement"),
         title_top_margin: 25.0,
+        min_node_width: 0.0,
+        wrapping_width: 0.0,
     };
     Ok(graph::render(&g, &gc, pal))
 }

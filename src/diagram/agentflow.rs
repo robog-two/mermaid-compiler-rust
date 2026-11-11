@@ -1682,6 +1682,8 @@ fn graph_config(cfg: &MermaidConfig) -> GraphConfig {
         curve: cfg.flowchart.curve,
         use_max_width: cfg.use_max_width("agentflow"),
         title_top_margin: cfg.section_f64("agentflow", "titleTopMargin", 25.0),
+        min_node_width: 0.0,
+        wrapping_width: 0.0,
     }
 }
 

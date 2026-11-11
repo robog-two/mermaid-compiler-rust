@@ -177,6 +177,12 @@ pub struct GraphConfig {
     pub curve: Curve,
     pub use_max_width: bool,
     pub title_top_margin: f64,
+    /// `minNodeWidth`: non-empty node labels are widened to at least this (mermaid 12
+    /// labelHelper `minWidth`; 0 = off).
+    pub min_node_width: f64,
+    /// `wrappingWidth`: node labels wrap at this width (labelHelper's `createText`
+    /// width; 0 = off).
+    pub wrapping_width: f64,
 }
 
 impl GraphConfig {
@@ -190,6 +196,8 @@ impl GraphConfig {
             curve: Curve::Basis,
             use_max_width: true,
             title_top_margin: 25.0,
+            min_node_width: 120.0,
+            wrapping_width: 120.0,
         }
     }
     fn state() -> Self {
@@ -200,8 +208,11 @@ impl GraphConfig {
         }
     }
     fn class() -> Self {
+        // Class boxes are drawn by their own shape, not labelHelper.
         GraphConfig {
             padding: 12.0,
+            min_node_width: 0.0,
+            wrapping_width: 0.0,
             ..Self::flowchart()
         }
     }
@@ -213,6 +224,10 @@ impl GraphConfig {
         set_f64(j, "diagramPadding", &mut self.diagram_padding);
         set_f64(j, "titleTopMargin", &mut self.title_top_margin);
         set_bool(j, "useMaxWidth", &mut self.use_max_width);
+        if self.min_node_width > 0.0 || self.wrapping_width > 0.0 {
+            set_f64(j, "minNodeWidth", &mut self.min_node_width);
+            set_f64(j, "wrappingWidth", &mut self.wrapping_width);
+        }
         if let Some(c) = j.get("curve").and_then(Json::as_str) {
             self.curve = Curve::from_name(c);
         }

@@ -208,6 +208,8 @@ fn graph_config(cfg: &MermaidConfig) -> GraphConfig {
         curve: Curve::Basis,
         use_max_width: cfg.use_max_width("er"),
         title_top_margin: cfg.section_f64("er", "titleTopMargin", 25.0),
+        min_node_width: 0.0,
+        wrapping_width: 0.0,
     }
 }
 
