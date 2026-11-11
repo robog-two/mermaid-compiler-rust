@@ -193,8 +193,33 @@ pub fn render(
     pal: &Palette,
 ) -> Result<Scene> {
     let d = parse(body, title)?;
-    let g = to_graph(&d);
+    let mut g = to_graph(&d);
+    wrap_plain_entities(&mut g, cfg.flowchart.wrapping_width, pal.font_size);
     Ok(graph::render(&g, &graph_config(cfg), pal))
+}
+
+/// An entity without attributes is drawn by `drawRect`, whose `labelHelper` wraps the
+/// name at `flowchart.wrappingWidth` (`DELIVERY-` / `ADDRESS`); a table's name does
+/// not wrap.
+fn wrap_plain_entities(g: &mut GraphDiagram, width: f64, font: f64) {
+    if width <= 0.0 {
+        return;
+    }
+    for n in g.nodes.iter_mut().filter(|n| n.sections.is_empty()) {
+        let bold = n.style.bold == Some(true);
+        let lines = super::timeline::wrap_text(&n.label, width, font, bold);
+        // Only a label that wraps is rewritten; its decoded lines are escaped again so
+        // the label pipeline decodes them exactly once.
+        if lines.len() > crate::text::label_lines(&n.label).len() {
+            let escape = |l: &String| {
+                l.replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+            };
+            n.label = lines.iter().map(escape).collect::<Vec<_>>().join("<br>");
+            n.wrapped_width = Some(width);
+        }
+    }
 }
 
 /// Layout settings from the `er` config section.
@@ -1415,5 +1440,50 @@ mod tests {
         assert!(parse("erDiagram\np ||--o{ q[Q] : x", None).is_err());
         let d = parse("erDiagram\np[Person]\np ||--o{ q : x", None).unwrap();
         assert_eq!(d.entities[0].alias.as_deref(), Some("Person"));
+    }
+
+    #[test]
+    fn plain_entity_names_wrap_at_the_flowchart_wrapping_width() {
+        let d = parse(
+            "erDiagram\nCUSTOMER }|..|{ DELIVERY-ADDRESS : uses\nLINE-ITEM { int qty }",
+            None,
+        )
+        .unwrap();
+        let mut g = to_graph(&d);
+        wrap_plain_entities(&mut g, 120.0, 16.0);
+        let label = |id: &str| g.nodes.iter().find(|n| n.id == id).unwrap().label.clone();
+        // mermaid: `DELIVERY-` / `ADDRESS` (the browser breaks after the hyphen).
+        assert_eq!(label("DELIVERY-ADDRESS"), "DELIVERY-<br>ADDRESS");
+        let wrapped = |id: &str| g.nodes.iter().find(|n| n.id == id).unwrap().wrapped_width;
+        assert_eq!(wrapped("DELIVERY-ADDRESS"), Some(120.0));
+        assert_eq!(wrapped("CUSTOMER"), None);
+        assert_eq!(label("CUSTOMER"), "CUSTOMER");
+        // A table's name is not wrapped.
+        let mut g2 = to_graph(&parse("erDiagram\nDELIVERY-ADDRESS { int x }", None).unwrap());
+        wrap_plain_entities(&mut g2, 50.0, 16.0);
+        assert_eq!(g2.nodes[0].label, "DELIVERY-ADDRESS");
+    }
+
+    #[test]
+    fn group_titles_wrap_at_the_group_width() {
+        let title = "Customer delivery addresses and their very long ordering group name";
+        let src =
+            format!("erDiagram\nsubgraph G [{title}]\n  A\nend\nsubgraph S [Short]\n  B\nend");
+        let g = to_graph(&parse(&src, None).unwrap());
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let scene = graph::render(&g, &graph_config(&cfg), &pal);
+        let mut clusters = Vec::new();
+        boxes(&scene.elements, "cluster-", &mut clusters);
+        let cl = |id: &str| clusters.iter().find(|(c, _)| c == id).unwrap().1;
+        let (long, short) = (cl("G"), cl("S"));
+        let full = crate::text::line_width(title, pal.font_size, false);
+        // mermaid (148 / 156 px wide): the title wraps instead of widening the frame.
+        assert!(long.w < full / 2.0, "{long:?}");
+        assert!(long.w >= short.w, "{long:?} {short:?}");
+        assert!(
+            long.h > short.h + 40.0,
+            "four title lines: {long:?} {short:?}"
+        );
     }
 }

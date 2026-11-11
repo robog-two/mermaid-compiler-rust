@@ -7,7 +7,7 @@ use super::graph::{
     Cluster, ClusterId, ClusterKind, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId,
     Section, Shape, StyleOverrides,
 };
-use super::statements;
+use super::statements_multiline;
 use crate::error::{Error, Result};
 use crate::layout::Direction;
 use crate::scene::DiagramKind;
@@ -37,7 +37,8 @@ struct Builder {
 
 /// Parse a state diagram body.
 pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
-    let stmts = statements(body);
+    // A `state "…"` description may span lines (STATE_STRING matches newlines).
+    let stmts = statements_multiline(body, |s| s.starts_with("state "));
     let mut b = Builder::default();
     // Pass 1: which ids are composite states, and which of them hold `--` regions.
     let mut open: Vec<String> = Vec::new();
@@ -563,5 +564,20 @@ mod tests {
         .unwrap();
         assert_eq!(g.direction, Direction::LeftRight);
         assert_eq!(g.clusters[0].direction, Some(Direction::TopBottom));
+    }
+
+    #[test]
+    fn state_descriptions_may_span_lines() {
+        let g = parse(
+            "stateDiagram-v2\nstate \"multi\nline\" as S5\nS5 --> S6",
+            None,
+        )
+        .unwrap();
+        let s5 = g.nodes.iter().find(|n| n.id == "S5").unwrap();
+        assert_eq!(
+            crate::text::TextBlock::label(&s5.label, 16.0).lines,
+            ["multi", "line"]
+        );
+        assert_eq!(g.edges.len(), 1);
     }
 }

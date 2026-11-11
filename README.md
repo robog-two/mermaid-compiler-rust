@@ -120,8 +120,11 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
 ### Known limitations
 
 - **Labels are SVG `<text>`, not HTML `<foreignObject>`.** Markdown/HTML formatting inside labels is stripped to plain text
+  (emphasis markers are removed by CommonMark's rules, but bold/italic are not drawn)
   (`<br>` line breaks are honoured). Flowchart, state, swimlane, agentflow and use-case node labels
   wrap at `wrappingWidth` and are widened to `minNodeWidth` (both 120, as in mermaid 12), so short-label nodes share one width.
+  Wrapping follows the browser's line breaking (CJK between characters, after hyphens); edge labels wrap at 200px.
+  Quoted and markdown strings may span lines.
 - **Text is measured with Helvetica/Arial metrics**, not by a browser, so widths can be off by a few percent for other fonts.
 - **PDF text uses the built-in Helvetica fonts** (nothing embedded), so characters outside Windows-1252 become `?` in PDFs.
   SVG and PNG handle any Unicode the system fonts cover.
