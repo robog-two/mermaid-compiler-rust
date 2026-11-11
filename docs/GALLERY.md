@@ -3,9 +3,41 @@
 Every example in `examples/diagrams/`, rendered by this implementation (no browser).
 Regenerate with `cargo run --release --example gallery`.
 
+## agentflow
+
+Source: [`examples/diagrams/agentflow.mmd`](../examples/diagrams/agentflow.mmd) · rendered in 1.38ms
+
+<details><summary>source</summary>
+
+```mermaid
+agentflow-beta TB
+  brief["Release brief"]@{ shape: input }
+  flow writer["Drafting Agent"]
+    draft["Draft the notes"]@{ shape: task }
+    lookup["changelog_search"]@{ shape: tool }
+    guide["Tone of voice"]@{ shape: refdoc }
+    draft --> lookup
+    draft -.- guide
+  end
+  flow reviewer["Review Agent"]
+    check["Check the claims"]@{ shape: task }
+    ok["Accurate?"]@{ shape: decision }
+    check --> ok
+  end
+  publish["Publish"]@{ shape: action }
+  brief --> writer
+  writer --> reviewer
+  ok -- yes --> publish
+  ok -- no --x check
+```
+
+</details>
+
+![agentflow](gallery/agentflow.png)
+
 ## architecture
 
-Source: [`examples/diagrams/architecture.mmd`](../examples/diagrams/architecture.mmd) · rendered in 117.75µs
+Source: [`examples/diagrams/architecture.mmd`](../examples/diagrams/architecture.mmd) · rendered in 202.51µs
 
 <details><summary>source</summary>
 
@@ -23,7 +55,7 @@ architecture-beta
     service db(database)[Database] in storage
     service disk(disk)[Disk] in storage
     service bucket(logos:aws-s3)[Bucket] in storage
-    service ext("API")[Partner API]
+    service ext(internet)[Partner API]
     junction hub in api
 
     internet:R --> L:gateway
@@ -42,7 +74,7 @@ architecture-beta
 
 ## block
 
-Source: [`examples/diagrams/block.mmd`](../examples/diagrams/block.mmd) · rendered in 149.41µs
+Source: [`examples/diagrams/block.mmd`](../examples/diagrams/block.mmd) · rendered in 231.13µs
 
 <details><summary>source</summary>
 
@@ -63,8 +95,8 @@ block-beta
   gw --> orders
   orders --> queue
   db -.-> search
-  decide --> ok
-  decide ==> alert
+  ok --> alert
+  queue ==> db
 
   classDef warn fill:#ffe0e0,stroke:#d33,color:#600
   class alert warn
@@ -77,7 +109,7 @@ block-beta
 
 ## c4-container
 
-Source: [`examples/diagrams/c4-container.mmd`](../examples/diagrams/c4-container.mmd) · rendered in 219.22µs
+Source: [`examples/diagrams/c4-container.mmd`](../examples/diagrams/c4-container.mmd) · rendered in 371.19µs
 
 <details><summary>source</summary>
 
@@ -122,7 +154,7 @@ C4Container
 
 ## c4
 
-Source: [`examples/diagrams/c4.mmd`](../examples/diagrams/c4.mmd) · rendered in 229.60µs
+Source: [`examples/diagrams/c4.mmd`](../examples/diagrams/c4.mmd) · rendered in 408.16µs
 
 <details><summary>source</summary>
 
@@ -177,7 +209,7 @@ C4Context
 
 ## class
 
-Source: [`examples/diagrams/class.mmd`](../examples/diagrams/class.mmd) · rendered in 158.99µs
+Source: [`examples/diagrams/class.mmd`](../examples/diagrams/class.mmd) · rendered in 320.38µs
 
 <details><summary>source</summary>
 
@@ -215,9 +247,85 @@ classDiagram
 
 ![class](gallery/class.png)
 
+## cynefin
+
+Source: [`examples/diagrams/cynefin.mmd`](../examples/diagrams/cynefin.mmd) · rendered in 172.98µs
+
+<details><summary>source</summary>
+
+```mermaid
+cynefin-beta
+  title Strategy Categorization
+
+  complex
+    "Market research"
+    "New product bets"
+
+  complicated
+    "Competitive analysis"
+
+  clear
+    "Standard pricing"
+
+  chaotic
+    "Crisis management"
+
+  confusion
+    "Unknown failure mode"
+
+  complex --> complicated : "Pattern identified"
+  complicated --> clear : "Best practice codified"
+  clear --> chaotic : "Complacency"
+  chaotic --> complex : "Stabilized"
+```
+
+</details>
+
+![cynefin](gallery/cynefin.png)
+
+## er-subgraphs
+
+Source: [`examples/diagrams/er-subgraphs.mmd`](../examples/diagrams/er-subgraphs.mmd) · rendered in 307.32µs
+
+<details><summary>source</summary>
+
+```mermaid
+---
+title: Subgraphs in an ER diagram
+---
+erDiagram
+    direction LR
+    %% Groups nest, take their own direction, and can be relationship endpoints.
+    subgraph TOP [Order domain]
+        direction TB
+        subgraph B1 [Customers]
+            direction RL
+            CUSTOMER ||--o{ ADDRESS : "lives at"
+        end
+        subgraph B2 [Orders]
+            direction BT
+            ORDER ||--|{ LINE-ITEM : contains
+        end
+    end
+    subgraph "Catalogue"
+        PRODUCT {
+            string code PK
+            string name
+        }
+    end
+    WAREHOUSE ||--|| TOP : serves
+    TOP ||--o{ Catalogue : sells
+    B1 ||--|| B2 : places
+    style Catalogue fill:#fff7e6,stroke:#d48806
+```
+
+</details>
+
+![er-subgraphs](gallery/er-subgraphs.png)
+
 ## er
 
-Source: [`examples/diagrams/er.mmd`](../examples/diagrams/er.mmd) · rendered in 171.82µs
+Source: [`examples/diagrams/er.mmd`](../examples/diagrams/er.mmd) · rendered in 461.79µs
 
 <details><summary>source</summary>
 
@@ -232,7 +340,8 @@ erDiagram
     ORDER ||--|{ LINE-ITEM : contains
     PRODUCT |o--o{ LINE-ITEM : "ordered in"
     %% Word cardinalities and an alias
-    p[Person] one or more optionally to zero or one CUSTOMER : "acts as"
+    p[Person]
+    p one or more optionally to zero or one CUSTOMER : "acts as"
 
     CUSTOMER {
         string id PK "customer number"
@@ -266,9 +375,33 @@ erDiagram
 
 ![er](gallery/er.png)
 
+## eventmodeling
+
+Source: [`examples/diagrams/eventmodeling.mmd`](../examples/diagrams/eventmodeling.mmd) · rendered in 176.32µs
+
+<details><summary>source</summary>
+
+```mermaid
+eventmodeling
+
+tf 01 ui CartUI
+tf 02 cmd AddItem { description: string }
+tf 03 evt ItemAdded { description: string }
+
+rf 04 evt External.InventoryChanged
+tf 05 pcr InventoryProcessor
+tf 06 cmd ChangeInventory
+tf 07 evt Cart.InventoryChanged
+tf 08 rmo CartItems ->> 03 ->> 07
+```
+
+</details>
+
+![eventmodeling](gallery/eventmodeling.png)
+
 ## flowchart
 
-Source: [`examples/diagrams/flowchart.mmd`](../examples/diagrams/flowchart.mmd) · rendered in 134.73µs
+Source: [`examples/diagrams/flowchart.mmd`](../examples/diagrams/flowchart.mmd) · rendered in 242.16µs
 
 <details><summary>source</summary>
 
@@ -296,7 +429,7 @@ flowchart TD
 
 ## gantt
 
-Source: [`examples/diagrams/gantt.mmd`](../examples/diagrams/gantt.mmd) · rendered in 645.12µs
+Source: [`examples/diagrams/gantt.mmd`](../examples/diagrams/gantt.mmd) · rendered in 773.07µs
 
 <details><summary>source</summary>
 
@@ -336,7 +469,7 @@ gantt
 
 ## gitgraph
 
-Source: [`examples/diagrams/gitgraph.mmd`](../examples/diagrams/gitgraph.mmd) · rendered in 84.13µs
+Source: [`examples/diagrams/gitgraph.mmd`](../examples/diagrams/gitgraph.mmd) · rendered in 151.96µs
 
 <details><summary>source</summary>
 
@@ -374,7 +507,7 @@ gitGraph
 
 ## info
 
-Source: [`examples/diagrams/info.mmd`](../examples/diagrams/info.mmd) · rendered in 17.78µs
+Source: [`examples/diagrams/info.mmd`](../examples/diagrams/info.mmd) · rendered in 91.60µs
 
 <details><summary>source</summary>
 
@@ -386,9 +519,42 @@ info showInfo
 
 ![info](gallery/info.png)
 
+## ishikawa
+
+Source: [`examples/diagrams/ishikawa.mmd`](../examples/diagrams/ishikawa.mmd) · rendered in 140.42µs
+
+<details><summary>source</summary>
+
+```mermaid
+ishikawa-beta
+    Blurry Photo
+    Process
+        Out of focus
+        Shutter speed too slow
+        Protective film not removed
+        Beautification filter applied
+    User
+        Shaky hands
+    Equipment
+        LENS
+            Inappropriate lens
+            Damaged lens
+            Dirty lens
+        SENSOR
+            Damaged sensor
+            Dirty sensor
+    Environment
+        Subject moved too quickly
+        Too dark
+```
+
+</details>
+
+![ishikawa](gallery/ishikawa.png)
+
 ## journey
 
-Source: [`examples/diagrams/journey.mmd`](../examples/diagrams/journey.mmd) · rendered in 154.55µs
+Source: [`examples/diagrams/journey.mmd`](../examples/diagrams/journey.mmd) · rendered in 242.66µs
 
 <details><summary>source</summary>
 
@@ -413,7 +579,7 @@ journey
 
 ## kanban
 
-Source: [`examples/diagrams/kanban.mmd`](../examples/diagrams/kanban.mmd) · rendered in 108.04µs
+Source: [`examples/diagrams/kanban.mmd`](../examples/diagrams/kanban.mmd) · rendered in 255.59µs
 
 <details><summary>source</summary>
 
@@ -448,7 +614,7 @@ kanban
 
 ## mindmap
 
-Source: [`examples/diagrams/mindmap.mmd`](../examples/diagrams/mindmap.mmd) · rendered in 96.71µs
+Source: [`examples/diagrams/mindmap.mmd`](../examples/diagrams/mindmap.mmd) · rendered in 187.16µs
 
 <details><summary>source</summary>
 
@@ -472,7 +638,8 @@ mindmap
       Mermaid
     Shapes
       sq[Square]
-      rd(Rounded):::urgent
+      rd(Rounded)
+      :::urgent
       bg))Bang((
       cl)Cloud(
       hx{{Hexagon}}
@@ -485,7 +652,7 @@ mindmap
 
 ## packet
 
-Source: [`examples/diagrams/packet.mmd`](../examples/diagrams/packet.mmd) · rendered in 167.89µs
+Source: [`examples/diagrams/packet.mmd`](../examples/diagrams/packet.mmd) · rendered in 281.00µs
 
 <details><summary>source</summary>
 
@@ -519,7 +686,7 @@ packet-beta
 
 ## pie
 
-Source: [`examples/diagrams/pie.mmd`](../examples/diagrams/pie.mmd) · rendered in 37.92µs
+Source: [`examples/diagrams/pie.mmd`](../examples/diagrams/pie.mmd) · rendered in 100.04µs
 
 <details><summary>source</summary>
 
@@ -538,7 +705,7 @@ pie showData
 
 ## quadrant
 
-Source: [`examples/diagrams/quadrant.mmd`](../examples/diagrams/quadrant.mmd) · rendered in 55.38µs
+Source: [`examples/diagrams/quadrant.mmd`](../examples/diagrams/quadrant.mmd) · rendered in 155.27µs
 
 <details><summary>source</summary>
 
@@ -567,7 +734,7 @@ quadrantChart
 
 ## radar
 
-Source: [`examples/diagrams/radar.mmd`](../examples/diagrams/radar.mmd) · rendered in 90.14µs
+Source: [`examples/diagrams/radar.mmd`](../examples/diagrams/radar.mmd) · rendered in 192.82µs
 
 <details><summary>source</summary>
 
@@ -593,9 +760,101 @@ radar-beta
 
 ![radar](gallery/radar.png)
 
+## railroad-abnf
+
+Source: [`examples/diagrams/railroad-abnf.mmd`](../examples/diagrams/railroad-abnf.mmd) · rendered in 203.97µs
+
+<details><summary>source</summary>
+
+```mermaid
+railroad-abnf-beta
+title "Email Address"
+
+address = local-part "@" domain ;
+local-part = 1*( ALPHA / DIGIT / "." / "-" ) ;
+domain = label *( "." label ) ;
+label = 1*( ALPHA / DIGIT / "-" ) ;
+port = [ ":" ] 1*5DIGIT %x30-39 ;
+```
+
+</details>
+
+![railroad-abnf](gallery/railroad-abnf.png)
+
+## railroad-ir
+
+Source: [`examples/diagrams/railroad-ir.mmd`](../examples/diagrams/railroad-ir.mmd) · rendered in 162.65µs
+
+<details><summary>source</summary>
+
+```mermaid
+railroad-beta
+title Expression Grammar
+
+expression = sequence(
+    nonterminal("term"),
+    zeroOrMore(sequence(
+        choice(terminal("+"), terminal("-")),
+        nonterminal("term")
+    ))
+) ;
+factor = choice(
+    nonterminal("number"),
+    sequence(terminal("("), nonterminal("expression"), terminal(")"))
+) ;
+number = sequence(optional(terminal("-")), oneOrMore(nonterminal("digit")), special("exponent")) ;
+```
+
+</details>
+
+![railroad-ir](gallery/railroad-ir.png)
+
+## railroad-peg
+
+Source: [`examples/diagrams/railroad-peg.mmd`](../examples/diagrams/railroad-peg.mmd) · rendered in 157.15µs
+
+<details><summary>source</summary>
+
+```mermaid
+railroad-peg-beta
+title "Calculator Grammar"
+
+Expression <- Term (("+" / "-") Term)* ;
+Term <- Factor (("*" / "/") Factor)* ;
+Factor <- Number / "(" Expression ")" ;
+Number <- Digit+ ;
+Identifier <- !Keyword Letter Letter* . ;
+```
+
+</details>
+
+![railroad-peg](gallery/railroad-peg.png)
+
+## railroad
+
+Source: [`examples/diagrams/railroad.mmd`](../examples/diagrams/railroad.mmd) · rendered in 200.47µs
+
+<details><summary>source</summary>
+
+```mermaid
+railroad-ebnf-beta
+title "JSON Grammar"
+
+json = element ;
+element = object | array | string | number | "true" | "false" | "null" ;
+object = "{" [ member ( "," member )* ] "}" ;
+array = "[" [ element ( "," element )* ] "]" ;
+member = string ":" element ;
+string = '"' { ? any character except quote ? } '"' ;
+```
+
+</details>
+
+![railroad](gallery/railroad.png)
+
 ## requirement
 
-Source: [`examples/diagrams/requirement.mmd`](../examples/diagrams/requirement.mmd) · rendered in 179.91µs
+Source: [`examples/diagrams/requirement.mmd`](../examples/diagrams/requirement.mmd) · rendered in 310.16µs
 
 <details><summary>source</summary>
 
@@ -677,7 +936,7 @@ requirementDiagram
 
 ## sankey
 
-Source: [`examples/diagrams/sankey.mmd`](../examples/diagrams/sankey.mmd) · rendered in 297.73µs
+Source: [`examples/diagrams/sankey.mmd`](../examples/diagrams/sankey.mmd) · rendered in 492.64µs
 
 <details><summary>source</summary>
 
@@ -722,7 +981,7 @@ Electricity grid,"Heating and cooling, homes",42.0
 
 ## sequence
 
-Source: [`examples/diagrams/sequence.mmd`](../examples/diagrams/sequence.mmd) · rendered in 102.92µs
+Source: [`examples/diagrams/sequence.mmd`](../examples/diagrams/sequence.mmd) · rendered in 165.89µs
 
 <details><summary>source</summary>
 
@@ -757,7 +1016,7 @@ sequenceDiagram
 
 ## shapes
 
-Source: [`examples/diagrams/shapes.mmd`](../examples/diagrams/shapes.mmd) · rendered in 262.67µs
+Source: [`examples/diagrams/shapes.mmd`](../examples/diagrams/shapes.mmd) · rendered in 704.65µs
 
 <details><summary>source</summary>
 
@@ -780,6 +1039,10 @@ flowchart LR
         g1@{ shape: div-rect, label: "Divided" } ~~~ g2@{ shape: notch-pent, label: "Loop limit" } ~~~ g3@{ shape: st-rect, label: "Processes" } ~~~ g4@{ shape: tag-rect, label: "Tagged" }
         h1@{ shape: lin-cyl, label: "Disk" } ~~~ h2@{ shape: h-cyl, label: "DAS" } ~~~ h3@{ shape: curv-trap, label: "Display" } ~~~ h4@{ shape: text, label: "Just text" }
         i1@{ shape: hourglass } ~~~ i2@{ shape: cross-circ } ~~~ i3@{ shape: sm-circ } ~~~ i4@{ shape: fr-circ } ~~~ i5@{ shape: fork }
+        j1@{ shape: docs, label: "Documents" } ~~~ j2@{ shape: tag-doc, label: "Tagged doc" } ~~~ j3@{ shape: lin-doc, label: "Lined doc" } ~~~ j4@{ shape: flag, label: "Paper tape" } ~~~ j5@{ shape: bow-rect, label: "Stored data" }
+        k1@{ shape: datastore, label: "Data store" } ~~~ k2@{ shape: folder, label: "Folder" } ~~~ k3@{ shape: bucket, label: "Bucket" } ~~~ k4@{ shape: cyl, label: "Database" }
+        l1@{ shape: console, label: "Console" } ~~~ l2@{ shape: browser, label: "Browser" } ~~~ l3@{ shape: person, label: "Person" } ~~~ l4@{ shape: bolt }
+        m1@{ shape: bang, label: "Bang" } ~~~ m2@{ shape: cloud, label: "Cloud" } ~~~ m3@{ shape: brace, label: "Comment" } ~~~ m4@{ shape: brace-r, label: "Right" } ~~~ m5@{ shape: braces, label: "Both" }
     end
 ```
 
@@ -789,7 +1052,7 @@ flowchart LR
 
 ## state
 
-Source: [`examples/diagrams/state.mmd`](../examples/diagrams/state.mmd) · rendered in 169.30µs
+Source: [`examples/diagrams/state.mmd`](../examples/diagrams/state.mmd) · rendered in 323.20µs
 
 <details><summary>source</summary>
 
@@ -815,9 +1078,39 @@ stateDiagram-v2
 
 ![state](gallery/state.png)
 
+## subgraph-collapse
+
+Source: [`examples/diagrams/subgraph-collapse.mmd`](../examples/diagrams/subgraph-collapse.mmd) · rendered in 1.05ms
+
+<details><summary>source</summary>
+
+```mermaid
+flowchart LR
+    subgraph ingest [Ingest]
+        src[Sources] --> parse[Parse] --> validate[Validate]
+    end
+    subgraph store [Storage]
+        direction TB
+        raw[(Raw)] --> clean[(Clean)]
+    end
+    subgraph observability [Observability]
+        metrics[Metrics] --> alerts[Alerts]
+    end
+    user((User)) e1@--> src
+    validate --> raw
+    validate --> observability
+    clean --> store
+    observability@{ view: collapsed }
+    e1@{ animate: true }
+```
+
+</details>
+
+![subgraph-collapse](gallery/subgraph-collapse.png)
+
 ## subgraphs
 
-Source: [`examples/diagrams/subgraphs.mmd`](../examples/diagrams/subgraphs.mmd) · rendered in 154.53µs
+Source: [`examples/diagrams/subgraphs.mmd`](../examples/diagrams/subgraphs.mmd) · rendered in 267.79µs
 
 <details><summary>source</summary>
 
@@ -846,9 +1139,39 @@ flowchart LR
 
 ![subgraphs](gallery/subgraphs.png)
 
+## swimlane
+
+Source: [`examples/diagrams/swimlane.mmd`](../examples/diagrams/swimlane.mmd) · rendered in 278.58µs
+
+<details><summary>source</summary>
+
+```mermaid
+swimlane-beta LR
+  subgraph Applicant
+    apply[Submit application]
+    sign[Sign agreement]
+  end
+  subgraph Reviewer
+    screen[Screen application]
+    decide{Approved?}
+  end
+  subgraph System
+    create[Create account]
+    notify[Send welcome email]
+  end
+  apply -->|Application received| screen
+  screen --> decide
+  decide -->|Approved| create --> notify --> sign
+  decide -->|Needs changes| apply
+```
+
+</details>
+
+![swimlane](gallery/swimlane.png)
+
 ## timeline
 
-Source: [`examples/diagrams/timeline.mmd`](../examples/diagrams/timeline.mmd) · rendered in 156.84µs
+Source: [`examples/diagrams/timeline.mmd`](../examples/diagrams/timeline.mmd) · rendered in 266.31µs
 
 <details><summary>source</summary>
 
@@ -873,7 +1196,7 @@ timeline
 
 ## treemap
 
-Source: [`examples/diagrams/treemap.mmd`](../examples/diagrams/treemap.mmd) · rendered in 76.10µs
+Source: [`examples/diagrams/treemap.mmd`](../examples/diagrams/treemap.mmd) · rendered in 184.22µs
 
 <details><summary>source</summary>
 
@@ -908,9 +1231,152 @@ classDef highlight fill:#ffd166,stroke:#c77d00,color:#000
 
 ![treemap](gallery/treemap.png)
 
+## treeview
+
+Source: [`examples/diagrams/treeview.mmd`](../examples/diagrams/treeview.mmd) · rendered in 172.48µs
+
+<details><summary>source</summary>
+
+```mermaid
+---
+config:
+  treeView:
+    showIcons: true
+---
+treeView-beta
+    my-project/
+        src/
+            App.tsx :::highlight icon(logos:react) ## main component
+            index.js ## entry point
+        .env ## environment variables
+        Dockerfile
+        package.json
+```
+
+</details>
+
+![treeview](gallery/treeview.png)
+
+## usecase
+
+Source: [`examples/diagrams/usecase.mmd`](../examples/diagrams/usecase.mmd) · rendered in 1.32ms
+
+<details><summary>source</summary>
+
+```mermaid
+usecase-beta
+direction LR
+accTitle: Online ordering use cases
+accDescr {
+  A customer places an order through the storefront.
+  Staff review the order and inspect its data.
+}
+actor Customer("Customer")
+actor Staff("Order staff")@{ type: hollow, business: true } <<Employee>>
+systemBoundary ordering["Ordering System"]@{ type: package }:::system
+  Browse("Browse products")
+  Checkout("Checkout") <<Core>>:::critical
+  Payment("Process payment")
+  Review[Review order]
+end
+json OrderData@{
+  "status": "pending",
+  "items": [{ "name": "Book", "quantity": 1 }],
+  "total": 29.95
+}:::data
+note for Checkout "`Validates the **cart** before payment`"
+Customer starts@-- "places order" ---> Checkout
+Customer --> Browse
+Checkout pays@..> : include Payment
+Staff --> Review
+Review --> OrderData
+classDef system stroke:#c8a02a,stroke-width:2px
+classDef critical stroke:#c33,stroke-width:3px
+classDef data stroke:#3572a5
+starts@{ animation: fast }
+style pays stroke:#6b46c1,stroke-width:2px
+```
+
+</details>
+
+![usecase](gallery/usecase.png)
+
+## venn
+
+Source: [`examples/diagrams/venn.mmd`](../examples/diagrams/venn.mmd) · rendered in 411.83µs
+
+<details><summary>source</summary>
+
+```mermaid
+venn-beta
+  title What makes a good feature
+  set Desirable
+    text D1["User research"]
+  set Feasible
+  set Viable
+  union Desirable,Feasible["Buildable"]
+  union Feasible,Viable["Sustainable"]
+  union Desirable,Viable["Marketable"]
+  union Desirable,Feasible,Viable["Ship it"]
+  style Desirable,Feasible,Viable fill:#fde68a
+```
+
+</details>
+
+![venn](gallery/venn.png)
+
+## wardley
+
+Source: [`examples/diagrams/wardley.mmd`](../examples/diagrams/wardley.mmd) · rendered in 160.09µs
+
+<details><summary>source</summary>
+
+```mermaid
+wardley-beta
+title Software Platform Strategy
+size [1100, 800]
+
+evolution Genesis@0.25 -> Custom@0.5 -> Product@0.75 -> Commodity@1.0
+
+anchor Customer [0.90, 0.95]
+
+component "Mobile App" [0.80, 0.85] (build)
+component "Web App" [0.75, 0.80] label [-60, 10] (build)
+component "API Gateway" [0.70, 0.65] (buy)
+component "Auth Service" [0.60, 0.55] (outsource)
+component "Database" [0.50, 0.45] (buy) (inertia)
+component "Cloud Platform" [0.30, 0.95] (market)
+
+Customer -> "Mobile App"
+Customer -> "Web App"
+"Mobile App" -> "API Gateway"
+"Web App" -> "API Gateway"
+"API Gateway" +<> "Auth Service"
+"API Gateway" +> "Database"
+"Database" -.-> "Cloud Platform"; hosting
+
+evolve "API Gateway" 0.85
+evolve "Database" 0.75
+
+accelerator "Cloud Native" [0.20, 0.85]
+deaccelerator "Legacy Data" [0.45, 0.35]
+
+annotations [0.10, 0.20]
+annotation 1,[0.78, 0.82] "User touchpoints"
+annotation 2,[0.70, 0.60] "Integration layer"
+annotation 3,[0.50, 0.40] "Data persistence"
+
+note "Build mobile-first experience" [0.85, 0.90]
+note "Migrate to cloud-native database" [0.60, 0.50]
+```
+
+</details>
+
+![wardley](gallery/wardley.png)
+
 ## xychart
 
-Source: [`examples/diagrams/xychart.mmd`](../examples/diagrams/xychart.mmd) · rendered in 96.23µs
+Source: [`examples/diagrams/xychart.mmd`](../examples/diagrams/xychart.mmd) · rendered in 150.38µs
 
 <details><summary>source</summary>
 
@@ -930,7 +1396,7 @@ xychart-beta
 
 ## zenuml
 
-Source: [`examples/diagrams/zenuml.mmd`](../examples/diagrams/zenuml.mmd) · rendered in 147.02µs
+Source: [`examples/diagrams/zenuml.mmd`](../examples/diagrams/zenuml.mmd) · rendered in 241.33µs
 
 <details><summary>source</summary>
 
