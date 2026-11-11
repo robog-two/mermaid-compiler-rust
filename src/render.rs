@@ -26,6 +26,14 @@ impl Rendered {
     }
 }
 
+/// Shared [`diagram::graph::RenderOptions`] of the flowchart / state / class renderers.
+fn graph_options(cfg: &MermaidConfig) -> diagram::graph::RenderOptions {
+    diagram::graph::RenderOptions {
+        subgraph_title_margin: cfg.subgraph_title_margin(),
+        ..Default::default()
+    }
+}
+
 /// Parse, lay out and draw one mermaid definition.
 pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
     let pre = diagram::preprocess(source)?;
@@ -41,23 +49,29 @@ pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
     let pal = cfg.palette();
     let (mut scene, use_max_width) = match kind {
         DiagramType::Flowchart => {
-            let g = diagram::flowchart::parse(&pre.body, pre.title.clone())?;
+            let opts = diagram::flowchart::ParseOptions {
+                inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
+            };
+            let g = diagram::flowchart::parse_with(&pre.body, pre.title.clone(), opts)?;
             (
-                diagram::graph::render(&g, &cfg.flowchart, &pal),
+                diagram::graph::render_with(&g, &cfg.flowchart, &pal, &graph_options(&cfg)),
                 cfg.flowchart.use_max_width,
             )
         }
         DiagramType::State => {
             let g = diagram::state::parse(&pre.body, pre.title.clone())?;
             (
-                diagram::graph::render(&g, &cfg.state, &pal),
+                diagram::graph::render_with(&g, &cfg.state, &pal, &graph_options(&cfg)),
                 cfg.state.use_max_width,
             )
         }
         DiagramType::Class => {
-            let g = diagram::class::parse(&pre.body, pre.title.clone())?;
+            let opts = diagram::class::ParseOptions {
+                hierarchical_namespaces: cfg.section_bool("class", "hierarchicalNamespaces", true),
+            };
+            let g = diagram::class::parse_with(&pre.body, pre.title.clone(), opts)?;
             (
-                diagram::graph::render(&g, &cfg.class, &pal),
+                diagram::graph::render_with(&g, &cfg.class, &pal, &graph_options(&cfg)),
                 cfg.class.use_max_width,
             )
         }

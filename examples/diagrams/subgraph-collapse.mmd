@@ -1,0 +1,17 @@
+flowchart LR
+    subgraph ingest [Ingest]
+        src[Sources] --> parse[Parse] --> validate[Validate]
+    end
+    subgraph store [Storage]
+        direction TB
+        raw[(Raw)] --> clean[(Clean)]
+    end
+    subgraph observability [Observability]
+        metrics[Metrics] --> alerts[Alerts]
+    end
+    user((User)) e1@--> src
+    validate --> raw
+    validate --> observability
+    clean --> store
+    observability@{ view: collapsed }
+    e1@{ animate: true }

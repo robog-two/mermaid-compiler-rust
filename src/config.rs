@@ -490,6 +490,26 @@ impl MermaidConfig {
             .unwrap_or(default)
     }
 
+    /// `flowchart.subGraphTitleMargin` as (top, bottom), each key deep-merged across
+    /// layers (default 0). mermaid reads it from the flowchart section for every
+    /// diagram that draws `rect` clusters or edge labels.
+    pub fn subgraph_title_margin(&self) -> (f64, f64) {
+        let get = |k: &str| {
+            self.raw
+                .iter()
+                .rev()
+                .find_map(|j| {
+                    j.get("flowchart")?
+                        .get("subGraphTitleMargin")?
+                        .get(k)?
+                        .as_f64()
+                })
+                .unwrap_or(0.0)
+                .max(0.0)
+        };
+        (get("top"), get("bottom"))
+    }
+
     /// mermaid's per-diagram `useMaxWidth` (default true).
     pub fn use_max_width(&self, section: &str) -> bool {
         self.section_bool(section, "useMaxWidth", true)

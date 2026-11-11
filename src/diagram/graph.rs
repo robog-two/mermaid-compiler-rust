@@ -589,6 +589,10 @@ fn measure_node(
 pub struct RenderOptions {
     /// mermaid's `minNodeWidth`: non-empty node labels are widened to at least this.
     pub min_label_width: f64,
+    /// `flowchart.subGraphTitleMargin` (top, bottom). As under mermaid's ELK layout it
+    /// moves a `rect` cluster's title down by `top` and every edge label down by
+    /// `(top + bottom) / 2` (`positionEdgeLabel`); the layout itself is unchanged.
+    pub subgraph_title_margin: (f64, f64),
 }
 
 /// Pure renderer for graph diagrams.
@@ -710,6 +714,25 @@ pub fn render_with(
         }
     };
     let resolve = |e: Endpoint, outgoing: bool| layout_end(e, outgoing).0;
+    // Edges between a cluster and itself or something inside it. They are laid out as
+    // a loop on one inner node (constraining nothing) and drawn against the frame.
+    let nested: Vec<Option<NestedEdge>> = g
+        .edges
+        .iter()
+        .map(|e| nested_edge(&g.clusters, &nodes, &empty_of, e))
+        .collect();
+    let layout_ends = |ei: usize, e: &Edge| -> ((usize, Option<usize>), (usize, Option<usize>)) {
+        match nested[ei] {
+            None => (layout_end(e.from, true), layout_end(e.to, false)),
+            Some(ne) => {
+                let v = match ne.inner {
+                    Endpoint::Node(NodeId(i)) => i,
+                    Endpoint::Cluster(c) => resolve(Endpoint::Cluster(c), true),
+                };
+                ((v, None), (v, None))
+            }
+        }
+    };
     let edge_labels: Vec<Option<TextBlock>> = g
         .edges
         .iter()
@@ -740,9 +763,9 @@ pub fn render_with(
             .edges
             .iter()
             .zip(&edge_labels)
-            .map(|(e, lb)| {
-                let (from, from_cluster) = layout_end(e.from, true);
-                let (to, to_cluster) = layout_end(e.to, false);
+            .enumerate()
+            .map(|(ei, (e, lb))| {
+                let ((from, from_cluster), (to, to_cluster)) = layout_ends(ei, e);
                 LayoutEdge {
                     from: pos_of[from],
                     to: pos_of[to],
@@ -833,6 +856,7 @@ pub fn render_with(
             let top = match (empty_of[ci], c.kind) {
                 (Some(_), _) => r.y,
                 (None, ClusterKind::Composite) => r.y + 1.0,
+                (None, ClusterKind::Group) => r.y + opts.subgraph_title_margin.0,
                 _ => r.y,
             };
             let center = Point::new(r.x + r.w / 2.0, top + t.height / 2.0);
@@ -890,10 +914,42 @@ pub fn render_with(
             continue;
         }
         let mut pts = route.points.clone();
-        if pts.len() < 2 {
+        let mut label_at = route.label;
+        if let Some(ne) = nested[ei] {
+            let frame = cluster_rects[ne.cluster.0];
+            let inner_rect = match ne.inner {
+                Endpoint::Node(NodeId(i)) => {
+                    Rect::centered(out.nodes[i], measured[i].w, measured[i].h)
+                }
+                Endpoint::Cluster(c) => cluster_rects[c.0],
+            };
+            let lw = edge_labels[ei].as_ref().map(|b| b.width + 8.0);
+            let title_h =
+                cluster_title_height(g.clusters[ne.cluster.0].kind, &cluster_titles[ne.cluster.0]);
+            // The flow direction inside the cluster: its own, else the nearest ancestor's.
+            let mut dir = g.direction;
+            let mut cur = Some(ne.cluster);
+            for _ in 0..=g.clusters.len() {
+                let Some(c) = cur else { break };
+                if let Some(d) = g.clusters[c.0].direction {
+                    dir = d;
+                    break;
+                }
+                cur = g.clusters[c.0].parent;
+            }
+            let (p, l) = nested_route(ne, frame, inner_rect, dir, title_h, lw);
+            pts = p;
+            if let Endpoint::Node(NodeId(i)) = ne.inner {
+                // Clip at the node's own outline (diamonds, circles, …).
+                let k = if ne.inner_is_target { pts.len() - 1 } else { 0 };
+                let toward = pts[if k == 0 { 1 } else { k - 1 }];
+                pts[k] = boundaries[i].clip(toward);
+            }
+            label_at = edge_labels[ei].as_ref().map(|_| l);
+        } else if pts.len() < 2 {
             continue;
         }
-        let is_loop = resolve(e.from, true) == resolve(e.to, false);
+        let is_loop = nested[ei].is_some() || resolve(e.from, true) == resolve(e.to, false);
         if !is_loop {
             // An edge to / from a whole cluster is cut where it crosses the cluster's
             // border (mermaid's `cutPathAtIntersect` for `fromCluster` / `toCluster`).
@@ -990,7 +1046,9 @@ pub fn render_with(
             .color
             .clone()
             .unwrap_or_else(|| pal.text_color.clone());
-        if let (Some(block), Some(at)) = (&edge_labels[ei], route.label) {
+        let (mt, mb) = opts.subgraph_title_margin;
+        let label_at = label_at.map(|p| Point::new(p.x, p.y + (mt + mb) / 2.0));
+        if let (Some(block), Some(at)) = (&edge_labels[ei], label_at) {
             let r = Rect::centered(at, block.width + 4.0, block.height);
             bounds.add_rect(r);
             label_els.push(Element::group(
@@ -1392,6 +1450,141 @@ fn endpoint_id(g: &GraphDiagram, e: Endpoint) -> String {
         Endpoint::Node(NodeId(i)) => g.nodes[i].id.clone(),
         Endpoint::Cluster(ClusterId(c)) => g.clusters[c].id.clone(),
     }
+}
+
+/// An edge between a (non-empty) cluster and itself or something inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NestedEdge {
+    cluster: ClusterId,
+    /// The other end: a node or cluster inside `cluster`, or `cluster` itself (a loop).
+    inner: Endpoint,
+    /// The edge runs from the cluster into `inner` (else out of `inner` to the cluster).
+    inner_is_target: bool,
+}
+
+fn nested_edge(
+    clusters: &[Cluster],
+    nodes: &[Node],
+    empty_of: &[Option<usize>],
+    e: &Edge,
+) -> Option<NestedEdge> {
+    let inside = |x: Endpoint, c: ClusterId| match x {
+        Endpoint::Node(NodeId(i)) => nodes[i]
+            .cluster
+            .is_some_and(|nc| is_within(clusters, nc, c)),
+        Endpoint::Cluster(d) => is_within(clusters, d, c),
+    };
+    let solid = |c: ClusterId| empty_of.get(c.0).is_some_and(Option::is_none);
+    match (e.from, e.to) {
+        (Endpoint::Cluster(c), to) if solid(c) && inside(to, c) => Some(NestedEdge {
+            cluster: c,
+            inner: to,
+            inner_is_target: true,
+        }),
+        (from, Endpoint::Cluster(c)) if solid(c) && inside(from, c) => Some(NestedEdge {
+            cluster: c,
+            inner: from,
+            inner_is_target: false,
+        }),
+        _ => None,
+    }
+}
+
+/// The path of a [`NestedEdge`] and its label position: a loop on the frame's top-right
+/// corner for a cluster's edge to itself, otherwise a straight run between the inner
+/// end and the frame side it faces in the flow (the side the flow enters through for
+/// an edge into the cluster, the side it leaves through for one out of it).
+fn nested_route(
+    ne: NestedEdge,
+    frame: Rect,
+    inner: Rect,
+    dir: Direction,
+    title_h: f64,
+    label_w: Option<f64>,
+) -> (Vec<Point>, Point) {
+    if ne.inner == Endpoint::Cluster(ne.cluster) {
+        let ext = 22.0;
+        let (cx, cy) = (frame.x + frame.w / 2.0, frame.y + frame.h / 2.0);
+        let (top, right) = (frame.y, frame.right());
+        let pts = vec![
+            Point::new(cx + frame.w / 4.0, top),
+            Point::new(cx + frame.w / 4.0, top - ext),
+            Point::new(right + ext, top - ext),
+            Point::new(right + ext, cy),
+            Point::new(right, cy),
+        ];
+        let label = Point::new(right + ext + label_w.unwrap_or(0.0) / 2.0 + 4.0, top - ext);
+        return (pts, label);
+    }
+    let (cx, cy) = (inner.x + inner.w / 2.0, inner.y + inner.h / 2.0);
+    // The edge runs in the lane the frame's padding keeps free along one side (clear
+    // of the nodes and of the title) and turns into / out of the inner end sideways,
+    // so it does not cut through the nodes before / after it in the flow.
+    let lane = CLUSTER_PADDING / 2.0;
+    if ne.inner_is_target {
+        // In from the entry side, down the lane on the cross axis' near side.
+        let pts = match dir {
+            Direction::TopBottom | Direction::BottomTop => {
+                let x = frame.x + lane;
+                let entry = if dir == Direction::TopBottom {
+                    frame.y
+                } else {
+                    frame.bottom()
+                };
+                vec![
+                    Point::new(x, entry),
+                    Point::new(x, cy),
+                    Point::new(inner.x, cy),
+                ]
+            }
+            Direction::LeftRight | Direction::RightLeft => {
+                let y = frame.y + title_h + lane;
+                let entry = if dir == Direction::LeftRight {
+                    frame.x
+                } else {
+                    frame.right()
+                };
+                vec![
+                    Point::new(entry, y),
+                    Point::new(cx, y),
+                    Point::new(cx, inner.y),
+                ]
+            }
+        };
+        let label = pts[0].lerp(pts[1], 0.5);
+        return (pts, label);
+    }
+    // Out of the cluster: sideways into the far lane, then along it to the exit side.
+    let pts = match dir {
+        Direction::TopBottom | Direction::BottomTop => {
+            let x = frame.right() - lane;
+            let exit = if dir == Direction::TopBottom {
+                frame.bottom()
+            } else {
+                frame.y
+            };
+            vec![
+                Point::new(inner.right(), cy),
+                Point::new(x, cy),
+                Point::new(x, exit),
+            ]
+        }
+        Direction::LeftRight | Direction::RightLeft => {
+            let y = frame.bottom() - lane;
+            let exit = if dir == Direction::LeftRight {
+                frame.right()
+            } else {
+                frame.x
+            };
+            vec![
+                Point::new(cx, inner.bottom()),
+                Point::new(cx, y),
+                Point::new(exit, y),
+            ]
+        }
+    };
+    let label = pts[1].lerp(pts[2], 0.5);
+    (pts, label)
 }
 
 fn is_within(clusters: &[Cluster], mut c: ClusterId, ancestor: ClusterId) -> bool {
@@ -1996,5 +2189,193 @@ mod tests {
         let title = TextBlock::label("A title much wider than the node inside it", 16.0);
         assert!(rect.w >= title.width + CLUSTER_TITLE_PAD - 1e-6);
         assert!((t.y - 16.0 * 0.35 - (rect.y + title.height / 2.0)).abs() < 1e-6);
+    }
+
+    fn frame_of(scene: &Scene, id: &str) -> Rect {
+        cluster_group(scene, id)
+            .iter()
+            .find_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+            .expect("frame rect")
+    }
+
+    /// Points (path vertices and curve end points) of the edge drawn with group id `id`.
+    fn edge_points(scene: &Scene, id: &str) -> Vec<Point> {
+        let Element::Group { children, .. } = &scene.elements[1] else {
+            panic!("edgePaths second");
+        };
+        let path = children
+            .iter()
+            .find_map(|c| match c {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i == id => children.first(),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no edge {id}: {children:?}"));
+        let Element::Shape {
+            geom: Geometry::Path(cmds),
+            ..
+        } = path
+        else {
+            panic!("path: {path:?}");
+        };
+        cmds.iter()
+            .filter_map(|c| match c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(*p),
+                PathCmd::Close => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn edges_between_a_cluster_and_its_own_contents() {
+        let src =
+            "flowchart TB\nsubgraph A\na1 --> a2\nend\nstart --> A\nA --> A\nA --> a1\na2 --> A";
+        let (g, scene) = render_flowchart(src);
+        let n = |id: &str| NodeId(g.nodes.iter().position(|n| n.id == id).unwrap());
+        let ne: Vec<Option<NestedEdge>> = g
+            .edges
+            .iter()
+            .map(|e| nested_edge(&g.clusters, &g.nodes, &[None], e))
+            .collect();
+        let a = ClusterId(0);
+        assert_eq!(ne[1], None, "start --> A is an ordinary cluster edge");
+        assert_eq!(
+            ne[2],
+            Some(NestedEdge {
+                cluster: a,
+                inner: Endpoint::Cluster(a),
+                inner_is_target: true
+            })
+        );
+        assert_eq!(
+            ne[3].map(|x| (x.inner, x.inner_is_target)),
+            Some((Endpoint::Node(n("a1")), true))
+        );
+        assert_eq!(
+            ne[4].map(|x| (x.inner, x.inner_is_target)),
+            Some((Endpoint::Node(n("a2")), false))
+        );
+
+        let frame = frame_of(&scene, "A");
+        let eps = 1e-6;
+        // A --> A: a loop outside the frame, from its top back to its right side.
+        let lp = edge_points(&scene, "L-A-A-2");
+        assert!((lp[0].y - frame.y).abs() < eps, "{lp:?} {frame:?}");
+        assert!(
+            lp.iter()
+                .any(|p| p.x > frame.right() + 10.0 && p.y < frame.y)
+        );
+        assert!((lp.last().unwrap().x - frame.right()).abs() < 10.0);
+        // A --> a1: from the frame's top edge into a1 (not between a1 and a2).
+        let into = edge_points(&scene, "L-A-a1-3");
+        assert!((into[0].y - frame.y).abs() < eps, "{into:?}");
+        let a1 = scene_node_center(&g, &scene, "a1");
+        let end = *into.last().unwrap();
+        assert!(
+            (end.y - a1.y).abs() < 1.0 && end.x < a1.x,
+            "{end:?} vs {a1:?}"
+        );
+        // a2 --> A: from a2 out to the frame's bottom edge (not a self-loop on a2).
+        let out = edge_points(&scene, "L-a2-A-4");
+        let a2 = scene_node_center(&g, &scene, "a2");
+        assert!((out[0].y - a2.y).abs() < 1.0 && out[0].x > a2.x, "{out:?}");
+        assert!(
+            out.last().unwrap().y > frame.bottom() - 8.0,
+            "{out:?} {frame:?}"
+        );
+    }
+
+    /// Centre of the node `id`'s label-container shape.
+    fn scene_node_center(g: &GraphDiagram, scene: &Scene, id: &str) -> Point {
+        let i = g.nodes.iter().position(|n| n.id == id).unwrap();
+        let Element::Group { children, .. } = &scene.elements[3] else {
+            panic!("nodes fourth");
+        };
+        let prefix = format!("{}-{id}-{i}", node_prefix(g.kind));
+        let shape = children
+            .iter()
+            .find_map(|c| match c {
+                Element::Group {
+                    id: Some(x),
+                    children,
+                    ..
+                } if *x == prefix => children.iter().find_map(|e| match e {
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        ..
+                    } => Some(*rect),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no node {prefix}"));
+        Point::new(shape.x + shape.w / 2.0, shape.y + shape.h / 2.0)
+    }
+
+    #[test]
+    fn edge_to_an_ancestor_cluster_leaves_the_node() {
+        // fc_edge_to_ancestor: x --> outer must not become a loop on x.
+        let src = "flowchart LR\nsubgraph outer\nsubgraph inner\nx --> z\nend\nend\nx --> outer\nouter --> y";
+        let (g, scene) = render_flowchart(src);
+        let frame = frame_of(&scene, "outer");
+        let pts = edge_points(&scene, "L-x-outer-1");
+        let x = scene_node_center(&g, &scene, "x");
+        assert!((pts[0].x - x.x).abs() < 1.0 && pts[0].y > x.y, "{pts:?}");
+        let end = *pts.last().unwrap();
+        assert!((end.x - frame.right()).abs() < 8.0, "{end:?} {frame:?}");
+    }
+
+    #[test]
+    fn subgraph_title_margin_moves_titles_and_edge_labels() {
+        let g =
+            crate::diagram::flowchart::parse("flowchart TB\nsubgraph S\na -->|lbl| b\nend", None)
+                .unwrap();
+        let cfg = crate::config::MermaidConfig::default().flowchart;
+        let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let texts = |scene: &Scene, group: usize| -> Vec<f64> {
+            let Element::Group { children, .. } = &scene.elements[group] else {
+                panic!()
+            };
+            let mut ys = Vec::new();
+            fn walk(e: &Element, ys: &mut Vec<f64>) {
+                match e {
+                    Element::Text { text, .. } => ys.push(text.y),
+                    Element::Group { children, .. } => children.iter().for_each(|c| walk(c, ys)),
+                    _ => {}
+                }
+            }
+            children.iter().for_each(|c| walk(c, &mut ys));
+            ys
+        };
+        let plain = render(&g, &cfg, &pal);
+        let opts = RenderOptions {
+            subgraph_title_margin: (20.0, 10.0),
+            ..Default::default()
+        };
+        let moved = render_with(&g, &cfg, &pal, &opts);
+        let (t0, t1) = (texts(&plain, 0), texts(&moved, 0));
+        assert!(
+            (t1[0] - t0[0] - 20.0).abs() < 1e-6,
+            "title {t0:?} -> {t1:?}"
+        );
+        let (l0, l1) = (texts(&plain, 2), texts(&moved, 2));
+        assert!(
+            (l1[0] - l0[0] - 15.0).abs() < 1e-6,
+            "label {l0:?} -> {l1:?}"
+        );
+        assert_eq!(
+            frame_of(&plain, "S"),
+            frame_of(&moved, "S"),
+            "layout unchanged"
+        );
     }
 }

@@ -170,6 +170,8 @@ pub struct Flow {
     pub classes: Vec<String>,
     pub style: StyleOverrides,
     pub metadata: Vec<(String, String)>,
+    /// The flow's own `direction` statement (a repeated id takes the last one given).
+    pub direction: Option<Direction>,
 }
 
 impl Flow {
@@ -366,6 +368,8 @@ struct Db {
     flow_index: HashMap<String, usize>,
     globals: HashSet<String>,
     sub_count: usize,
+    /// One slot per open `flow` / `global` block: its last `direction` statement.
+    dir_stack: Vec<Option<Direction>>,
     class_defs: HashMap<String, StyleOverrides>,
     link_styles: Vec<(usize, Option<Vec<usize>>, StyleOverrides)>,
 }
@@ -410,11 +414,21 @@ impl Db {
                 }
                 "flow" => ids.push(self.flow(stmts, pos, *line, stmt, rest)?),
                 "global" if rest.is_empty() => {
-                    let list = self.document(stmts, pos, Block::Global)?;
-                    self.add_global(&list);
+                    // A `direction` inside `global … end` belongs to no flow.
+                    self.dir_stack.push(None);
+                    let list = self.document(stmts, pos, Block::Global);
+                    self.dir_stack.pop();
+                    self.add_global(&list?);
                 }
                 "connector" => ids.push(self.connector(*line, stmt, rest)?),
-                "direction" => {}
+                "direction" => {
+                    // Only a flow's own `direction` matters (the last one wins).
+                    if let (Some(slot), Some(d)) =
+                        (self.dir_stack.last_mut(), Direction::parse(rest))
+                    {
+                        *slot = Some(d);
+                    }
+                }
                 "classDef" => {
                     let (names, style) = first_word(rest);
                     let st = StyleOverrides::parse(style);
@@ -515,8 +529,10 @@ impl Db {
                 &format!("Unexpected '{}' after flow header", sc.rest()),
             ));
         }
-        let list = self.document(stmts, pos, Block::Flow)?;
-        let id = self.add_subgraph(id, &list, title);
+        self.dir_stack.push(None);
+        let list = self.document(stmts, pos, Block::Flow);
+        let dir = self.dir_stack.pop().flatten();
+        let id = self.add_subgraph(id, &list?, title, dir);
         if let Some(m) = meta {
             self.add_vertex(&id, None, None, Some(&m), line, stmt)?;
         }
@@ -709,6 +725,7 @@ impl Db {
         id: Option<String>,
         list: &[String],
         title: Option<String>,
+        dir: Option<Direction>,
     ) -> String {
         let id = id
             .filter(|s| !s.is_empty())
@@ -735,6 +752,9 @@ impl Db {
                 if !title.is_empty() {
                     existing.title = title;
                 }
+                if dir.is_some() {
+                    existing.direction = dir;
+                }
             }
             None => {
                 self.flow_index.insert(id.clone(), self.flows.len());
@@ -745,6 +765,7 @@ impl Db {
                     classes: Vec::new(),
                     style: StyleOverrides::default(),
                     metadata: Vec::new(),
+                    direction: dir,
                 });
             }
         }
@@ -1382,6 +1403,9 @@ pub struct ConvertOptions {
     pub font_size: f64,
     /// Length of the theme's categorical palette (0 when the theme has none).
     pub palette_len: usize,
+    /// `flowchart.inheritDir` (agentflow's `addSubGraph` reads the flowchart section):
+    /// a flow without its own `direction` takes the diagram's.
+    pub inherit_dir: bool,
 }
 
 /// The pure equivalent of `AgentFlowDB.getData()`: collapse handling, containment
@@ -1527,6 +1551,7 @@ pub fn to_graph(af: &Agentflow, opts: &ConvertOptions) -> GraphDiagram {
         .map(|f| Cluster {
             style: f.style.clone(),
             color_slot: Some(container_slot(&f.id)),
+            direction: f.direction.or(opts.inherit_dir.then_some(af.direction)),
             ..Cluster::new(f.id.clone(), f.title.clone(), cluster_parent(&f.id))
         })
         .collect();
@@ -1614,6 +1639,12 @@ pub fn to_graph(af: &Agentflow, opts: &ConvertOptions) -> GraphDiagram {
         g.minlen = e.length.max(1);
         g.label = e.label.clone();
         g.style = e.style.clone();
+        // `animate: true` / `animation: fast|slow` → `.edge-animation-*` (9,5 dashes).
+        if meta_get(&e.metadata, "animate") == Some("true")
+            || meta_get(&e.metadata, "animation").is_some_and(|v| !v.is_empty())
+        {
+            g.style.dash = Some(super::flowchart::ANIMATED_DASH.to_vec());
+        }
         edges.push(g);
     }
 
@@ -1666,10 +1697,12 @@ pub fn render(
         wrapping_width: cfg.section_f64("agentflow", "wrappingWidth", 120.0),
         font_size: pal.font_size,
         palette_len: pal.color_slots.as_ref().map_or(0, |p| p.border.len()),
+        inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
     };
     let g = to_graph(&af, &opts);
     let ro = RenderOptions {
         min_label_width: cfg.section_f64("agentflow", "minNodeWidth", 120.0),
+        subgraph_title_margin: cfg.subgraph_title_margin(),
     };
     Ok(graph::render_with(&g, &graph_config(cfg), pal, &ro))
 }
@@ -1691,6 +1724,7 @@ mod tests {
                 wrapping_width: 0.0,
                 font_size: 16.0,
                 palette_len: 12,
+                inherit_dir: false,
             },
         )
     }
@@ -1963,6 +1997,68 @@ end";
     }
 
     #[test]
+    fn flow_direction_statements() {
+        let src = "agentflow-beta TB
+flow f [Steps]
+  direction LR
+  a --> b
+  flow g
+    direction BT
+    c
+  end
+  global
+    direction RL
+    z
+  end
+end
+flow h
+  d
+end
+flow f
+  e
+end";
+        let af = p(src);
+        assert_eq!(flow(&af, "f").direction, Some(Direction::LeftRight));
+        assert_eq!(flow(&af, "g").direction, Some(Direction::BottomTop));
+        assert_eq!(flow(&af, "h").direction, None);
+        let g = graph(src);
+        let dir = |id: &str| g.clusters.iter().find(|c| c.id == id).unwrap().direction;
+        assert_eq!(dir("f"), Some(Direction::LeftRight));
+        assert_eq!(dir("h"), None);
+        let inherited = to_graph(
+            &af,
+            &ConvertOptions {
+                wrapping_width: 0.0,
+                font_size: 16.0,
+                palette_len: 12,
+                inherit_dir: true,
+            },
+        );
+        let dir = |id: &str| {
+            inherited
+                .clusters
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .direction
+        };
+        assert_eq!(dir("h"), Some(Direction::TopBottom));
+        assert_eq!(dir("g"), Some(Direction::BottomTop));
+        // A repeated id keeps the last direction given.
+        let af = p("agentflow-beta\nflow f\ndirection LR\na\nend\nflow f\ndirection RL\nb\nend");
+        assert_eq!(flow(&af, "f").direction, Some(Direction::RightLeft));
+    }
+
+    #[test]
+    fn animated_edges_are_dashed() {
+        let g = graph(
+            "agentflow-beta\na e1@--> b\nb e2@--> c\nc e3@--> d\ne1@{ animate: true }\ne2@{ animation: slow }",
+        );
+        let dash: Vec<Option<Vec<f64>>> = g.edges.iter().map(|e| e.style.dash.clone()).collect();
+        assert_eq!(dash, [Some(vec![9.0, 5.0]), Some(vec![9.0, 5.0]), None]);
+    }
+
+    #[test]
     fn collapsed_flow_folds_to_a_node_and_redirects_edges() {
         let g = graph(
             "agentflow-beta TB
@@ -2161,6 +2257,7 @@ linkStyle 0 stroke:#00f");
                 wrapping_width: 120.0,
                 font_size: pal.font_size,
                 palette_len: 12,
+                inherit_dir: false,
             },
         );
         // Every node sits inside its cluster and every cluster inside its parent.

@@ -677,8 +677,9 @@ fn rank_nodes(n: usize, edges: &[Option<Oriented>]) -> Vec<usize> {
 /// constrained to start below its last (end above its first) member, the way
 /// dagre's nesting graph ties cluster borders to their contents: every member
 /// hangs between a virtual top and bottom vertex of the cluster and the edge
-/// runs from the bottom / to the top vertex. Falls back to the plain ranking
-/// when the constraints are contradictory (an edge from a cluster into itself).
+/// runs from the bottom / to the top vertex. An edge whose constraint would be
+/// contradictory (e.g. from a cluster into its own member) is ranked by its plain
+/// member ends instead; the other edges keep theirs.
 ///
 /// When the constraints hold, an edge leaving a cluster is re-attached to the member
 /// on the cluster's last rank (one entering it to a member on its first rank), so the
@@ -733,10 +734,34 @@ fn rank_with_clusters(
             }
         }
     }
-    for (o, (src, dst)) in oriented.iter().zip(&ends) {
-        let Some(o) = o else { continue };
-        let from = src.and_then(bottom).unwrap_or(o.from);
-        let to = dst.and_then(top).unwrap_or(o.to);
+    // The constraint graph must stay acyclic. Membership constraints and plain node
+    // edges are acyclic on their own; each cluster-bound edge is then added only if it
+    // keeps the graph acyclic (else it falls back to its plain member ends, or, if
+    // even that closes a cycle, does not constrain the ranking), so one contradictory
+    // edge does not cost every other edge its cluster constraint.
+    let mut outs: Vec<Vec<usize>> = vec![Vec::new(); total];
+    for o in edges.iter().flatten() {
+        outs[o.from].push(o.to);
+    }
+    let reaches = |outs: &[Vec<usize>], from: usize, to: usize| -> bool {
+        let mut seen = vec![false; outs.len()];
+        let mut stack = vec![from];
+        while let Some(v) = stack.pop() {
+            if v == to {
+                return true;
+            }
+            if std::mem::replace(&mut seen[v], true) {
+                continue;
+            }
+            stack.extend(outs[v].iter().copied());
+        }
+        false
+    };
+    let mut push = |edges: &mut Vec<Option<Oriented>>, from: usize, to: usize, o: &Oriented| {
+        if from != to && reaches(&outs, to, from) {
+            return false;
+        }
+        outs[from].push(to);
         edges.push(Some(Oriented {
             from,
             to,
@@ -744,27 +769,25 @@ fn rank_with_clusters(
             reversed: false,
             weight: o.weight,
         }));
-    }
-    // The constraint graph must stay acyclic (Kahn).
-    let mut indeg = vec![0usize; total];
-    let mut outs: Vec<Vec<usize>> = vec![Vec::new(); total];
-    for o in edges.iter().flatten() {
-        indeg[o.to] += 1;
-        outs[o.from].push(o.to);
-    }
-    let mut queue: Vec<usize> = (0..total).filter(|&v| indeg[v] == 0).collect();
-    let mut seen = 0;
-    while let Some(v) = queue.pop() {
-        seen += 1;
-        for &w in &outs[v] {
-            indeg[w] -= 1;
-            if indeg[w] == 0 {
-                queue.push(w);
-            }
+        true
+    };
+    for (o, (src, dst)) in oriented.iter().zip(&ends) {
+        if let Some(o) = o.as_ref().filter(|_| src.is_none() && dst.is_none()) {
+            push(&mut edges, o.from, o.to, o);
         }
     }
-    if seen < total {
-        return rank_nodes(n, oriented);
+    for (o, end) in oriented.iter().zip(ends.iter_mut()) {
+        let Some(o) = o else { continue };
+        let (src, dst) = *end;
+        if src.is_none() && dst.is_none() {
+            continue;
+        }
+        let from = src.and_then(bottom).unwrap_or(o.from);
+        let to = dst.and_then(top).unwrap_or(o.to);
+        if !push(&mut edges, from, to, o) {
+            *end = (None, None);
+            push(&mut edges, o.from, o.to, o);
+        }
     }
     let all = rank_nodes(total, &edges);
     let min = all[..n].iter().copied().min().unwrap_or(0);
@@ -1255,6 +1278,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn one_contradictory_cluster_edge_keeps_the_other_constraints() {
+        // Cluster 0 = {0 → 1}. `C → 3` is given with the first member as its
+        // representative, so only the cluster constraint puts 3 below 1. The edge
+        // `C → 0` (into its own member) is contradictory; it must not cost `C → 3`
+        // its constraint.
+        let cl = |from: usize, to: usize, fc: Option<usize>, tc: Option<usize>| LayoutEdge {
+            from_cluster: fc,
+            to_cluster: tc,
+            ..LayoutEdge::new(from, to, 1, None)
+        };
+        let nodes = vec![node(Some(0)), node(Some(0)), node(None), node(None)];
+        let edges = vec![
+            edge(0, 1),
+            cl(2, 1, None, Some(0)),
+            cl(0, 3, Some(0), None),
+            cl(1, 0, Some(0), None),
+        ];
+        let inp = input(
+            nodes,
+            edges,
+            vec![LayoutCluster::new(None, 24.0)],
+            Direction::TopBottom,
+        );
+        let out = layout(&inp);
+        let y = |i: usize| out.nodes[i].y;
+        assert!(y(2) < y(0) && y(0) < y(1), "{:?}", out.nodes);
+        assert!(
+            y(3) > y(1),
+            "C → 3 still ranks 3 after the whole cluster: {:?}",
+            out.nodes
+        );
     }
 
     #[test]
