@@ -369,6 +369,10 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     let mut loop_reach = vec![0.0f64; n];
     let mut loop_inner = vec![0.0f64; n];
     if matches!(input.routing, EdgeRouting::Orthogonal(_)) {
+        let mut loops = vec![0usize; n];
+        for e in input.edges.iter().filter(|e| e.from == e.to) {
+            loops[e.from] += 1;
+        }
         for (ei, e) in input.edges.iter().enumerate() {
             if e.from != e.to {
                 continue;
@@ -383,6 +387,11 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
             let side = verts[v].h;
             let cap = (side / 2.0 - 2.0).max(side / 8.0);
             loop_half[ei] = (side / 8.0).max(loop_inner[v]).min(cap);
+            // The next loop's legs stand outside this one's, so that their ends
+            // (and arrowheads) do not coincide.
+            // Many loops share the side evenly.
+            let room = (cap - side / 8.0) / (loops[v].max(2) - 1) as f64;
+            loop_inner[v] = loop_half[ei] + room.min(SELF_LOOP_EXT / 2.0);
             if let Some((lw, lh)) = e.label {
                 let (across, along) = swap(lw, lh);
                 loop_reach[v] = loop_out[ei] + across + 4.0;
@@ -1674,6 +1683,28 @@ mod tests {
                         );
                     }
                     taken.push(lr);
+                }
+            }
+        }
+    }
+
+    /// Unlabelled self-loops on one node nest: each one's legs stand outside the
+    /// previous one's, so their ends and arrowheads do not coincide.
+    #[test]
+    fn orthogonal_self_loops_nest_without_shared_ends() {
+        for dir in [Direction::TopBottom, Direction::LeftRight] {
+            let mut inp = input(
+                vec![node(None)],
+                vec![edge(0, 0), edge(0, 0), edge(0, 0)],
+                vec![],
+                dir,
+            );
+            inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+            let out = layout(&inp);
+            for pair in out.edges.windows(2) {
+                let (a, b) = (&pair[0].points, &pair[1].points);
+                for (p, q) in [(a[0], b[0]), (a[a.len() - 1], b[b.len() - 1])] {
+                    assert!(p.dist(q) > 2.0, "{dir:?}: shared end {p:?} {q:?}");
                 }
             }
         }
