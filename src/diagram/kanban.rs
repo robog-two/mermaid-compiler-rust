@@ -325,15 +325,23 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     bounds.add_rect(shift(placed.rect));
     let mut els = Vec::new();
     let card_fill = pal.background.clone();
+    let dark_mode = cfg
+        .theme_variables
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "darkMode")
+        .is_some_and(|(_, v)| v.trim() == "true");
     let card_text = pal.text_color.clone();
     for (ci, (col, cp)) in k.columns.iter().zip(&placed.children).enumerate() {
         let cr = shift(cp.rect);
-        let fill = pal.scale_color(ci);
-        let border = shade(fill, pal.dark, 15.0);
+        // Column `ci` is `.section-(ci+1)`: fill and stroke `cScale(ci+2)` lightened by
+        // 10 (darkened under `darkMode`), title `cScaleLabel(ci+2)`; cards are `.node`
+        // (`background` fill, `nodeBorder` stroke).
+        let fill = shade(pal.scale_color(ci + 2), !dark_mode, 10.0);
         let mut g = vec![
             Element::classed_shape(
                 Geometry::Rect { rect: cr, rx: 5.0 },
-                Paint::both(fill, &border, 1.0),
+                Paint::both(&fill, &fill, 1.0),
                 "kanban-section",
             ),
             Element::classed_text(
@@ -342,7 +350,7 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                     &col_titles[ci],
                     FONT,
                     lh,
-                    pal.scale_text_color(ci),
+                    pal.scale_text_color(ci + 2),
                 )
                 .bold(),
                 "kanban-section-title",
@@ -352,7 +360,7 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             let r = shift(ip.rect);
             g.push(Element::classed_shape(
                 Geometry::Rect { rect: r, rx: 5.0 },
-                Paint::both(&card_fill, &border, 1.0),
+                Paint::both(&card_fill, &pal.node_border, 1.0),
                 "kanban-item",
             ));
             if let Some(c) = item.priority.and_then(Priority::color) {

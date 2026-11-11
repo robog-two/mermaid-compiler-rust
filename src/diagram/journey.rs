@@ -6,7 +6,7 @@
 //! expression encode the 1–5 score, and an arrowed activity line underneath.
 //! Section/task boxes are placed with Taffy ([`crate::layout::boxes`]).
 
-use super::timeline::{shade, wrap_text};
+use super::timeline::wrap_text;
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
@@ -199,6 +199,9 @@ fn face(c: Point, score: f64, line: &Color) -> Vec<Element> {
 }
 
 /// Lay out and draw a parsed journey.
+/// Length of mermaid's default `journey.sectionFills`.
+const SECTION_FILLS: usize = 7;
+
 pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let task_w = cfg.section_f64("journey", "width", 150.0);
     let task_h = cfg.section_f64("journey", "height", 50.0);
@@ -300,9 +303,12 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     };
 
     for (si, (sec, sp)) in j.sections.iter().zip(&placed.children).enumerate() {
-        let fill = pal.scale_color(si);
-        let tfill = pal.scale_text_color(si);
-        let border = shade(fill, pal.dark, 20.0);
+        // `.section-type-N` / `.task-type-N` paint `fillTypeN`, where N wraps at the
+        // length of `journey.sectionFills` (7 by default); the outline is the `#666`
+        // stroke attribute and the label takes `.label { color: textColor }`.
+        let fill = pal.fill_type_color(si % SECTION_FILLS);
+        let tfill = &pal.text_color;
+        let border = Color::new("#666");
         let hr = shift(sp.children[0].rect);
         fore.push(Element::classed_shape(
             Geometry::Rect { rect: hr, rx: 3.0 },

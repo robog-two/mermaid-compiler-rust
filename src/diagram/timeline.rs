@@ -299,8 +299,7 @@ pub fn draw(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let has_header = header_h > 0.0;
         if let (Some(lines), true) = (&sec.header, has_header) {
             let r = shift(sp.children[0].rect);
-            let fill = pal.scale_color(si);
-            nodes.push(node_box(r, fill, pal));
+            nodes.push(node_box(r, si, pal));
             nodes.push(Element::classed_text(
                 Text::centered(
                     r.center(),
@@ -323,12 +322,11 @@ pub fn draw(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 0
             };
             period_index += 1;
-            let fill = pal.scale_color(ci);
             let tfill = pal.scale_text_color(ci);
             let pr = shift(pp.children[0].rect);
             let gap_r = shift(pp.children[1].rect);
             axis_y = Some(gap_r.y + gap_r.h / 2.0);
-            nodes.push(node_box(pr, fill, pal));
+            nodes.push(node_box(pr, ci, pal));
             nodes.push(Element::classed_text(
                 Text::centered(pr.center(), label, FONT, lh, tfill).bold(),
                 "periodText",
@@ -349,7 +347,7 @@ pub fn draw(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             ));
             for (lines, ep) in events.iter().zip(pp.children.iter().skip(2)) {
                 let er = shift(ep.rect);
-                nodes.push(node_box(er, fill, pal));
+                nodes.push(node_box(er, ci, pal));
                 nodes.push(Element::classed_text(
                     Text::centered(er.center(), lines, FONT, lh, tfill),
                     "eventText",
@@ -411,8 +409,11 @@ pub fn draw(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
 }
 
 /// mermaid's timeline node: rounded box with a darker rule along its bottom edge.
-fn node_box(r: Rect, fill: &Color, pal: &Palette) -> Element {
-    let edge = shade(fill, pal.dark, 15.0);
+/// A node of section colour `ci`: `cScale` fill with a `cScaleInv` underline
+/// (`.section-N rect` / `.section-N line`).
+fn node_box(r: Rect, ci: usize, pal: &Palette) -> Element {
+    let fill = pal.scale_color(ci);
+    let edge = pal.scale_inv_color(ci);
     Element::group(
         "node",
         vec![
@@ -420,7 +421,7 @@ fn node_box(r: Rect, fill: &Color, pal: &Palette) -> Element {
             Element::line(
                 Point::new(r.x + 3.0, r.bottom()),
                 Point::new(r.right() - 3.0, r.bottom()),
-                Paint::stroke(&edge, 3.0),
+                Paint::stroke(edge, 3.0),
             ),
         ],
     )

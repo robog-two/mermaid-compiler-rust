@@ -594,7 +594,13 @@ fn to_xy(o: Orientation, along: f64, across: f64) -> Point {
 
 /// Saturated branch colour derived from the theme's section scale. Lanes step
 /// five scale entries at a time (150° of hue) so neighbouring lanes contrast.
+///
+/// The classic themes define `git0..7`, which upstream's `normalTheme` styles use
+/// (`.commit{i}` / `.arrow{i}` / `.label{i}` = `git{i % 8}`).
 fn git_color(pal: &Palette, i: usize) -> Color {
+    if !pal.git.is_empty() {
+        return pal.git[i % pal.git.len()].clone();
+    }
     let base = pal.scale_color(i * 5 % 12 + i / 12);
     match color::parse(base.css()) {
         Some(rgb) => {
@@ -603,6 +609,14 @@ fn git_color(pal: &Palette, i: usize) -> Color {
             Color::new(Rgba::from_hsl(h, s.max(70.0), l, 1.0).to_hex())
         }
         None => base.clone(),
+    }
+}
+
+/// `gitBranchLabel{i % 8}`, or a readable colour on `fill` without the git set.
+fn branch_label_color(pal: &Palette, i: usize, fill: &Color) -> Color {
+    match pal.git_branch_label.get(i % 8) {
+        Some(c) => c.clone(),
+        None => readable_on(fill),
     }
 }
 
@@ -705,7 +719,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                     &tb.lines,
                     BRANCH_FONT,
                     tb.line_height,
-                    &readable_on(&fill),
+                    &branch_label_color(pal, lay.lane_index[b], &fill),
                 ),
                 format!("branch-label{}", lay.lane_index[b] % 8),
             ));
@@ -770,9 +784,13 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
         let symbol = c.custom_type.unwrap_or(c.kind);
         match symbol {
             CommitType::Highlight => {
-                let inv = color::parse(col.css())
-                    .map(|r| Color::new(r.invert().to_hex()))
-                    .unwrap_or_else(|| col.clone());
+                // `.commit-highlight{i}`: `gitInv{i % 8}`.
+                let inv = match pal.git_inv.get(lay.lane_index[c.branch] % 8) {
+                    Some(c) => c.clone(),
+                    None => color::parse(col.css())
+                        .map(|r| Color::new(r.invert().to_hex()))
+                        .unwrap_or_else(|| col.clone()),
+                };
                 bullet_els.push(Element::classed_shape(
                     Geometry::Rect {
                         rect: Rect::centered(p, 20.0, 20.0),

@@ -1,5 +1,6 @@
 //! mermaid themes and `themeVariables`.
 
+mod classic;
 mod neo;
 
 use crate::color::{self, Rgba};
@@ -101,10 +102,20 @@ pub struct Palette {
     pub pie_title_text: Color,
     pub pie_section_text: Color,
     pub pie_legend_text: Color,
-    /// mermaid's `cScale0..11`: section colours for timeline, mindmap, kanban, journey, git, ...
+    /// mermaid's `cScale0..11`: section colours of timeline, mindmap, kanban, treemap, radar.
     pub scale: Vec<Color>,
-    /// Text colour readable on each `scale` entry.
+    /// `cScaleLabel0..11`: text on each `scale` entry.
     pub scale_text: Vec<Color>,
+    /// `cScalePeer0..11`: borders of `scale` entries (treemap sections).
+    pub scale_peer: Vec<Color>,
+    /// `cScaleInv0..11`: the underline of timeline / mindmap / kanban nodes.
+    pub scale_inv: Vec<Color>,
+    /// `fillType0..7`: user-journey section and task fills.
+    pub fill_type: Vec<Color>,
+    /// `git0..7`, `gitInv0..7`, `gitBranchLabel0..7` (empty: the git graph derives its own).
+    pub git: Vec<Color>,
+    pub git_inv: Vec<Color>,
+    pub git_branch_label: Vec<Color>,
     /// Whether this is a dark theme.
     pub dark: bool,
     /// Theme `strokeWidth` (neo/redux family). `None` means each diagram's own default.
@@ -241,6 +252,12 @@ fn default_palette() -> Palette {
         pie_legend_text: c("black"),
         scale: Vec::new(),
         scale_text: Vec::new(),
+        scale_peer: Vec::new(),
+        scale_inv: Vec::new(),
+        fill_type: Vec::new(),
+        git: Vec::new(),
+        git_inv: Vec::new(),
+        git_branch_label: Vec::new(),
         dark: false,
         stroke_width: None,
         radius: None,
@@ -272,23 +289,7 @@ fn forest_palette() -> Palette {
     p.signal_color = c("#333");
     p.activation_bkg = c("#f4f4f4");
     p.special_state = c("#13540c");
-    p.pie_colors = [
-        "#cde498",
-        "#cdffb2",
-        "hsl(78.1578947368, 58.4615384615%, 59.5098039216%)",
-        "hsl(98.1578947368, 58.4615384615%, 59.5098039216%)",
-        "hsl(118.1578947368, 58.4615384615%, 59.5098039216%)",
-        "hsl(138.1578947368, 58.4615384615%, 59.5098039216%)",
-        "hsl(158.1578947368, 58.4615384615%, 59.5098039216%)",
-        "hsl(178.1578947368, 58.4615384615%, 59.5098039216%)",
-        "hsl(198.1578947368, 58.4615384615%, 59.5098039216%)",
-        "hsl(218.1578947368, 58.4615384615%, 59.5098039216%)",
-        "hsl(238.1578947368, 58.4615384615%, 59.5098039216%)",
-        "hsl(258.1578947368, 58.4615384615%, 59.5098039216%)",
-    ]
-    .iter()
-    .map(|s| c(s))
-    .collect();
+    // `pie1..12`: see `classic::pie_colors`.
     p
 }
 
@@ -319,25 +320,8 @@ fn dark_palette() -> Palette {
     p.activation_border = c("#ccc");
     p.sequence_number = c("black");
     p.special_state = c("#ccc");
-    p.pie_colors = [
-        "hsl(180, 1.5873015873%, 12.3529411765%)",
-        "hsl(180, 1.5873015873%, 28.3529411765%)",
-        "hsl(0, 0%, 23.5294117647%)",
-        "hsl(60, 50%, 40%)",
-        "hsl(120, 30%, 35%)",
-        "hsl(200, 40%, 35%)",
-        "hsl(260, 30%, 40%)",
-        "hsl(320, 30%, 40%)",
-        "hsl(20, 40%, 40%)",
-        "hsl(170, 30%, 35%)",
-        "hsl(230, 30%, 45%)",
-        "hsl(0, 30%, 40%)",
-    ]
-    .iter()
-    .map(|s| c(s))
-    .collect();
-    p.pie_stroke = c("#ccc");
-    p.pie_outer_stroke = c("#ccc");
+    // `pie1..12`: see `classic::pie_colors`.
+    // theme-dark.js: `pieStrokeColor ||= 'black'`, `pieOuterStrokeColor ||= 'black'`.
     p.pie_title_text = c("lightgrey");
     p.pie_section_text = c("lightgrey");
     p.pie_legend_text = c("lightgrey");
@@ -434,14 +418,6 @@ fn base_palette(vars: &[(String, String)]) -> Palette {
     p.note_bkg = hex(tertiary);
     p.note_border = hex(tertiary.lighten(-40.0));
     p.special_state = hex(line);
-    p.pie_colors = (0..12)
-        .map(|i| match i {
-            0 => hex(primary),
-            1 => hex(secondary),
-            2 => hex(tertiary),
-            n => hex(primary.rotate_hue(n as f64 * 30.0).lighten(-10.0)),
-        })
-        .collect();
     p
 }
 
@@ -468,50 +444,73 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
         theme,
         ThemeName::Dark | ThemeName::NeoDark | ThemeName::ReduxDark | ThemeName::ReduxDarkColor
     ) || color::parse(p.background.css()).is_some_and(Rgba::is_dark);
-    if p.scale.is_empty() {
-        p.scale = color_scale(&p);
+    if let Some(sc) = classic::section_colors(theme, vars) {
+        // Every override is already folded in, exactly as upstream re-applies them.
+        p.scale = sc.scale;
+        p.scale_text = sc.scale_label;
+        p.scale_peer = sc.scale_peer;
+        p.scale_inv = sc.scale_inv;
+        p.fill_type = sc.fill_type;
+        p.git = sc.git;
+        p.git_inv = sc.git_inv;
+        p.git_branch_label = sc.git_branch_label;
+        if let Some(pie) = sc.pie {
+            p.pie_colors = pie;
+        }
     }
     for (k, v) in vars {
         apply_variable(&mut p, k, v);
     }
-    p.scale_text = p
-        .scale
-        .iter()
-        .map(|c| match color::parse(c.css()) {
-            Some(rgb) if rgb.is_dark() => Color::new("#ffffff"),
-            _ => Color::new("#333333"),
-        })
-        .collect();
+    // The neo / redux family: companions not ported from those themes.
+    if p.scale_text.is_empty() {
+        p.scale_text = p
+            .scale
+            .iter()
+            .map(|c| match color::parse(c.css()) {
+                Some(rgb) if rgb.is_dark() => Color::new("#ffffff"),
+                _ => Color::new("#333333"),
+            })
+            .collect();
+    }
+    let derived = |f: fn(Rgba) -> Rgba, from: &[Color]| -> Vec<Color> {
+        from.iter()
+            .map(|c| color::parse(c.css()).map_or_else(|| c.clone(), |x| hex(f(x))))
+            .collect()
+    };
+    if p.scale_peer.is_empty() {
+        // `cScalePeerN ||= darken(cScaleN, 10)` (none of the family sets darkMode).
+        p.scale_peer = derived(|x| x.darken(10.0), &p.scale);
+    }
+    if p.scale_inv.is_empty() {
+        p.scale_inv = derived(Rgba::invert, &p.scale);
+    }
     p
 }
 
-/// 12 section colours: hue steps from the theme's primary colour.
-fn color_scale(p: &Palette) -> Vec<Color> {
-    let base = color::parse(p.main_bkg.css()).unwrap_or(Rgba {
-        r: 0xec,
-        g: 0xec,
-        b: 0xff,
-        a: 1.0,
-    });
-    let (h, s, _) = base.to_hsl();
-    let (sat, light) = if p.dark {
-        (s.clamp(40.0, 60.0), 30.0)
-    } else {
-        (s.clamp(60.0, 90.0), 80.0)
-    };
-    (0..12)
-        .map(|i| hex(Rgba::from_hsl(h + i as f64 * 30.0, sat, light, 1.0)))
-        .collect()
-}
-
 impl Palette {
-    /// Section colour `i` (wraps around).
+    /// Section colour `i` (`cScale`, wraps around).
     pub fn scale_color(&self, i: usize) -> &Color {
         &self.scale[i % self.scale.len()]
     }
-    /// Readable text colour on section colour `i`.
+    /// Text colour on section colour `i` (`cScaleLabel`).
     pub fn scale_text_color(&self, i: usize) -> &Color {
         &self.scale_text[i % self.scale_text.len()]
+    }
+    /// Border colour of section colour `i` (`cScalePeer`).
+    pub fn scale_peer_color(&self, i: usize) -> &Color {
+        &self.scale_peer[i % self.scale_peer.len()]
+    }
+    /// Inverse of section colour `i` (`cScaleInv`).
+    pub fn scale_inv_color(&self, i: usize) -> &Color {
+        &self.scale_inv[i % self.scale_inv.len()]
+    }
+    /// User-journey section / task fill `i` (`fillType`, wraps around); falls back to the
+    /// section scale for a palette without journey colours.
+    pub fn fill_type_color(&self, i: usize) -> &Color {
+        if self.fill_type.is_empty() {
+            return self.scale_color(i);
+        }
+        &self.fill_type[i % self.fill_type.len()]
     }
 }
 
@@ -584,20 +583,30 @@ fn apply_variable(p: &mut Palette, key: &str, value: &str) {
         "pieOpacity" => p.pie_opacity = num().unwrap_or(p.pie_opacity),
         "strokeWidth" => p.stroke_width = num().or(p.stroke_width),
         "radius" => p.radius = num().or(p.radius),
-        k if k.starts_with("cScale")
-            && !k.starts_with("cScaleLabel")
-            && !k.starts_with("cScalePeer") =>
-        {
-            if let Some(i) = k[6..].parse::<usize>().ok().filter(|i| *i < 12) {
-                if p.scale.len() == 12 {
-                    p.scale[i] = v;
-                }
-            }
-        }
         k => {
             if let Some(i) = k.strip_prefix("pie").and_then(|n| n.parse::<usize>().ok()) {
                 if (1..=12).contains(&i) {
                     p.pie_colors[i - 1] = v;
+                }
+                return;
+            }
+            // Indexed colour sets: `cScaleN`, `cScaleLabelN`, ... (`gitInv` before `git`).
+            let sets: [(&str, &mut Vec<Color>); 8] = [
+                ("cScaleLabel", &mut p.scale_text),
+                ("cScalePeer", &mut p.scale_peer),
+                ("cScaleInv", &mut p.scale_inv),
+                ("cScale", &mut p.scale),
+                ("fillType", &mut p.fill_type),
+                ("gitBranchLabel", &mut p.git_branch_label),
+                ("gitInv", &mut p.git_inv),
+                ("git", &mut p.git),
+            ];
+            for (prefix, set) in sets {
+                if let Some(i) = k.strip_prefix(prefix).and_then(|n| n.parse::<usize>().ok()) {
+                    if let Some(slot) = set.get_mut(i) {
+                        *slot = v;
+                    }
+                    return;
                 }
             }
         }
