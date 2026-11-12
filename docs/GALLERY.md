@@ -5,7 +5,7 @@ Regenerate with `cargo run --release --example gallery`.
 
 ## agentflow
 
-Source: [`examples/diagrams/agentflow.mmd`](../examples/diagrams/agentflow.mmd) · rendered in 938.56µs
+Source: [`examples/diagrams/agentflow.mmd`](../examples/diagrams/agentflow.mmd) · rendered in 709.20µs
 
 <details><summary>source</summary>
 
@@ -37,7 +37,7 @@ agentflow-beta TB
 
 ## architecture
 
-Source: [`examples/diagrams/architecture.mmd`](../examples/diagrams/architecture.mmd) · rendered in 274.28µs
+Source: [`examples/diagrams/architecture.mmd`](../examples/diagrams/architecture.mmd) · rendered in 230.94µs
 
 <details><summary>source</summary>
 
@@ -74,7 +74,7 @@ architecture-beta
 
 ## block
 
-Source: [`examples/diagrams/block.mmd`](../examples/diagrams/block.mmd) · rendered in 313.04µs
+Source: [`examples/diagrams/block.mmd`](../examples/diagrams/block.mmd) · rendered in 368.96µs
 
 <details><summary>source</summary>
 
@@ -109,7 +109,7 @@ block-beta
 
 ## c4-container
 
-Source: [`examples/diagrams/c4-container.mmd`](../examples/diagrams/c4-container.mmd) · rendered in 409.72µs
+Source: [`examples/diagrams/c4-container.mmd`](../examples/diagrams/c4-container.mmd) · rendered in 603.39µs
 
 <details><summary>source</summary>
 
@@ -154,7 +154,7 @@ C4Container
 
 ## c4
 
-Source: [`examples/diagrams/c4.mmd`](../examples/diagrams/c4.mmd) · rendered in 452.06µs
+Source: [`examples/diagrams/c4.mmd`](../examples/diagrams/c4.mmd) · rendered in 484.88µs
 
 <details><summary>source</summary>
 
@@ -209,7 +209,7 @@ C4Context
 
 ## class
 
-Source: [`examples/diagrams/class.mmd`](../examples/diagrams/class.mmd) · rendered in 609.42µs
+Source: [`examples/diagrams/class.mmd`](../examples/diagrams/class.mmd) · rendered in 379.09µs
 
 <details><summary>source</summary>
 
@@ -249,7 +249,7 @@ classDiagram
 
 ## cynefin
 
-Source: [`examples/diagrams/cynefin.mmd`](../examples/diagrams/cynefin.mmd) · rendered in 249.29µs
+Source: [`examples/diagrams/cynefin.mmd`](../examples/diagrams/cynefin.mmd) · rendered in 171.51µs
 
 <details><summary>source</summary>
 
@@ -285,7 +285,7 @@ cynefin-beta
 
 ## er-subgraphs
 
-Source: [`examples/diagrams/er-subgraphs.mmd`](../examples/diagrams/er-subgraphs.mmd) · rendered in 719.12µs
+Source: [`examples/diagrams/er-subgraphs.mmd`](../examples/diagrams/er-subgraphs.mmd) · rendered in 827.22µs
 
 <details><summary>source</summary>
 
@@ -325,7 +325,7 @@ erDiagram
 
 ## er
 
-Source: [`examples/diagrams/er.mmd`](../examples/diagrams/er.mmd) · rendered in 517.73µs
+Source: [`examples/diagrams/er.mmd`](../examples/diagrams/er.mmd) · rendered in 445.99µs
 
 <details><summary>source</summary>
 
@@ -377,7 +377,7 @@ erDiagram
 
 ## eventmodeling
 
-Source: [`examples/diagrams/eventmodeling.mmd`](../examples/diagrams/eventmodeling.mmd) · rendered in 243.34µs
+Source: [`examples/diagrams/eventmodeling.mmd`](../examples/diagrams/eventmodeling.mmd) · rendered in 268.25µs
 
 <details><summary>source</summary>
 
@@ -401,7 +401,7 @@ tf 08 rmo CartItems ->> 03 ->> 07
 
 ## flowchart
 
-Source: [`examples/diagrams/flowchart.mmd`](../examples/diagrams/flowchart.mmd) · rendered in 489.88µs
+Source: [`examples/diagrams/flowchart.mmd`](../examples/diagrams/flowchart.mmd) · rendered in 430.66µs
 
 <details><summary>source</summary>
 
@@ -429,7 +429,7 @@ flowchart TD
 
 ## gantt
 
-Source: [`examples/diagrams/gantt.mmd`](../examples/diagrams/gantt.mmd) · rendered in 835.64µs
+Source: [`examples/diagrams/gantt.mmd`](../examples/diagrams/gantt.mmd) · rendered in 828.14µs
 
 <details><summary>source</summary>
 
@@ -469,7 +469,7 @@ gantt
 
 ## gitgraph
 
-Source: [`examples/diagrams/gitgraph.mmd`](../examples/diagrams/gitgraph.mmd) · rendered in 212.63µs
+Source: [`examples/diagrams/gitgraph.mmd`](../examples/diagrams/gitgraph.mmd) · rendered in 216.16µs
 
 <details><summary>source</summary>
 
@@ -507,7 +507,7 @@ gitGraph
 
 ## info
 
-Source: [`examples/diagrams/info.mmd`](../examples/diagrams/info.mmd) · rendered in 152.79µs
+Source: [`examples/diagrams/info.mmd`](../examples/diagrams/info.mmd) · rendered in 104.33µs
 
 <details><summary>source</summary>
 
@@ -521,7 +521,7 @@ info showInfo
 
 ## ishikawa
 
-Source: [`examples/diagrams/ishikawa.mmd`](../examples/diagrams/ishikawa.mmd) · rendered in 285.54µs
+Source: [`examples/diagrams/ishikawa.mmd`](../examples/diagrams/ishikawa.mmd) · rendered in 164.93µs
 
 <details><summary>source</summary>
 
@@ -554,7 +554,7 @@ ishikawa-beta
 
 ## journey
 
-Source: [`examples/diagrams/journey.mmd`](../examples/diagrams/journey.mmd) · rendered in 451.64µs
+Source: [`examples/diagrams/journey.mmd`](../examples/diagrams/journey.mmd) · rendered in 317.31µs
 
 <details><summary>source</summary>
 
@@ -579,7 +579,7 @@ journey
 
 ## kanban
 
-Source: [`examples/diagrams/kanban.mmd`](../examples/diagrams/kanban.mmd) · rendered in 317.44µs
+Source: [`examples/diagrams/kanban.mmd`](../examples/diagrams/kanban.mmd) · rendered in 259.90µs
 
 <details><summary>source</summary>
 
@@ -614,7 +614,7 @@ kanban
 
 ## mindmap
 
-Source: [`examples/diagrams/mindmap.mmd`](../examples/diagrams/mindmap.mmd) · rendered in 380.58µs
+Source: [`examples/diagrams/mindmap.mmd`](../examples/diagrams/mindmap.mmd) · rendered in 237.92µs
 
 <details><summary>source</summary>
 
@@ -652,7 +652,7 @@ mindmap
 
 ## packet
 
-Source: [`examples/diagrams/packet.mmd`](../examples/diagrams/packet.mmd) · rendered in 353.77µs
+Source: [`examples/diagrams/packet.mmd`](../examples/diagrams/packet.mmd) · rendered in 298.70µs
 
 <details><summary>source</summary>
 
@@ -686,7 +686,7 @@ packet-beta
 
 ## pie
 
-Source: [`examples/diagrams/pie.mmd`](../examples/diagrams/pie.mmd) · rendered in 140.08µs
+Source: [`examples/diagrams/pie.mmd`](../examples/diagrams/pie.mmd) · rendered in 116.09µs
 
 <details><summary>source</summary>
 
@@ -705,7 +705,7 @@ pie showData
 
 ## quadrant
 
-Source: [`examples/diagrams/quadrant.mmd`](../examples/diagrams/quadrant.mmd) · rendered in 185.17µs
+Source: [`examples/diagrams/quadrant.mmd`](../examples/diagrams/quadrant.mmd) · rendered in 154.36µs
 
 <details><summary>source</summary>
 
@@ -734,7 +734,7 @@ quadrantChart
 
 ## radar
 
-Source: [`examples/diagrams/radar.mmd`](../examples/diagrams/radar.mmd) · rendered in 214.46µs
+Source: [`examples/diagrams/radar.mmd`](../examples/diagrams/radar.mmd) · rendered in 189.60µs
 
 <details><summary>source</summary>
 
@@ -762,7 +762,7 @@ radar-beta
 
 ## railroad-abnf
 
-Source: [`examples/diagrams/railroad-abnf.mmd`](../examples/diagrams/railroad-abnf.mmd) · rendered in 211.16µs
+Source: [`examples/diagrams/railroad-abnf.mmd`](../examples/diagrams/railroad-abnf.mmd) · rendered in 235.26µs
 
 <details><summary>source</summary>
 
@@ -783,7 +783,7 @@ port = [ ":" ] 1*5DIGIT %x30-39 ;
 
 ## railroad-ir
 
-Source: [`examples/diagrams/railroad-ir.mmd`](../examples/diagrams/railroad-ir.mmd) · rendered in 192.39µs
+Source: [`examples/diagrams/railroad-ir.mmd`](../examples/diagrams/railroad-ir.mmd) · rendered in 197.68µs
 
 <details><summary>source</summary>
 
@@ -811,7 +811,7 @@ number = sequence(optional(terminal("-")), oneOrMore(nonterminal("digit")), spec
 
 ## railroad-peg
 
-Source: [`examples/diagrams/railroad-peg.mmd`](../examples/diagrams/railroad-peg.mmd) · rendered in 186.49µs
+Source: [`examples/diagrams/railroad-peg.mmd`](../examples/diagrams/railroad-peg.mmd) · rendered in 204.56µs
 
 <details><summary>source</summary>
 
@@ -832,7 +832,7 @@ Identifier <- !Keyword Letter Letter* . ;
 
 ## railroad
 
-Source: [`examples/diagrams/railroad.mmd`](../examples/diagrams/railroad.mmd) · rendered in 204.96µs
+Source: [`examples/diagrams/railroad.mmd`](../examples/diagrams/railroad.mmd) · rendered in 247.08µs
 
 <details><summary>source</summary>
 
@@ -854,7 +854,7 @@ string = '"' { ? any character except quote ? } '"' ;
 
 ## requirement
 
-Source: [`examples/diagrams/requirement.mmd`](../examples/diagrams/requirement.mmd) · rendered in 525.07µs
+Source: [`examples/diagrams/requirement.mmd`](../examples/diagrams/requirement.mmd) · rendered in 433.49µs
 
 <details><summary>source</summary>
 
@@ -936,7 +936,7 @@ requirementDiagram
 
 ## sankey
 
-Source: [`examples/diagrams/sankey.mmd`](../examples/diagrams/sankey.mmd) · rendered in 535.03µs
+Source: [`examples/diagrams/sankey.mmd`](../examples/diagrams/sankey.mmd) · rendered in 615.29µs
 
 <details><summary>source</summary>
 
@@ -981,7 +981,7 @@ Electricity grid,"Heating and cooling, homes",42.0
 
 ## sequence
 
-Source: [`examples/diagrams/sequence.mmd`](../examples/diagrams/sequence.mmd) · rendered in 209.17µs
+Source: [`examples/diagrams/sequence.mmd`](../examples/diagrams/sequence.mmd) · rendered in 197.48µs
 
 <details><summary>source</summary>
 
@@ -1016,7 +1016,7 @@ sequenceDiagram
 
 ## shapes
 
-Source: [`examples/diagrams/shapes.mmd`](../examples/diagrams/shapes.mmd) · rendered in 1.11ms
+Source: [`examples/diagrams/shapes.mmd`](../examples/diagrams/shapes.mmd) · rendered in 1.10ms
 
 <details><summary>source</summary>
 
@@ -1052,7 +1052,7 @@ flowchart LR
 
 ## state
 
-Source: [`examples/diagrams/state.mmd`](../examples/diagrams/state.mmd) · rendered in 503.73µs
+Source: [`examples/diagrams/state.mmd`](../examples/diagrams/state.mmd) · rendered in 500.47µs
 
 <details><summary>source</summary>
 
@@ -1080,7 +1080,7 @@ stateDiagram-v2
 
 ## subgraph-collapse
 
-Source: [`examples/diagrams/subgraph-collapse.mmd`](../examples/diagrams/subgraph-collapse.mmd) · rendered in 449.60µs
+Source: [`examples/diagrams/subgraph-collapse.mmd`](../examples/diagrams/subgraph-collapse.mmd) · rendered in 452.22µs
 
 <details><summary>source</summary>
 
@@ -1110,7 +1110,7 @@ flowchart LR
 
 ## subgraphs
 
-Source: [`examples/diagrams/subgraphs.mmd`](../examples/diagrams/subgraphs.mmd) · rendered in 569.40µs
+Source: [`examples/diagrams/subgraphs.mmd`](../examples/diagrams/subgraphs.mmd) · rendered in 556.15µs
 
 <details><summary>source</summary>
 
@@ -1141,7 +1141,7 @@ flowchart LR
 
 ## swimlane
 
-Source: [`examples/diagrams/swimlane.mmd`](../examples/diagrams/swimlane.mmd) · rendered in 253.23µs
+Source: [`examples/diagrams/swimlane.mmd`](../examples/diagrams/swimlane.mmd) · rendered in 371.56µs
 
 <details><summary>source</summary>
 
@@ -1171,7 +1171,7 @@ swimlane-beta LR
 
 ## timeline
 
-Source: [`examples/diagrams/timeline.mmd`](../examples/diagrams/timeline.mmd) · rendered in 342.40µs
+Source: [`examples/diagrams/timeline.mmd`](../examples/diagrams/timeline.mmd) · rendered in 514.86µs
 
 <details><summary>source</summary>
 
@@ -1196,7 +1196,7 @@ timeline
 
 ## treemap
 
-Source: [`examples/diagrams/treemap.mmd`](../examples/diagrams/treemap.mmd) · rendered in 184.75µs
+Source: [`examples/diagrams/treemap.mmd`](../examples/diagrams/treemap.mmd) · rendered in 261.06µs
 
 <details><summary>source</summary>
 
@@ -1233,7 +1233,7 @@ classDef highlight fill:#ffd166,stroke:#c77d00,color:#000
 
 ## treeview
 
-Source: [`examples/diagrams/treeview.mmd`](../examples/diagrams/treeview.mmd) · rendered in 165.04µs
+Source: [`examples/diagrams/treeview.mmd`](../examples/diagrams/treeview.mmd) · rendered in 174.07µs
 
 <details><summary>source</summary>
 
@@ -1259,7 +1259,7 @@ treeView-beta
 
 ## usecase
 
-Source: [`examples/diagrams/usecase.mmd`](../examples/diagrams/usecase.mmd) · rendered in 880.12µs
+Source: [`examples/diagrams/usecase.mmd`](../examples/diagrams/usecase.mmd) · rendered in 590.30µs
 
 <details><summary>source</summary>
 
@@ -1303,7 +1303,7 @@ style pays stroke:#6b46c1,stroke-width:2px
 
 ## venn
 
-Source: [`examples/diagrams/venn.mmd`](../examples/diagrams/venn.mmd) · rendered in 443.58µs
+Source: [`examples/diagrams/venn.mmd`](../examples/diagrams/venn.mmd) · rendered in 463.24µs
 
 <details><summary>source</summary>
 
@@ -1327,7 +1327,7 @@ venn-beta
 
 ## wardley
 
-Source: [`examples/diagrams/wardley.mmd`](../examples/diagrams/wardley.mmd) · rendered in 215.26µs
+Source: [`examples/diagrams/wardley.mmd`](../examples/diagrams/wardley.mmd) · rendered in 207.68µs
 
 <details><summary>source</summary>
 
@@ -1376,7 +1376,7 @@ note "Migrate to cloud-native database" [0.60, 0.50]
 
 ## xychart
 
-Source: [`examples/diagrams/xychart.mmd`](../examples/diagrams/xychart.mmd) · rendered in 215.08µs
+Source: [`examples/diagrams/xychart.mmd`](../examples/diagrams/xychart.mmd) · rendered in 328.94µs
 
 <details><summary>source</summary>
 
@@ -1396,7 +1396,7 @@ xychart-beta
 
 ## zenuml
 
-Source: [`examples/diagrams/zenuml.mmd`](../examples/diagrams/zenuml.mmd) · rendered in 242.50µs
+Source: [`examples/diagrams/zenuml.mmd`](../examples/diagrams/zenuml.mmd) · rendered in 405.82µs
 
 <details><summary>source</summary>
 
