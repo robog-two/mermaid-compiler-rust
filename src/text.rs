@@ -182,16 +182,138 @@ pub fn char_width_em(c: char, bold: bool) -> f64 {
     units / 1000.0
 }
 
-/// Width of a single line in pixels.
+/// Arial's kerning pairs (its `kern` table, in 1/2048 em), which the browser
+/// applies to regular text (`font-kerning: auto`): "DEPARTMENT" is 1.3px
+/// narrower at 14px than its advance widths (`PA`, `RT`).
+const KERNING: &[(&str, i16)] = &[
+    (" A", -113),
+    (" T", -37),
+    (" Y", -37),
+    ("11", -152),
+    ("A ", -113),
+    ("AT", -152),
+    ("AV", -152),
+    ("AW", -76),
+    ("AY", -152),
+    ("Av", -37),
+    ("Aw", -37),
+    ("Ay", -37),
+    ("F,", -227),
+    ("F.", -227),
+    ("FA", -113),
+    ("L ", -76),
+    ("LT", -152),
+    ("LV", -152),
+    ("LW", -152),
+    ("LY", -152),
+    ("Ly", -76),
+    ("P ", -37),
+    ("P,", -264),
+    ("P.", -264),
+    ("PA", -152),
+    ("RT", -37),
+    ("RV", -37),
+    ("RW", -37),
+    ("RY", -76),
+    ("T ", -37),
+    ("T,", -227),
+    ("T-", -113),
+    ("T.", -227),
+    ("T:", -227),
+    ("T;", -227),
+    ("TA", -152),
+    ("TO", -37),
+    ("Ta", -227),
+    ("Tc", -227),
+    ("Te", -227),
+    ("Ti", -76),
+    ("To", -227),
+    ("Tr", -76),
+    ("Ts", -227),
+    ("Tu", -76),
+    ("Tw", -113),
+    ("Ty", -113),
+    ("V ", -37),
+    ("V,", -188),
+    ("V-", -113),
+    ("V.", -188),
+    ("V:", -76),
+    ("V;", -76),
+    ("VA", -152),
+    ("Va", -152),
+    ("Ve", -113),
+    ("Vi", -37),
+    ("Vo", -113),
+    ("Vr", -76),
+    ("Vu", -76),
+    ("Vy", -76),
+    ("W,", -113),
+    ("W-", -37),
+    ("W.", -113),
+    ("W:", -37),
+    ("W;", -37),
+    ("WA", -76),
+    ("Wa", -76),
+    ("We", -37),
+    ("Wo", -37),
+    ("Wr", -37),
+    ("Wu", -37),
+    ("Wy", -18),
+    ("Y ", -37),
+    ("Y,", -264),
+    ("Y-", -188),
+    ("Y.", -264),
+    ("Y:", -113),
+    ("Y;", -113),
+    ("YA", -152),
+    ("Ya", -152),
+    ("Ye", -188),
+    ("Yi", -76),
+    ("Yo", -188),
+    ("Yp", -152),
+    ("Yq", -188),
+    ("Yu", -113),
+    ("Yv", -113),
+    ("ff", -37),
+    ("r,", -113),
+    ("r.", -113),
+    ("v,", -152),
+    ("v.", -152),
+    ("w,", -113),
+    ("w.", -113),
+    ("y,", -152),
+    ("y.", -152),
+];
+
+/// The kerning between two characters of regular text, in em.
+fn kerning_em(a: char, b: char) -> f64 {
+    if !a.is_ascii() || !b.is_ascii() {
+        return 0.0;
+    }
+    KERNING
+        .iter()
+        .find(|(p, _)| p.as_bytes() == [a as u8, b as u8])
+        .map_or(0.0, |&(_, k)| f64::from(k) / 2048.0)
+}
+
+/// Width of a single line in pixels (regular text kerned as Arial is).
 pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
     let mut st = Emphasis::default();
+    let mut prev: Option<char> = None;
     text.chars()
         .map(|c| {
             if st.apply(c) {
-                0.0
-            } else {
-                char_width_em(c, bold || st.bold > 0)
+                // A change of style starts a new run, which is not kerned across.
+                prev = None;
+                return 0.0;
             }
+            let b = bold || st.bold > 0;
+            let kern = match prev {
+                Some(p) if !b => kerning_em(p, c),
+                _ => 0.0,
+            };
+            prev = Some(c);
+            char_width_em(c, b) + kern
         })
         .sum::<f64>()
         * font_size
@@ -969,6 +1091,12 @@ mod tests {
     #[test]
     fn measures_widths() {
         let w = line_width("Hello", 16.0, false);
+        // Kerned as the browser does (mermaid: "DEPARTMENT" 95.16px at 14px).
+        assert!((line_width("DEPARTMENT", 14.0, false) - 95.16).abs() < 0.05);
+        // Only regular text is kerned here.
+        let unkerned = (char_width_em('T', true) + char_width_em('e', true)) * 14.0;
+        assert!((line_width("Te", 14.0, true) - unkerned).abs() < 1e-9);
+        assert!(line_width("Te", 14.0, false) < line_width("Tn", 14.0, false));
         assert!((w - 16.0 * (0.722 + 0.556 + 0.222 + 0.222 + 0.556)).abs() < 1e-9);
         let b = TextBlock::label("a<br>bb", 16.0);
         assert_eq!(b.lines.len(), 2);
