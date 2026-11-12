@@ -206,10 +206,12 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
     // then each graph's port distributor, by a coin flip of its own generator.
     let seed = rng.next_long();
     let mut sws = Vec::with_capacity(ng);
+    // Per graph, per layer: its ghost vertices, and whether it has others.
+    let mut ghosts: Vec<Vec<(Vec<usize>, bool)>> = Vec::with_capacity(ng);
     let mut extra: Vec<RunExtra> = Vec::with_capacity(ng);
     for (gi, g) in graphs.into_iter().enumerate() {
         let RunGraph {
-            mut layers,
+            layers,
             graph,
             ctx,
             opts,
@@ -231,6 +233,25 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
             east[a].push(s);
             west[b].push(s);
         }
+        // External ports without an edge inside (an edge to the container
+        // itself) are ELK nodes only where the container has other external
+        // ports (`CompoundGraphPreprocessor` makes their dummies only then);
+        // otherwise they are kept out of the sweeps, and put back at the ends of
+        // their layers afterwards.
+        let unconnected = |v: usize| east[v].is_empty() && west[v].is_empty();
+        let connected_ext = (0..nv).any(|v| ext_key[v].is_some() && !unconnected(v));
+        let ghost = |v: usize| !connected_ext && ext_key[v].is_some() && unconnected(v);
+        let mut kept = Vec::with_capacity(layers.len());
+        let mut layer_ghosts = Vec::with_capacity(layers.len());
+        for layer in layers {
+            let (g, l): (Vec<usize>, Vec<usize>) = layer.into_iter().partition(|&v| ghost(v));
+            layer_ghosts.push((g, !l.is_empty()));
+            if !l.is_empty() {
+                kept.push(l);
+            }
+        }
+        ghosts.push(layer_ghosts);
+        let mut layers = kept;
         creation_order(&mut layers, &east, segs, info, real, label);
         if opts.model_order {
             sort_by_model_order(&mut layers, &mut east, &mut west, segs, info, real, ctx);
@@ -281,21 +302,26 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
         into,
         seed,
     };
-    // Bottom-up graphs, deepest first (the reverse of a breadth-first walk).
-    let depth = |gi: usize| {
-        let mut d = 0;
-        let mut cur = run.extra[gi].3;
-        while let Some((p, _)) = cur {
-            d += 1;
-            cur = run.extra[p].3;
-            if d > ng {
-                break;
-            }
+    // Bottom-up graphs (and the root) in the reverse of a breadth-first walk
+    // that finds a graph's children in its layers' order
+    // (`LayerSweepCrossingMinimizer.initialize`).
+    let mut bfs = vec![0];
+    let mut i = 0;
+    while i < bfs.len() {
+        let cur = bfs[i];
+        for layer in &run.sw[cur].layers {
+            bfs.extend(layer.iter().filter_map(|&v| run.sw[cur].nested[v]));
         }
-        d
-    };
-    let mut order: Vec<usize> = (0..ng).filter(|&g| !run.into[g]).collect();
-    order.sort_by_key(|&g| std::cmp::Reverse(depth(g)));
+        i += 1;
+    }
+    // (Every graph is reached; any that were not would go first.)
+    let mut seen = vec![false; ng];
+    for &g in &bfs {
+        seen[g] = true;
+    }
+    let missed: Vec<usize> = (0..ng).filter(|&g| !seen[g]).collect();
+    bfs.extend(missed);
+    let order: Vec<usize> = bfs.into_iter().rev().filter(|&g| !run.into[g]).collect();
     for g in order {
         let opts = run.extra[g].0;
         // A lone graph of a single layer has nothing to order (`process`'s
@@ -327,7 +353,24 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
             run.sw[pg].fixed_node[v] = true;
         }
     }
-    run.sw.into_iter().map(|s| s.layers).collect()
+    run.sw
+        .into_iter()
+        .zip(ghosts)
+        .map(|(s, gs)| {
+            let mut kept = s.layers.into_iter();
+            gs.into_iter()
+                .map(|(g, has_others)| {
+                    let mut layer = if has_others {
+                        kept.next().unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    layer.extend(g);
+                    layer
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// `LayerSweepTypeDecider.useBottomUp` for the graph of `child`, the container
@@ -1252,6 +1295,60 @@ mod tests {
         greedy_switch: false,
         thoroughness: 7,
     };
+
+    #[test]
+    fn unconnected_ports_of_a_container_without_others_are_kept_aside() {
+        // Root: the container (0) alone.
+        let root_v = verts(1);
+        let root_ctx = OrderCtx {
+            verts: &root_v,
+            chains: &[],
+        };
+        // Inside: p (0) -> q (1), and two external port dummies (2, 3) of edges
+        // to the container itself: no ELK nodes, but still in their layers.
+        let segs = [(0, 1)];
+        let child_info = info(&segs);
+        let child_v = verts(4);
+        let child_ctx = OrderCtx {
+            verts: &child_v,
+            chains: &[],
+        };
+        let no = [false; 4];
+        let graphs = vec![
+            RunGraph {
+                layers: vec![vec![0]],
+                graph: Graph {
+                    border: &no[..1],
+                    label: &no[..1],
+                    segs: &[],
+                    info: &[],
+                    real: 1,
+                },
+                ctx: &root_ctx,
+                opts: OPTS,
+                ext_key: vec![None],
+                seg_key: vec![],
+                parent: None,
+            },
+            RunGraph {
+                layers: vec![vec![2], vec![0], vec![3, 1]],
+                graph: Graph {
+                    border: &no,
+                    label: &no,
+                    segs: &segs,
+                    info: &child_info,
+                    real: 2,
+                },
+                ctx: &child_ctx,
+                opts: OPTS,
+                ext_key: vec![None, None, Some(5), Some(6)],
+                seg_key: vec![3],
+                parent: Some((0, 0)),
+            },
+        ];
+        let out = minimize_run(graphs);
+        assert_eq!(out[1], vec![vec![2], vec![0], vec![1, 3]]);
+    }
 
     #[test]
     fn untangles_a_crossing() {

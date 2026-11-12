@@ -148,3 +148,42 @@ fn reversed_edges_order_like_elk() {
         &[&["N0"], &["N3", "N2", "N1", "N4"], &["N6", "N5"]],
     );
 }
+
+#[test]
+fn hierarchical_sweeps_draw_like_elk() {
+    // Four containers: ELK orders C1, C2 and C3 on their own (in the reverse
+    // of a breadth-first walk over the layers), and C0 within the root's
+    // sweeps; C1's port for `C1 --> C3` is no node inside C1 (it has no other
+    // external port), while C2's port for `c0n1 --> C2` is. With every random
+    // draw in ELK's order, c2n0 stands left of c2n1, as in mermaid's render.
+    let src = "flowchart TD
+  subgraph C0
+    c0n0 --> c0n1
+  end
+  subgraph C1
+    c1n0 --> c1n1
+  end
+  subgraph C2
+    c2n0 --> c2n1
+    c2n1 --> c2n2
+  end
+  subgraph C3
+    c3n0 --> c3n1
+    c3n1 --> c3n2
+  end
+  c2n0 --> c3n1
+  c0n0 --> x
+  C1 --> C3
+  c2n1 --> c3n1
+  c0n1 --> C2
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let names = ["c0n0", "c0n1", "c2n0", "c2n1", "c2n2", "c3n0", "c3n1"];
+    let cs = centres(&svg, &names, false);
+    let x = |n: &str| cs.iter().find(|c| c.0 == n).expect("node").2;
+    assert!(x("c0n0") < x("c0n1"));
+    assert!(x("c2n0") < x("c2n1"));
+    assert!(x("c2n2") < x("c2n1"));
+    assert!(x("c3n0") < x("c3n1"));
+}
