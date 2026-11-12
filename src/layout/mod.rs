@@ -11,7 +11,8 @@
 //! 5. order layers with weighted barycentre sweeps, keeping clusters contiguous,
 //!    scoring with an O(E log V) crossing count and keeping the best ordering;
 //! 6. assign cross-axis coordinates with Brandes–Köpf, exactly as dagre does
-//!    (four median alignments, block compaction, balanced), see `bk.rs`;
+//!    (four median alignments, block compaction, balanced), see `bk.rs`, then
+//!    push cluster frames apart where their sides zig-zag over their layers;
 //! 7. stack ranks along the rank axis and rotate for TB / BT / LR / RL.
 
 use crate::geom::{Point, Rect};
@@ -1663,7 +1664,19 @@ fn sweep(
     } else {
         (0..n_layers.saturating_sub(1)).rev().collect()
     };
+    // The layer the sweep starts from keeps its order, but its sibling clusters'
+    // order still binds the layers arranged after it: otherwise two clusters could
+    // swap sides between it and the next layer.
     let mut before = Vec::new();
+    let fixed = if downward {
+        0
+    } else {
+        n_layers.saturating_sub(1)
+    };
+    if let Some(layer) = layers.get(fixed) {
+        let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
+        ctx.arrange(layer, &keys, &mut before);
+    }
     for li in order {
         let layer = &layers[li];
         let keys: Vec<f64> = layer
@@ -1780,6 +1793,7 @@ fn assign_x(
         width: &width,
     };
     let mut x = bk::position_x(&graph, gap);
+    separate_cluster_frames(layers, borders, gap, &mut x);
     // Normalise so the leftmost extent sits at zero.
     let min = (0..nv)
         .map(|v| x[v] - width[v] / 2.0)
@@ -1790,6 +1804,100 @@ fn assign_x(
         }
     }
     x
+}
+
+/// Make cluster frames hold apart over all their layers, not only layer by layer.
+///
+/// Brandes–Köpf keeps each layer's vertices (cluster borders included) apart,
+/// but a cluster is drawn as one rectangle from its leftmost left border to its
+/// rightmost right border over all its layers. When its borders zig-zag (a
+/// cluster pulled one way on some layers and another way on others, typically
+/// by edges to the whole cluster that contradict each other), a sibling, or a
+/// node outside it, can fall inside that rectangle on another layer.
+///
+/// Here each cluster side becomes one variable (at its outermost border: the
+/// rectangle's side), every layer's neighbours give a separation constraint
+/// between their variables, and, in topological order, every variable is pushed
+/// right just as far as its constraints need. Layouts that already hold apart do
+/// not move. (Sibling clusters keep one order over all the layers they share, see
+/// `OrderCtx::arrange`, so the constraints have no cycle; if they had one, the
+/// layout would stay as it is.)
+fn separate_cluster_frames(
+    layers: &[Vec<usize>],
+    borders: &[Vec<(usize, usize)>],
+    gap: &dyn Fn(usize, usize) -> f64,
+    x: &mut [f64],
+) {
+    if borders.iter().all(|b| b.is_empty()) {
+        return;
+    }
+    let nv = x.len();
+    // Variable per vertex: itself, or its cluster side (`nv + 2c` / `nv + 2c + 1`).
+    let mut var: Vec<usize> = (0..nv).collect();
+    let mut val: Vec<f64> = x.to_vec();
+    val.resize(nv + 2 * borders.len(), 0.0);
+    for (c, bs) in borders.iter().enumerate() {
+        if bs.is_empty() {
+            continue;
+        }
+        let (l, r) = (nv + 2 * c, nv + 2 * c + 1);
+        val[l] = bs.iter().map(|&(a, _)| x[a]).fold(f64::INFINITY, f64::min);
+        val[r] = bs
+            .iter()
+            .map(|&(_, b)| x[b])
+            .fold(f64::NEG_INFINITY, f64::max);
+        for &(a, b) in bs {
+            var[a] = l;
+            var[b] = r;
+        }
+    }
+    let nvar = val.len();
+    let mut out: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nvar];
+    let mut indeg = vec![0usize; nvar];
+    for layer in layers {
+        for w in layer.windows(2) {
+            let (a, b) = (var[w[0]], var[w[1]]);
+            out[a].push((b, gap(w[0], w[1])));
+            indeg[b] += 1;
+        }
+    }
+    let mut queue: Vec<usize> = (0..nvar).filter(|&v| indeg[v] == 0).collect();
+    let mut seen = 0;
+    let mut moved = false;
+    while let Some(a) = queue.pop() {
+        seen += 1;
+        for &(b, g) in &out[a] {
+            if val[a] + g > val[b] + 1e-9 {
+                val[b] = val[a] + g;
+                moved = true;
+            }
+            indeg[b] -= 1;
+            if indeg[b] == 0 {
+                queue.push(b);
+            }
+        }
+    }
+    if seen < nvar || !moved {
+        return;
+    }
+    // Write back. A border stays where it was unless its side moved past it (the
+    // left side) or what precedes it on its layer pushed it (the right side): the
+    // rectangle's sides are still the variables, and every layer stays apart.
+    for layer in layers {
+        for (i, &v) in layer.iter().enumerate() {
+            let u = var[v];
+            x[v] = if u == v {
+                val[v]
+            } else if (u - nv) % 2 == 0 {
+                x[v].max(val[u])
+            } else {
+                let after_prev = i
+                    .checked_sub(1)
+                    .map_or(f64::NEG_INFINITY, |j| x[layer[j]] + gap(layer[j], v));
+                x[v].max(after_prev)
+            };
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2115,6 +2223,91 @@ mod tests {
             for (k, r) in rects(&inp, &out).iter().enumerate() {
                 let other = out.clusters[1 - c[k]];
                 assert!(!r.intersects(&other), "{routing:?}: node {k} in {other:?}");
+            }
+        }
+    }
+
+    /// Clusters whose borders zig-zag over their layers: each layer is apart, but
+    /// cluster 0 reaches further right on layer 1 than cluster 1 starts on layer 0.
+    /// The frames are pushed apart; a layout already apart stays as it is.
+    #[test]
+    fn cluster_frames_are_apart_over_all_their_layers() {
+        // Vertices: per layer [0.left, member, 0.right, 1.left, member, 1.right].
+        let layers = vec![vec![0, 1, 2, 3, 4, 5], vec![6, 7, 8, 9, 10, 11]];
+        let borders = vec![vec![(0, 2), (6, 8)], vec![(3, 5), (9, 11)]];
+        let gap = |_: usize, _: usize| 10.0;
+        let mut x = vec![
+            0.0, 10.0, 20.0, 30.0, 40.0, 50.0, // layer 0
+            100.0, 110.0, 120.0, 130.0, 140.0, 150.0, // layer 1
+        ];
+        separate_cluster_frames(&layers, &borders, &gap, &mut x);
+        let right0 = x[2].max(x[8]);
+        let left1 = x[3].min(x[9]);
+        assert!(left1 >= right0 + 10.0, "{x:?}");
+        for layer in &layers {
+            for w in layer.windows(2) {
+                assert!(x[w[1]] - x[w[0]] >= 10.0 - 1e-9, "{x:?}");
+            }
+        }
+        // Already apart: nothing moves.
+        let mut apart = vec![
+            0.0, 10.0, 20.0, 130.0, 140.0, 150.0, 0.0, 10.0, 30.0, 140.0, 150.0, 160.0,
+        ];
+        let before = apart.clone();
+        separate_cluster_frames(&layers, &borders, &gap, &mut apart);
+        assert_eq!(apart, before);
+    }
+
+    /// The layer a sweep starts from is not rearranged, but its sibling clusters'
+    /// order binds the next layers: cluster 0 left of cluster 2 on layer 0 stays
+    /// left of it on layer 1, though an edge pulls cluster 2's member there left.
+    #[test]
+    fn sweeps_keep_sibling_order_from_the_fixed_layer() {
+        for routing in [
+            EdgeRouting::Splines,
+            EdgeRouting::Orthogonal(OrthoSpacing::ROOT),
+        ] {
+            // x, y, z, c0n0..2, c1n0, c2n0, c2n1, c3n0..2 (the fuzzer's case).
+            let cl = [
+                None,
+                None,
+                None,
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(2),
+                Some(3),
+                Some(3),
+                Some(3),
+            ];
+            let mut inp = input(
+                cl.iter().map(|&c| node(c)).collect(),
+                vec![
+                    edge(3, 4),
+                    edge(4, 5),
+                    edge(9, 10),
+                    edge(10, 11),
+                    edge(9, 4),
+                    edge(0, 7),
+                ],
+                (0..4).map(|_| LayoutCluster::new(None, 24.0)).collect(),
+                Direction::TopBottom,
+            );
+            inp.routing = routing;
+            let out = layout(&inp);
+            for a in 0..4 {
+                for b in a + 1..4 {
+                    let (ra, rb) = (out.clusters[a], out.clusters[b]);
+                    assert!(!ra.intersects(&rb), "{routing:?}: {a} {b}: {ra:?} {rb:?}");
+                }
+            }
+            for (k, r) in rects(&inp, &out).iter().enumerate() {
+                for c in (0..4).filter(|&c| cl[k] != Some(c)) {
+                    let f = out.clusters[c];
+                    assert!(!r.intersects(&f), "{routing:?}: node {k} in {c}");
+                }
             }
         }
     }

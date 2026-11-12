@@ -149,7 +149,9 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
 - **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction and Brandes–Köpf
   coordinate assignment ported from dagre's `position/bk` (every edge gets a midpoint vertex, as with dagre's
   `makeSpaceForEdgeLabels`, which gives mermaid's curved "S" edges). Crossing reduction differs from dagre's, so
-  node order can differ. Network simplex recomputes the
+  node order can differ. Sibling subgraph frames never overlap: where a frame's sides would zig-zag over its layers
+  into a sibling (edges to a whole subgraph that contradict each other), it and what follows it are pushed aside,
+  which leaves a slanted edge or a wider gap there. Network simplex recomputes the
   tree on every pivot (O(V·E)); graphs above 4,000 nodes fall back to a greedy ranker.
 - `click`/`href`/callbacks are parsed and ignored (static images have no interactivity).
 - **Rotated text** follows mermaid (xychart left-axis title and `xAxis.labelRotation`, gitGraph `rotateCommitLabel`
