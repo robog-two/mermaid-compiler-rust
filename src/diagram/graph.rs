@@ -976,7 +976,11 @@ pub fn render_with(
                         .map(|b| {
                             // An SVG label's box includes its background's padding.
                             let pad = if b.svg { 2.0 * SVG_EDGE_LABEL_PAD } else { 0.0 };
-                            (b.width + pad + 8.0, b.height + pad + 4.0)
+                            if elk {
+                                (b.width + pad, b.height + pad)
+                            } else {
+                                (b.width + pad + 8.0, b.height + pad + 4.0)
+                            }
                         }),
                     from_cluster,
                     to_cluster,
@@ -3350,6 +3354,19 @@ mod tests {
         }
         let dagre = LayoutAlgorithm::Dagre;
         assert_eq!(paths(LineHops::Arc, dagre), paths(LineHops::Off, dagre));
+    }
+
+    /// mermaid's ELK adapter hands ELK the label's own bbox (`edge.width/height`),
+    /// without the padding dagre's label node gets. Reference (mermaid 12.3.0,
+    /// default theme, classic look): A→B centres 188 apart, C→D 94.
+    #[test]
+    fn elk_edge_labels_take_their_own_size() {
+        let (g, scene) = render_flowchart("flowchart TD\nA -->|Get money| B\nC --> D");
+        let gap = |a: &str, b: &str| {
+            scene_node_center(&g, &scene, b).y - scene_node_center(&g, &scene, a).y
+        };
+        assert!((gap("A", "B") - 188.0).abs() < 1e-6, "{}", gap("A", "B"));
+        assert!((gap("C", "D") - 94.0).abs() < 1e-6, "{}", gap("C", "D"));
     }
 
     /// mermaid's ELK adapter never reads `nodeSpacing` / `rankSpacing`; dagre does.
