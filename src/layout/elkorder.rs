@@ -239,14 +239,10 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
                 let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
                 *layer = ctx.arrange(layer, &keys, &mut Vec::new());
             }
-            let mut pos = vec![0usize; nv];
-            for layer in &layers {
-                for (i, &v) in layer.iter().enumerate() {
-                    pos[v] = i;
-                }
-            }
+            // A node's ports in the order they were made, edge by edge; ELK lists
+            // them clockwise, so its west side runs bottom to top.
             for w in west.iter_mut() {
-                w.sort_by_key(|&s| (pos[segs[s].0], s));
+                w.sort_by_key(|&s| std::cmp::Reverse((info[s].edge, s)));
             }
         }
         let mut own = if gi == 0 {

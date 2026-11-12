@@ -245,19 +245,68 @@ pub(super) fn layout(input: &LayoutInput) -> LayoutOutput {
     // the feedback edges between whole clusters before ELK sees them; they are laid
     // out the other way and drawn back from their own source.
     let flags = subgraph_feedback_edges(input);
-    if !flags.contains(&true) {
-        return layout_tree(input);
-    }
     let mut turned = input.clone();
     for (e, _) in turned.edges.iter_mut().zip(&flags).filter(|(_, f)| **f) {
         std::mem::swap(&mut e.from, &mut e.to);
         std::mem::swap(&mut e.from_cluster, &mut e.to_cluster);
     }
-    let mut out = layout_tree(&turned);
-    for (r, _) in out.edges.iter_mut().zip(&flags).filter(|(_, f)| **f) {
+    // Then it hands ELK the edges in `orderNestedEdgeEnds`'s order.
+    let order = nested_edge_order(&turned);
+    if order.iter().enumerate().any(|(i, &k)| i != k) {
+        turned.edges = order.iter().map(|&k| turned.edges[k].clone()).collect();
+    }
+    let laid = layout_tree(&turned);
+    let mut edges = laid.edges.clone();
+    for (route, &k) in laid.edges.into_iter().zip(&order) {
+        edges[k] = route;
+    }
+    for (r, _) in edges.iter_mut().zip(&flags).filter(|(_, f)| **f) {
         r.points.reverse();
     }
-    out
+    LayoutOutput { edges, ..laid }
+}
+
+/// mermaid's `orderNestedEdgeEnds`: an edge moves in front of the first edge
+/// before it that leaves a cluster around its source for the same target, or
+/// that enters a cluster around its target from the same source (so that ELK's
+/// model order does not cross the two). The edge indices in their new order.
+fn nested_edge_order(input: &LayoutInput) -> Vec<usize> {
+    let chains = cluster_chains(&input.clusters);
+    let end = |e: &LayoutEdge, source: bool| -> Member {
+        match source {
+            true => e.from_cluster.map_or(Member::Node(e.from), Member::Cluster),
+            false => e.to_cluster.map_or(Member::Node(e.to), Member::Cluster),
+        }
+    };
+    // Whether `m` sits inside cluster member `anc`, at any depth.
+    let inside = |m: Member, anc: Member| -> bool {
+        let Member::Cluster(a) = anc else {
+            return false;
+        };
+        let parent = match m {
+            Member::Node(v) => input.nodes[v].cluster,
+            Member::Cluster(c) => input.clusters[c].parent,
+        };
+        parent.is_some_and(|p| chains.get(p).is_some_and(|ch| ch.contains(&a)))
+    };
+    let edges = &input.edges;
+    let mut order: Vec<usize> = (0..edges.len()).collect();
+    for (index, e) in edges.iter().enumerate() {
+        let (source, target) = (end(e, true), end(e, false));
+        let Some(from) = order.iter().position(|&k| k == index) else {
+            continue;
+        };
+        let to = order[..from].iter().position(|&other| {
+            let earlier = &edges[other];
+            (end(earlier, false) == target && inside(source, end(earlier, true)))
+                || (end(earlier, true) == source && inside(target, end(earlier, false)))
+        });
+        if let Some(to) = to {
+            order.remove(from);
+            order.insert(to, index);
+        }
+    }
+    order
 }
 
 /// mermaid's `findSubgraphFeedbackEdges`: per common ancestor, the edges between its
@@ -884,6 +933,15 @@ fn level_input(
     let mut seg_of = Vec::new();
     let mut hier = Hierarchy::default();
     hier.ext.extend(stub_ext);
+    // ELK makes a node's ports as it imports the edges, breadth-first by the
+    // graph containing each (the two ends' common ancestor): an edge from further
+    // out comes first.
+    let mut segs = segs;
+    segs.sort_by_key(|s| {
+        let (a, b) = ends[s.edge];
+        tree.common_ancestor(a, b)
+            .map_or(0, |c| tree.chains[c].len())
+    });
     for s in &segs {
         let e = &input.edges[s.edge];
         let end = |x: SegEnd| -> Option<usize> {
@@ -1603,5 +1661,45 @@ mod tests {
         let leave = (a[0].x - b[0].x).signum();
         let meet = (at_top(a) - at_top(b)).signum();
         assert_eq!(leave, meet, "{a:?} {b:?}");
+    }
+
+    /// mermaid's `orderNestedEdgeEnds`: `x --> C` then `x --> b` with b in C:
+    /// the edge into C's member moves in front.
+    #[test]
+    fn edge_into_a_cluster_member_moves_before_the_edge_to_the_cluster() {
+        let inp = input(
+            vec![node(None), node(Some(0)), node(Some(0))],
+            vec![
+                to_cluster(0, 1, 0),
+                LayoutEdge::new(1, 2, 1, None),
+                LayoutEdge::new(0, 2, 1, None),
+            ],
+            vec![with_dir(None, None)],
+            Direction::TopBottom,
+        );
+        assert_eq!(super::nested_edge_order(&inp), vec![2, 0, 1]);
+    }
+
+    /// ELK keeps a node's ports in the order it made them, and lists a side
+    /// clockwise: the west side bottom to top. In a container laid out on its
+    /// own, `a --> b : long label` and `b --> a : short` (turned round), the
+    /// first sweep that reaches the labels from b puts the turned edge's label
+    /// first, as mermaid draws state diagrams' `accelerate` / `brake`.
+    #[test]
+    fn elk_turned_edge_label_comes_first_in_a_container() {
+        let inp = elk(input(
+            vec![node(None), node(Some(0)), node(Some(0))],
+            vec![
+                to_cluster(0, 1, 0),
+                LayoutEdge::new(1, 2, 1, Some((64.0, 21.0))),
+                LayoutEdge::new(2, 1, 1, Some((35.0, 21.0))),
+            ],
+            vec![with_dir(None, Some(Direction::TopBottom))],
+            Direction::TopBottom,
+        ));
+        let out = layout(&inp);
+        let (fwd, back) = (out.edges[1].label, out.edges[2].label);
+        let (fwd, back) = (fwd.expect("label"), back.expect("label"));
+        assert!(back.x < fwd.x, "{back:?} {fwd:?}");
     }
 }
