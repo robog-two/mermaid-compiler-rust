@@ -2496,6 +2496,55 @@ fn rank_nodes(n: usize, edges: &[Option<Oriented>]) -> Vec<usize> {
     rank.into_iter().map(|r| (r - min) as usize).collect()
 }
 
+/// ELK's layering of a graph with edge labels: `LabelDummyInserter` has made each
+/// labelled edge's label a node of its own (in the order of the nodes and their
+/// outgoing edges) before `NetworkSimplexLayerer` runs, so the labels take part in
+/// the layering and in its balancing like any node (where a label stands decides
+/// which ranks are fullest). Returns the real nodes' ranks, twice: the labels are
+/// then placed by `LabelDummySwitcher`'s median rule on the balanced ranks (see
+/// `prepare`).
+fn rank_with_label_nodes(
+    n: usize,
+    oriented: &[Option<Oriented>],
+    input: &LayoutInput,
+) -> (Vec<usize>, Vec<usize>) {
+    let mut edges: Vec<Option<Oriented>> = Vec::new();
+    let mut next = n;
+    let mut by_source: Vec<(usize, usize)> = oriented
+        .iter()
+        .enumerate()
+        .filter_map(|(ei, o)| o.as_ref().map(|o| (o.from, ei)))
+        .collect();
+    by_source.sort_unstable();
+    for (_, ei) in by_source {
+        if let Some(o) = oriented[ei].as_ref() {
+            if input.edges[ei].label.is_some() && o.from != o.to {
+                let half = |from, to| Oriented {
+                    from,
+                    to,
+                    minlen: 1,
+                    ..*o
+                };
+                edges.push(Some(half(o.from, next)));
+                edges.push(Some(half(next, o.to)));
+                next += 1;
+            } else {
+                edges.push(Some(Oriented {
+                    from: o.from,
+                    to: o.to,
+                    minlen: o.minlen,
+                    reversed: o.reversed,
+                    weight: o.weight,
+                }));
+            }
+        }
+    }
+    let mut ranks = rank_nodes(next, &edges);
+    balance_ranks(&mut ranks, next, &edges, 1);
+    let ranks: Vec<usize> = ranks[..n].to_vec();
+    (ranks.clone(), ranks)
+}
+
 /// Rank like `rank_nodes`, but an edge leaving (entering) a whole cluster is
 /// constrained to start below its last (end above its first) member, the way
 /// dagre's nesting graph ties cluster borders to their contents: every member
@@ -2532,6 +2581,9 @@ fn rank_with_clusters(
         ends.push((src, dst));
     }
     let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
+    if used.is_empty() && elk {
+        return rank_with_label_nodes(n, oriented, input);
+    }
     if used.is_empty() {
         let mut ranks = rank_nodes(n, oriented);
         let layered = if elk {
@@ -4147,6 +4199,71 @@ mod tests {
         )));
         assert!((out.nodes[2].y - out.nodes[3].y).abs() < 1.0, "{out:?}");
         assert!((out.nodes[6].y - out.nodes[1].y).abs() < 1.0, "{out:?}");
+    }
+
+    /// Edge labels are nodes of ELK's layering (`LabelDummyInserter` runs before
+    /// `NetworkSimplexLayerer`), so they count when it balances: node 2 (`A --> C
+    /// --> D`) may sit on layer 1, beside the two labels of `A -->|l| B`, or on
+    /// layer 2 beside B, and ends on layer 2, as in elkjs.
+    #[test]
+    fn elk_balancing_counts_edge_labels() {
+        let mut edges = vec![
+            LayoutEdge::new(0, 1, 1, Some((30.0, 20.0))),
+            LayoutEdge::new(0, 1, 1, Some((30.0, 20.0))),
+        ];
+        edges.extend(edges_of(&[(1, 3), (0, 2), (2, 3)]));
+        let out = layout(&elk(input(
+            vec![node(None); 4],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        assert!((out.nodes[2].y - out.nodes[1].y).abs() < 1.0, "{out:?}");
+    }
+
+    /// With its labels in the layering and then moved to the median layer of their
+    /// edges (`LabelDummySwitcher`), ELK leaves no layer holding only long-edge
+    /// dummies: every layer between the first and the last holds a node or a label.
+    #[test]
+    fn elk_layering_leaves_no_layer_of_long_edge_dummies_alone() {
+        let mut seed: u64 = 7;
+        let mut rnd = |m: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % m
+        };
+        for _ in 0..300 {
+            let n = 4 + rnd(8);
+            let mut edges = Vec::new();
+            for _ in 0..n + rnd(n) {
+                let (a, b) = (rnd(n), rnd(n));
+                if a != b {
+                    let label = (rnd(5) < 2).then_some((30.0, 20.0));
+                    edges.push(LayoutEdge::new(a.min(b), a.max(b), 1, label));
+                }
+            }
+            let inp = elk(input(
+                vec![node(None); n],
+                edges,
+                vec![],
+                Direction::TopBottom,
+            ));
+            let oriented = orient_edges(n, &inp.edges, 1, true);
+            let (ranks, _) = rank_with_label_nodes(n, &oriented, &inp);
+            let mut used: Vec<usize> = ranks.clone();
+            for (o, e) in oriented.iter().zip(&inp.edges) {
+                if let (Some(o), Some(_)) = (o, e.label) {
+                    let (u, w) = (ranks[o.from], ranks[o.to]);
+                    used.push(u + w.saturating_sub(u) / 2);
+                }
+            }
+            used.sort_unstable();
+            used.dedup();
+            for pair in used.windows(2) {
+                assert_eq!(pair[1], pair[0] + 1, "{ranks:?} {used:?}");
+            }
+        }
     }
 
     /// ELK's `minimalSpan` takes a second, equally short incoming edge for an
