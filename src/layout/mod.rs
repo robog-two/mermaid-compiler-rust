@@ -1,8 +1,11 @@
 //! Layered (Sugiyama-style) graph layout, written from scratch.
 //!
 //! Pipeline, all pure:
-//! 1. remove self-loops, break cycles by reversing DFS back edges;
-//! 2. rank with longest-path + source tightening (minlen-aware);
+//! 1. remove self-loops, break cycles by reversing DFS back edges (under ELK, the
+//!    search starts from the sources, as ELK's depth-first cycle breaker does);
+//! 2. rank with longest-path + source tightening (minlen-aware) and network simplex;
+//!    under ELK in its layer units (a labelled edge spans two), then balanced and
+//!    each component started on the first layer, as ELK's network simplex layerer;
 //! 3. split long edges into dummy vertices (edge labels become sized dummies, as in dagre);
 //! 4. add left/right border vertices for every cluster on every rank it spans;
 //! 5. order layers with weighted barycentre sweeps, keeping clusters contiguous,
@@ -189,14 +192,38 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
 
     // dagre's makeSpaceForEdgeLabels: every edge spans two ranks at half the
     // separation, labelled or not, so each edge gets a midpoint vertex.
-    let rank_scale = 2;
+    let rank_scale = RANK_STEP;
     let rank_sep = input.rank_sep / rank_scale as f64;
 
     // 1. Orientation.
-    let mut oriented = orient_edges(n, &input.edges, rank_scale);
+    // ELK layers in its own units (see `elk_ranks`): an edge spans one layer, a
+    // labelled one two, its label being a node of the layer between.
+    let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
+    let mut oriented = orient_edges(n, &input.edges, if elk { 1 } else { rank_scale }, elk);
+    if elk {
+        for (o, e) in oriented.iter_mut().zip(&input.edges) {
+            if let Some(o) = o.as_mut().filter(|_| e.label.is_some()) {
+                o.minlen = o.minlen.max(2);
+            }
+        }
+    }
 
     // 2. Ranking.
-    let ranks = rank_with_clusters(n, &mut oriented, input);
+    let (mut ranks, layered) = rank_with_clusters(n, &mut oriented, input);
+    // Under ELK, per edge: the rank of its label (the layer its label dummy took).
+    let mut label_ranks: Vec<Option<usize>> = vec![None; input.edges.len()];
+    if elk {
+        let to_rank = elk_ranks(&ranks);
+        for (ei, o) in oriented.iter().enumerate() {
+            if let Some(o) = o.as_ref().filter(|_| input.edges[ei].label.is_some()) {
+                // The label dummy stays where the layering put it, half-way, when
+                // `balance_ranks` then moves an end.
+                let (lu, lv) = (layered[o.from], layered[o.to]);
+                label_ranks[ei] = Some(to_rank(lu + lv.saturating_sub(lu) / 2));
+            }
+        }
+        ranks = ranks.iter().map(|&l| to_rank(l)).collect();
+    }
 
     // 3. Vertices + chains.
     let mut verts: Vec<Vertex> = input
@@ -243,7 +270,10 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
         let (ru, rv) = (ranks[o.from], ranks[o.to]);
         let span = rv - ru;
         let label = input.edges[ei].label.map(|(w, h)| swap(w, h));
-        let label_rank = ru + span / 2;
+        let label_rank = match label_ranks[ei] {
+            Some(r) if span >= 2 => r.clamp(ru + 1, rv - 1),
+            _ => ru + span / 2,
+        };
         let dummy_cluster = lca(
             &cluster_chain,
             input.nodes[o.from].cluster,
@@ -364,6 +394,22 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
 
     // 5. Ordering.
     let mut layers = initial_order(&verts, n, &down, max_rank);
+    if elk {
+        // ELK (`considerModelOrder: NODES_AND_EDGES`) starts crossing minimisation
+        // from the model order: real nodes in input order, an edge's dummies after
+        // the node the edge leaves, in edge order.
+        let mut key: Vec<(usize, usize)> = (0..verts.len()).map(|v| (v, 0)).collect();
+        for (ei, c) in chains.iter().enumerate() {
+            if let Some((chain, _, _)) = c {
+                for &d in &chain[1..chain.len() - 1] {
+                    key[d] = (chain[0], 1 + ei);
+                }
+            }
+        }
+        for layer in layers.iter_mut() {
+            layer.sort_by_key(|&v| key[v]);
+        }
+    }
     let ctx = OrderCtx {
         verts: &verts,
         chains: &cluster_chain,
@@ -550,10 +596,15 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     // between two layers from the slots routed through it).
     // ELK gives edge labels a layer of their own with the full layer gap on both
     // sides; the split around the label vertex leaves only half the gap each side.
+    // A label in a layer of nodes (its edge spans more layers) needs no more room.
     let mut label_gap = vec![0.0f64; max_rank + 1];
     if plan.is_some() {
+        let mut has_node = vec![false; max_rank + 1];
+        for v in verts.iter().filter(|v| v.kind == Kind::Real) {
+            has_node[v.rank] = true;
+        }
         for v in &verts {
-            if matches!(v.kind, Kind::Dummy { labeled: true }) {
+            if matches!(v.kind, Kind::Dummy { labeled: true }) && !has_node[v.rank] {
                 label_gap[v.rank] = rank_sep;
             }
         }
@@ -938,13 +989,32 @@ impl OrthoPlan {
 }
 
 /// DFS-based cycle breaking. Returns `None` for self-loops.
-fn orient_edges(n: usize, edges: &[LayoutEdge], scale: usize) -> Vec<Option<Oriented>> {
+///
+/// dagre (`acyclic.dfsFAS`) starts a search from every node in turn. ELK's
+/// `DepthFirstCycleBreaker` (mermaid's default `cycleBreaking: DEPTH_FIRST`) first
+/// searches from every source, a node without incoming edges, in model order and
+/// only then from the nodes left unvisited: a cycle hanging below a source is entered
+/// from that source, so the edge closing it, not one leaving the first node, is the
+/// one reversed (`sources_first`).
+fn orient_edges(
+    n: usize,
+    edges: &[LayoutEdge],
+    scale: usize,
+    sources_first: bool,
+) -> Vec<Option<Oriented>> {
     let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut has_in = vec![false; n];
     for (i, e) in edges.iter().enumerate() {
         if e.from != e.to {
             out_edges[e.from].push(i);
+            has_in[e.to] = true;
         }
     }
+    let roots: Vec<usize> = if sources_first {
+        (0..n).filter(|&v| !has_in[v]).chain(0..n).collect()
+    } else {
+        (0..n).collect()
+    };
     #[derive(Clone, Copy, PartialEq)]
     enum Mark {
         White,
@@ -953,7 +1023,7 @@ fn orient_edges(n: usize, edges: &[LayoutEdge], scale: usize) -> Vec<Option<Orie
     }
     let mut mark = vec![Mark::White; n];
     let mut reversed = vec![false; edges.len()];
-    for root in 0..n {
+    for root in roots {
         if mark[root] != Mark::White {
             continue;
         }
@@ -1001,6 +1071,137 @@ fn orient_edges(n: usize, edges: &[LayoutEdge], scale: usize) -> Vec<Option<Orie
 }
 
 const NETWORK_SIMPLEX_MAX_NODES: usize = 4000;
+
+/// Ranks per edge of length one: every edge spans two ranks (see `layout_flat`).
+const RANK_STEP: usize = 2;
+
+/// ELK's layers (of real nodes and label dummies) as ranks: a layer holding a real
+/// node gets the next even rank; one holding nothing but labels (and long edges)
+/// gets the odd rank before it, where the labels of edges between neighbouring
+/// layers sit anyway, so a label layer is spaced like dagre's label ranks.
+fn elk_ranks(layers: &[usize]) -> impl Fn(usize) -> usize + use<> {
+    let top = layers.iter().copied().max().unwrap_or(0);
+    let mut occupied = vec![false; top + 2];
+    for &l in layers {
+        occupied[l] = true;
+    }
+    let mut rank = Vec::with_capacity(top + 2);
+    let mut real: usize = 0;
+    for occ in occupied {
+        if occ {
+            rank.push(2 * real);
+            real += 1;
+        } else {
+            rank.push((2 * real).saturating_sub(1));
+        }
+    }
+    move |l: usize| rank[l.min(rank.len() - 1)]
+}
+
+/// ELK's network simplex layering ends with `NetworkSimplex.balance`: a node with as
+/// many incoming as outgoing edges, which can sit on any rank its edges allow at no
+/// cost, moves to the least filled of those ranks if it is strictly emptier than its
+/// own. Nodes are visited in model order and counted per connected component, as
+/// `NetworkSimplexLayerer` lays out each component on its own. Only the first `real`
+/// vertices are real nodes (and moved or counted); the rest, with their edges, only
+/// bound the ranks a node may take. Ranks of real nodes stay multiples of `step`.
+fn balance_ranks(
+    ranks: &mut [usize],
+    real: usize,
+    edges: &[Option<Oriented>],
+    step: usize,
+) -> Vec<usize> {
+    let total = ranks.len();
+    // Per vertex: (other end, minlen, counts as an edge) of its incoming / outgoing edges.
+    let mut ins: Vec<Vec<(usize, usize, bool)>> = vec![Vec::new(); total];
+    let mut outs: Vec<Vec<(usize, usize, bool)>> = vec![Vec::new(); total];
+    // Connected components of the real nodes (union-find).
+    let mut comp: Vec<usize> = (0..total).collect();
+    fn find(comp: &mut [usize], mut v: usize) -> usize {
+        while comp[v] != v {
+            comp[v] = comp[comp[v]];
+            v = comp[v];
+        }
+        v
+    }
+    for o in edges.iter().flatten() {
+        if o.from == o.to {
+            continue;
+        }
+        let counts = o.weight > 0.0;
+        outs[o.from].push((o.to, o.minlen, counts));
+        ins[o.to].push((o.from, o.minlen, counts));
+        let (a, b) = (find(&mut comp, o.from), find(&mut comp, o.to));
+        comp[a] = b;
+    }
+    // Each component is layered on its own, so each starts on the first rank.
+    let mut low: std::collections::HashMap<usize, usize> = Default::default();
+    let all_roots: Vec<usize> = (0..total).map(|v| find(&mut comp, v)).collect();
+    for v in 0..total {
+        let m = low.entry(all_roots[v]).or_insert(usize::MAX);
+        *m = (*m).min(ranks[v]);
+    }
+    for v in 0..total {
+        ranks[v] -= low[&all_roots[v]] / step * step;
+    }
+    let layered = ranks.to_vec();
+    let roots: Vec<usize> = (0..real).map(|v| find(&mut comp, v)).collect();
+    let mut filling: std::collections::HashMap<(usize, usize), usize> = Default::default();
+    for v in 0..real {
+        *filling.entry((roots[v], ranks[v])).or_default() += 1;
+    }
+    for v in 0..real {
+        let din = ins[v].iter().filter(|e| e.2).count();
+        let dout = outs[v].iter().filter(|e| e.2).count();
+        if din != dout || din == 0 {
+            continue;
+        }
+        let cur = ranks[v];
+        // ELK's `minimalSpan`, quirk included: an incoming edge no shorter than the
+        // shortest incoming one before it is taken for an outgoing one, so a node with
+        // two equally short incoming edges stays where it is.
+        let (mut span_in, mut span_out) = (usize::MAX, usize::MAX);
+        for &(u, _, _) in ins[v].iter().filter(|e| e.2) {
+            let span = cur.saturating_sub(ranks[u]);
+            if span < span_in {
+                span_in = span;
+            } else {
+                span_out = span_out.min(span);
+            }
+        }
+        for &(w, _, _) in outs[v].iter().filter(|e| e.2) {
+            span_out = span_out.min(ranks[w].saturating_sub(cur));
+        }
+        // Edges that do not count (cluster constraints) still bound the rank.
+        let lo = ins[v]
+            .iter()
+            .map(|&(u, len, _)| ranks[u] + len)
+            .chain([(cur + step).saturating_sub(span_in)])
+            .max()
+            .unwrap_or(cur);
+        let hi = outs[v]
+            .iter()
+            .map(|&(w, len, _)| ranks[w].saturating_sub(len))
+            .chain([(cur + span_out).saturating_sub(step)])
+            .min()
+            .unwrap_or(cur);
+        let fill = |r: usize| filling.get(&(roots[v], r)).copied().unwrap_or(0);
+        let mut best = cur;
+        let mut r = lo + (cur + step - lo % step) % step;
+        while r <= hi {
+            if fill(r) < fill(best) {
+                best = r;
+            }
+            r += step;
+        }
+        if best != cur && fill(best) < fill(cur) {
+            *filling.entry((roots[v], cur)).or_default() -= 1;
+            *filling.entry((roots[v], best)).or_default() += 1;
+            ranks[v] = best;
+        }
+    }
+    layered
+}
 
 /// Longest-path ranking refined by network simplex.
 fn rank_nodes(n: usize, edges: &[Option<Oriented>]) -> Vec<usize> {
@@ -1084,7 +1285,7 @@ fn rank_with_clusters(
     n: usize,
     oriented: &mut [Option<Oriented>],
     input: &LayoutInput,
-) -> Vec<usize> {
+) -> (Vec<usize>, Vec<usize>) {
     let mut slot: Vec<Option<usize>> = vec![None; input.clusters.len()];
     let mut used = Vec::new();
     let mut ends = Vec::with_capacity(oriented.len());
@@ -1103,8 +1304,15 @@ fn rank_with_clusters(
         }
         ends.push((src, dst));
     }
+    let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
     if used.is_empty() {
-        return rank_nodes(n, oriented);
+        let mut ranks = rank_nodes(n, oriented);
+        let layered = if elk {
+            balance_ranks(&mut ranks, n, oriented, 1)
+        } else {
+            ranks.clone()
+        };
+        return (ranks, layered);
     }
     let chains = cluster_chains(&input.clusters);
     let top = |c: usize| slot[c].map(|k| n + 2 * k);
@@ -1192,9 +1400,15 @@ fn rank_with_clusters(
             }
         }
     }
-    let all = rank_nodes(total, &edges);
+    let mut all = rank_nodes(total, &edges);
+    let layered = if elk {
+        balance_ranks(&mut all, n, &edges, 1)
+    } else {
+        all.clone()
+    };
     let min = all[..n].iter().copied().min().unwrap_or(0);
     let ranks: Vec<usize> = all[..n].iter().map(|r| r - min).collect();
+    let layered: Vec<usize> = layered[..n].iter().map(|r| r.saturating_sub(min)).collect();
     let in_cluster = |v: usize, c: usize| {
         input.nodes[v]
             .cluster
@@ -1219,7 +1433,7 @@ fn rank_with_clusters(
             }
         }
     }
-    ranks
+    (ranks, layered)
 }
 
 /// Root-to-cluster ancestor chains (inclusive).
@@ -2133,5 +2347,187 @@ mod tests {
         let out = layout(&inp);
         let l = out.edges[0].label.expect("label position");
         assert!(l.y > out.nodes[0].y + 20.0 && l.y < out.nodes[1].y - 20.0);
+    }
+
+    fn elk(mut inp: LayoutInput) -> LayoutInput {
+        inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+        inp
+    }
+
+    fn reversed(o: &[Option<Oriented>]) -> Vec<usize> {
+        (0..o.len())
+            .filter(|&i| o[i].as_ref().is_some_and(|o| o.reversed))
+            .collect()
+    }
+
+    fn edges_of(pairs: &[(usize, usize)]) -> Vec<LayoutEdge> {
+        pairs.iter().map(|&(a, b)| edge(a, b)).collect()
+    }
+
+    /// Nodes sorted top to bottom.
+    fn column(out: &LayoutOutput) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..out.nodes.len()).collect();
+        v.sort_by(|&a, &b| out.nodes[a].y.total_cmp(&out.nodes[b].y));
+        v
+    }
+
+    /// dagre starts its search at the first node; ELK's depth-first cycle breaker
+    /// at the sources (here only node 2), so it walks 2 → 3 → 1 → 0 → 4 and
+    /// reverses the four edges closing a cycle on that path: the graph becomes a
+    /// column (as mermaid draws it) instead of a wide layout.
+    #[test]
+    fn elk_cycle_breaking_starts_at_the_sources() {
+        let edges = edges_of(&[
+            (0, 1),
+            (0, 3),
+            (0, 4),
+            (1, 0),
+            (1, 3),
+            (2, 3),
+            (2, 4),
+            (3, 1),
+            (4, 1),
+        ]);
+        assert_eq!(reversed(&orient_edges(5, &edges, 2, false)), vec![3, 7]);
+        assert_eq!(
+            reversed(&orient_edges(5, &edges, 2, true)),
+            vec![0, 1, 4, 8]
+        );
+
+        let out = layout(&elk(input(
+            vec![node(None); 5],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        let order = column(&out);
+        assert_eq!(order, vec![2, 3, 1, 0, 4]);
+        for w in order.windows(2) {
+            assert!(out.nodes[w[1]].y > out.nodes[w[0]].y + 40.0, "{out:?}");
+        }
+    }
+
+    /// dagre keeps its own cycle breaking: from the first node, not the sources.
+    #[test]
+    fn dagre_cycle_breaking_starts_at_the_first_node() {
+        let edges = edges_of(&[(0, 1), (1, 0), (2, 1)]);
+        assert_eq!(reversed(&orient_edges(3, &edges, 2, false)), vec![1]);
+        assert_eq!(reversed(&orient_edges(3, &edges, 2, true)), vec![0]);
+        let out = layout(&input(
+            vec![node(None); 3],
+            edges.clone(),
+            vec![],
+            Direction::TopBottom,
+        ));
+        assert!(out.nodes[0].y < out.nodes[1].y, "{out:?}");
+        let out = layout(&elk(input(
+            vec![node(None); 3],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        assert_eq!(column(&out), vec![2, 1, 0]);
+    }
+
+    /// ELK's network simplex balancing: node 2 (one edge in, one out) may sit on
+    /// layer 1 or 2 at no cost and ends on the emptier one, layer 2.
+    #[test]
+    fn elk_balances_a_free_node_onto_the_emptier_layer() {
+        let edges = edges_of(&[(0, 1), (1, 3), (3, 4), (0, 2), (2, 4), (5, 1), (5, 6)]);
+        let out = layout(&elk(input(
+            vec![node(None); 7],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        assert!((out.nodes[2].y - out.nodes[3].y).abs() < 1.0, "{out:?}");
+        assert!((out.nodes[6].y - out.nodes[1].y).abs() < 1.0, "{out:?}");
+    }
+
+    /// ELK's `minimalSpan` takes a second, equally short incoming edge for an
+    /// outgoing one, so node 2 (parents 0 and 1, children 4 and 5 two layers
+    /// down) stays on the fuller layer 1.
+    #[test]
+    fn elk_balancing_keeps_a_node_with_two_short_incoming_edges() {
+        let edges = edges_of(&[
+            (0, 2),
+            (1, 2),
+            (2, 4),
+            (2, 5),
+            (0, 3),
+            (3, 6),
+            (6, 4),
+            (6, 5),
+            (0, 7),
+            (1, 3),
+        ]);
+        let out = layout(&elk(input(
+            vec![node(None); 8],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        assert!((out.nodes[2].y - out.nodes[3].y).abs() < 1.0, "{out:?}");
+        assert!((out.nodes[7].y - out.nodes[3].y).abs() < 1.0, "{out:?}");
+    }
+
+    /// ELK layers every connected component on its own, from the first layer.
+    #[test]
+    fn elk_components_start_on_the_first_layer() {
+        let edges = edges_of(&[(0, 1), (1, 2), (3, 2), (4, 5)]);
+        let out = layout(&elk(input(
+            vec![node(None); 6],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        assert!((out.nodes[4].y - out.nodes[0].y).abs() < 1.0, "{out:?}");
+    }
+
+    /// Under ELK a label is a node of its own layer: a labelled edge spans two
+    /// layers, and its label, in a layer of nodes, takes no extra room there.
+    #[test]
+    fn elk_labelled_edge_spans_two_layers() {
+        let mut edges = edges_of(&[(0, 1), (1, 2), (2, 3), (3, 4)]);
+        edges.push(LayoutEdge::new(5, 4, 1, Some((30.0, 20.0))));
+        let out = layout(&elk(input(
+            vec![node(None); 6],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        assert!((out.nodes[5].y - out.nodes[2].y).abs() < 1.0, "{out:?}");
+        let label = out.edges[4].label.expect("label");
+        assert!((label.y - out.nodes[3].y).abs() < 1.0, "{out:?}");
+        let gaps: Vec<f64> = (0..4)
+            .map(|i| out.nodes[i + 1].y - out.nodes[i].y)
+            .collect();
+        assert!(gaps.iter().all(|g| (g - gaps[0]).abs() < 1.0), "{gaps:?}");
+    }
+
+    /// When balancing moves a labelled edge's target down, the label stays in the
+    /// layer below the source with its siblings' labels (mermaid's flowchart
+    /// example: `C -->|Three| Car` beside `C -->|One| Laptop --> Database`).
+    #[test]
+    fn elk_label_stays_put_when_its_target_is_balanced_down() {
+        let lb = Some((30.0, 20.0));
+        let edges = vec![
+            LayoutEdge::new(0, 1, 1, lb),
+            LayoutEdge::new(0, 2, 1, lb),
+            LayoutEdge::new(0, 3, 1, lb),
+            edge(1, 4),
+            edge(2, 4),
+            edge(4, 5),
+            edge(3, 5),
+        ];
+        let out = layout(&elk(input(
+            vec![node(None); 6],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        assert!((out.nodes[3].y - out.nodes[4].y).abs() < 1.0, "{out:?}");
+        let ly = |e: usize| out.edges[e].label.expect("label").y;
+        assert!((ly(2) - ly(0)).abs() < 1.0, "{out:?}");
     }
 }
