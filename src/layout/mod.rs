@@ -418,15 +418,14 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         rank_with_clusters(n, &mut oriented, input, &is_ext);
     if elk && !hier.ext.is_empty() {
         let moved = pin_ext_neighbours(
-            &mut ranks,
-            &mut layered,
+            (&mut ranks, &mut layered, &created),
             input,
             &oriented,
             &hidden,
             &is_ext,
             hier,
         );
-        // `LayerConstraintPostprocessor` appends what it moves to the last layer.
+        // `LayerConstraintPostprocessor` appends what it moves to its layer.
         for (k, v) in moved.into_iter().enumerate() {
             if let Some(c) = created.get_mut(v) {
                 *c = usize::MAX / 2 + k;
@@ -750,10 +749,12 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
 /// constraint of the dummies it was joined to: `FIRST` if it only met ports where
 /// edges enter, `LAST` if only ports where they leave (any other mix: none). It is
 /// layered on its own, on the first layer, and `LayerConstraintPostprocessor` then
-/// moves a `LAST` node to the last layer (dropping a layer left empty).
+/// moves a `LAST` node to the last layer (dropping a layer left empty) and puts a
+/// `FIRST` one back on the first: either goes to the end of its layer's list.
+/// Returns the nodes it moved, in the order it moved them (layer by layer, in
+/// the order of `created`).
 fn pin_ext_neighbours(
-    ranks: &mut [usize],
-    layered: &mut [usize],
+    (ranks, layered, created): (&mut [usize], &mut [usize], &[usize]),
     input: &LayoutInput,
     oriented: &[Option<Oriented>],
     hidden: &[Option<Oriented>],
@@ -793,12 +794,18 @@ fn pin_ext_neighbours(
     let Some(mut last) = real.iter().map(|&v| ranks[v]).max() else {
         return moved;
     };
-    for &v in &real {
-        if seen[v] != (false, false, true) || ranks[v] == last {
+    let mut pinned: Vec<usize> = real
+        .iter()
+        .copied()
+        .filter(|&v| matches!(seen[v], (false, true, false) | (false, false, true)))
+        .collect();
+    pinned.sort_by_key(|&v| (ranks[v], created.get(v).copied().unwrap_or(v)));
+    for v in pinned {
+        moved.push(v);
+        if seen[v].1 || ranks[v] == last {
             continue;
         }
         let old = ranks[v];
-        moved.push(v);
         ranks[v] = last;
         layered[v] = last;
         // The layer it left may now be empty (a label dummy's layer lies between

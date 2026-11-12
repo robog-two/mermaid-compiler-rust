@@ -1907,6 +1907,34 @@ mod tests {
         assert!((out.nodes[0].y - c.y - c.h / 2.0).abs() < 1e-6, "{out:?}");
     }
 
+    /// A member joined only to ports where edges enter takes ELK's `FIRST`
+    /// constraint, and `LayerConstraintPostprocessor` puts it back at the end of
+    /// the first layer's list, which the crossing minimisation starts from (elkjs:
+    /// `subgraph S0: s0n0 s0n1 s0n2 s0n3, s0n3 --> s0n0 end; x1 --> s0n1;
+    /// s0n0 --> x1`: s0n2, s0n1, s0n3 from the left).
+    #[test]
+    fn elk_member_only_entered_from_outside_goes_last_in_its_layer() {
+        let inp = elk(input(
+            vec![
+                node(Some(0)),
+                node(Some(0)),
+                node(Some(0)),
+                node(Some(0)),
+                node(None),
+            ],
+            vec![
+                LayoutEdge::new(3, 0, 1, None),
+                LayoutEdge::new(4, 1, 1, None),
+                LayoutEdge::new(0, 4, 1, None),
+            ],
+            vec![with_dir(None, None)],
+            Direction::TopBottom,
+        ));
+        let out = layout(&inp);
+        let x = |v: usize| out.nodes[v].x;
+        assert!(x(2) < x(1) && x(1) < x(3), "{out:?}");
+    }
+
     fn elk(mut inp: LayoutInput) -> LayoutInput {
         inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
         inp
