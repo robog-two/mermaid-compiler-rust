@@ -853,15 +853,15 @@ fn finish(
         let label_across: Vec<f64> = verts
             .iter()
             .map(|v| match v.kind {
-                Kind::Dummy { labeled: true } => (v.w
-                    - if horizontal {
-                        ELK_LABEL_PAD.1
-                    } else {
-                        ELK_LABEL_PAD.0
-                    })
-                .max(0.0),
+                Kind::Dummy { labeled: true } => v.w,
                 _ => 0.0,
             })
+            .collect();
+        // The cross size of each edge's end labels (at its source, its target).
+        let end_labels: Vec<[Option<f64>; 2]> = input
+            .edges
+            .iter()
+            .map(|e| e.terminals.map(|t| t.map(|(w, h)| swap(w, h).0)))
             .collect();
         elk_place(
             &layers,
@@ -872,6 +872,7 @@ fn finish(
             &label_across,
             &is_ext,
             &hier.ports,
+            &end_labels,
             elk_spacing(graph, input.node_sep),
         )
     });
@@ -1446,10 +1447,6 @@ fn self_loop(c: Point, node: &LayoutNode, label: Option<(f64, f64)>) -> EdgeRout
     EdgeRoute { points, label }
 }
 
-/// The padding the diagrams add around an edge label's text (width, height) for
-/// the layout; mermaid hands ELK the bare text size.
-const ELK_LABEL_PAD: (f64, f64) = (8.0, 4.0);
-
 /// ELK keeps a node's ports this far from the ends of its side (and spreads
 /// them evenly over the rest).
 const ELK_PORT_INSET: f64 = 10.0;
@@ -1507,6 +1504,7 @@ fn elk_place(
     label_across: &[f64],
     is_ext: &[bool],
     fixed: &[(Option<f64>, Option<f64>)],
+    end_labels: &[[Option<f64>; 2]],
     spacing: elkbk::Spacing,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let nv = verts.len();
@@ -1527,7 +1525,7 @@ fn elk_place(
         }
     }
     let kept = |v: usize| kept_rank(verts[v].rank);
-    let nodes: Vec<elkbk::Node> = verts
+    let mut nodes: Vec<elkbk::Node> = verts
         .iter()
         .enumerate()
         .map(|(v, vx)| {
@@ -1600,6 +1598,31 @@ fn elk_place(
             for (&(_, _, ei), off) in side.iter().zip(elk_port_offsets(side.len(), verts[v].w)) {
                 port[ei] = off;
             }
+        }
+    }
+    // ELK's `EndLabelPreprocessor` puts an edge's end labels beside its port,
+    // on the port's far side along the cross axis (the edge-label spacing and
+    // the edge's thickness from it), and widens the node's margins to hold them.
+    for (ei, c) in chains.iter().enumerate() {
+        let Some((chain, _, reversed)) = c else {
+            continue;
+        };
+        let labels = end_labels.get(ei).copied().unwrap_or_default();
+        let (at_from, at_to) = if *reversed {
+            (labels[1], labels[0])
+        } else {
+            (labels[0], labels[1])
+        };
+        let ends = [
+            (chain[0], at_from, out_port[ei]),
+            (chain[chain.len() - 1], at_to, in_port[ei]),
+        ];
+        for (v, across, port) in ends {
+            let Some(across) = across.filter(|_| v < real && chain.len() >= 2) else {
+                continue;
+            };
+            let over = port + ELK_END_LABEL_EDGE_GAP + across - verts[v].w;
+            nodes[v].margin_bottom = nodes[v].margin_bottom.max(over);
         }
     }
     let port_of = |v: usize| match nodes[v].kind {
@@ -3629,6 +3652,70 @@ mod tests {
 
     /// ELK reserves room beside a port for its edge's end labels: the layer gap
     /// grows by the edge-label spacing and the label's depth on each side.
+    #[test]
+    fn elk_end_labels_widen_a_narrow_node_across() {
+        // A -> B, A -> C, B -> C (TB) with narrow nodes: the long edge A -> C
+        // passes B. B's end label at its port to C sticks out of B's right side
+        // (port 17.0625 + 5 + 17.5 > 34.125) and keeps the long edge further off.
+        let clear = |label: Option<(f64, f64)>| {
+            let narrow = LayoutNode {
+                width: 34.125,
+                height: 81.0,
+                cluster: None,
+            };
+            let mut inp = elk(input(
+                vec![narrow.clone(), narrow.clone(), narrow],
+                vec![edge(0, 1), edge(0, 2), edge(1, 2)],
+                vec![],
+                Direction::TopBottom,
+            ));
+            inp.edges[2].terminals = [label, None];
+            let out = layout(&inp);
+            let b = out.nodes[1];
+            // Where the long edge passes B's rank.
+            let pts = &out.edges[1].points;
+            let pass = pts
+                .windows(2)
+                .find(|w| {
+                    (w[0].x - w[1].x).abs() < 1e-9
+                        && w[0].y.min(w[1].y) < b.y
+                        && w[0].y.max(w[1].y) > b.y
+                })
+                .map(|w| w[0].x)
+                .unwrap_or(f64::NAN);
+            pass - (b.x + 34.125 / 2.0)
+        };
+        let plain = clear(None);
+        let labelled = clear(Some((17.5, 28.5)));
+        let over = 34.125 / 2.0 + 5.0 + 17.5 - 34.125;
+        assert!((labelled - plain - over).abs() < 1e-6, "{plain} {labelled}");
+    }
+
+    #[test]
+    fn elk_edge_label_keeps_its_whole_width_clear() {
+        // Z -> A labelled, Z -> K -> A: K shares the label's layer, a node
+        // spacing clear of the label's full width.
+        let mut inp = elk(input(
+            vec![node(None), node(None), node(None)],
+            vec![edge(0, 1), edge(0, 2), edge(2, 1)],
+            vec![],
+            Direction::TopBottom,
+        ));
+        inp.edges[0].label = Some((83.0, 21.0));
+        let out = layout(&inp);
+        let label = out.edges[0].label.unwrap_or_default();
+        let k = out.nodes[2];
+        let gap = if k.x > label.x {
+            (k.x - 40.0) - (label.x + 41.5)
+        } else {
+            (label.x - 41.5) - (k.x + 40.0)
+        };
+        assert!(
+            gap >= inp.node_sep - 1e-6 && gap < inp.node_sep + 1.0,
+            "{gap}"
+        );
+    }
+
     #[test]
     fn elk_end_labels_deepen_the_layer_gap() {
         let gap = |terminals: [Option<(f64, f64)>; 2]| {
