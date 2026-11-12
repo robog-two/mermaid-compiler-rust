@@ -1,6 +1,7 @@
 //! Graph IR shared by flowcharts, state diagrams and class diagrams, plus the
 //! pure renderer `GraphDiagram -> Scene` (layout → shapes → edges → labels).
 
+use super::elkedges;
 use super::markers::{self, End, MarkerColors};
 use super::shapes::{self, Boundary, PartStyle, ShapeMetrics};
 use crate::config::{Curve, GraphConfig, LayoutAlgorithm, Look as ConfigLook};
@@ -1135,6 +1136,9 @@ pub fn render_with(
     // index in `edge_els` of its drawn group (none for an invisible edge, which still
     // takes part: upstream paints it with an invisible stroke).
     let mut hop_edges: Vec<(linejump::EdgeGeom, Option<usize>)> = Vec::new();
+    // Every edge's clipped route and label position first: under ELK mermaid then
+    // straightens the routes' terminal steps and separates opposite labels.
+    let mut routed: Vec<Option<(Vec<Point>, Option<Point>)>> = vec![None; g.edges.len()];
     for (ei, (e, route)) in g.edges.iter().zip(&out.edges).enumerate() {
         let mut pts = route.points.clone();
         let mut label_at = route.label;
@@ -1202,6 +1206,52 @@ pub fn render_with(
                 continue;
             }
         }
+        routed[ei] = Some((pts, label_at));
+    }
+    if elk {
+        let mut routes: Vec<Option<Vec<Point>>> = routed
+            .iter()
+            .map(|r| r.as_ref().map(|r| r.0.clone()))
+            .collect();
+        let mut labels: Vec<Option<elkedges::Label>> = routed
+            .iter()
+            .zip(&edge_labels)
+            .map(|(r, b)| {
+                let (r, b) = (r.as_ref()?, b.as_ref()?);
+                Some(elkedges::Label {
+                    center: r.1?,
+                    width: b.width,
+                    height: b.height,
+                })
+            })
+            .collect();
+        elkedges::straighten_edge_terminals(&mut routes, &mut labels);
+        let pairs: Vec<(String, String)> = g
+            .edges
+            .iter()
+            .map(|e| {
+                let (a, b) = (endpoint_id(g, e.from), endpoint_id(g, e.to));
+                if a <= b { (a, b) } else { (b, a) }
+            })
+            .collect();
+        let pair_ids: Vec<usize> = pairs
+            .iter()
+            .map(|p| pairs.iter().position(|q| q == p).unwrap_or(0))
+            .collect();
+        elkedges::separate_opposite_edge_labels(&mut labels, &pair_ids);
+        for ((r, route), label) in routed.iter_mut().zip(routes).zip(labels) {
+            if let (Some(r), Some(route)) = (r.as_mut(), route) {
+                r.0 = route;
+                if let Some(l) = label {
+                    r.1 = Some(l.center);
+                }
+            }
+        }
+    }
+    for (ei, e) in g.edges.iter().enumerate() {
+        let Some((mut pts, label_at)) = routed[ei].take() else {
+            continue;
+        };
         // A neo edge takes the `*-margin` markers (`useMargin`), the neo barb's
         // pull-back, and leaves its last `markerOffsets2` px undrawn.
         let neo = cfg.look == ConfigLook::Neo;
