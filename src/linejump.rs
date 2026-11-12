@@ -135,41 +135,103 @@ fn in_rounded_corner(edge: &EdgeGeom, seg: usize, t: f64) -> bool {
     leaving.is_some_and(|cut| seg_len - d < cut)
 }
 
+/// Grid cell size for the crossing search; segments are only tested against
+/// segments sharing a cell, so the search stays near-linear in drawing size.
+const CELL: f64 = 128.0;
+
 /// `findEdgeIntersections`: every crossing, attributed to the edge that hops.
+///
+/// Upstream compares every segment pair; this finds the same crossings, in the
+/// same order, through a uniform grid over the segments' bounding boxes.
 fn find_crossings(edges: &[EdgeGeom]) -> Vec<Crossing> {
-    let mut out = Vec::new();
-    for (i, ea) in edges.iter().enumerate() {
-        for (j, eb) in edges.iter().enumerate().skip(i + 1) {
-            for (si, sa) in ea.points.windows(2).enumerate() {
-                for (sj, sb) in eb.points.windows(2).enumerate() {
-                    let Some((point, ta, tb)) = segment_intersection(sa[0], sa[1], sb[0], sb[1])
-                    else {
-                        continue;
-                    };
-                    if in_rounded_corner(ea, si, ta) || in_rounded_corner(eb, sj, tb) {
-                        continue;
-                    }
-                    let (ah, bh) = (is_horizontal(sa[0], sa[1]), is_horizontal(sb[0], sb[1]));
-                    // A horizontal segment hops a vertical one; any other pair hops on
-                    // the later edge.
-                    out.push(if ah != bh && ah {
-                        Crossing {
-                            edge: i,
-                            segment: si,
-                            t: ta,
-                            point,
-                        }
-                    } else {
-                        Crossing {
-                            edge: j,
-                            segment: sj,
-                            t: tb,
-                            point,
-                        }
-                    });
+    use std::collections::HashMap;
+    struct Seg {
+        edge: usize,
+        idx: usize,
+        min: (f64, f64),
+        max: (f64, f64),
+    }
+    let cell = |v: f64| (v / CELL).floor() as i64;
+    let mut segs = Vec::new();
+    let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (e, edge) in edges.iter().enumerate() {
+        for (idx, w) in edge.points.windows(2).enumerate() {
+            let (a, b) = (w[0], w[1]);
+            if !(a.x.is_finite() && a.y.is_finite() && b.x.is_finite() && b.y.is_finite()) {
+                continue;
+            }
+            let min = (a.x.min(b.x), a.y.min(b.y));
+            let max = (a.x.max(b.x), a.y.max(b.y));
+            let id = segs.len();
+            segs.push(Seg {
+                edge: e,
+                idx,
+                min,
+                max,
+            });
+            for gx in cell(min.0)..=cell(max.0) {
+                for gy in cell(min.1)..=cell(max.1) {
+                    grid.entry((gx, gy)).or_default().push(id);
                 }
             }
         }
+    }
+    let mut found = Vec::new();
+    for (&(gx, gy), ids) in &grid {
+        for (k, &p) in ids.iter().enumerate() {
+            for &q in &ids[k + 1..] {
+                let (sp, sq) = (&segs[p], &segs[q]);
+                if sp.edge == sq.edge {
+                    continue;
+                }
+                let (sa, sb) = if sp.edge < sq.edge {
+                    (sp, sq)
+                } else {
+                    (sq, sp)
+                };
+                // Report each pair once: in the cell holding the low corner of the
+                // overlap of their boxes (pairs whose boxes miss cannot cross).
+                let lo = (sa.min.0.max(sb.min.0), sa.min.1.max(sb.min.1));
+                if lo.0 > sa.max.0.min(sb.max.0) || lo.1 > sa.max.1.min(sb.max.1) {
+                    continue;
+                }
+                if (cell(lo.0), cell(lo.1)) != (gx, gy) {
+                    continue;
+                }
+                found.push((sa.edge, sb.edge, sa.idx, sb.idx));
+            }
+        }
+    }
+    found.sort_unstable();
+    let mut out = Vec::new();
+    for (i, j, si, sj) in found {
+        let (ea, eb) = (&edges[i], &edges[j]);
+        let (a1, a2) = (ea.points[si], ea.points[si + 1]);
+        let (b1, b2) = (eb.points[sj], eb.points[sj + 1]);
+        let Some((point, ta, tb)) = segment_intersection(a1, a2, b1, b2) else {
+            continue;
+        };
+        if in_rounded_corner(ea, si, ta) || in_rounded_corner(eb, sj, tb) {
+            continue;
+        }
+        let (ah, bh) = (is_horizontal(a1, a2), is_horizontal(b1, b2));
+        // A horizontal segment hops a vertical one; any other pair hops on the
+        // later edge.
+        out.push(if ah != bh && ah {
+            Crossing {
+                edge: i,
+                segment: si,
+                t: ta,
+                point,
+            }
+        } else {
+            Crossing {
+                edge: j,
+                segment: sj,
+                t: tb,
+                point,
+            }
+        });
     }
     out
 }
