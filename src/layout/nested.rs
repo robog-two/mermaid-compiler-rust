@@ -173,6 +173,137 @@ struct Level {
 }
 
 pub(super) fn layout(input: &LayoutInput) -> LayoutOutput {
+    if !matches!(input.routing, EdgeRouting::Orthogonal(_)) || input.clusters.is_empty() {
+        return layout_tree(input);
+    }
+    // mermaid's ELK adapter (`elk.orientFeedbackEdges`, on by default) turns round
+    // the feedback edges between whole clusters before ELK sees them; they are laid
+    // out the other way and drawn back from their own source.
+    let flags = subgraph_feedback_edges(input);
+    if !flags.contains(&true) {
+        return layout_tree(input);
+    }
+    let mut turned = input.clone();
+    for (e, _) in turned.edges.iter_mut().zip(&flags).filter(|(_, f)| **f) {
+        std::mem::swap(&mut e.from, &mut e.to);
+        std::mem::swap(&mut e.from_cluster, &mut e.to_cluster);
+    }
+    let mut out = layout_tree(&turned);
+    for (r, _) in out.edges.iter_mut().zip(&flags).filter(|(_, f)| **f) {
+        r.points.reverse();
+    }
+    out
+}
+
+/// mermaid's `findSubgraphFeedbackEdges`: per common ancestor, the edges between its
+/// children (each end lifted to the child of the ancestor containing it) form a
+/// graph; a depth-first search from its sources first, then from every vertex, in
+/// order of first appearance, finds the edges closing a cycle. Such an edge is
+/// flagged if an end was lifted, i.e. it attaches to (or inside) a cluster.
+fn subgraph_feedback_edges(input: &LayoutInput) -> Vec<bool> {
+    let chains = cluster_chains(&input.clusters);
+    let mut flags = vec![false; input.edges.len()];
+    // The ancestor chain of a member, itself first, up to (not including) the root.
+    let up = |m: Member| -> Vec<Member> {
+        let mut out = vec![m];
+        let cluster = match m {
+            Member::Node(n) => input.nodes[n].cluster,
+            Member::Cluster(c) => input.clusters[c].parent,
+        };
+        if let Some(c) = cluster {
+            out.extend(chains[c].iter().rev().map(|&a| Member::Cluster(a)));
+        }
+        out
+    };
+    // (ancestor, [(edge, from, to, collapsed)]) in order of first appearance.
+    type Level = (Option<usize>, Vec<(usize, Member, Member, bool)>);
+    let mut levels: Vec<Level> = Vec::new();
+    for (ei, e) in input.edges.iter().enumerate() {
+        let src = e.from_cluster.map_or(Member::Node(e.from), Member::Cluster);
+        let dst = e.to_cluster.map_or(Member::Node(e.to), Member::Cluster);
+        if src == dst {
+            continue;
+        }
+        let (us, ud) = (up(src), up(dst));
+        // `findCommonAncestor`: the first of the target's chain on the source's.
+        let anc = ud.iter().find(|m| us.contains(m)).copied();
+        if anc == Some(src) || anc == Some(dst) {
+            continue;
+        }
+        let anc = anc.and_then(|m| match m {
+            Member::Cluster(c) => Some(c),
+            Member::Node(_) => None,
+        });
+        let below = |chain: &[Member]| -> Member {
+            let k = match anc {
+                Some(a) => chain
+                    .iter()
+                    .position(|&m| m == Member::Cluster(a))
+                    .unwrap_or(chain.len()),
+                None => chain.len(),
+            };
+            chain[k.saturating_sub(1)]
+        };
+        let (from, to) = (below(&us), below(&ud));
+        let edge = (ei, from, to, from != src || to != dst);
+        match levels.iter_mut().find(|(a, _)| *a == anc) {
+            Some((_, list)) => list.push(edge),
+            None => levels.push((anc, vec![edge])),
+        }
+    }
+    for (_, level) in &levels {
+        let mut nodes: Vec<Member> = Vec::new();
+        let mut indeg: Vec<usize> = Vec::new();
+        for &(_, f, t, _) in level {
+            for m in [f, t] {
+                if !nodes.contains(&m) {
+                    nodes.push(m);
+                    indeg.push(0);
+                }
+            }
+            let k = nodes.iter().position(|&m| m == t).unwrap_or(0);
+            indeg[k] += 1;
+        }
+        let idx = |m: Member| nodes.iter().position(|&x| x == m).unwrap_or(0);
+        let succ: Vec<Vec<usize>> = (0..nodes.len())
+            .map(|k| (0..level.len()).filter(|&i| idx(level[i].1) == k).collect())
+            .collect();
+        // 0 unseen, 1 on the stack, 2 done.
+        let mut state = vec![0u8; nodes.len()];
+        let roots = (0..nodes.len())
+            .filter(|&k| indeg[k] == 0)
+            .chain(0..nodes.len());
+        for root in roots.collect::<Vec<_>>() {
+            if state[root] != 0 {
+                continue;
+            }
+            state[root] = 1;
+            let mut stack = vec![(root, 0usize)];
+            while let Some(&mut (v, ref mut next)) = stack.last_mut() {
+                let Some(&i) = succ[v].get(*next) else {
+                    state[v] = 2;
+                    stack.pop();
+                    continue;
+                };
+                *next += 1;
+                let (ei, _, to, collapsed) = level[i];
+                let w = idx(to);
+                match state[w] {
+                    1 => flags[ei] = collapsed,
+                    0 => {
+                        state[w] = 1;
+                        stack.push((w, 0));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    flags
+}
+
+/// The layout proper (see the module documentation).
+fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     let nc = input.clusters.len();
     if nc == 0 {
         return layout_flat(input);
@@ -514,6 +645,7 @@ fn layout_level(
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use super::subgraph_feedback_edges;
 
     fn node(cluster: Option<usize>) -> LayoutNode {
         LayoutNode {
@@ -729,5 +861,75 @@ mod tests {
         let out = layout(&inp);
         assert!(out.nodes[3].y > out.nodes[2].y + 40.0, "{out:?}");
         assert!(out.nodes[3].y > out.clusters[0].bottom());
+    }
+
+    /// `x --> C` with `b --> x` from inside C: mermaid's adapter turns the edge
+    /// back into C round before ELK sees it, so x stays above the whole cluster
+    /// (rather than C's members wrapping round x).
+    #[test]
+    fn feedback_edge_out_of_a_cluster_is_laid_out_reversed() {
+        let to_c = LayoutEdge {
+            to_cluster: Some(0),
+            ..LayoutEdge::new(0, 1, 1, None)
+        };
+        let mut inp = input(
+            vec![node(None), node(Some(0)), node(Some(0))],
+            vec![
+                to_c,
+                LayoutEdge::new(1, 2, 1, None),
+                LayoutEdge::new(2, 0, 1, None),
+            ],
+            vec![with_dir(None, None)],
+            Direction::TopBottom,
+        );
+        // dagre has no such pass.
+        assert_eq!(subgraph_feedback_edges(&inp), vec![false, false, true]);
+        inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+        let out = layout(&inp);
+        assert!(out.nodes[0].y < out.clusters[0].y, "{out:?}");
+        // The edge is still drawn from b to x.
+        let pts = &out.edges[2].points;
+        assert!(pts[0].y > pts[pts.len() - 1].y, "{pts:?}");
+    }
+
+    /// Two sibling clusters fed by x, one feeding back: both hang below x, side
+    /// by side, as mermaid draws them.
+    #[test]
+    fn sibling_clusters_with_a_feedback_edge_hang_below_their_source() {
+        let whole = |from: usize, to: usize, c: usize| LayoutEdge {
+            to_cluster: Some(c),
+            ..LayoutEdge::new(from, to, 1, None)
+        };
+        let mut inp = input(
+            vec![
+                node(None),
+                node(Some(0)),
+                node(Some(0)),
+                node(Some(1)),
+                node(Some(1)),
+            ],
+            vec![
+                whole(0, 1, 0),
+                LayoutEdge::new(1, 2, 1, None),
+                LayoutEdge::new(3, 4, 1, None),
+                whole(0, 3, 1),
+                LayoutEdge::new(4, 0, 1, None),
+            ],
+            vec![with_dir(None, None), with_dir(None, None)],
+            Direction::TopBottom,
+        );
+        inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+        assert_eq!(
+            subgraph_feedback_edges(&inp),
+            vec![false, false, false, false, true]
+        );
+        let out = layout(&inp);
+        let (c0, c1) = (out.clusters[0], out.clusters[1]);
+        assert!(out.nodes[0].y < c0.y && out.nodes[0].y < c1.y, "{out:?}");
+        assert!(!c0.intersects(&c1), "{out:?}");
+        assert!(
+            c0.y < c1.bottom() && c1.y < c0.bottom(),
+            "side by side: {out:?}"
+        );
     }
 }
