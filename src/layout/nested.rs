@@ -263,7 +263,86 @@ pub(super) fn layout(input: &LayoutInput) -> LayoutOutput {
     for (r, _) in edges.iter_mut().zip(&flags).filter(|(_, f)| **f) {
         r.points.reverse();
     }
-    LayoutOutput { edges, ..laid }
+    let mut out = LayoutOutput { edges, ..laid };
+    even_group_frames(input, &mut out);
+    out
+}
+
+/// mermaid's `evenGroupFrames`, after ELK: deepest first, a container's frame
+/// is pulled in (never pushed out) to its padding from what it holds (its
+/// children's boxes, the routes of edges with both ends inside it and the
+/// ends of edges on it) on the left, the right and the bottom; the top keeps
+/// its title band. ELK sizes a container around more (lanes of edges that
+/// leave it, the room around its port dummies), which stays laid out but
+/// unframed.
+fn even_group_frames(input: &LayoutInput, out: &mut LayoutOutput) {
+    let nc = input.clusters.len();
+    let chains = cluster_chains(&input.clusters);
+    let pad = input.cluster_padding;
+    let inside = |cluster: Option<usize>, c: usize| {
+        cluster.is_some_and(|k| chains.get(k).is_some_and(|ch| ch.contains(&c)))
+    };
+    let mut order: Vec<usize> = (0..nc).collect();
+    order.sort_by_key(|&c| std::cmp::Reverse(chains[c].len()));
+    for c in order {
+        let frame = out.clusters[c];
+        let mut xs: Vec<f64> = Vec::new();
+        let mut ys: Vec<f64> = Vec::new();
+        let mut boxes = 0;
+        for (v, nd) in input.nodes.iter().enumerate() {
+            if nd.cluster == Some(c) && nd.width > 0.0 && nd.height > 0.0 {
+                let r = Rect::centered(out.nodes[v], nd.width, nd.height);
+                xs.extend([r.x, r.right()]);
+                ys.extend([r.y, r.bottom()]);
+                boxes += 1;
+            }
+        }
+        for (k, cl) in input.clusters.iter().enumerate() {
+            let r = out.clusters[k];
+            if cl.parent == Some(c) && k != c && r.w > 0.0 && r.h > 0.0 {
+                xs.extend([r.x, r.right()]);
+                ys.extend([r.y, r.bottom()]);
+                boxes += 1;
+            }
+        }
+        if boxes == 0 || frame.w <= 0.0 || frame.h <= 0.0 {
+            continue;
+        }
+        for (e, route) in input.edges.iter().zip(&out.edges) {
+            let end_in = |node: usize, whole: Option<usize>| match whole {
+                Some(k) => k != c && inside(Some(k), c),
+                None => inside(input.nodes[node].cluster, c),
+            };
+            let (first, last) = (route.points.first(), route.points.last());
+            let points: Vec<Point> = if end_in(e.from, e.from_cluster) && end_in(e.to, e.to_cluster)
+            {
+                route.points.clone()
+            } else {
+                let start = first.filter(|_| e.from_cluster == Some(c));
+                let end = last.filter(|_| e.to_cluster == Some(c));
+                start.into_iter().chain(end).copied().collect()
+            };
+            xs.extend(points.iter().map(|p| p.x));
+            ys.extend(points.iter().map(|p| p.y));
+        }
+        let min = |v: &[f64]| v.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = |v: &[f64]| v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let left = frame.x.max(min(&xs) - pad);
+        let right = frame.right().min(max(&xs) + pad);
+        let bottom = frame.bottom().min(max(&ys) + pad);
+        let (mut x, mut w) = (left, right - left);
+        let floor = input.clusters[c].min_width;
+        if w < floor {
+            x -= (floor - w) / 2.0;
+            w = floor;
+            x = frame.x.max(x.min(frame.right() - w));
+            w = w.min(frame.w);
+        }
+        let h = bottom - frame.y;
+        if h > 0.0 && w > 0.0 {
+            out.clusters[c] = Rect::new(x, frame.y, w, h);
+        }
+    }
 }
 
 /// mermaid's `orderNestedEdgeEnds`: an edge moves in front of the first edge
@@ -1168,6 +1247,34 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
             add(*r);
         }
     }
+    // ELK sizes a layer of external port dummies with `spacing.portsSurrounding`
+    // beyond its first and last dummy (`LayerSizeAndGraphHeightCalculator`);
+    // where they are ELK nodes at all (see `elkorder::minimize_run`).
+    let mut bbox = bbox.unwrap_or_default();
+    if elk && !ext_kinds.iter().all(|k| k.2) {
+        let horizontal = flat.direction.is_horizontal();
+        for entering in [true, false] {
+            let cross: Vec<f64> = ext_kinds
+                .iter()
+                .filter(|k| k.1 == entering)
+                .map(|k| out.nodes[k.0])
+                .map(|p| if horizontal { p.y } else { p.x })
+                .collect();
+            let lo = cross.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = cross.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            if lo > hi {
+                continue;
+            }
+            let (lo, hi) = (lo - ELK_PORTS_SURROUNDING, hi + ELK_PORTS_SURROUNDING);
+            if horizontal {
+                let (y0, y1) = (bbox.y.min(lo), bbox.bottom().max(hi));
+                bbox = Rect::new(bbox.x, y0, bbox.w, y1 - y0);
+            } else {
+                let (x0, x1) = (bbox.x.min(lo), bbox.right().max(hi));
+                bbox = Rect::new(x0, bbox.y, x1 - x0, bbox.h);
+            }
+        }
+    }
     Level {
         items,
         out,
@@ -1175,9 +1282,12 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
         edge_ids,
         segs: seg_of,
         ext_kinds,
-        bbox: bbox.unwrap_or_default(),
+        bbox,
     }
 }
+
+/// mermaid's `elk.spacing.portsSurrounding` (12 on every side).
+const ELK_PORTS_SURROUNDING: f64 = 12.0;
 
 /// ELK's crossing minimisation for every level, the levels of one ELK run
 /// (the root, or a container laid out on its own, with the containers laid out
@@ -1275,7 +1385,7 @@ fn order_runs(
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use super::subgraph_feedback_edges;
+    use super::{even_group_frames, subgraph_feedback_edges};
 
     fn node(cluster: Option<usize>) -> LayoutNode {
         LayoutNode {
@@ -1707,6 +1817,40 @@ mod tests {
         // ... into C0's west side, eastwards.
         let before = pts[pts.len() - 2];
         assert!((last.x - c0.x).abs() < 1e-6 && before.x < last.x, "{pts:?}");
+    }
+
+    /// mermaid draws a container's frame its padding from what it holds on the
+    /// left, right and bottom, whatever room ELK left around it; an edge with
+    /// both ends inside keeps its lane framed, one leaving does not.
+    #[test]
+    fn group_frames_are_pulled_in_to_their_contents() {
+        let nodes = vec![node(Some(0)), node(Some(0)), node(None)];
+        let clusters = vec![with_dir(None, None)];
+        let edges = vec![
+            LayoutEdge::new(0, 1, 1, None),
+            LayoutEdge::new(0, 2, 1, None),
+        ];
+        let inp = elk(input(nodes, edges, clusters, Direction::TopBottom));
+        let p = |x: f64, y: f64| Point::new(x, y);
+        let route = |points: Vec<Point>| EdgeRoute {
+            points,
+            label: None,
+        };
+        let mut out = LayoutOutput {
+            nodes: vec![p(100.0, 100.0), p(100.0, 200.0), p(400.0, 400.0)],
+            edges: vec![
+                // Inside: a lane out to the right (x = 170).
+                route(vec![p(100.0, 120.0), p(170.0, 150.0), p(100.0, 180.0)]),
+                // Leaving: its lane on the left (x = 0) is not the frame's.
+                route(vec![p(100.0, 120.0), p(0.0, 150.0), p(400.0, 380.0)]),
+            ],
+            clusters: vec![Rect::new(-20.0, 30.0, 260.0, 260.0)],
+            cluster_directions: vec![Direction::TopBottom],
+        };
+        even_group_frames(&inp, &mut out);
+        // Children span x 60..140, y 80..220: left 60 - 24, right the lane's
+        // 170 + 24, bottom 220 + 24, the top as it was.
+        assert_eq!(out.clusters[0], Rect::new(36.0, 30.0, 158.0, 214.0));
     }
 
     /// ELK gives an edge to a container of the run a port dummy inside it too,

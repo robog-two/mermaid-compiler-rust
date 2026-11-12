@@ -3184,7 +3184,9 @@ mod tests {
     /// LR: `s --> a`, `a --> b`, `s --> b` with `a`, `b` in a titled cluster. Under ELK
     /// the long edge enters the cluster across its side facing `s` and runs inside it,
     /// rather than staying outside until `b`'s rank and dropping in across the
-    /// cluster's top border, where its title is.
+    /// cluster's top border, where its title is. (Its bottom border may be
+    /// crossed: mermaid pulls a frame in to its contents, leaving the lanes of
+    /// edges coming from outside below it.)
     #[test]
     fn orthogonal_edge_into_cluster_enters_across_its_side() {
         let mut inp = input(
@@ -3202,8 +3204,8 @@ mod tests {
                 let across = |y: f64| a.y.min(b.y) < y - 0.5 && a.y.max(b.y) > y + 0.5;
                 let inside = a.x > c.x + 0.5 && a.x < c.right() - 0.5;
                 assert!(
-                    !(inside && (across(c.y) || across(c.bottom()))),
-                    "edge {ei} crosses the top / bottom of {c:?}: {:?}",
+                    !(inside && across(c.y)),
+                    "edge {ei} crosses the top of {c:?}: {:?}",
                     r.points
                 );
             }

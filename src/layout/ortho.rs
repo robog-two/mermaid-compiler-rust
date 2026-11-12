@@ -35,11 +35,13 @@ impl OrthoSpacing {
         edge_node: 20.0,
         edge_edge: 20.0,
     };
-    /// A container laid out on its own: `elk.layered.spacing.edgeNodeBetweenLayers: 30`,
-    /// `elk.spacing.edgeEdge: 20` (`createSubgraphElkNode`).
+    /// A container laid out on its own: `elk.layered.spacing.edgeNodeBetweenLayers: 30`
+    /// (`createSubgraphElkNode`); its `spacing.edgeEdgeBetweenLayers` is not set, so
+    /// ELK derives it from the container's `spacing.baseValue: 24` as half (mermaid's
+    /// `elk.spacing.edgeEdge: 20` is the spacing within a layer).
     pub const CONTAINER: OrthoSpacing = OrthoSpacing {
         edge_node: 30.0,
-        edge_edge: 20.0,
+        edge_edge: 12.0,
     };
 
     /// The gap a channel with `slots` slots needs.
