@@ -254,6 +254,41 @@ fn external_port_dummies_are_made_in_elks_order() {
 }
 
 #[test]
+fn long_edge_dummies_ports_and_jogs_measure_as_in_elk() {
+    // Long-edge dummies are as thick as their edge (1px), ports inside a
+    // container keep 10.8px from the ends of a side, and a jog of a fraction
+    // of a pixel still takes a routing slot: c2n2 sits 48.5px below c2n0 and
+    // C3's layers are 224px apart (two slots for the edges into c3n1), as in
+    // mermaid's render.
+    let src = "flowchart LR
+  subgraph C0
+    c0n0
+  end
+  subgraph C1
+    c1n0
+  end
+  subgraph C2
+    c2n0 --> c2n1
+    c2n1 --> c2n2
+  end
+  subgraph C3
+    c3n0 --> c3n1
+  end
+  c2n0 --> c3n1
+  y --> C1
+  x --> C0
+  C0 --> c2n2
+  c3n1 --> c2n0
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["c2n0", "c2n2", "c3n0", "c3n1"], true);
+    let at = |n: &str| cs.iter().find(|c| c.0 == n).expect("node");
+    assert!((at("c2n2").2 - at("c2n0").2 - 48.5).abs() < 0.2, "{cs:?}");
+    assert!((at("c3n1").1 - at("c3n0").1 - 224.0).abs() < 0.2, "{cs:?}");
+}
+
+#[test]
 fn placement_follows_the_port_order_crossing_minimisation_leaves() {
     // C1's ports towards C0 stay in the order they were made (the root's
     // model order has no crossing, so crossing minimisation keeps it): the one

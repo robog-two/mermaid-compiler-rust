@@ -667,7 +667,11 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                         })
                         .collect();
                     stub.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-                    let offs = super::elk_port_offsets(stub.len(), side_len);
+                    let inset = super::elk_port_inset(match tree.owner_of_cluster(c) {
+                        None => ElkGraph::Root,
+                        Some(_) => ElkGraph::Container { separate: false },
+                    });
+                    let offs = super::elk_port_offsets(stub.len(), side_len, inset);
                     for (&(_, i), o) in stub.iter().zip(offs) {
                         if let Item::Ext(ei) = level.items[i] {
                             ext_off.insert((c, ei), o - side_len / 2.0);

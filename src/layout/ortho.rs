@@ -140,6 +140,10 @@ fn conflicts(a: &[f64], b: &[f64], threshold: f64) -> i64 {
     }
 }
 
+/// `OrthogonalRoutingGenerator.TOLERANCE`: ends of a segment closer than this
+/// across are straight, no jog.
+pub const TOLERANCE: f64 = 1e-3;
+
 /// `OrthogonalRoutingGenerator.countCrossings`: the positions within `[lo, hi]`.
 fn crossings(posis: &[f64], lo: f64, hi: f64) -> i64 {
     posis.iter().filter(|&&p| p >= lo && p <= hi).count() as i64

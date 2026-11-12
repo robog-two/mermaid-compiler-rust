@@ -272,6 +272,9 @@ pub const ELK_END_LABEL_SPACING: f64 = 4.0;
 /// edge's thickness (1).
 const ELK_END_LABEL_EDGE_GAP: f64 = 5.0;
 
+/// ELK's default `edge.thickness` (mermaid sets none).
+const ELK_EDGE_THICKNESS: f64 = 1.0;
+
 /// An end label beside a node side: (cross start, cross size, depth).
 type EndLabel = (f64, f64, f64);
 
@@ -877,8 +880,10 @@ fn finish(
             &is_ext,
             &hier.ports,
             &hier.port_rank,
+            &inl,
             &end_labels,
             elk_spacing(graph, input.node_sep),
+            elk_port_inset(graph),
         )
     });
     let (x, ports) = match elk_placed {
@@ -1462,9 +1467,21 @@ fn self_loop(c: Point, node: &LayoutNode, label: Option<(f64, f64)>) -> EdgeRout
 /// them evenly over the rest).
 const ELK_PORT_INSET: f64 = 10.0;
 
-/// Offsets from a side's start of `n` ports spread over a side of length `len`.
-fn elk_port_offsets(n: usize, len: f64) -> impl Iterator<Item = f64> {
-    let inset = ELK_PORT_INSET.min(len / 2.0);
+/// [`ELK_PORT_INSET`] for a node in graph `graph`: within a container (whose
+/// `spacing.baseValue` is mermaid's 24, not the root's 40) ELK keeps ports
+/// 10.8 from the ends (as measured: three ports on a 45px side at 16.65, 22.5
+/// and 28.35).
+fn elk_port_inset(graph: ElkGraph) -> f64 {
+    match graph {
+        ElkGraph::Root => ELK_PORT_INSET,
+        ElkGraph::Container { .. } => 10.8,
+    }
+}
+
+/// Offsets from a side's start of `n` ports spread over a side of length `len`
+/// (`inset` from either end, see [`elk_port_inset`]).
+fn elk_port_offsets(n: usize, len: f64, inset: f64) -> impl Iterator<Item = f64> {
+    let inset = inset.min(len / 2.0);
     let free = len - 2.0 * inset;
     (0..n).map(move |i| inset + free * (i + 1) as f64 / (n + 1) as f64)
 }
@@ -1516,8 +1533,10 @@ fn elk_place(
     is_ext: &[bool],
     fixed: &[(Option<f64>, Option<f64>)],
     port_rank: &[(Option<usize>, Option<usize>)],
+    inl: &[InLayer],
     end_labels: &[[Option<f64>; 2]],
     spacing: elkbk::Spacing,
+    port_inset: f64,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let nv = verts.len();
     let kept_rank = |r: usize| {
@@ -1547,7 +1566,10 @@ fn elk_place(
                 }
                 Kind::Real => (elkbk::NodeType::Normal, vx.w),
                 Kind::Dummy { labeled: true } => (elkbk::NodeType::Label, label_across[v]),
-                _ => (elkbk::NodeType::LongEdge, 0.0),
+                // `LongEdgeSplitter` makes its dummies as thick as their edge;
+                // `InvertedPortProcessor` makes its own of no size.
+                _ if inl.iter().any(|l| l.dummy == v) => (elkbk::NodeType::LongEdge, 0.0),
+                _ => (elkbk::NodeType::LongEdge, ELK_EDGE_THICKNESS),
             };
             elkbk::Node {
                 kind,
@@ -1607,7 +1629,8 @@ fn elk_place(
                 }
                 None => true,
             });
-            for (&(_, _, ei), off) in side.iter().zip(elk_port_offsets(side.len(), verts[v].w)) {
+            let offs = elk_port_offsets(side.len(), verts[v].w, port_inset);
+            for (&(_, _, ei), off) in side.iter().zip(offs) {
                 port[ei] = off;
             }
         }
@@ -1905,7 +1928,7 @@ fn ortho_plan(
     for (ei, s) in stops.iter().enumerate() {
         for (k, w) in s.windows(2).enumerate() {
             let ((a, ax), (b, bx)) = (w[0], w[1]);
-            if (ax - bx).abs() > 0.5 {
+            if (ax - bx).abs() >= ortho::TOLERANCE {
                 let ra = verts[a].rank;
                 by_channel[ra].push((ei, k, ortho::Jog { from: ax, to: bx }.into()));
                 channels[ra] = Some((verts[b].rank, 0));
