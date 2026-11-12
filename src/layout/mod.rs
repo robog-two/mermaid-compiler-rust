@@ -222,7 +222,16 @@ struct Hierarchy {
     /// Per edge: fixed cross-axis offsets (from the node's centre) of its source
     /// and target ports, where it meets a laid out container's external port.
     ports: Vec<(Option<f64>, Option<f64>)>,
+    /// Per node with any: its margins along the rank axis (before, after). ELK
+    /// puts a container's ports for edges crossing its border
+    /// (`CompoundGraphPreprocessor`) half an edge spacing outside it
+    /// (`portBorderOffset`), which widens its layer.
+    margins: Vec<(f64, f64)>,
 }
+
+/// ELK's border offset of the ports it makes for edges crossing a container's
+/// border: half the container's `spacing.edgeEdge` (20, as mermaid sets it).
+const ELK_HIERARCHICAL_PORT_OFFSET: f64 = 10.0;
 
 /// `layout_flat` for one graph of the ELK hierarchy.
 fn layout_flat_in(input: &LayoutInput, graph: ElkGraph, hier: &Hierarchy) -> LayoutOutput {
@@ -791,9 +800,15 @@ fn finish(
             0.0
         }
     };
+    let margin = |v: usize| hier.margins.get(v).copied().unwrap_or((0.0, 0.0));
     let mut rank_h = vec![0.0f64; max_rank + 1];
-    for v in &verts {
-        rank_h[v.rank] = rank_h[v.rank].max(v.h);
+    // Per layer: the largest margin before and after its nodes.
+    let mut rank_margin = vec![(0.0f64, 0.0f64); max_rank + 1];
+    for (v, vert) in verts.iter().enumerate() {
+        let (lo, hi) = margin(v);
+        rank_h[vert.rank] = rank_h[vert.rank].max(vert.h + lo + hi);
+        let m = &mut rank_margin[vert.rank];
+        *m = (m.0.max(lo), m.1.max(hi));
     }
     if plan.is_some() {
         // An orthogonal self-loop's label stands beside its node, centred on it along
@@ -932,10 +947,24 @@ fn finish(
         }
         for v in 0..n {
             let total = ins[v] + outs[v];
-            if total > 0 {
-                let ratio = outs[v] as f64 / total as f64;
-                vy[v] += (rank_h[verts[v].rank] - verts[v].h) * (ratio - 0.5);
+            let ratio = if total > 0 {
+                outs[v] as f64 / total as f64
+            } else {
+                0.5
+            };
+            // Within the layer, towards the side its margins allow.
+            let r = verts[v].rank;
+            let (size, h) = (rank_h[r], verts[v].h);
+            let (lo, hi) = margin(v);
+            let (max_lo, max_hi) = rank_margin[r];
+            let mut at = (size - h) * ratio;
+            if ratio > 0.5 {
+                at -= max_hi * 2.0 * (ratio - 0.5);
+            } else if ratio < 0.5 {
+                at += max_lo * 2.0 * (0.5 - ratio);
             }
+            let at = at.min(size - hi - h).max(lo);
+            vy[v] = rank_y[r] - size / 2.0 + at + h / 2.0;
         }
     }
     let pos = |v: usize| to_out(Point::new(x[v], vy[v]));

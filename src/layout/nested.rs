@@ -959,6 +959,20 @@ fn level_input(
             _ => None,
         };
         hier.ports.push((port(s.from), port(s.to)));
+        // A port of a container where the edge goes on inside it (not one on
+        // the container itself) stands off its border.
+        let (a, b) = ends[s.edge];
+        let crossing =
+            |x: SegEnd, m: Member| matches!(x, SegEnd::Box(c) if m != Member::Cluster(c));
+        if crossing(s.from, a) || crossing(s.to, b) {
+            hier.margins.resize(items.len(), (0.0, 0.0));
+            if crossing(s.from, a) {
+                hier.margins[from].1 = super::ELK_HIERARCHICAL_PORT_OFFSET;
+            }
+            if crossing(s.to, b) {
+                hier.margins[to].0 = super::ELK_HIERARCHICAL_PORT_OFFSET;
+            }
+        }
         if s.from == SegEnd::Ext {
             hier.ext.push((from, true));
         }
@@ -1584,6 +1598,55 @@ mod tests {
             to_cluster: Some(c),
             ..LayoutEdge::new(from, to, 1, None)
         }
+    }
+
+    /// ELK puts the ports it makes for an edge crossing a container's border
+    /// half an edge spacing (10) off the border, which deepens the container's
+    /// layer by as much on that side; a port of an edge to the container itself
+    /// stays on the border. (C0 = a → b, C1 = c → d, C2 = e; b → d crosses both
+    /// borders, `C0 --> C1` neither.)
+    #[test]
+    fn elk_ports_of_crossing_edges_stand_off_the_border() {
+        let nodes = vec![
+            node(Some(0)),
+            node(Some(0)),
+            node(Some(1)),
+            node(Some(1)),
+            node(Some(2)),
+        ];
+        let clusters = vec![
+            with_dir(None, None),
+            with_dir(None, None),
+            with_dir(None, None),
+        ];
+        let inner = [
+            LayoutEdge::new(0, 1, 1, None),
+            LayoutEdge::new(2, 3, 1, None),
+        ];
+        let run = |cross: LayoutEdge| {
+            let mut edges = inner.to_vec();
+            edges.push(cross);
+            layout(&elk(input(
+                nodes.clone(),
+                edges,
+                clusters.clone(),
+                Direction::TopBottom,
+            )))
+        };
+        let crossing = run(LayoutEdge::new(1, 3, 1, None));
+        let direct = run(LayoutEdge {
+            from_cluster: Some(0),
+            to_cluster: Some(1),
+            ..LayoutEdge::new(1, 3, 1, None)
+        });
+        let gap = |o: &LayoutOutput| o.clusters[1].y - o.clusters[0].bottom();
+        assert!((gap(&crossing) - gap(&direct) - 20.0).abs() < 1e-6);
+        // C2 shares C0's layer, centred on it with its margin.
+        let mid = |r: Rect| r.y + r.h / 2.0;
+        let (c0, c2) = (crossing.clusters[0], crossing.clusters[2]);
+        assert!((mid(c2) - mid(c0) - 5.0).abs() < 1e-6, "{c0:?} {c2:?}");
+        let (c0, c2) = (direct.clusters[0], direct.clusters[2]);
+        assert!((mid(c2) - mid(c0)).abs() < 1e-6, "{c0:?} {c2:?}");
     }
 
     /// ELK gives an edge to a container of the run a port dummy inside it too,
