@@ -195,8 +195,17 @@ pub fn render(
     let d = parse(body, title)?;
     let mut g = to_graph(&d);
     wrap_plain_entities(&mut g, cfg.flowchart.wrapping_width, pal.font_size);
-    Ok(graph::render(&g, &graph_config(cfg), pal))
+    let opts = graph::RenderOptions {
+        er_scaled_padding: !cfg.html_labels_truthy(),
+        view_padding: Some(VIEW_PADDING),
+        group_title_wrap: cfg.flowchart.wrapping_width,
+        ..Default::default()
+    };
+    Ok(graph::render_with(&g, &graph_config(cfg), pal, &opts))
 }
+
+/// `erRenderer-unified.ts` pads the drawing by a fixed 8 (`setupViewPortForSVG`).
+const VIEW_PADDING: f64 = 8.0;
 
 /// An entity without attributes is drawn by `drawRect`, whose `labelHelper` wraps the
 /// name at `flowchart.wrappingWidth` (`DELIVERY-` / `ADDRESS`); a table's name does
@@ -1001,7 +1010,8 @@ pub fn to_graph(d: &ErDiagram) -> GraphDiagram {
                 lines: vec![
                     a.ty.clone(),
                     a.name.clone(),
-                    a.keys.join(", "),
+                    // `attribute.keys.join()`: a bare comma.
+                    a.keys.join(","),
                     a.comment.clone().unwrap_or_default(),
                 ],
                 centered: false,
@@ -1487,21 +1497,139 @@ mod tests {
         let title = "Customer delivery addresses and their very long ordering group name";
         let src =
             format!("erDiagram\nsubgraph G [{title}]\n  A\nend\nsubgraph S [Short]\n  B\nend");
-        let g = to_graph(&parse(&src, None).unwrap());
+        for json in [r#"{"layout": "dagre"}"#, "{}"] {
+            let scene = render_with_cfg(&src, json);
+            let font = MermaidConfig::default().palette().font_size;
+            let mut clusters = Vec::new();
+            boxes(&scene.elements, "cluster-", &mut clusters);
+            let cl = |id: &str| clusters.iter().find(|(c, _)| c == id).unwrap().1;
+            let (long, short) = (cl("G"), cl("S"));
+            let full = crate::text::line_width(title, font, false);
+            // mermaid (148 / 156 px wide): the title wraps instead of widening the frame.
+            assert!(long.w < full / 2.0, "{json}: {long:?}");
+            assert!(long.w >= short.w, "{json}: {long:?} {short:?}");
+            assert!(
+                long.h > short.h + 40.0,
+                "{json}: four title lines: {long:?} {short:?}"
+            );
+            if json == "{}" {
+                // ELK (mermaid 12.3: 156 x 237 beside 148 x 153): laid out once, the
+                // title band measured at the 120px wrapping width; painted wrapped at
+                // the frame's width, which grows by the group's padding.
+                let lines =
+                    crate::text::wrap(title, 120.0, font, false, crate::text::BreakRule::Browser);
+                let extra = (lines.len() - 1) as f64 * 1.5 * font;
+                assert!(
+                    (long.h - short.h - extra).abs() < 1e-6,
+                    "{long:?} {short:?}"
+                );
+                assert!((long.w - short.w - 8.0).abs() < 1e-6, "{long:?} {short:?}");
+            }
+        }
+    }
+
+    /// The `basic label-container` box of every entity, keyed by its group id.
+    fn entity_boxes(els: &[Element], out: &mut Vec<(String, Rect)>) {
+        for el in els {
+            if let Element::Group { id, children, .. } = el {
+                if let Some(id) = id.as_deref().filter(|i| i.starts_with("entity-")) {
+                    for c in children {
+                        if let Element::Shape {
+                            geom: Geometry::Rect { rect, .. },
+                            class: Some(class),
+                            ..
+                        } = c
+                        {
+                            if class.contains("label-container") {
+                                out.push((id.to_string(), *rect));
+                            }
+                        }
+                    }
+                }
+                entity_boxes(children, out);
+            }
+        }
+    }
+
+    fn render_with_cfg(src: &str, json: &str) -> Scene {
+        let cfg = MermaidConfig::default()
+            .with_json(&crate::json::parse(json).unwrap())
+            .unwrap();
+        let pal = cfg.palette();
+        render(src, None, &cfg, &pal).unwrap()
+    }
+
+    /// `erBox` scales `diagramPadding` (20) and `entityPadding` (15) by 1.25 unless
+    /// the root `htmlLabels` is set: mermaid 12.3's `CUSTOMER { string name }` is
+    /// 129.86 x 79.5 (name 79.86 wide, rows 21 + 18.75 high). A plain entity's
+    /// `drawRect` box is padded before that scaling (21 + 3 x 20 high).
+    #[test]
+    fn table_paddings_scale_without_root_html_labels() {
+        let src = "erDiagram\nCUSTOMER {\n string name\n}\nCUSTOMER ||--o{ ORDER : places";
+        let size = |json: &str| {
+            let mut b = Vec::new();
+            entity_boxes(&render_with_cfg(src, json).elements, &mut b);
+            b.sort_by(|a, b| a.0.cmp(&b.0));
+            b.iter().map(|(_, r)| (r.w, r.h)).collect::<Vec<_>>()
+        };
+        let font = MermaidConfig::default().palette().font_size;
+        let (name, line) = (crate::text::line_width("CUSTOMER", font, false), 1.5 * font);
+        let scaled = size("{}");
+        assert!(
+            (scaled[0].1 - 2.0 * (line + 18.75)).abs() < 1e-9,
+            "{scaled:?}"
+        );
+        assert!((scaled[0].0 - (name + 50.0)).abs() < 1e-9, "{scaled:?}");
+        assert!((scaled[1].1 - (line + 60.0)).abs() < 1e-9, "{scaled:?}");
+        let html = size(r#"{"htmlLabels": true}"#);
+        assert!((html[0].1 - 2.0 * (line + 15.0)).abs() < 1e-9, "{html:?}");
+        assert!((html[0].0 - (name + 40.0)).abs() < 1e-9, "{html:?}");
+        assert!((html[1].1 - (line + 60.0)).abs() < 1e-9, "{html:?}");
+    }
+
+    /// `setupViewPortForSVG(svg, 8)`: the drawing is padded by 8, not by
+    /// `er.diagramPadding`; and the title's baseline sits `titleTopMargin` above
+    /// the layout's origin (ELK's 12px padding), at the root font size.
+    #[test]
+    fn view_box_padding_and_title_follow_the_er_renderer() {
         let cfg = MermaidConfig::default();
         let pal = cfg.palette();
-        let scene = graph::render(&g, &graph_config(&cfg), &pal);
-        let mut clusters = Vec::new();
-        boxes(&scene.elements, "cluster-", &mut clusters);
-        let cl = |id: &str| clusters.iter().find(|(c, _)| c == id).unwrap().1;
-        let (long, short) = (cl("G"), cl("S"));
-        let full = crate::text::line_width(title, pal.font_size, false);
-        // mermaid (148 / 156 px wide): the title wraps instead of widening the frame.
-        assert!(long.w < full / 2.0, "{long:?}");
-        assert!(long.w >= short.w, "{long:?} {short:?}");
+        let plain = render("erDiagram\nA ||--o{ B : has", None, &cfg, &pal).unwrap();
+        let mut b = Vec::new();
+        entity_boxes(&plain.elements, &mut b);
+        let top = b.iter().map(|(_, r)| r.y).fold(f64::INFINITY, f64::min);
         assert!(
-            long.h > short.h + 40.0,
-            "four title lines: {long:?} {short:?}"
+            (plain.view_box.y - (top - 8.0)).abs() < 1e-9,
+            "{:?}",
+            plain.view_box
         );
+        let titled = render(
+            "erDiagram\nA ||--o{ B : has",
+            Some("Order management".into()),
+            &cfg,
+            &pal,
+        )
+        .unwrap();
+        // mermaid (14px): the viewBox starts 46px above the origin: 8 + 13px of
+        // ascent above the baseline at y = -25, 37 above the first entity (y = 12).
+        let rise = 8.0 + 37.0 + (0.905 * pal.font_size).round();
+        assert!(
+            (titled.view_box.y - (top - rise)).abs() < 1e-9,
+            "{:?}",
+            titled.view_box
+        );
+        assert!(
+            (titled.view_box.h - (plain.view_box.h + rise - 8.0)).abs() < 1e-9,
+            "{:?} {:?}",
+            titled.view_box,
+            plain.view_box
+        );
+    }
+
+    /// `attribute.keys.join()`: several keys are joined by a bare comma.
+    #[test]
+    fn attribute_keys_join_with_a_bare_comma() {
+        let g = to_graph(&parse("erDiagram\nD {\n string id PK, FK\n}", None).unwrap());
+        assert_eq!(g.nodes[0].sections[0].lines[2], "PK,FK");
     }
 }

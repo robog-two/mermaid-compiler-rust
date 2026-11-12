@@ -600,6 +600,7 @@ fn measure_node(
     min_label_width: f64,
     wrap_width: f64,
     svg: bool,
+    table_scale: f64,
 ) -> Measured {
     let mut block = TextBlock::label(&node.label, font);
     let bold = node.style.bold == Some(true);
@@ -686,7 +687,7 @@ fn measure_node(
                 (w, h)
             }
             Shape::EntityTable => {
-                let t = table_metrics(node, pad, cell_pad, font);
+                let t = table_metrics(node, pad, cell_pad, font, table_scale);
                 let size = (t.w, t.h);
                 table = Some(t);
                 size
@@ -724,6 +725,15 @@ pub struct RenderOptions {
     /// `markdownAutoWrap: false`: markdown-string node and edge labels keep their
     /// lines unwrapped (`markdownToHTML` turns their spaces into `&nbsp;`).
     pub markdown_no_wrap: bool,
+    /// ER only: `erBox` scales its paddings by 1.25 (`PADDING *= 1.25`) unless the
+    /// root `htmlLabels` is truthy, which it is not by default.
+    pub er_scaled_padding: bool,
+    /// Padding around the drawing in the viewBox, when it is not `diagram_padding`
+    /// (the ER renderer passes a fixed 8 to `setupViewPortForSVG`).
+    pub view_padding: Option<f64>,
+    /// ER groups under ELK: the width their titles are measured at for the layout
+    /// (`labelBBox`, the group's `wrappingWidth`, i.e. `flowchart.wrappingWidth`).
+    pub group_title_wrap: f64,
 }
 
 /// Edge labels wrap at 200px: `insertEdgeLabel` calls `createText` without a
@@ -851,6 +861,7 @@ pub fn render_with(
                     cfg.wrapping_width
                 },
                 !cfg.html_labels,
+                if opts.er_scaled_padding { 1.25 } else { 1.0 },
             )
         })
         .collect();
@@ -1020,7 +1031,21 @@ pub fn render_with(
         inner_rank_sep: CLUSTER_RANK_SPACING,
         routing: edge_routing(cfg.layout),
     };
-    if g.kind == DiagramKind::Er {
+    // ER group titles wrap at the group's laid-out width. Under ELK mermaid lays
+    // out once, with each title measured at the wrapping width, and wraps it again
+    // at the frame's width when painting (below); under dagre a probe layout gives
+    // the width to wrap at before the real one.
+    let er_groups = g.kind == DiagramKind::Er;
+    if er_groups && elk {
+        for (ci, c) in g.clusters.iter().enumerate() {
+            if empty_of[ci].is_some() || cluster_titles[ci].is_empty() {
+                continue;
+            }
+            let t = wrapped_group_title(&c.title, opts.group_title_wrap, font);
+            input.clusters[ci].title_height = cluster_title_height(c.kind, &t);
+            input.clusters[ci].min_width = t.width + title_pad;
+        }
+    } else if er_groups {
         wrap_er_cluster_titles(
             g,
             &mut input,
@@ -1044,11 +1069,14 @@ pub fn render_with(
 
     // Clusters, outermost first.
     let mut cluster_rects = out.clusters.clone();
-    for (ci, t) in cluster_titles.iter().enumerate() {
+    for (ci, t) in cluster_titles.iter_mut().enumerate() {
         let r = &mut cluster_rects[ci];
         if let Some(p) = empty_of[ci] {
             *r = Rect::centered(out.nodes[p], measured[p].w, measured[p].h);
             continue;
+        }
+        if er_groups && elk && !t.is_empty() {
+            *t = wrapped_group_title(&g.clusters[ci].title, r.w, font);
         }
         let need = if t.is_empty() {
             0.0
@@ -1444,7 +1472,14 @@ pub fn render_with(
                     Paint::fill(edge_label_bg),
                 )
             };
-            bounds.add_rect(r);
+            // The drawing's bbox holds an HTML label's `foreignObject`, which is the
+            // text box itself: the 2px background margin stays outside it. (Kept
+            // under dagre, whose output is pinned.)
+            bounds.add_rect(if block.svg || !elk {
+                r
+            } else {
+                Rect::centered(at, block.width, block.height)
+            });
             label_els.push(Element::group(
                 "edgeLabel",
                 vec![
@@ -1498,7 +1533,30 @@ pub fn render_with(
 
     // Title above everything.
     let mut title_els = Vec::new();
-    if let Some(t) = g.title.as_ref().filter(|t| !t.trim().is_empty()) {
+    let title = g.title.as_ref().filter(|t| !t.trim().is_empty());
+    if let Some(t) = title.filter(|_| g.kind == DiagramKind::Er) {
+        // `insertTitle`: an unstyled `<text>` (root font size) with its baseline at
+        // `y = -titleTopMargin` in layout space, whose top margin is ELK's 12px
+        // padding or dagre's 8px `marginy`; centred on the drawing's bbox.
+        let content = bounds.rect();
+        let margin = if elk { 12.0 } else { 8.0 };
+        let baseline = content.y - margin - cfg.title_top_margin;
+        let tw = crate::text::line_width(t, font, false);
+        let ascent = (0.905 * font).round();
+        let cx = content.x + content.w / 2.0;
+        bounds.add_rect(Rect::new(
+            cx - tw / 2.0,
+            baseline - ascent,
+            tw,
+            crate::text::svg_line_box(font, t),
+        ));
+        let lines = vec![t.clone()];
+        let center = Point::new(cx, baseline - font * 0.35);
+        title_els.push(Element::classed_text(
+            Text::centered(center, &lines, font, font, &pal.text_color),
+            "erDiagramTitleText",
+        ));
+    } else if let Some(t) = title {
         let content = bounds.rect();
         let tb = TextBlock::new(vec![t.clone()], font * 1.125, false);
         let center = Point::new(
@@ -1531,7 +1589,9 @@ pub fn render_with(
         Element::group("nodes", node_els),
     ];
     elements.extend(title_els);
-    let view_box = bounds.rect().pad(cfg.diagram_padding);
+    let view_box = bounds
+        .rect()
+        .pad(opts.view_padding.unwrap_or(cfg.diagram_padding));
     Scene {
         kind: g.kind,
         view_box,
@@ -1701,6 +1761,7 @@ pub fn node_size(
         cfg.min_node_width,
         cfg.wrapping_width,
         !cfg.html_labels,
+        1.0,
     );
     (m.w, m.h)
 }
@@ -1729,6 +1790,7 @@ pub fn draw_node(
         cfg.min_node_width,
         cfg.wrapping_width,
         !cfg.html_labels,
+        1.0,
     );
     let slot = slot_colors(n.color_slot, pal);
     let painted = Node {
@@ -1798,6 +1860,19 @@ fn wrap_er_cluster_titles(
         input.clusters[ci].min_width = t.width + title_pad;
         titles[ci] = t;
     }
+}
+
+/// An ER group title as `createText` lays it out at `width`: one line when it
+/// fits, else wrapped in a `div` exactly that wide (or as wide as its widest word).
+fn wrapped_group_title(title: &str, width: f64, font: f64) -> TextBlock {
+    let t = TextBlock::label(title, font);
+    if width <= 0.0 || t.width <= width {
+        return t;
+    }
+    let lines = crate::text::wrap(title, width, font, false, crate::text::BreakRule::Browser);
+    let mut t = TextBlock::new(lines, font, false);
+    t.width = t.width.max(width);
+    t
 }
 
 /// Height of the band reserved above a cluster's children for its title: ELK keeps
@@ -2341,8 +2416,10 @@ struct TableMetrics {
 }
 
 /// `erBox.ts`: `text_pad` is `er.entityPadding` (TEXT_PADDING, row/header
-/// slack) and `cell_pad` is `er.diagramPadding` (PADDING, per-column slack).
-fn table_metrics(node: &Node, text_pad: f64, cell_pad: f64, font: f64) -> TableMetrics {
+/// slack) and `cell_pad` is `er.diagramPadding` (PADDING, per-column slack). A
+/// table scales both by `scale` (1.25 without root `htmlLabels`); the plain box is
+/// drawn before that scaling.
+fn table_metrics(node: &Node, text_pad: f64, cell_pad: f64, font: f64, scale: f64) -> TableMetrics {
     let ncols = node
         .sections
         .iter()
@@ -2363,6 +2440,7 @@ fn table_metrics(node: &Node, text_pad: f64, cell_pad: f64, font: f64) -> TableM
             h: label.height.max(line_h) + 3.0 * cell_pad,
         };
     }
+    let (text_pad, cell_pad) = (text_pad * scale, cell_pad * scale);
     // Type and name columns are always present; keys / comment only when used.
     let mut cols: Vec<f64> = (0..ncols)
         .map(|j| {

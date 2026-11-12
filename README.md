@@ -131,7 +131,8 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   edge-label backgrounds padded by 2px, left-aligned state labels, class members 3px apart. As upstream, the deprecated
   `flowchart.htmlLabels: false` only switches edge labels and subgraph titles (node labels read the top-level key).
   ER, requirement and other diagrams keep HTML-label metrics, and inline HTML tags are still stripped rather than
-  printed literally as mermaid's SVG labels do.
+  printed literally as mermaid's SVG labels do. ER entity tables do follow `erBox`'s reading of the root key: unless
+  `htmlLabels` is set, their `diagramPadding` and `entityPadding` are scaled by 1.25 (mermaid 12.3's default output).
 - **Text is measured with Helvetica/Arial metrics**, not by a browser, so widths can be off by a few percent for other fonts.
 - **PDF text uses the built-in Helvetica fonts** (nothing embedded), so characters outside Windows-1252 become `?` in PDFs.
   SVG and PNG handle any Unicode the system fonts cover.
@@ -155,7 +156,10 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   as their edge, routing slots between layers assigned as ELK's orthogonal router does (only edges that would cross
   or share a vertical run take separate slots, a jog of a fraction of a pixel included; nearly coincident verticals
   split one segment in two at a free area; cycles broken with ELK's random generator, continuing its sequence
-  after crossing minimisation), labels inline on the route, self-loops on the west / north side. Nodes are placed with a port of ELK's Brandes–Köpf
+  after crossing minimisation), labels inline on the route (ELK's label dummy carries the edge half its rounded-up
+  size in, so a label sits up to a pixel before its edge), self-loops on the west / north side as ELK draws them
+  (their ports spread over the side inside its 12px port surrounding, legs 20 apart and labels 4 beyond their leg).
+  Nodes are placed with a port of ELK's Brandes–Köpf
   (`BALANCED`, `IMPROVE_STRAIGHTNESS`: blocks line up ports, type-dependent node / edge spacing, class compaction)
   and nodes shorter than their layer are aligned by their edges, as ELK does. Where two edges cross, one hops the
   other as upstream (`elk.lineHops`: a radius-6 arc by default, `gap` breaks the line, `false` turns hops off; the
@@ -184,7 +188,11 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   long-edge dummies are merged into the routing channel around them rather than kept as ELK layers of their own,
   and an inverted port's in-layer edge is never split by the router. `layout: dagre` (or any other non-ELK `layout`)
   gives dagre's spacing, the dagre
-  rules for subgraphs (only uncrossed ones laid out on their own) and the configured curve. ELK's packing of
+  rules for subgraphs (only uncrossed ones laid out on their own) and the configured curve. ER diagrams under ELK are
+  laid out once, as upstream: a group's title is measured at `wrappingWidth` for the layout and wrapped again at the
+  group's frame when drawn (under dagre a probe layout finds that width first, and ER group frames are not dagre's
+  sizes). A self-loop's ends are left on the node's side where mermaid's edge cutter, through floating-point dust
+  in ELK's coordinates, sometimes re-attaches one a few pixels along the side. ELK's packing of
   disconnected parts inside a container is not reproduced, `@{ view: collapsed }` folds a subgraph into one node as
   upstream.
 - **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction (under `layout: dagre`;

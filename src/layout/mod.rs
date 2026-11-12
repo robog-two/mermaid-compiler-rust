@@ -778,44 +778,34 @@ fn finish(
         }
     };
     // Orthogonal self-loops stand off their node's low cross-axis side, each beyond
-    // the ones before it and their labels; the node keeps that much room free.
-    // Its two legs leave a quarter of the side apart, or further, around the labels of
-    // the loops inside it.
+    // the ones before it (in model order) and their labels; the node keeps that much
+    // room free. As ELK places them (`SelfLoopPortRestorer`, `SelfLoopRouter`): the
+    // 2k ports of a node's k loops are spread evenly over the side inside its
+    // `spacing.portsSurrounding`, the first loop on the middle pair and each later one
+    // on the pair around it; the first leg stands one edge-node spacing (20) off the
+    // side, each later one 20 beyond the previous leg or beyond its label, which
+    // stands 4px (`spacing.edgeLabel` 2, twice) outside its leg.
     let mut loop_out = vec![0.0f64; input.edges.len()];
     let mut loop_half = vec![0.0f64; input.edges.len()];
     let mut loop_reach = vec![0.0f64; n];
-    let mut loop_inner = vec![0.0f64; n];
     if matches!(input.routing, EdgeRouting::Orthogonal(_)) {
         let mut loops = vec![0usize; n];
         for e in input.edges.iter().filter(|e| e.from == e.to) {
             loops[e.from] += 1;
         }
+        let mut seen = vec![0usize; n];
         for (ei, e) in input.edges.iter().enumerate() {
             if e.from != e.to {
                 continue;
             }
             let v = e.from;
-            let reach = loop_reach[v];
-            loop_out[ei] = if reach > 0.0 {
-                reach + 0.75 * SELF_LOOP_EXT
-            } else {
-                SELF_LOOP_EXT
-            };
-            let side = verts[v].h;
-            let cap = (side / 2.0 - 2.0).max(side / 8.0);
-            loop_half[ei] = (side / 8.0).max(loop_inner[v]).min(cap);
-            // The next loop's legs stand outside this one's, so that their ends
-            // (and arrowheads) do not coincide.
-            // Many loops share the side evenly.
-            let room = (cap - side / 8.0) / (loops[v].max(2) - 1) as f64;
-            loop_inner[v] = loop_half[ei] + room.min(SELF_LOOP_EXT / 2.0);
-            if let Some((lw, lh)) = e.label {
-                let (across, along) = swap(lw, lh);
-                loop_reach[v] = loop_out[ei] + across + 4.0;
-                loop_inner[v] = loop_inner[v].max(along / 2.0 + 4.0);
-            } else {
-                loop_reach[v] = loop_out[ei];
-            }
+            let gap = ((verts[v].h - 2.0 * PORTS_SURROUNDING) / (2 * loops[v] + 1) as f64).max(0.0);
+            loop_half[ei] = gap * (2 * seen[v] + 1) as f64 / 2.0;
+            seen[v] += 1;
+            loop_out[ei] = loop_reach[v] + SELF_LOOP_EXT;
+            loop_reach[v] = loop_out[ei]
+                + e.label
+                    .map_or(0.0, |(lw, lh)| SELF_LOOP_LABEL_GAP + swap(lw, lh).0);
         }
     }
     let gap = |a: usize, b: usize| -> f64 {
@@ -870,11 +860,19 @@ fn finish(
     };
     // ELK's own node placement where no cluster is integrated into this pass.
     let elk_placed = (elk && borders.iter().all(|b| b.is_empty())).then(|| {
-        let label_across: Vec<f64> = verts
+        // A label dummy's cross size and the offset of its ports, which carry the
+        // edge: in a vertical layout the label's width and half its width rounded
+        // up; in a horizontal one the label's height plus the edge's thickness and
+        // half of that, the height rounded up (`LabelDummyInserter`).
+        let label_across: Vec<(f64, f64)> = verts
             .iter()
             .map(|v| match v.kind {
-                Kind::Dummy { labeled: true } => v.w,
-                _ => 0.0,
+                Kind::Dummy { labeled: true } if horizontal => (
+                    v.w + ELK_EDGE_THICKNESS,
+                    (v.w.ceil() + ELK_EDGE_THICKNESS) / 2.0,
+                ),
+                Kind::Dummy { labeled: true } => (v.w, v.w.ceil() / 2.0),
+                _ => (0.0, 0.0),
             })
             .collect();
         // The cross size of each edge's end labels (at its source, its target).
@@ -1204,7 +1202,7 @@ fn finish(
                     .to_vec();
                     let label = e.label.map(|(lw, lh)| {
                         let lw = swap(lw, lh).0;
-                        to_out(Point::new(out - lw / 2.0 - 2.0, cy))
+                        to_out(Point::new(out - lw / 2.0 - SELF_LOOP_LABEL_GAP, cy))
                     });
                     return EdgeRoute { points, label };
                 }
@@ -1227,6 +1225,7 @@ fn finish(
                 }
                 let label = label_v
                     .map(|v| to_out(Point::new(p.xs[v], rank_y[verts[v].rank])))
+                    .map(|c| elk_label_centre(c, e.label, horizontal))
                     .or_else(|| {
                         e.label
                             .map(|_| points[0].lerp(points[points.len() - 1], 0.5))
@@ -1547,7 +1546,7 @@ fn elk_place(
     real: usize,
     chains: &[Option<Chain>],
     loop_reach: &[f64],
-    label_across: &[f64],
+    label_across: &[(f64, f64)],
     is_ext: &[bool],
     fixed: &[(Option<f64>, Option<f64>)],
     port_rank: &[(Option<usize>, Option<usize>)],
@@ -1583,7 +1582,7 @@ fn elk_place(
                     (elkbk::NodeType::ExternalPort, 0.0)
                 }
                 Kind::Real => (elkbk::NodeType::Normal, vx.w),
-                Kind::Dummy { labeled: true } => (elkbk::NodeType::Label, label_across[v]),
+                Kind::Dummy { labeled: true } => (elkbk::NodeType::Label, label_across[v].0),
                 // `LongEdgeSplitter` makes its dummies as thick as their edge;
                 // `InvertedPortProcessor` makes its own of no size.
                 _ if inl.iter().any(|l| l.dummy == v) => (elkbk::NodeType::LongEdge, 0.0),
@@ -1679,7 +1678,7 @@ fn elk_place(
         }
     }
     let port_of = |v: usize| match nodes[v].kind {
-        elkbk::NodeType::Label => nodes[v].size / 2.0,
+        elkbk::NodeType::Label => label_across[v].1,
         _ => 0.0,
     };
     // The order of a node's ports on a side: where a laid out container fixes
@@ -1774,8 +1773,26 @@ fn elk_place(
     (x, start, end)
 }
 
+/// Where ELK puts a label whose dummy's ports carry the edge through `c`: not quite
+/// centred on it, but half a pixel-rounded label before it (`ceil(width) / 2` left
+/// of a vertical edge; `(ceil(height) + 1) / 2` above a horizontal one), in every
+/// direction.
+fn elk_label_centre(c: Point, label: Option<(f64, f64)>, horizontal: bool) -> Point {
+    let Some((w, h)) = label else { return c };
+    if horizontal {
+        Point::new(c.x, c.y - (h.ceil() + 1.0 - h) / 2.0)
+    } else {
+        Point::new(c.x - (w.ceil() - w) / 2.0, c.y)
+    }
+}
+
 /// How far an orthogonal self-loop stands off its node.
 const SELF_LOOP_EXT: f64 = 20.0;
+/// Gap between an ELK self-loop's outer leg and its label.
+const SELF_LOOP_LABEL_GAP: f64 = 4.0;
+/// ELK's `spacing.portsSurrounding` as mermaid sets it: no port within 12px of a
+/// node's corner.
+pub(crate) const PORTS_SURROUNDING: f64 = 12.0;
 /// The least room between an orthogonal self-loop (or its label) and the node beside it.
 const SELF_LOOP_CLEARANCE: f64 = 10.0;
 
@@ -3229,13 +3246,18 @@ mod tests {
                     }
                 }
             }
-            // The labelled edge passes through its label.
+            // The labelled edge passes through its label (within ELK's offset of
+            // under a pixel, see `elk_label_centre`).
             let r = &out.edges[9];
             let l = r.label.unwrap();
             assert!(r.points.windows(2).any(|w| {
                 let (a, b) = (w[0], w[1]);
-                (a.x - l.x).abs() < 1e-6 && (a.y - l.y) * (b.y - l.y) <= 0.0
-                    || (a.y - l.y).abs() < 1e-6 && (a.x - l.x) * (b.x - l.x) <= 0.0
+                (a.x - l.x).abs() < 1.0
+                    && (a.x - b.x).abs() < 1e-6
+                    && (a.y - l.y) * (b.y - l.y) <= 0.0
+                    || (a.y - l.y).abs() < 1.0
+                        && (a.y - b.y).abs() < 1e-6
+                        && (a.x - l.x) * (b.x - l.x) <= 0.0
             }));
         }
     }
@@ -3265,10 +3287,11 @@ mod tests {
                 let l = r.label.unwrap();
                 let n = r.points.len();
                 let (a, b) = (r.points[n - 2], r.points[n - 1]);
+                // (ELK sets a label up to a pixel off its edge: `elk_label_centre`.)
                 let along = if dir.is_horizontal() {
-                    (a.y - b.y).abs() < 1e-6 && (l.y - b.y).abs() < 1e-6 && l.x > a.x - 1e-6
+                    (a.y - b.y).abs() < 1e-6 && (l.y - b.y).abs() < 1.0 && l.x > a.x - 1e-6
                 } else {
-                    (a.x - b.x).abs() < 1e-6 && (l.x - b.x).abs() < 1e-6 && l.y > a.y - 1e-6
+                    (a.x - b.x).abs() < 1e-6 && (l.x - b.x).abs() < 1.0 && l.y > a.y - 1e-6
                 };
                 assert!(
                     along,
@@ -3280,6 +3303,8 @@ mod tests {
 
     /// Several labelled self-loops on one node stand off one beyond the other's
     /// label, and the node beside them is pushed clear of the loops and labels.
+    /// (On a short side an outer loop's legs pass over an inner loop's label, as in
+    /// ELK, whose ports are spread over the side whatever the labels.)
     #[test]
     fn orthogonal_self_loops_and_labels_do_not_overlap() {
         for dir in [Direction::TopBottom, Direction::LeftRight] {
@@ -3308,7 +3333,7 @@ mod tests {
                         (a.x - b.x).abs(),
                         (a.y - b.y).abs(),
                     );
-                    for (k, t) in taken.iter().enumerate() {
+                    for (k, t) in boxes.iter().enumerate() {
                         if k != 2 {
                             assert!(
                                 !seg.intersects(&t.pad(-0.5)),
@@ -3527,6 +3552,103 @@ mod tests {
                     assert!(p.dist(q) > 2.0, "{dir:?}: shared end {p:?} {q:?}");
                 }
             }
+        }
+    }
+
+    /// ELK's self-loop geometry (elkjs, mermaid's options): a 100 x 81 node with
+    /// loops labelled 50 x 21, unlabelled and 30 x 42 has its six ports spread
+    /// 57/7 apart over the west side inside the 12px surrounding, the first loop on
+    /// the middle pair; legs 20, 94 and 114 off the side; labels 4 beyond their leg.
+    /// Laid out to the right, the loops stand on the north side the same way.
+    #[test]
+    fn orthogonal_self_loops_match_elk() {
+        for dir in [Direction::TopBottom, Direction::LeftRight] {
+            let horizontal = dir.is_horizontal();
+            let mut inp = input(
+                vec![LayoutNode {
+                    width: 100.0,
+                    height: 81.0,
+                    cluster: None,
+                }],
+                vec![
+                    LayoutEdge::new(0, 0, 1, Some((50.0, 21.0))),
+                    edge(0, 0),
+                    LayoutEdge::new(0, 0, 1, Some((30.0, 42.0))),
+                ],
+                vec![],
+                dir,
+            );
+            inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+            let out = layout(&inp);
+            let c = out.nodes[0];
+            // (across the side, out from it): TB's west side, LR's north side.
+            let rel = |p: Point| {
+                if horizontal {
+                    (p.x - c.x, c.y - 40.5 - p.y)
+                } else {
+                    (p.y - c.y, c.x - 50.0 - p.x)
+                }
+            };
+            let side = if horizontal { 100.0 } else { 81.0 };
+            let gap = (side - 24.0) / 7.0;
+            let outs = if horizontal {
+                [20.0, 65.0, 85.0]
+            } else {
+                [20.0, 94.0, 114.0]
+            };
+            for (i, r) in out.edges.iter().enumerate() {
+                let half = gap * (2 * i + 1) as f64 / 2.0;
+                let pts: Vec<(f64, f64)> = r.points.iter().map(|&p| rel(p)).collect();
+                assert_eq!(pts.len(), 4, "{dir:?} {i}: {pts:?}");
+                let expect = [(-half, 0.0), (-half, outs[i]), (half, outs[i]), (half, 0.0)];
+                for (p, q) in pts.iter().zip(expect) {
+                    let sorted = (p.0.abs(), p.1);
+                    assert!(
+                        (sorted.0 - q.0.abs()).abs() < 1e-6 && (sorted.1 - q.1).abs() < 1e-6,
+                        "{dir:?} loop {i}: {pts:?} vs {expect:?}"
+                    );
+                }
+            }
+            for (i, across) in [
+                (0, if horizontal { 21.0 } else { 50.0 }),
+                (2, if horizontal { 42.0 } else { 30.0 }),
+            ] {
+                let l = rel(out.edges[i].label.expect("label"));
+                assert!(l.0.abs() < 1e-6, "{dir:?} label {i}: {l:?}");
+                assert!(
+                    (l.1 - (outs[i] + 4.0 + across / 2.0)).abs() < 1e-6,
+                    "{dir:?} label {i}: {l:?}"
+                );
+            }
+        }
+    }
+
+    /// ELK carries a labelled edge through its label dummy half the label's
+    /// rounded-up width in (vertical), or half its rounded-up height plus the
+    /// edge's thickness (horizontal): the label sits 0.4 left of a vertical edge
+    /// for a 40.2 x 21 label and 0.85 above a horizontal one for 40 x 21.3.
+    #[test]
+    fn elk_label_sits_off_its_edge_as_in_elk() {
+        for (dir, size, off) in [
+            (Direction::TopBottom, (40.2, 21.0), Point::new(-0.4, 0.0)),
+            (Direction::BottomTop, (40.2, 21.0), Point::new(-0.4, 0.0)),
+            (Direction::LeftRight, (40.0, 21.3), Point::new(0.0, -0.85)),
+            (Direction::RightLeft, (40.0, 21.0), Point::new(0.0, -0.5)),
+        ] {
+            let out = layout(&elk(input(
+                vec![node(None); 2],
+                vec![LayoutEdge::new(0, 1, 1, Some(size))],
+                vec![],
+                dir,
+            )));
+            let r = &out.edges[0];
+            let l = r.label.expect("label");
+            let a = r.points[0];
+            let d = l.minus(Point::new(
+                if dir.is_horizontal() { l.x } else { a.x },
+                if dir.is_horizontal() { a.y } else { l.y },
+            ));
+            assert!(d.dist(off) < 1e-9, "{dir:?}: {d:?} vs {off:?}");
         }
     }
 

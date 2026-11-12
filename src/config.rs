@@ -497,6 +497,18 @@ impl MermaidConfig {
         evaluate(self.top_value("htmlLabels"))
     }
 
+    /// The root `htmlLabels` read raw as a JS condition (`if (!config.htmlLabels)`):
+    /// unset is `false`, unlike [`Self::html_labels`].
+    pub fn html_labels_truthy(&self) -> bool {
+        match self.top_value("htmlLabels") {
+            None | Some(Json::Null) => false,
+            Some(Json::Bool(b)) => *b,
+            Some(Json::Number(n)) => *n != 0.0 && !n.is_nan(),
+            Some(Json::String(s)) => !s.is_empty(),
+            Some(_) => true,
+        }
+    }
+
     /// mermaid's `getEffectiveHtmlLabels`: `htmlLabels ?? flowchart.htmlLabels ?? true`.
     pub fn effective_html_labels(&self) -> bool {
         fn set(v: Option<&Json>) -> Option<&Json> {
