@@ -403,6 +403,17 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         })
         .collect();
     let (mut ranks, mut layered) = rank_with_clusters(n, &mut oriented, input);
+    if elk && !hier.ext.is_empty() {
+        pin_ext_neighbours(
+            &mut ranks,
+            &mut layered,
+            input,
+            &oriented,
+            &hidden,
+            &is_ext,
+            hier,
+        );
+    }
     for (o, h) in oriented.iter_mut().zip(hidden) {
         if h.is_some() {
             *o = h;
@@ -688,6 +699,79 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         down,
         max_rank,
         layers,
+    }
+}
+
+/// ELK's `LayerConstraintPreprocessor` hides the external port dummies with their
+/// edges before layering; a node left without any edge then takes the layer
+/// constraint of the dummies it was joined to: `FIRST` if it only met ports where
+/// edges enter, `LAST` if only ports where they leave (any other mix: none). It is
+/// layered on its own, on the first layer, and `LayerConstraintPostprocessor` then
+/// moves a `LAST` node to the last layer (dropping a layer left empty).
+fn pin_ext_neighbours(
+    ranks: &mut [usize],
+    layered: &mut [usize],
+    input: &LayoutInput,
+    oriented: &[Option<Oriented>],
+    hidden: &[Option<Oriented>],
+    is_ext: &[bool],
+    hier: &Hierarchy,
+) {
+    let n = ranks.len();
+    let entering: Vec<Option<bool>> = {
+        let mut k = vec![None; n];
+        for &(v, first) in &hier.ext {
+            k[v] = Some(first);
+        }
+        k
+    };
+    // Per node: (has a visible edge, met an entering port, met a leaving port).
+    let mut seen = vec![(false, false, false); n];
+    for (ei, e) in input.edges.iter().enumerate() {
+        if e.from == e.to {
+            seen[e.from].0 = true;
+        } else if oriented[ei].is_some() {
+            seen[e.from].0 = true;
+            seen[e.to].0 = true;
+        } else if hidden[ei].is_some() {
+            for (a, b) in [(e.from, e.to), (e.to, e.from)] {
+                if let (false, Some(first)) = (is_ext[a], entering[b]) {
+                    if first {
+                        seen[a].1 = true;
+                    } else {
+                        seen[a].2 = true;
+                    }
+                }
+            }
+        }
+    }
+    let real: Vec<usize> = (0..n).filter(|&v| !is_ext[v]).collect();
+    let Some(mut last) = real.iter().map(|&v| ranks[v]).max() else {
+        return;
+    };
+    for &v in &real {
+        if seen[v] != (false, false, true) || ranks[v] == last {
+            continue;
+        }
+        let old = ranks[v];
+        ranks[v] = last;
+        layered[v] = last;
+        // The layer it left may now be empty (a label dummy's layer lies between
+        // the ends of a labelled edge).
+        let used = real.iter().any(|&w| ranks[w] == old)
+            || oriented.iter().zip(&input.edges).any(|(o, e)| {
+                o.as_ref()
+                    .is_some_and(|o| e.label.is_some() && ranks[o.from] < old && old < ranks[o.to])
+            });
+        if !used {
+            for &w in &real {
+                if ranks[w] > old {
+                    ranks[w] -= 1;
+                    layered[w] = layered[w].saturating_sub(1);
+                }
+            }
+            last -= 1;
+        }
     }
 }
 

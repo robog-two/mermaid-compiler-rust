@@ -1822,6 +1822,26 @@ mod tests {
         assert!((pts[pts.len() - 1].y - c0.y).abs() < 1e-6, "{pts:?}");
     }
 
+    /// A member whose only edges leave its container takes ELK's `LAST` layer
+    /// constraint (`LayerConstraintPreprocessor`): it sits on the container's last
+    /// layer, not on its first (`subgraph S0: a -->|x| b; c end; b --> x; c --> x`).
+    #[test]
+    fn elk_member_only_leaving_its_container_sits_on_its_last_layer() {
+        let inp = elk(input(
+            vec![node(Some(0)), node(Some(0)), node(Some(0)), node(None)],
+            vec![
+                LayoutEdge::new(0, 1, 1, Some((30.0, 20.0))),
+                LayoutEdge::new(2, 3, 1, None),
+                LayoutEdge::new(1, 3, 1, None),
+            ],
+            vec![with_dir(None, None)],
+            Direction::TopBottom,
+        ));
+        let out = layout(&inp);
+        assert!((out.nodes[2].y - out.nodes[1].y).abs() < 1e-6, "{out:?}");
+        assert!(out.nodes[0].y < out.nodes[1].y, "{out:?}");
+    }
+
     fn elk(mut inp: LayoutInput) -> LayoutInput {
         inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
         inp
