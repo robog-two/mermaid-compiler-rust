@@ -154,12 +154,16 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   other as upstream (`elk.lineHops`: a radius-6 arc by default, `gap` breaks the line, `false` turns hops off; the
   horizontal segment of a horizontal / vertical pair gives way, otherwise the later edge; hops shrink or drop near
   rounded corners and each other, invisible `~~~` edges take part). The order within layers comes from ELK's layer
-  sweep (model order first, port-aware barycentres, 7 seeded random restarts drawn from ELK's `java.util.Random`
-  sequence, the greedy switch only where ELK runs it), run on each subgraph's graph on its own: ELK's sweep across
-  the whole hierarchy (where a parent's order fixes the order of a subgraph's border ports) is not reproduced, so
-  the order of a subgraph's contents, and of its edges leaving it, can differ; layers wider than 128 nodes skip ELK's
-  transitive model-order bookkeeping. ELK's side-of-edge label placement and where an edge to a whole subgraph meets
-  its frame are not reproduced. `layout: dagre` (or any other non-ELK `layout`) gives dagre's spacing, the dagre
+  sweep (model order first, port-aware barycentres with ports in ELK's creation order, 7 seeded random restarts
+  drawn from ELK's `java.util.Random` sequence, the greedy switch only where ELK runs it), run across the whole
+  hierarchy as ELK's hierarchical sweep does: a subgraph is ordered either on its own first (its border ports then
+  keep the order of its port dummies) or within its parent's sweeps, as ELK decides; an edge to a whole subgraph
+  meets its frame at a port of its own among the others. The random draws inside such sweeps follow ELK's per-graph
+  generators but are not verified bit for bit, so a subgraph whose orders tie can still come out mirrored; layers
+  wider than 128 nodes skip ELK's transitive model-order bookkeeping. mermaid's post-processing of ELK's routes is
+  reproduced (short port-to-channel steps straightened, the labels of two opposite edges between one pair of nodes
+  pushed beside them); its handling of start / end labels is not. `layout: dagre` (or any other non-ELK `layout`)
+  gives dagre's spacing, the dagre
   rules for subgraphs (only uncrossed ones laid out on their own) and the configured curve. ELK's packing of
   disconnected parts inside a container is not reproduced, `@{ view: collapsed }` folds a subgraph into one node as
   upstream.
