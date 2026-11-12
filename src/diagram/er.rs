@@ -199,6 +199,7 @@ pub fn render(
         er_scaled_padding: !cfg.html_labels_truthy(),
         view_padding: Some(VIEW_PADDING),
         group_title_wrap: cfg.flowchart.wrapping_width,
+        cluster_nodes: true,
         ..Default::default()
     };
     Ok(graph::render_with(&g, &graph_config(cfg), pal, &opts))
@@ -1571,6 +1572,75 @@ mod tests {
             .unwrap();
         let pal = cfg.palette();
         render(src, None, &cfg, &pal).unwrap()
+    }
+
+    /// Group ids (`cluster-…`, `L-…`) in drawing order.
+    fn drawing_order(els: &[Element], out: &mut Vec<String>) {
+        for el in els {
+            if let Element::Group { id, children, .. } = el {
+                if let Some(i) = id
+                    .as_deref()
+                    .filter(|i| i.starts_with("cluster-") || i.starts_with("L-"))
+                {
+                    out.push(i.to_string());
+                }
+                drawing_order(children, out);
+            }
+        }
+    }
+
+    /// Under dagre, mermaid draws a group no edge crosses as a node of its own
+    /// graph, over that graph's edges: the part of an end marker reaching inside
+    /// it is hidden (er-subgraphs' `sells`). Groups an edge crosses stay under
+    /// the edges, as under ELK.
+    #[test]
+    fn dagre_cluster_nodes_draw_over_their_parents_edges() {
+        let src = "erDiagram\nsubgraph G\n  B\nend\nsubgraph H\n  C\nend\n\
+                   A ||--o{ G : sells\nA ||--|| C : x";
+        let order = |json: &str| {
+            let mut out = Vec::new();
+            drawing_order(&render_with_cfg(src, json).elements, &mut out);
+            out
+        };
+        let at = |o: &[String], p: &str| o.iter().position(|i| i.starts_with(p)).unwrap();
+        let dagre = order(r#"{"layout": "dagre"}"#);
+        assert!(at(&dagre, "cluster-G") > at(&dagre, "L-A-G"), "{dagre:?}");
+        assert!(at(&dagre, "cluster-H") < at(&dagre, "L-A-C"), "{dagre:?}");
+        let elk = order("{}");
+        assert!(at(&elk, "cluster-G") < at(&elk, "L-A-G"), "{elk:?}");
+    }
+
+    /// The circle of a zero-or-one / zero-or-more marker is filled (`mainBkg`
+    /// under neo), so the relationship line does not show through it.
+    #[test]
+    fn zero_markers_fill_their_circle() {
+        let scene = render_with_cfg("erDiagram\nA ||--o{ B : has\nA |o--o| C : may", "{}");
+        let mut circles = Vec::new();
+        fn walk(els: &[Element], out: &mut Vec<String>) {
+            for el in els {
+                match el {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Circle { .. },
+                        paint,
+                        ..
+                    } => out.push(paint.fill.css().to_string()),
+                    _ => {}
+                }
+            }
+        }
+        walk(&scene.elements, &mut circles);
+        assert_eq!(circles.len(), 3, "{circles:?}");
+        assert!(circles.iter().all(|c| c == "white"), "{circles:?}");
+        // Under neo with the theme's `mainBkg`.
+        let json = r#"{"look": "neo"}"#;
+        let neo = render_with_cfg("erDiagram\nA ||--o{ B : has", json);
+        let mut circles = Vec::new();
+        walk(&neo.elements, &mut circles);
+        let cfg = MermaidConfig::default()
+            .with_json(&crate::json::parse(json).unwrap())
+            .unwrap();
+        assert_eq!(circles, vec![cfg.palette().main_bkg.css().to_string()]);
     }
 
     /// `erBox` scales `diagramPadding` (20) and `entityPadding` (15) by 1.25 unless

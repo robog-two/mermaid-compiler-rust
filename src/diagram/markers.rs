@@ -638,6 +638,19 @@ pub fn elements(
         Fill::None => Color::none(),
     };
     let paint = Paint::both(&fill, colors.line, stroke);
+    // An ER marker's circle is filled (`white`; `mainBkg` under neo), so the
+    // edge does not show through it.
+    let er_circle = matches!(head, Head::ErZeroOrOne | Head::ErZeroOrMore);
+    let circle_paint = if er_circle {
+        let bg = if neo {
+            colors.background.clone()
+        } else {
+            Color::new("white")
+        };
+        Paint::both(&bg, colors.line, stroke)
+    } else {
+        paint.clone()
+    };
     def.parts
         .iter()
         .map(|part| {
@@ -654,6 +667,7 @@ pub fn elements(
             };
             let paint = match part {
                 Part::Path(_) => Paint::stroke(colors.line, stroke),
+                Part::Circle(..) => circle_paint.clone(),
                 _ => paint.clone(),
             };
             Element::classed_shape(geom, paint, "marker")

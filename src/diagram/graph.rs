@@ -734,6 +734,9 @@ pub struct RenderOptions {
     /// ER groups under ELK: the width their titles are measured at for the layout
     /// (`labelBBox`, the group's `wrappingWidth`, i.e. `flowchart.wrappingWidth`).
     pub group_title_wrap: f64,
+    /// ER under dagre: groups drawn as mermaid's dagre wrapper draws its cluster
+    /// nodes (see [`nest_cluster_nodes`]).
+    pub cluster_nodes: bool,
 }
 
 /// Edge labels wrap at 200px: `insertEdgeLabel` calls `createText` without a
@@ -1067,6 +1070,12 @@ pub fn render_with(
     let mut edge_els = Vec::new();
     let mut label_els = Vec::new();
     let mut node_els = Vec::new();
+    // What each drawn element belongs to (cluster, edge, node index), for
+    // `nest_cluster_nodes`.
+    let mut cluster_tag: Vec<usize> = Vec::new();
+    let mut edge_tag: Vec<usize> = Vec::new();
+    let mut label_tag: Vec<usize> = Vec::new();
+    let mut node_tag: Vec<usize> = Vec::new();
 
     // Clusters, outermost first.
     let mut cluster_rects = out.clusters.clone();
@@ -1130,6 +1139,7 @@ pub fn render_with(
             class: Some("cluster".into()),
             children,
         });
+        cluster_tag.push(ci);
     }
 
     // Node geometry (needed for edge clipping).
@@ -1166,6 +1176,7 @@ pub fn render_with(
                 class: Some(class),
                 children: els,
             });
+            node_tag.push(i);
         }
     }
 
@@ -1340,6 +1351,8 @@ pub fn render_with(
         }
     }
     for (ei, e) in g.edges.iter().enumerate() {
+        edge_tag.resize(edge_els.len(), ei.saturating_sub(1));
+        label_tag.resize(label_els.len(), ei.saturating_sub(1));
         let Some((mut pts, label_at)) = routed[ei].take() else {
             continue;
         };
@@ -1522,6 +1535,9 @@ pub fn render_with(
         }
     }
 
+    edge_tag.resize(edge_els.len(), g.edges.len().saturating_sub(1));
+    label_tag.resize(label_els.len(), g.edges.len().saturating_sub(1));
+
     if elk {
         let (geoms, slots): (Vec<_>, Vec<_>) = hop_edges.into_iter().unzip();
         let hopped = linejump::line_hops(&geoms, linejump::ELK_JUMP_RADIUS, cfg.line_hops);
@@ -1583,12 +1599,22 @@ pub fn render_with(
         ));
     }
 
-    let mut elements = vec![
-        Element::group("clusters", cluster_els),
-        Element::group("edgePaths", edge_els),
-        Element::group("edgeLabels", label_els),
-        Element::group("nodes", node_els),
-    ];
+    let mut elements = if opts.cluster_nodes && !elk {
+        nest_cluster_nodes(
+            g,
+            (cluster_els, cluster_tag),
+            (edge_els, edge_tag),
+            (label_els, label_tag),
+            (node_els, node_tag),
+        )
+    } else {
+        vec![
+            Element::group("clusters", cluster_els),
+            Element::group("edgePaths", edge_els),
+            Element::group("edgeLabels", label_els),
+            Element::group("nodes", node_els),
+        ]
+    };
     elements.extend(title_els);
     let view_box = bounds
         .rect()
@@ -2114,6 +2140,163 @@ fn node_prefix(kind: DiagramKind) -> &'static str {
         DiagramKind::Agentflow => "agentflow",
         _ => "flowchart",
     }
+}
+
+/// Drawn elements, each with the index of the cluster, edge or node it draws.
+type Tagged = (Vec<Element>, Vec<usize>);
+
+/// mermaid's dagre wrapper lays out a cluster no edge crosses (none joins a
+/// node or cluster inside it to one outside; edges to the cluster itself do
+/// not count) as a graph of its own (`adjustClustersAndEdges` / `extractor`),
+/// and draws it as one node of its parent: its frame and contents in the
+/// parent's `nodes`, over the parent's edges. Edges to it are cut at its
+/// frame, so the part of an end marker that reaches inside is hidden. The
+/// layers here follow that: per such graph its other clusters, edges (those
+/// with both ends inside it), edge labels, and nodes with its cluster nodes.
+fn nest_cluster_nodes(
+    g: &GraphDiagram,
+    clusters: Tagged,
+    edges: Tagged,
+    labels: Tagged,
+    nodes: Tagged,
+) -> Vec<Element> {
+    let nc = g.clusters.len();
+    let chain = |mut c: Option<ClusterId>| {
+        let mut out = Vec::new();
+        while let Some(ClusterId(i)) = c {
+            if out.len() > nc || out.contains(&i) {
+                break;
+            }
+            out.push(i);
+            c = g.clusters[i].parent;
+        }
+        out
+    };
+    // Per endpoint: the clusters it lies in (a cluster counts as inside itself
+    // for where its edges go, not for crossing).
+    let within = |e: Endpoint| match e {
+        Endpoint::Node(NodeId(i)) => (chain(g.nodes[i].cluster), None),
+        Endpoint::Cluster(ClusterId(c)) => (chain(g.clusters[c].parent), Some(c)),
+    };
+    let mut own = vec![false; nc];
+    for n in &g.nodes {
+        for c in chain(n.cluster) {
+            own[c] = true;
+        }
+    }
+    let mut crossed = vec![false; nc];
+    for e in &g.edges {
+        let ((a, _), (b, _)) = (within(e.from), within(e.to));
+        for (c, x) in crossed.iter_mut().enumerate() {
+            *x |= a.contains(&c) != b.contains(&c);
+        }
+    }
+    let node_cluster: Vec<bool> = (0..nc).map(|c| own[c] && !crossed[c]).collect();
+    // The graph each item is drawn in: its nearest cluster node (`nc`: the root).
+    let level_of = |inside: &[usize]| {
+        inside
+            .iter()
+            .copied()
+            .find(|&c| node_cluster[c])
+            .unwrap_or(nc)
+    };
+    let cluster_level: Vec<usize> = (0..nc)
+        .map(|c| level_of(&chain(g.clusters[c].parent)))
+        .collect();
+    let edge_level: Vec<usize> = g
+        .edges
+        .iter()
+        .map(|e| {
+            let side = |x: Endpoint| {
+                let (mut cs, me) = within(x);
+                if let Some(c) = me {
+                    cs.insert(0, c);
+                }
+                cs
+            };
+            let (a, b) = (side(e.from), side(e.to));
+            a.iter()
+                .copied()
+                .find(|c| node_cluster[*c] && b.contains(c))
+                .unwrap_or(nc)
+        })
+        .collect();
+    let node_level: Vec<usize> = g
+        .nodes
+        .iter()
+        .map(|n| level_of(&chain(n.cluster)))
+        .collect();
+    let mut by_level: Vec<[Vec<Element>; 4]> = (0..=nc).map(|_| Default::default()).collect();
+    let mut frames: Vec<Option<Element>> = (0..nc).map(|_| None).collect();
+    for (el, c) in clusters.0.into_iter().zip(clusters.1) {
+        if node_cluster[c] {
+            frames[c] = Some(el);
+        } else {
+            by_level[cluster_level[c]][0].push(el);
+        }
+    }
+    for (el, e) in edges.0.into_iter().zip(edges.1) {
+        by_level[edge_level[e]][1].push(el);
+    }
+    for (el, e) in labels.0.into_iter().zip(labels.1) {
+        by_level[edge_level[e]][2].push(el);
+    }
+    // Nodes and cluster nodes in the order mermaid's graph lists them: a
+    // cluster node where its first member would be.
+    let mut first_member = vec![usize::MAX; nc];
+    for (i, n) in g.nodes.iter().enumerate() {
+        for c in chain(n.cluster) {
+            first_member[c] = first_member[c].min(i);
+        }
+    }
+    fn build(
+        level: usize,
+        by_level: &mut [[Vec<Element>; 4]],
+        frames: &mut [Option<Element>],
+        kids: &[Vec<usize>],
+        first_member: &[usize],
+        nodes_at: &mut [Vec<(usize, usize, Element)>],
+    ) -> Vec<Element> {
+        let mut layer = std::mem::take(&mut nodes_at[level]);
+        for &c in &kids[level] {
+            let mut inner = Vec::new();
+            if let Some(f) = frames[c].take() {
+                inner.push(f);
+            }
+            let parts = build(c, by_level, frames, kids, first_member, nodes_at);
+            let mut parts = parts.into_iter();
+            if let Some(Element::Group { children, .. }) = parts.next() {
+                inner.extend(children);
+            }
+            let mut children = vec![Element::group("clusters", inner)];
+            children.extend(parts);
+            layer.push((first_member[c], 1, Element::group("root", children)));
+        }
+        layer.sort_by_key(|t| (t.0, t.1));
+        let [c, e, l, _] = std::mem::take(&mut by_level[level]);
+        vec![
+            Element::group("clusters", c),
+            Element::group("edgePaths", e),
+            Element::group("edgeLabels", l),
+            Element::group("nodes", layer.into_iter().map(|t| t.2).collect()),
+        ]
+    }
+    let mut kids: Vec<Vec<usize>> = vec![Vec::new(); nc + 1];
+    for c in (0..nc).filter(|&c| node_cluster[c]) {
+        kids[cluster_level[c]].push(c);
+    }
+    let mut nodes_at: Vec<Vec<(usize, usize, Element)>> = (0..=nc).map(|_| Vec::new()).collect();
+    for (el, i) in nodes.0.into_iter().zip(nodes.1) {
+        nodes_at[node_level[i]].push((i, 0, el));
+    }
+    build(
+        nc,
+        &mut by_level,
+        &mut frames,
+        &kids,
+        &first_member,
+        &mut nodes_at,
+    )
 }
 
 fn endpoint_id(g: &GraphDiagram, e: Endpoint) -> String {
