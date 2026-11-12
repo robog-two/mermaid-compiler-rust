@@ -226,6 +226,53 @@ struct Hierarchy {
 
 /// `layout_flat` for one graph of the ELK hierarchy.
 fn layout_flat_in(input: &LayoutInput, graph: ElkGraph, hier: &Hierarchy) -> LayoutOutput {
+    let prep = prepare(input, hier);
+    let layers = order_flat(input, graph, &prep);
+    finish(input, graph, hier, prep, layers)
+}
+
+/// A layered pass up to crossing minimisation: its vertices (edges split into
+/// dummies, cluster borders added) on their ranks, in their initial order.
+struct Prepared {
+    n: usize,
+    rank_sep: f64,
+    is_ext: Vec<bool>,
+    hidden_layers: (Option<usize>, Option<usize>),
+    verts: Vec<Vertex>,
+    cluster_chain: Vec<Vec<usize>>,
+    links: Vec<(usize, usize, f64)>,
+    chains: Vec<Option<Chain>>,
+    span: Vec<Option<(usize, usize)>>,
+    borders: Vec<Vec<(usize, usize)>>,
+    up: Vec<Vec<(usize, f64)>>,
+    down: Vec<Vec<(usize, f64)>>,
+    max_rank: usize,
+    /// The initial order.
+    layers: Vec<Vec<usize>>,
+}
+
+impl Prepared {
+    /// Cluster border vertices.
+    fn border(&self) -> Vec<bool> {
+        self.verts
+            .iter()
+            .map(|v| matches!(v.kind, Kind::Border { .. }))
+            .collect()
+    }
+}
+
+/// How ELK minimises crossings in `graph` (of `n` nodes).
+fn elk_options(graph: ElkGraph, n: usize) -> elkorder::Options {
+    elkorder::Options {
+        model_order: graph == ElkGraph::Root,
+        greedy_switch: graph == (ElkGraph::Container { separate: true })
+            && n < ELK_GREEDY_SWITCH_THRESHOLD,
+        thoroughness: ELK_THOROUGHNESS,
+    }
+}
+
+/// Steps 1–5 of the pass (see the module documentation), up to the initial order.
+fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
     let horizontal = input.direction.is_horizontal();
     let swap = |w: f64, h: f64| if horizontal { (h, w) } else { (w, h) };
     let n = input.nodes.len();
@@ -503,21 +550,92 @@ fn layout_flat_in(input: &LayoutInput, graph: ElkGraph, hier: &Hierarchy) -> Lay
         let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
         *layer = ctx.arrange(layer, &keys, &mut before);
     }
-    let layers = if elk {
-        let border: Vec<bool> = verts
-            .iter()
-            .map(|v| matches!(v.kind, Kind::Border { .. }))
-            .collect();
-        let opts = elkorder::Options {
-            model_order: graph == ElkGraph::Root,
-            greedy_switch: graph == (ElkGraph::Container { separate: true })
-                && n < ELK_GREEDY_SWITCH_THRESHOLD,
-            thoroughness: ELK_THOROUGHNESS,
-        };
-        elk_order(layers, &verts, n, &chains, &border, &ctx, opts)
-    } else {
-        dagre_order(layers, &ctx, &up, &down, nv)
+    Prepared {
+        n,
+        rank_sep,
+        is_ext,
+        hidden_layers,
+        verts,
+        cluster_chain,
+        links,
+        chains,
+        span,
+        borders,
+        up,
+        down,
+        max_rank,
+        layers,
+    }
+}
+
+/// Crossing minimisation of one pass on its own.
+fn order_flat(input: &LayoutInput, graph: ElkGraph, prep: &Prepared) -> Vec<Vec<usize>> {
+    let Prepared {
+        n,
+        verts,
+        cluster_chain,
+        chains,
+        up,
+        down,
+        layers,
+        ..
+    } = prep;
+    let (n, nv) = (*n, verts.len());
+    let ctx = OrderCtx {
+        verts,
+        chains: cluster_chain,
     };
+    let layers = layers.clone();
+    let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
+    if elk {
+        let border = prep.border();
+        elk_order(
+            layers,
+            verts,
+            n,
+            chains,
+            &border,
+            &ctx,
+            elk_options(graph, n),
+        )
+    } else {
+        dagre_order(layers, &ctx, up, down, nv)
+    }
+}
+
+/// Steps 6–8 of the pass: coordinates and routes for the ordered `layers`. The
+/// real nodes take their sizes from `input` (a container's box may have been
+/// sized after its pass was prepared).
+fn finish(
+    input: &LayoutInput,
+    graph: ElkGraph,
+    hier: &Hierarchy,
+    prep: Prepared,
+    layers: Vec<Vec<usize>>,
+) -> LayoutOutput {
+    let Prepared {
+        n,
+        rank_sep,
+        is_ext,
+        hidden_layers,
+        mut verts,
+        cluster_chain,
+        links,
+        chains,
+        span,
+        borders,
+        max_rank,
+        ..
+    } = prep;
+    let horizontal = input.direction.is_horizontal();
+    let swap = |w: f64, h: f64| if horizontal { (h, w) } else { (w, h) };
+    let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
+    let nc = input.clusters.len();
+    for (v, nd) in input.nodes.iter().enumerate() {
+        let (w, h) = swap(nd.width, nd.height);
+        verts[v].w = w;
+        verts[v].h = h;
+    }
 
     // 6. Cross-axis coordinates.
     let pad = input.cluster_padding;
@@ -913,92 +1031,153 @@ fn elk_order(
     ctx: &OrderCtx,
     opts: elkorder::Options,
 ) -> Vec<Vec<usize>> {
-    let mut kept = vec![false; layers.len()];
-    for (r, k) in kept.iter_mut().enumerate() {
-        *k = r % RANK_STEP == 0;
-    }
-    for v in verts {
-        if matches!(v.kind, Kind::Dummy { labeled: true }) {
-            kept[v.rank] = true;
+    let (setup, elk_layers) = ElkLayers::new(layers, verts, chains);
+    let ordered = elkorder::minimize(elk_layers, &setup.graph(border, real), ctx, opts);
+    setup.complete(ordered, verts, ctx)
+}
+
+/// One pass's vertices as ELK's crossing minimisation sees them (see
+/// `elk_order`): its kept ranks and the edge segments between them.
+struct ElkLayers {
+    kept: Vec<bool>,
+    /// The kept ranks, in order.
+    ranks: Vec<usize>,
+    segs: Vec<(usize, usize)>,
+    info: Vec<elkorder::SegInfo>,
+    label: Vec<bool>,
+    /// Per left-out vertex: its edge's ends on the kept layers above and below.
+    across: Vec<Option<(usize, usize)>>,
+    /// The layers, the kept ones taken out.
+    rest: Vec<Vec<usize>>,
+}
+
+impl ElkLayers {
+    /// Split `layers` into ELK's layers (returned) and the rest.
+    fn new(
+        layers: Vec<Vec<usize>>,
+        verts: &[Vertex],
+        chains: &[Option<Chain>],
+    ) -> (Self, Vec<Vec<usize>>) {
+        let mut kept = vec![false; layers.len()];
+        for (r, k) in kept.iter_mut().enumerate() {
+            *k = r % RANK_STEP == 0;
         }
-    }
-    let mut segs = Vec::new();
-    let mut info = Vec::new();
-    // Per left-out vertex: its edge's ends on the kept layers above and below.
-    let mut across: Vec<Option<(usize, usize)>> = vec![None; verts.len()];
-    for (ei, (chain, _, reversed)) in chains
-        .iter()
-        .enumerate()
-        .filter_map(|(ei, c)| Some((ei, c.as_ref()?)))
-    {
-        let target = chain[chain.len() - 1];
-        let mut last = chain[0];
-        let mut skipped = Vec::new();
-        for &v in &chain[1..] {
-            if kept[verts[v].rank] {
-                segs.push((last, v));
-                info.push(elkorder::SegInfo {
-                    edge: ei,
-                    target,
-                    reversed: *reversed,
-                });
-                for &d in &skipped {
-                    across[d] = Some((last, v));
-                }
-                skipped.clear();
-                last = v;
-            } else {
-                skipped.push(v);
+        for v in verts {
+            if matches!(v.kind, Kind::Dummy { labeled: true }) {
+                kept[v.rank] = true;
             }
         }
+        let mut segs = Vec::new();
+        let mut info = Vec::new();
+        let mut across: Vec<Option<(usize, usize)>> = vec![None; verts.len()];
+        for (ei, (chain, _, reversed)) in chains
+            .iter()
+            .enumerate()
+            .filter_map(|(ei, c)| Some((ei, c.as_ref()?)))
+        {
+            let target = chain[chain.len() - 1];
+            let mut last = chain[0];
+            let mut skipped = Vec::new();
+            for &v in &chain[1..] {
+                if kept[verts[v].rank] {
+                    segs.push((last, v));
+                    info.push(elkorder::SegInfo {
+                        edge: ei,
+                        target,
+                        reversed: *reversed,
+                    });
+                    for &d in &skipped {
+                        across[d] = Some((last, v));
+                    }
+                    skipped.clear();
+                    last = v;
+                } else {
+                    skipped.push(v);
+                }
+            }
+        }
+        let ranks: Vec<usize> = (0..layers.len()).filter(|&r| kept[r]).collect();
+        let label: Vec<bool> = verts
+            .iter()
+            .map(|v| matches!(v.kind, Kind::Dummy { labeled: true }))
+            .collect();
+        let mut rest = layers;
+        let elk_layers: Vec<Vec<usize>> = ranks
+            .iter()
+            .map(|&r| std::mem::take(&mut rest[r]))
+            .collect();
+        let setup = ElkLayers {
+            kept,
+            ranks,
+            segs,
+            info,
+            label,
+            across,
+            rest,
+        };
+        (setup, elk_layers)
     }
-    let ranks: Vec<usize> = (0..layers.len()).filter(|&r| kept[r]).collect();
-    let label: Vec<bool> = verts
-        .iter()
-        .map(|v| matches!(v.kind, Kind::Dummy { labeled: true }))
-        .collect();
-    let mut all = layers;
-    let elk_layers: Vec<Vec<usize>> = ranks.iter().map(|&r| std::mem::take(&mut all[r])).collect();
-    let ordered = elkorder::minimize(
-        elk_layers,
-        &elkorder::Graph {
+
+    /// Per segment: the index of its edge.
+    fn seg_edges(&self) -> impl Iterator<Item = usize> + '_ {
+        self.info.iter().map(|i| i.edge)
+    }
+
+    fn graph<'a>(&'a self, border: &'a [bool], real: usize) -> elkorder::Graph<'a> {
+        elkorder::Graph {
             border,
-            label: &label,
-            segs: &segs,
-            info: &info,
+            label: &self.label,
+            segs: &self.segs,
+            info: &self.info,
             real,
-        },
-        ctx,
-        opts,
-    );
-    for (&r, layer) in ranks.iter().zip(ordered) {
-        all[r] = layer;
-    }
-    let mut pos = vec![0usize; verts.len()];
-    for &r in &ranks {
-        for (i, &v) in all[r].iter().enumerate() {
-            pos[v] = i;
         }
     }
-    // Sibling clusters keep the order the kept layers give them.
-    let mut before = Vec::new();
-    for &r in &ranks {
-        let keys: Vec<f64> = (0..all[r].len()).map(|i| i as f64).collect();
-        ctx.arrange(&all[r], &keys, &mut before);
+
+    /// All layers again, from ELK's ordered ones: the ranks between, which
+    /// hold nothing but the midpoints of edges, are each ordered after their
+    /// edges' upper ends, so they add no crossing.
+    fn complete(
+        self,
+        ordered: Vec<Vec<usize>>,
+        verts: &[Vertex],
+        ctx: &OrderCtx,
+    ) -> Vec<Vec<usize>> {
+        let ElkLayers {
+            kept,
+            ranks,
+            across,
+            rest: mut all,
+            ..
+        } = self;
+        for (&r, layer) in ranks.iter().zip(ordered) {
+            all[r] = layer;
+        }
+        let mut pos = vec![0usize; verts.len()];
+        for &r in &ranks {
+            for (i, &v) in all[r].iter().enumerate() {
+                pos[v] = i;
+            }
+        }
+        // Sibling clusters keep the order the kept layers give them.
+        let mut before = Vec::new();
+        for &r in &ranks {
+            let keys: Vec<f64> = (0..all[r].len()).map(|i| i as f64).collect();
+            ctx.arrange(&all[r], &keys, &mut before);
+        }
+        for r in (0..all.len()).filter(|&r| !kept[r]) {
+            let layer = std::mem::take(&mut all[r]);
+            let width = (verts.len() + 1) as f64;
+            let keys: Vec<f64> = layer
+                .iter()
+                .map(|&v| match across[v] {
+                    Some((a, b)) => pos[a] as f64 * width + pos[b] as f64,
+                    None => 0.0,
+                })
+                .collect();
+            all[r] = ctx.arrange(&layer, &keys, &mut before);
+        }
+        all
     }
-    for r in (0..all.len()).filter(|&r| !kept[r]) {
-        let layer = std::mem::take(&mut all[r]);
-        let width = (verts.len() + 1) as f64;
-        let keys: Vec<f64> = layer
-            .iter()
-            .map(|&v| match across[v] {
-                Some((a, b)) => pos[a] as f64 * width + pos[b] as f64,
-                None => 0.0,
-            })
-            .collect();
-        all[r] = ctx.arrange(&layer, &keys, &mut before);
-    }
-    all
 }
 
 /// dagre-style ordering: weighted barycentre sweeps, alternating down and up,
@@ -1167,11 +1346,23 @@ fn elk_place(
         })
         .collect();
     // Ports on the nodes' two flow sides.
-    let mut out_side: Vec<Vec<(usize, usize)>> = vec![Vec::new(); real];
-    let mut in_side: Vec<Vec<(usize, usize)>> = vec![Vec::new(); real];
+    // Ports leading to one vertex go in the order of the ports they reach there,
+    // where those are fixed by a laid out container.
+    let fixed_end = |ei: usize, at_end: bool| {
+        let (from, to) = fixed.get(ei).copied().unwrap_or((None, None));
+        // The chain is oriented; a reversed edge's ends are swapped.
+        let reversed = chains[ei].as_ref().is_some_and(|c| c.2);
+        if at_end != reversed { to } else { from }
+    };
+    let key = |o: Option<f64>| o.map_or(i64::MIN, |o| (o * 1024.0).round() as i64);
+    let mut out_side: Vec<Vec<(usize, i64, usize)>> = vec![Vec::new(); real];
+    let mut in_side: Vec<Vec<(usize, i64, usize)>> = vec![Vec::new(); real];
     for (ei, s) in stops.iter().enumerate().filter(|(_, s)| s.len() >= 2) {
-        out_side[s[0]].push((index[s[1]], ei));
-        in_side[s[s.len() - 1]].push((index[s[s.len() - 2]], ei));
+        let direct = s.len() == 2;
+        let to_key = key(fixed_end(ei, true).filter(|_| direct));
+        let from_key = key(fixed_end(ei, false).filter(|_| direct));
+        out_side[s[0]].push((index[s[1]], to_key, ei));
+        in_side[s[s.len() - 1]].push((index[s[s.len() - 2]], from_key, ei));
     }
     let mut out_port = vec![0.0; ne];
     let mut in_port = vec![0.0; ne];
@@ -1182,20 +1373,14 @@ fn elk_place(
         ] {
             side.sort_unstable();
             // Ports fixed by a laid out container stay where its contents put them.
-            let fixed_at = |ei: usize| {
-                let (from, to) = fixed.get(ei).copied().unwrap_or((None, None));
-                // The chain is oriented; a reversed edge's ends are swapped.
-                let reversed = chains[ei].as_ref().is_some_and(|c| c.2);
-                if at_end != reversed { to } else { from }
-            };
-            side.retain(|&(_, ei)| match fixed_at(ei) {
+            side.retain(|&(_, _, ei)| match fixed_end(ei, at_end) {
                 Some(off) => {
                     port[ei] = verts[v].w / 2.0 + off;
                     false
                 }
                 None => true,
             });
-            for (&(_, ei), off) in side.iter().zip(elk_port_offsets(side.len(), verts[v].w)) {
+            for (&(_, _, ei), off) in side.iter().zip(elk_port_offsets(side.len(), verts[v].w)) {
                 port[ei] = off;
             }
         }

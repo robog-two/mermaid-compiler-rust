@@ -19,10 +19,14 @@
 //! - a two-sided greedy switch afterwards where ELK runs one by default: graphs laid
 //!   out on their own (not hierarchically) with fewer than 40 nodes.
 //!
-//! Clusters stay contiguous, with their order kept over the layers, through the
-//! same `OrderCtx::arrange` the dagre-style sweeps use; ELK instead orders a
-//! compound node's contents in its own nested graph, so the graphs only agree in
-//! structure without clusters.
+//! Under ELK every container is a graph of its own (see `nested`); the graphs of
+//! one hierarchical run are ordered together (`minimize_run`), as ELK's
+//! hierarchical layer sweep does: a container is either ordered on its own first
+//! ("bottom up", its border ports then fixed in its parent in the order of its
+//! port dummies) or within its parent's sweeps, which dive into it. Clusters
+//! integrated into a pass (dagre-style) stay contiguous, with their order kept
+//! over the layers, through the same `OrderCtx::arrange` the dagre-style sweeps
+//! use.
 
 use super::OrderCtx;
 
@@ -98,6 +102,13 @@ struct Sweeper<'a> {
     west_rank: Vec<f64>,
     node_relative: bool,
     rng: JavaRandom,
+    /// Nodes whose port order is fixed (a container ordered on its own):
+    /// never redistributed.
+    fixed_node: Vec<bool>,
+    /// Per vertex: the run's graph of the container it is, if any.
+    nested: Vec<Option<usize>>,
+    /// External port dummies.
+    ext: Vec<bool>,
     ctx: &'a OrderCtx<'a>,
 }
 
@@ -132,77 +143,452 @@ pub(super) struct Graph<'a> {
 
 /// Order the layers as ELK's layer sweep does. `layers` holds ELK's layers.
 pub(super) fn minimize(
-    mut layers: Vec<Vec<usize>>,
+    layers: Vec<Vec<usize>>,
     graph: &Graph,
     ctx: &OrderCtx,
     opts: Options,
 ) -> Vec<Vec<usize>> {
-    let Graph {
-        border,
-        label,
-        segs,
-        info,
-        real,
-    } = *graph;
-    let nv = border.len();
-    let mut east = vec![Vec::new(); nv];
-    let mut west = vec![Vec::new(); nv];
-    for (s, &(a, b)) in segs.iter().enumerate() {
-        east[a].push(s);
-        west[b].push(s);
-    }
-    creation_order(&mut layers, &east, segs, info, real, label);
-    if opts.model_order {
-        sort_by_model_order(&mut layers, &mut east, &mut west, segs, info, real, ctx);
-    } else {
-        for layer in layers.iter_mut() {
-            let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
-            *layer = ctx.arrange(layer, &keys, &mut Vec::new());
-        }
-        let mut pos = vec![0usize; nv];
-        for layer in &layers {
-            for (i, &v) in layer.iter().enumerate() {
-                pos[v] = i;
-            }
-        }
-        for w in west.iter_mut() {
-            w.sort_by_key(|&s| (pos[segs[s].0], s));
-        }
-    }
+    let nv = graph.border.len();
+    let run = vec![RunGraph {
+        layers,
+        graph: Graph { ..*graph },
+        ctx,
+        opts,
+        ext_key: vec![None; nv],
+        seg_key: (0..graph.segs.len()).collect(),
+        parent: None,
+    }];
+    minimize_run(run).pop().unwrap_or_default()
+}
+
+/// One graph of an ELK run (`hierarchyHandling: INCLUDE_CHILDREN`): the root of
+/// the run, or a container laid out within it.
+pub(super) struct RunGraph<'a> {
+    /// ELK's layers.
+    pub layers: Vec<Vec<usize>>,
+    pub graph: Graph<'a>,
+    pub ctx: &'a OrderCtx<'a>,
+    pub opts: Options,
+    /// Per vertex: for an external port dummy, the key of the edge it is the
+    /// port of (the container's port with the same key in its parent).
+    pub ext_key: Vec<Option<usize>>,
+    /// Per segment: the key of its edge.
+    pub seg_key: Vec<usize>,
+    /// The graph's container: (its graph's index in the run, its vertex there).
+    pub parent: Option<(usize, usize)>,
+}
+
+/// ELK's `hierarchicalSweepiness` default: a container whose paths lead
+/// mostly to random nodes rather than its border ports is ordered on its own
+/// (`LayerSweepTypeDecider`).
+const HIERARCHICAL_SWEEPINESS: f64 = 0.1;
+
+/// Per graph of a run: (options, external port keys, segment keys, parent).
+type RunExtra = (
+    Options,
+    Vec<Option<usize>>,
+    Vec<usize>,
+    Option<(usize, usize)>,
+);
+
+/// Order every graph of an ELK run as `LayerSweepCrossingMinimizer` does with
+/// hierarchical crossing minimisation: the containers it decides to order
+/// "bottom up" each on their own, deepest first, their border ports' order
+/// fixed in their parents from where their contents put the port dummies; the
+/// others within their parent's sweeps, which dive into them on reaching their
+/// layer (the parent's ports there order the container's first layer of port
+/// dummies, and its last layer then orders the ports on the far side).
+/// `graphs[0]` is the root. Returns each graph's layers.
+pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
+    let ng = graphs.len();
     let mut rng = JavaRandom::new(1);
     // `LayerSweepCrossingMinimizer.initialize`: the seed every run restarts from,
-    // then the graph's port distributor, by a coin flip.
+    // then each graph's port distributor, by a coin flip of its own generator.
     let seed = rng.next_long();
-    let node_relative = rng.next_boolean();
-    let mut sw = Sweeper {
-        layers,
-        border,
-        segs,
-        east,
-        west,
-        east_rank: vec![0.0; segs.len()],
-        west_rank: vec![0.0; segs.len()],
-        node_relative,
-        rng,
-        ctx,
+    let mut sws = Vec::with_capacity(ng);
+    let mut extra: Vec<RunExtra> = Vec::with_capacity(ng);
+    for (gi, g) in graphs.into_iter().enumerate() {
+        let RunGraph {
+            mut layers,
+            graph,
+            ctx,
+            opts,
+            ext_key,
+            seg_key,
+            parent,
+        } = g;
+        let Graph {
+            border,
+            label,
+            segs,
+            info,
+            real,
+        } = graph;
+        let nv = border.len();
+        let mut east = vec![Vec::new(); nv];
+        let mut west = vec![Vec::new(); nv];
+        for (s, &(a, b)) in segs.iter().enumerate() {
+            east[a].push(s);
+            west[b].push(s);
+        }
+        creation_order(&mut layers, &east, segs, info, real, label);
+        if opts.model_order {
+            sort_by_model_order(&mut layers, &mut east, &mut west, segs, info, real, ctx);
+        } else {
+            for layer in layers.iter_mut() {
+                let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
+                *layer = ctx.arrange(layer, &keys, &mut Vec::new());
+            }
+            let mut pos = vec![0usize; nv];
+            for layer in &layers {
+                for (i, &v) in layer.iter().enumerate() {
+                    pos[v] = i;
+                }
+            }
+            for w in west.iter_mut() {
+                w.sort_by_key(|&s| (pos[segs[s].0], s));
+            }
+        }
+        let mut own = if gi == 0 {
+            std::mem::replace(&mut rng, JavaRandom::new(0))
+        } else {
+            JavaRandom::new(1)
+        };
+        let node_relative = own.next_boolean();
+        sws.push(Sweeper {
+            layers,
+            border,
+            segs,
+            east,
+            west,
+            east_rank: vec![0.0; segs.len()],
+            west_rank: vec![0.0; segs.len()],
+            node_relative,
+            rng: own,
+            fixed_node: vec![false; nv],
+            nested: vec![None; nv],
+            ext: ext_key.iter().map(Option::is_some).collect(),
+            ctx,
+        });
+        extra.push((opts, ext_key, seg_key, parent));
+    }
+    let mut into = vec![false; ng];
+    for (gi, e) in extra.iter().enumerate() {
+        if let Some((pg, v)) = e.3 {
+            sws[pg].nested[v] = Some(gi);
+            into[gi] = !bottom_up(&sws[gi], &sws[pg], v);
+        }
+    }
+    let mut run = Run {
+        sw: sws,
+        extra,
+        into,
+        seed,
     };
-    if sw.layers.len() < 2 {
-        return sw.layers;
+    // Bottom-up graphs, deepest first (the reverse of a breadth-first walk).
+    let depth = |gi: usize| {
+        let mut d = 0;
+        let mut cur = run.extra[gi].3;
+        while let Some((p, _)) = cur {
+            d += 1;
+            cur = run.extra[p].3;
+            if d > ng {
+                break;
+            }
+        }
+        d
+    };
+    let mut order: Vec<usize> = (0..ng).filter(|&g| !run.into[g]).collect();
+    order.sort_by_key(|&g| std::cmp::Reverse(depth(g)));
+    for g in order {
+        let opts = run.extra[g].0;
+        // A lone graph of a single layer has nothing to order (`process`'s
+        // short cut); a container is still swept.
+        if run.sw[g].layers.is_empty() || (ng == 1 && run.sw[g].layers.len() < 2) {
+            continue;
+        }
+        run.sw[0].rng.set_seed(run.seed);
+        if let Some(best) = run.compare_randomized_layouts(g, opts) {
+            for (k, snap) in best.into_iter().enumerate() {
+                if let Some(snap) = snap {
+                    run.sw[k].layers = snap.layers;
+                    run.sw[k].east = snap.east;
+                    run.sw[k].west = snap.west;
+                }
+            }
+        }
+        if opts.greedy_switch && ng == 1 {
+            // A second `LayerSweepCrossingMinimizer` (two-sided greedy switch) on the
+            // same random generator.
+            let _ = run.sw[0].rng.next_long();
+            run.sw[0].greedy_switch();
+        }
+        // `setPortOrderOnParentGraph`.
+        if let Some((pg, v)) = run.extra[g].3 {
+            let last = run.sw[g].layers.len().saturating_sub(1);
+            run.ports_from_dummies(g, last, pg, v, true);
+            run.ports_from_dummies(g, 0, pg, v, false);
+            run.sw[pg].fixed_node[v] = true;
+        }
     }
-    sw.rng.set_seed(seed);
-    let best = sw.compare_randomized_layouts(opts);
-    if let Some(best) = best {
-        sw.layers = best.layers;
-        sw.east = best.east;
-        sw.west = best.west;
+    run.sw.into_iter().map(|s| s.layers).collect()
+}
+
+/// `LayerSweepTypeDecider.useBottomUp` for the graph of `child`, the container
+/// at vertex `v` of `parent`.
+fn bottom_up(child: &Sweeper, parent: &Sweeper, v: usize) -> bool {
+    if parent.east[v].len() < 2 && parent.west[v].len() < 2 {
+        return true;
     }
-    if opts.greedy_switch {
-        // A second `LayerSweepCrossingMinimizer` (two-sided greedy switch) on the
-        // same random generator.
-        let _ = sw.rng.next_long();
-        sw.greedy_switch();
+    let nv = child.border.len();
+    // (connected edges, hierarchical influence, random influence)
+    let mut info = vec![(0usize, 0usize, 0usize); nv];
+    let (mut to_random, mut to_hier) = (0usize, 0usize);
+    let last = child.layers.len().saturating_sub(1);
+    for (li, layer) in child.layers.iter().enumerate() {
+        for &u in layer {
+            if child.border[u] {
+                continue;
+            }
+            let mut cur = info[u];
+            if child.ext[u] {
+                cur.1 = 1;
+                if li == last && li > 0 {
+                    to_hier += cur.0;
+                }
+            } else if child.west[u].is_empty() {
+                cur.2 = 1;
+            } else if child.east[u].is_empty() {
+                to_random += cur.0;
+            }
+            info[u] = cur;
+            for &s in &child.east[u] {
+                to_random += cur.2;
+                to_hier += cur.1;
+                let t = child.segs[s].1;
+                info[t].0 += cur.0 + 1;
+                info[t].1 += cur.1;
+                info[t].2 += cur.2;
+            }
+        }
     }
-    sw.layers
+    let all = (to_random + to_hier) as f64;
+    let normalized = if all == 0.0 {
+        f64::INFINITY
+    } else {
+        (to_random as f64 - to_hier as f64) / all
+    };
+    normalized >= HIERARCHICAL_SWEEPINESS
+}
+
+/// The graphs of an ELK run being ordered.
+struct Run<'a> {
+    sw: Vec<Sweeper<'a>>,
+    extra: Vec<RunExtra>,
+    /// Per graph: ordered within its parent's sweeps.
+    into: Vec<bool>,
+    seed: i64,
+}
+
+impl Run<'_> {
+    /// The order of the ports on one side of the container at vertex `v` of
+    /// graph `pg` from the order of its port dummies in layer `li` of its graph
+    /// `g` (`sortPortsByDummyPositionsInLastLayer`); `east`: the side towards
+    /// the next layer.
+    fn ports_from_dummies(&mut self, g: usize, li: usize, pg: usize, v: usize, east: bool) {
+        let Some(layer) = self.sw[g].layers.get(li) else {
+            return;
+        };
+        if layer.first().is_none_or(|&u| !self.sw[g].ext[u]) {
+            return;
+        }
+        let keys: Vec<usize> = layer.iter().filter_map(|&u| self.extra[g].1[u]).collect();
+        let seg_key = &self.extra[pg].2;
+        let ports = if east {
+            &mut self.sw[pg].east[v]
+        } else {
+            &mut self.sw[pg].west[v]
+        };
+        let rank = |s: usize| {
+            keys.iter()
+                .position(|&k| k == seg_key[s])
+                .unwrap_or(usize::MAX)
+        };
+        ports.sort_by_key(|&s| rank(s));
+    }
+
+    /// Order layer `li` of graph `g` (its port dummies) by the ports on one side
+    /// of its container, vertex `v` of graph `pg` (`sortPortDummiesByPortPositions`).
+    fn dummies_from_ports(&mut self, g: usize, li: usize, pg: usize, v: usize, west: bool) {
+        let ports = if west {
+            &self.sw[pg].west[v]
+        } else {
+            &self.sw[pg].east[v]
+        };
+        let keys: Vec<usize> = ports.iter().map(|&s| self.extra[pg].2[s]).collect();
+        let ext_key = &self.extra[g].1;
+        let rank = |u: usize| {
+            ext_key[u]
+                .and_then(|k| keys.iter().position(|&x| x == k))
+                .unwrap_or(usize::MAX)
+        };
+        self.sw[g].layers[li].sort_by_key(|&u| rank(u));
+    }
+
+    /// Graph `g` and the graphs ordered within its sweeps.
+    fn subtree(&self, g: usize) -> Vec<usize> {
+        let mut out = vec![g];
+        let mut i = 0;
+        while i < out.len() {
+            let cur = out[i];
+            for (c, e) in self.extra.iter().enumerate() {
+                if self.into[c] && e.3.is_some_and(|(p, _)| p == cur) {
+                    out.push(c);
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    fn snapshot(&self, g: usize) -> Vec<Option<Snapshot>> {
+        let mut out: Vec<Option<Snapshot>> = (0..self.sw.len()).map(|_| None).collect();
+        for k in self.subtree(g) {
+            out[k] = Some(self.sw[k].snapshot());
+        }
+        out
+    }
+
+    /// Crossings of graph `g` and of the graphs ordered within its sweeps.
+    fn crossings(&self, g: usize) -> usize {
+        self.subtree(g)
+            .iter()
+            .map(|&k| self.sw[k].crossings())
+            .sum()
+    }
+
+    /// `compareDifferentRandomizedLayouts`: the best of `thoroughness` runs, or
+    /// `None` to keep the order as it is.
+    fn compare_randomized_layouts(
+        &mut self,
+        g: usize,
+        opts: Options,
+    ) -> Option<Vec<Option<Snapshot>>> {
+        let mut first_try = opts.model_order;
+        let mut best = None;
+        let mut best_crossings = usize::MAX;
+        for _ in 0..opts.thoroughness.max(1) {
+            let (crossings, run_best) = self.run(g, &mut first_try);
+            if crossings < best_crossings {
+                best_crossings = crossings;
+                if run_best.is_some() {
+                    best = run_best;
+                }
+                if crossings == 0 {
+                    break;
+                }
+            }
+        }
+        best
+    }
+
+    /// `minimizeCrossingsWithCounter`: one run; its crossing count and best order.
+    /// The first run with model order sweeps forward from the model order (and
+    /// stops at once if that has no crossing); the others start from a random
+    /// first layer. (Later ELK versions also start the second run from the
+    /// current order; elkjs 0.12, which mermaid 12.3 bundles, does not.)
+    fn run(&mut self, g: usize, first_try: &mut bool) -> (usize, Option<Vec<Option<Snapshot>>>) {
+        // The sweep direction comes from the run's (the root's) generator.
+        let mut forward = self.sw[0].rng.next_boolean();
+        if *first_try && self.crossings(g) == 0 {
+            // The model order is already free of crossings: keep it.
+            return (0, None);
+        }
+        if *first_try {
+            forward = true;
+        } else {
+            self.sw[g].set_first_layer_order(forward);
+        }
+        self.sweep(g, forward, !*first_try, true);
+        *first_try = false;
+        let mut crossings = self.crossings(g);
+        loop {
+            let best = self.snapshot(g);
+            if crossings == 0 {
+                return (0, Some(best));
+            }
+            forward = !forward;
+            let old = crossings;
+            self.sweep(g, forward, false, false);
+            crossings = self.crossings(g);
+            if old <= crossings {
+                return (old, Some(best));
+            }
+        }
+    }
+
+    /// `sweepReducingCrossings` on graph `g`: `first` places nodes without a
+    /// barycentre at random; `first_sweep` is the run's first sweep, which the
+    /// graphs dived into take as theirs.
+    fn sweep(&mut self, g: usize, forward: bool, first: bool, first_sweep: bool) {
+        let n = self.sw[g].layers.len();
+        if n == 0 {
+            return;
+        }
+        let mut before = Vec::new();
+        let start = self.sw[g].start(forward);
+        {
+            let sw = &self.sw[g];
+            let keys: Vec<f64> = (0..sw.layers[start].len()).map(|i| i as f64).collect();
+            sw.ctx.arrange(&sw.layers[start], &keys, &mut before);
+        }
+        self.dive(g, start, forward, first_sweep);
+        let free: Vec<usize> = if forward {
+            (1..n).collect()
+        } else {
+            (0..n - 1).rev().collect()
+        };
+        for li in free {
+            let fixed = if forward { li - 1 } else { li + 1 };
+            let sw = &mut self.sw[g];
+            sw.rank_ports(fixed, forward);
+            let layer = std::mem::take(&mut sw.layers[li]);
+            // A layer of port dummies counts as ordered (`preOrdered`).
+            let first = first && layer.first().is_none_or(|&u| !sw.ext[u]);
+            let bary = sw.barycenters(&layer, forward, first);
+            sw.layers[li] = sw.sorted(&layer, bary, &mut before);
+            sw.distribute_ports(li, fixed, forward);
+            self.dive(g, li, forward, first_sweep);
+        }
+    }
+
+    /// `sweepInHierarchicalNodes`: sweep the graphs of the containers in layer
+    /// `li` of graph `g` that are ordered within its sweeps.
+    fn dive(&mut self, g: usize, li: usize, forward: bool, first_sweep: bool) {
+        let containers: Vec<(usize, usize)> = self.sw[g].layers[li]
+            .iter()
+            .filter_map(|&v| Some((v, self.sw[g].nested[v]?)))
+            .filter(|&(_, c)| self.into[c])
+            .collect();
+        for (v, c) in containers {
+            let n = self.sw[c].layers.len();
+            if n == 0 {
+                continue;
+            }
+            let start = self.sw[c].start(forward);
+            let first_is_port = self.sw[c].layers[start]
+                .first()
+                .is_some_and(|&u| self.sw[c].ext[u]);
+            if first_is_port {
+                self.dummies_from_ports(c, start, g, v, forward);
+            } else {
+                self.sw[c].set_first_layer_order(forward);
+            }
+            self.sweep(c, forward, first_sweep, first_sweep);
+            let end = if forward { n - 1 } else { 0 };
+            self.ports_from_dummies(c, end, g, v, forward);
+        }
+    }
 }
 
 /// The order ELK's layers have before crossing minimisation: real nodes in model
@@ -509,61 +895,6 @@ impl Sweeper<'_> {
         }
     }
 
-    /// `compareDifferentRandomizedLayouts`: the best of `thoroughness` runs, or
-    /// `None` to keep the order as it is.
-    fn compare_randomized_layouts(&mut self, opts: Options) -> Option<Snapshot> {
-        let mut first_try = opts.model_order;
-        let mut best: Option<Snapshot> = None;
-        let mut best_crossings = usize::MAX;
-        for _ in 0..opts.thoroughness.max(1) {
-            let (crossings, run_best) = self.run(&mut first_try);
-            if crossings < best_crossings {
-                best_crossings = crossings;
-                if run_best.is_some() {
-                    best = run_best;
-                }
-                if crossings == 0 {
-                    break;
-                }
-            }
-        }
-        best
-    }
-
-    /// `minimizeCrossingsWithCounter`: one run; its crossing count and best order.
-    /// The first run with model order sweeps forward from the model order (and
-    /// stops at once if that has no crossing); the others start from a random
-    /// first layer. (Later ELK versions also start the second run from the
-    /// current order; elkjs 0.12, which mermaid 12.3 bundles, does not.)
-    fn run(&mut self, first_try: &mut bool) -> (usize, Option<Snapshot>) {
-        let mut forward = self.rng.next_boolean();
-        if *first_try && self.crossings() == 0 {
-            // The model order is already free of crossings: keep it.
-            return (0, None);
-        }
-        if *first_try {
-            forward = true;
-        } else {
-            self.set_first_layer_order(forward);
-        }
-        self.sweep(forward, !*first_try);
-        *first_try = false;
-        let mut crossings = self.crossings();
-        loop {
-            let best = self.snapshot();
-            if crossings == 0 {
-                return (0, Some(best));
-            }
-            forward = !forward;
-            let old = crossings;
-            self.sweep(forward, false);
-            crossings = self.crossings();
-            if old <= crossings {
-                return (old, Some(best));
-            }
-        }
-    }
-
     fn start(&self, forward: bool) -> usize {
         if forward { 0 } else { self.layers.len() - 1 }
     }
@@ -597,30 +928,6 @@ impl Sweeper<'_> {
             keys.push(0.0);
         }
         self.ctx.arrange(&items, &keys, before)
-    }
-
-    /// `sweepReducingCrossings`: one sweep; `first` places nodes without a
-    /// barycentre at random (the first sweep of a random run).
-    fn sweep(&mut self, forward: bool, first: bool) {
-        let n = self.layers.len();
-        // The start layer keeps its order; its clusters' order binds the others.
-        let mut before = Vec::new();
-        let start = self.start(forward);
-        let keys: Vec<f64> = (0..self.layers[start].len()).map(|i| i as f64).collect();
-        self.ctx.arrange(&self.layers[start], &keys, &mut before);
-        let free: Vec<usize> = if forward {
-            (1..n).collect()
-        } else {
-            (0..n - 1).rev().collect()
-        };
-        for li in free {
-            let fixed = if forward { li - 1 } else { li + 1 };
-            self.rank_ports(fixed, forward);
-            let layer = std::mem::take(&mut self.layers[li]);
-            let bary = self.barycenters(&layer, forward, first);
-            self.layers[li] = self.sorted(&layer, bary, &mut before);
-            self.distribute_ports(li, fixed, forward);
-        }
     }
 
     /// `calculatePortRanks`: ranks for the ports of layer `li` on its side towards
@@ -728,6 +1035,9 @@ impl Sweeper<'_> {
         self.rank_ports(fixed, forward);
         for i in 0..self.layers[free].len() {
             let v = self.layers[free][i];
+            if self.fixed_node[v] {
+                continue;
+            }
             if forward {
                 let mut ports = std::mem::take(&mut self.west[v]);
                 ports.sort_by(|&a, &b| self.east_rank[a].total_cmp(&self.east_rank[b]));
@@ -741,6 +1051,10 @@ impl Sweeper<'_> {
         self.rank_ports(free, !forward);
         for i in 0..self.layers[fixed].len() {
             let v = self.layers[fixed][i];
+            // A container's ports on the fixed side are its contents' to order.
+            if self.fixed_node[v] || self.nested[v].is_some() {
+                continue;
+            }
             if forward {
                 let mut ports = std::mem::take(&mut self.east[v]);
                 ports.sort_by(|&a, &b| self.west_rank[a].total_cmp(&self.west_rank[b]));
@@ -1025,6 +1339,68 @@ mod tests {
             model_order_sort(&mut layer, &west, &[], &[], n, &pos, &[]);
             assert_eq!(layer, (0..n).collect::<Vec<_>>());
         }
+    }
+
+    /// A container with two ports on a side, whose paths all lead to its ports,
+    /// is ordered within its parent's sweeps: the parent's port order there
+    /// orders its port dummies, and its next layer follows them.
+    #[test]
+    fn run_dives_into_a_container() {
+        // Root: x (0) feeds the container (1) twice (edges 7 and 8).
+        let root_segs = [(0, 1), (0, 1)];
+        let root_info = info(&root_segs);
+        let root_v = verts(2);
+        let root_ctx = OrderCtx {
+            verts: &root_v,
+            chains: &[],
+        };
+        // Inside: port dummies 0 (edge 8) and 1 (edge 7), then a (2) fed by 1 and
+        // b (3) fed by 0: in this order the two edges cross.
+        let segs = [(0, 3), (1, 2)];
+        let child_info = info(&segs);
+        let child_v = verts(4);
+        let child_ctx = OrderCtx {
+            verts: &child_v,
+            chains: &[],
+        };
+        let no = [false; 4];
+        let graphs = vec![
+            RunGraph {
+                layers: vec![vec![0], vec![1]],
+                graph: Graph {
+                    border: &no[..2],
+                    label: &no[..2],
+                    segs: &root_segs,
+                    info: &root_info,
+                    real: 2,
+                },
+                ctx: &root_ctx,
+                opts: OPTS,
+                ext_key: vec![None; 2],
+                seg_key: vec![7, 8],
+                parent: None,
+            },
+            RunGraph {
+                layers: vec![vec![0, 1], vec![2, 3]],
+                graph: Graph {
+                    border: &no,
+                    label: &no,
+                    segs: &segs,
+                    info: &child_info,
+                    real: 4,
+                },
+                ctx: &child_ctx,
+                opts: Options {
+                    model_order: false,
+                    ..OPTS
+                },
+                ext_key: vec![Some(8), Some(7), None, None],
+                seg_key: vec![8, 7],
+                parent: Some((0, 1)),
+            },
+        ];
+        let out = minimize_run(graphs);
+        assert_eq!(out[1], vec![vec![1, 0], vec![2, 3]]);
     }
 
     /// `new Random(1)` in Java.
