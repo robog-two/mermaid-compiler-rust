@@ -481,8 +481,14 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
             let _ = run.sw[0].rng.next_long();
             run.sw[0].greedy_switch();
         }
-        // `setPortOrderOnParentGraph`.
-        if let Some((pg, v)) = run.extra[g].3 {
+        // `setPortOrderOnParentGraph`: only a graph with external port dummies
+        // fixes its container's port order (`FIXED_ORDER`); without, the
+        // container's ports stay free for its parent's sweeps.
+        let has_ext = {
+            let sw = &run.sw[g];
+            sw.layers.iter().flatten().any(|&u| sw.ext[u])
+        };
+        if let Some((pg, v)) = run.extra[g].3.filter(|_| has_ext) {
             let last = run.sw[g].layers.len().saturating_sub(1);
             run.ports_from_dummies(g, last, pg, v, true);
             run.ports_from_dummies(g, 0, pg, v, false);

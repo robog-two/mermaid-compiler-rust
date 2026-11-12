@@ -348,6 +348,55 @@ fn port_list_sorter_reverses_all_but_the_last_west_port() {
 }
 
 #[test]
+fn ports_of_edges_into_a_container_itself_follow_the_crossing_minimisation() {
+    // C0's ports are all on edges to C0 itself: no dummies inside, so its
+    // parent orders them (c2n1's above y's) and the two jogs share a slot:
+    // c0n0 stands 250px right of c2n1, as in mermaid's render.
+    let src = "flowchart LR
+  subgraph C0
+    c0n0 --> c0n1
+  end
+  subgraph C1
+    c1n0
+  end
+  subgraph C2
+    c2n0 --> c2n1
+  end
+  y --> C0
+  c2n1 --> C0
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["c2n1", "c0n0"], true);
+    let at = |n: &str| cs.iter().find(|c| c.0 == n).expect("node");
+    assert!((at("c0n0").1 - at("c2n1").1 - 250.0).abs() < 0.5, "{cs:?}");
+}
+
+#[test]
+fn a_container_without_port_dummies_leaves_its_port_order_free() {
+    // C1's two edges start at C1 itself: its graph has no external port
+    // dummies, so ELK does not fix C1's port order and the parent's sweeps
+    // order its ports by C0's; C1's right port lines up with C0's: c1n0 sits
+    // 23.8px right of c0n2, as in mermaid's render.
+    let src = "flowchart TD
+  subgraph C0
+    c0n0 --> c0n1
+    c0n1 --> c0n2
+  end
+  subgraph C1
+    c1n0 --> c1n1
+  end
+  C1 --> c0n2
+  C1 --> c0n2
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["c0n2", "c1n0"], false);
+    let x = |n: &str| cs.iter().find(|c| c.0 == n).expect("node").2;
+    assert!((x("c1n0") - x("c0n2") - 23.8).abs() < 0.5, "{cs:?}");
+}
+
+#[test]
 fn ports_reaching_a_container_keep_the_crossing_minimisation_order() {
     // x2's ports stay in the order crossing minimisation left them (s0n2's
     // edge first, from S0's ports as made), although S0's contents place

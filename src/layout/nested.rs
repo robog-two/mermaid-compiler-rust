@@ -683,32 +683,13 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             }
             // Ports all unconnected inside: no ELK nodes there (the container
             // has no external port dummies), so ELK spreads them over their
-            // side, as a node's own ports. (With others, they are dummies
-            // placed inside like the rest.)
-            let side_len = if horizontal { h } else { w };
-            let all_unconnected = level.ext_kinds.iter().all(|k| k.2);
-            for entering in [true, false] {
-                let on_side = |k: &(usize, bool, bool)| k.1 == entering;
-                if all_unconnected {
-                    let mut stub: Vec<(f64, usize)> = level
-                        .ext_kinds
-                        .iter()
-                        .filter(|k| on_side(k))
-                        .map(|&(i, _, _)| {
-                            let p = level.out.nodes[i];
-                            (if horizontal { p.y } else { p.x }, i)
-                        })
-                        .collect();
-                    stub.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-                    let inset = super::elk_port_inset(match tree.owner_of_cluster(c) {
-                        None => ElkGraph::Root,
-                        Some(_) => ElkGraph::Container { separate: false },
-                    });
-                    let offs = super::elk_port_offsets(stub.len(), side_len, inset);
-                    for (&(_, i), o) in stub.iter().zip(offs) {
-                        if let Item::Ext(ei) = level.items[i] {
-                            ext_off.insert((c, ei), o - side_len / 2.0);
-                        }
+            // side, as a node's own ports, in the order its parent's crossing
+            // minimisation gives them: they are left free there. (With
+            // others, they are dummies placed inside like the rest.)
+            if level.ext_kinds.iter().all(|k| k.2) {
+                for &(i, _, _) in &level.ext_kinds {
+                    if let Item::Ext(ei) = level.items[i] {
+                        ext_off.remove(&(c, ei));
                     }
                 }
             }
