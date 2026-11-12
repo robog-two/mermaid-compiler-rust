@@ -4592,6 +4592,38 @@ mod tests {
         assert!(label.x < out.nodes[1].x - 60.0, "{out:?}");
     }
 
+    /// `SortByInputModelProcessor` compares a node by the source of its first
+    /// incoming port: before the layer's ports are sorted, the first in edge order;
+    /// after, the first clockwise (elkjs, a random flowchart: `n5 --> n7`,
+    /// `n1 -->|yes| n5`, `n4 --> n6`, `n0 --> n4`, `n3 -->|yes| n5`,
+    /// `n1 -->|a longer label| n7`, `n0 --> n2`, `n4 -->|yes| n7`, `n2 --> n5`).
+    #[test]
+    fn elk_model_order_sort_reads_ports_as_elk_has_them() {
+        let lb = Some((30.0, 20.0));
+        // n5 n7 n1 n4 n6 n0 n3 n2
+        let edges = vec![
+            edge(0, 1),
+            LayoutEdge::new(2, 0, 1, lb),
+            edge(3, 4),
+            edge(5, 3),
+            LayoutEdge::new(6, 0, 1, lb),
+            LayoutEdge::new(2, 1, 1, Some((80.0, 20.0))),
+            edge(5, 7),
+            LayoutEdge::new(3, 1, 1, lb),
+            edge(7, 0),
+        ];
+        let out = layout(&elk(input(
+            vec![node(None); 8],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        let x = |v: usize| out.nodes[v].x;
+        assert!(x(2) < x(6) && x(6) < x(5), "{out:?}");
+        assert!(x(7) < x(3), "{out:?}");
+        assert!(x(0) < x(4), "{out:?}");
+    }
+
     /// When balancing moves a labelled edge's target down, the label stays in the
     /// layer below the source with its siblings' labels (mermaid's flowchart
     /// example: `C -->|Three| Car` beside `C -->|One| Laptop --> Database`).

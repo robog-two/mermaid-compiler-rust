@@ -954,7 +954,12 @@ fn sort_by_model_order(
     for slot in layers.iter_mut() {
         let mut layer = std::mem::take(slot);
         let ctx_fb = (&first_in[..], &feedback[..], other);
-        model_order_sort(&mut layer, west, segs, info, real, &pos, &port_at, ctx_fb);
+        // Before the layer's ports are sorted they are in the order ELK made
+        // them: a node's in the order of its edges.
+        let unsorted = PortOrder::Created;
+        model_order_sort_in(
+            &mut layer, west, segs, info, real, &pos, &port_at, ctx_fb, unsorted,
+        );
         for &v in &layer {
             // Incoming ports by where they come from (top to bottom).
             west[v].sort_by_key(|&s| (pos[segs[s].0], port_at[s]));
@@ -1004,9 +1009,43 @@ fn model_order_sort(
     real: usize,
     pos: &[usize],
     port_at: &[usize],
+    fb: Feedback,
+) {
+    let sorted = PortOrder::Clockwise;
+    model_order_sort_in(layer, west, segs, info, real, pos, port_at, fb, sorted);
+}
+
+/// Where a node's incoming ports stand in its port list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortOrder {
+    /// Sorted (`west`, top to bottom): clockwise, the west side from the bottom.
+    Clockwise,
+    /// As ELK made them, in the order of their edges.
+    Created,
+}
+
+/// `model_order_sort` with the layer's ports in the given order.
+#[allow(clippy::too_many_arguments)]
+fn model_order_sort_in(
+    layer: &mut [usize],
+    west: &[Vec<usize>],
+    segs: &[(usize, usize)],
+    info: &[SegInfo],
+    real: usize,
+    pos: &[usize],
+    port_at: &[usize],
     (first_in, feedback, other): Feedback,
+    ports: PortOrder,
 ) {
     use std::cmp::Ordering::{Greater, Less};
+    // A node's incoming ports, first first.
+    let incoming = |v: usize| -> Vec<usize> {
+        let mut w: Vec<usize> = west[v].iter().rev().copied().collect();
+        if ports == PortOrder::Created {
+            w.sort_by_key(|&s| info[s].edge);
+        }
+        w
+    };
     let n = layer.len();
     if n < 2 {
         return;
@@ -1103,10 +1142,8 @@ fn model_order_sort(
     let source: Vec<Option<usize>> = old
         .iter()
         .map(|&v| {
-            west[v]
-                .iter()
-                .rev()
-                .copied()
+            incoming(v)
+                .into_iter()
                 .find(|&s| pos[segs[s].0] != usize::MAX)
         })
         .collect();
@@ -1114,8 +1151,8 @@ fn model_order_sort(
         .iter()
         .map(|&v| match first_in.get(v).copied().flatten() {
             Some(edge) => edge as i64,
-            None => west[v]
-                .last()
+            None => incoming(v)
+                .first()
                 .map_or(i64::from(i32::MAX), |&s| info[s].edge as i64),
         })
         .collect();
