@@ -617,9 +617,10 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             &ext_off,
         );
         let out = match ordered[slot(scope)].take() {
-            Some((prep, layers, port_rank)) => {
+            Some((prep, layers, port_rank, rng)) => {
                 let hier = Hierarchy {
                     port_rank,
+                    route_rng: rng,
                     ..li.hier.clone()
                 };
                 finish(&li.flat, li.graph, &hier, prep, layers)
@@ -1438,12 +1439,15 @@ fn order_runs(tree: &Tree, scopes: &[Option<usize>], inputs: &[LevelInput]) -> V
             ordered[i] = Some(o);
         }
     }
-    let complete: Vec<(Vec<Vec<usize>>, PortRanks)> = setups
+    let complete: Vec<(Vec<Vec<usize>>, PortRanks, Option<elkorder::JavaRandom>)> = setups
         .into_iter()
         .zip(ordered)
         .enumerate()
         .map(|(i, (setup, o))| {
-            let (layers, seg_rank) = o.map(|o| (o.layers, o.port_rank)).unwrap_or_default();
+            let (layers, seg_rank, rng) = match o {
+                Some(o) => (o.layers, o.port_rank, Some(o.rng)),
+                None => (Vec::new(), Vec::new(), None),
+            };
             // Per edge of the level: the ranks at its real ends.
             let mut rank: PortRanks = Vec::new();
             for (e, r) in setup.seg_edges().zip(seg_rank) {
@@ -1454,14 +1458,14 @@ fn order_runs(tree: &Tree, scopes: &[Option<usize>], inputs: &[LevelInput]) -> V
                 rank[e].1 = rank[e].1.or(r.1);
             }
             let layers = setup.complete(layers, &preps[i].verts, &ctxs[i]);
-            (layers, rank)
+            (layers, rank, rng)
         })
         .collect();
     drop(ctxs);
     preps
         .into_iter()
         .zip(complete)
-        .map(|(p, (l, r))| (p, l, r))
+        .map(|(p, (l, r, g))| (p, l, r, g))
         .collect()
 }
 
@@ -1471,7 +1475,12 @@ type PortRanks = Vec<(Option<usize>, Option<usize>)>;
 
 /// One level of an ELK run, ordered: its prepared pass, its layers and its
 /// port ranks.
-type RunLevel = (Prepared, Vec<Vec<usize>>, PortRanks);
+type RunLevel = (
+    Prepared,
+    Vec<Vec<usize>>,
+    PortRanks,
+    Option<elkorder::JavaRandom>,
+);
 
 #[cfg(test)]
 mod tests {

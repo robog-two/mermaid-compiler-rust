@@ -231,6 +231,9 @@ struct Hierarchy {
     /// and lower ends are in ELK's port lists after crossing minimisation
     /// (`elkorder::RunOrder::port_rank`).
     port_rank: Vec<(Option<usize>, Option<usize>)>,
+    /// The graph's random generator after crossing minimisation, which the
+    /// edge router draws from (see `elkorder::RunOrder::rng`).
+    route_rng: Option<elkorder::JavaRandom>,
     /// Per node with any: its margins along the rank axis (before, after). ELK
     /// puts a container's ports for edges crossing its border
     /// (`CompoundGraphPreprocessor`) half an edge spacing outside it
@@ -308,8 +311,12 @@ fn strip_depth(mut labels: Vec<EndLabel>) -> f64 {
 /// `layout_flat` for one graph of the ELK hierarchy.
 fn layout_flat_in(input: &LayoutInput, graph: ElkGraph, hier: &Hierarchy) -> LayoutOutput {
     let prep = prepare(input, hier);
-    let layers = order_flat(input, graph, &prep);
-    finish(input, graph, hier, prep, layers)
+    let (layers, route_rng) = order_flat(input, graph, &prep);
+    let hier = Hierarchy {
+        route_rng,
+        ..hier.clone()
+    };
+    finish(input, graph, &hier, prep, layers)
 }
 
 /// A layered pass up to crossing minimisation: its vertices (edges split into
@@ -683,8 +690,13 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
     }
 }
 
-/// Crossing minimisation of one pass on its own.
-fn order_flat(input: &LayoutInput, graph: ElkGraph, prep: &Prepared) -> Vec<Vec<usize>> {
+/// Crossing minimisation of one pass on its own; under ELK also the random
+/// generator it leaves.
+fn order_flat(
+    input: &LayoutInput,
+    graph: ElkGraph,
+    prep: &Prepared,
+) -> (Vec<Vec<usize>>, Option<elkorder::JavaRandom>) {
     let Prepared {
         n,
         verts,
@@ -704,7 +716,7 @@ fn order_flat(input: &LayoutInput, graph: ElkGraph, prep: &Prepared) -> Vec<Vec<
     let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
     if elk {
         let border = prep.border();
-        elk_order(
+        let (layers, rng) = elk_order(
             layers,
             verts,
             n,
@@ -713,9 +725,10 @@ fn order_flat(input: &LayoutInput, graph: ElkGraph, prep: &Prepared) -> Vec<Vec<
             &border,
             &ctx,
             elk_options(graph, n),
-        )
+        );
+        (layers, Some(rng))
     } else {
-        dagre_order(layers, &ctx, up, down, nv)
+        (dagre_order(layers, &ctx, up, down, nv), None)
     }
 }
 
@@ -902,6 +915,10 @@ fn finish(
             ports,
             &inl,
             &hier.ports,
+            &mut hier
+                .route_rng
+                .clone()
+                .unwrap_or_else(|| elkorder::JavaRandom::new(1)),
         )),
         EdgeRouting::Splines => None,
     };
@@ -1255,10 +1272,11 @@ fn elk_order(
     border: &[bool],
     ctx: &OrderCtx,
     opts: elkorder::Options,
-) -> Vec<Vec<usize>> {
+) -> (Vec<Vec<usize>>, elkorder::JavaRandom) {
     let (setup, elk_layers) = ElkLayers::new(layers, verts, chains, inl);
     let ordered = elkorder::minimize(elk_layers, &setup.graph(border, real), ctx, opts);
-    setup.complete(ordered, verts, ctx)
+    let layers = setup.complete(ordered.layers, verts, ctx);
+    (layers, ordered.rng)
 }
 
 /// One pass's vertices as ELK's crossing minimisation sees them (see
@@ -1771,6 +1789,9 @@ struct OrthoPlan {
     /// Per edge, per pair of consecutive stops: the slot level of the jog between
     /// them, if their positions differ.
     jogs: Vec<Vec<Option<usize>>>,
+    /// Per edge, per jog split in two (a critical cycle in its channel): where
+    /// its two parts meet across, and the second part's slot level.
+    splits: Vec<Vec<Option<(f64, usize)>>>,
     /// Per rank: the channel below it, as (next obstacle rank, slots used).
     channels: Vec<Option<(usize, usize)>>,
     spacing: OrthoSpacing,
@@ -1810,6 +1831,7 @@ fn ortho_plan(
     ports: Option<(Vec<f64>, Vec<f64>)>,
     inl: &[InLayer],
     fixed: &[(Option<f64>, Option<f64>)],
+    rng: &mut elkorder::JavaRandom,
 ) -> OrthoPlan {
     let max_rank = verts.iter().map(|v| v.rank).max().unwrap_or(0);
     // Ranks holding nodes or edge labels; ranks of plain long-edge dummies are free.
@@ -1925,12 +1947,15 @@ fn ortho_plan(
         .iter()
         .map(|s| vec![None; s.len().saturating_sub(1)])
         .collect();
+    let mut splits: Vec<Vec<Option<(f64, usize)>>> =
+        jogs.iter().map(|j| vec![None; j.len()]).collect();
     for (ei, s) in stops.iter().enumerate() {
         for (k, w) in s.windows(2).enumerate() {
             let ((a, ax), (b, bx)) = (w[0], w[1]);
+            // A straight run takes no slot, but its ends count in the channel.
+            let ra = verts[a].rank;
+            by_channel[ra].push((ei, k, ortho::Jog { from: ax, to: bx }.into()));
             if (ax - bx).abs() >= ortho::TOLERANCE {
-                let ra = verts[a].rank;
-                by_channel[ra].push((ei, k, ortho::Jog { from: ax, to: bx }.into()));
                 channels[ra] = Some((verts[b].rank, 0));
             }
         }
@@ -1980,56 +2005,77 @@ fn ortho_plan(
             None => outer_lists[usize::from(!l.before)].push(k),
         }
     }
-    for (ra, list) in by_channel.iter().enumerate() {
+    // ELK routes channel by channel from the first (`OrthogonalEdgeRouter`): the
+    // one before the first layer, those between layers, the one after the last;
+    // each with the graph's random generator, its segments in ELK's order (see
+    // `ortho::assign_slots_trunks`): by the upper layer's ports, then by the
+    // lower layer's ports of in-layer edges.
+    let in_layer_key = |r: &InLayerRoute| {
+        if r.before { (1, r.port) } else { (0, r.at) }
+    };
+    let mut outer = (0, 0);
+    let route_outer =
+        |side: usize, in_layer: &mut [InLayerRoute], rng: &mut elkorder::JavaRandom| {
+            let mut list = outer_lists[side].clone();
+            list.sort_by(|&a, &b| {
+                let (ka, kb) = (in_layer_key(&in_layer[a]), in_layer_key(&in_layer[b]));
+                ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
+            });
+            let segs: Vec<ortho::Trunk> = list
+                .iter()
+                .map(|&k| {
+                    let r = &in_layer[k];
+                    let ends = vec![r.port.min(r.at), r.port.max(r.at)];
+                    match side {
+                        0 => ortho::Trunk {
+                            incoming: Vec::new(),
+                            outgoing: ends,
+                        },
+                        _ => ortho::Trunk {
+                            incoming: ends,
+                            outgoing: Vec::new(),
+                        },
+                    }
+                })
+                .collect();
+            let out = ortho::assign_slots_trunks(&segs, spacing.edge_edge, rng);
+            for (&k, l) in list.iter().zip(out.slot) {
+                in_layer[k].slot = l;
+            }
+            out.count
+        };
+    outer.0 = route_outer(0, &mut in_layer, rng);
+    for (ra, list) in by_channel.iter_mut().enumerate() {
         if list.is_empty() {
             continue;
         }
+        let key = |e: &Entry| match e.0 {
+            usize::MAX => in_layer_key(&in_layer[e.1]),
+            _ => (0, e.2.incoming.first().copied().unwrap_or(0.0)),
+        };
+        list.sort_by(|a, b| {
+            let (ka, kb) = (key(a), key(b));
+            ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
+        });
         let segs: Vec<ortho::Trunk> = list.iter().map(|(_, _, j)| j.clone()).collect();
-        let (levels, count) = ortho::assign_slots_trunks(&segs, spacing.edge_edge);
-        for (&(ei, k, _), l) in list.iter().zip(levels) {
+        let out = ortho::assign_slots_trunks(&segs, spacing.edge_edge, rng);
+        for (i, &(ei, k, ref t)) in list.iter().enumerate() {
             if ei == usize::MAX {
-                in_layer[k].slot = l;
-            } else {
-                jogs[ei][k] = Some(l);
+                in_layer[k].slot = out.slot[i];
+            } else if (t.incoming[0] - t.outgoing[0]).abs() >= ortho::TOLERANCE {
+                jogs[ei][k] = Some(out.slot[i]);
+                splits[ei][k] = out.split[i];
             }
         }
         if let Some((rb, _)) = channels[ra] {
-            channels[ra] = Some((rb, count));
+            channels[ra] = Some((rb, out.count));
         }
     }
-    // The channels outside the outer layers.
-    let mut outer = (0, 0);
-    for (side, list) in outer_lists.iter().enumerate() {
-        let segs: Vec<ortho::Trunk> = list
-            .iter()
-            .map(|&k| {
-                let r = &in_layer[k];
-                let ends = vec![r.port.min(r.at), r.port.max(r.at)];
-                match side {
-                    0 => ortho::Trunk {
-                        incoming: Vec::new(),
-                        outgoing: ends,
-                    },
-                    _ => ortho::Trunk {
-                        incoming: ends,
-                        outgoing: Vec::new(),
-                    },
-                }
-            })
-            .collect();
-        let (levels, count) = ortho::assign_slots_trunks(&segs, spacing.edge_edge);
-        for (&k, l) in list.iter().zip(levels) {
-            in_layer[k].slot = l;
-        }
-        if side == 0 {
-            outer.0 = count;
-        } else {
-            outer.1 = count;
-        }
-    }
+    outer.1 = route_outer(1, &mut in_layer, rng);
     OrthoPlan {
         stops,
         jogs,
+        splits,
         channels,
         spacing,
         xs,
@@ -2069,9 +2115,18 @@ impl OrthoPlan {
                 let top = rank_y[ra] + rank_h[ra] / 2.0 + end_pad[ra];
                 let bottom = rank_y[rb] - rank_h[rb] / 2.0 - start_pad[rb];
                 let ee = self.spacing.edge_edge;
-                let y = (top + bottom) / 2.0 - (slots - 1) as f64 * ee / 2.0 + level as f64 * ee;
+                let at = |level: usize| {
+                    (top + bottom) / 2.0 - (slots - 1) as f64 * ee / 2.0 + level as f64 * ee
+                };
+                let y = at(level);
                 pts.push(Point::new(ax, y));
-                pts.push(Point::new(bx, y));
+                if let Some((sx, second)) = self.splits[ei][k] {
+                    pts.push(Point::new(sx, y));
+                    pts.push(Point::new(sx, at(second)));
+                    pts.push(Point::new(bx, at(second)));
+                } else {
+                    pts.push(Point::new(bx, y));
+                }
                 cur = bx;
             }
             if b != w {

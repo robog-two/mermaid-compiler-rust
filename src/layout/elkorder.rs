@@ -70,6 +70,20 @@ impl JavaRandom {
     pub(super) fn next_float(&mut self) -> f64 {
         self.next(24) as f64 / (1u32 << 24) as f64
     }
+
+    /// `nextInt(bound)`, `bound` positive.
+    pub(super) fn next_int(&mut self, bound: i32) -> i32 {
+        if bound & bound.wrapping_neg() == bound {
+            return ((i64::from(bound) * i64::from(self.next(31))) >> 31) as i32;
+        }
+        loop {
+            let bits = self.next(31);
+            let val = bits % bound;
+            if bits.wrapping_sub(val).wrapping_add(bound - 1) >= 0 {
+                return val;
+            }
+        }
+    }
 }
 
 /// How ELK minimises crossings in one graph.
@@ -217,7 +231,7 @@ pub(super) fn minimize(
     graph: &Graph,
     ctx: &OrderCtx,
     opts: Options,
-) -> Vec<Vec<usize>> {
+) -> RunOrder {
     let nv = graph.border.len();
     let run = vec![RunGraph {
         layers,
@@ -228,10 +242,11 @@ pub(super) fn minimize(
         seg_key: (0..graph.segs.len()).collect(),
         parent: None,
     }];
-    minimize_run(run)
-        .pop()
-        .map(|o| o.layers)
-        .unwrap_or_default()
+    minimize_run(run).pop().unwrap_or(RunOrder {
+        layers: Vec::new(),
+        port_rank: Vec::new(),
+        rng: JavaRandom::new(1),
+    })
 }
 
 /// One graph of an ELK run (`hierarchyHandling: INCLUDE_CHILDREN`): the root of
@@ -259,6 +274,9 @@ pub(super) struct RunOrder {
     /// nodes. A container's ports keep the order crossing minimisation leaves
     /// them in, which its contents' placement need not follow.
     pub port_rank: Vec<(Option<usize>, Option<usize>)>,
+    /// The graph's random generator as crossing minimisation leaves it, which
+    /// ELK's edge router draws from next (`HyperEdgeCycleDetector`).
+    pub rng: JavaRandom,
 }
 
 /// ELK's `hierarchicalSweepiness` default: a container whose paths lead
@@ -492,7 +510,11 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
                     layer
                 })
                 .collect();
-            RunOrder { layers, port_rank }
+            RunOrder {
+                layers,
+                port_rank,
+                rng: s.rng,
+            }
         })
         .collect()
 }
@@ -1808,7 +1830,7 @@ mod tests {
             real: n,
             inl: &[],
         };
-        minimize(layers, &graph, &ctx, opts)
+        minimize(layers, &graph, &ctx, opts).layers
     }
 
     const OPTS: Options = Options {
@@ -1916,7 +1938,7 @@ mod tests {
                 ..OPTS
             },
         ] {
-            let out = minimize(sweeper_layers.clone(), &graph, &ctx, opts);
+            let out = minimize(sweeper_layers.clone(), &graph, &ctx, opts).layers;
             let at = |v: usize| out[1].iter().position(|&u| u == v).unwrap_or(9);
             assert_eq!(at(2).abs_diff(at(5)), 1, "{out:?}");
         }
