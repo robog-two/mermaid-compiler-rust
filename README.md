@@ -151,10 +151,11 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   Under ELK (the default) the root graph uses ELK's spacing (40 between nodes and layers, 20 around edges; the
   diagram's `nodeSpacing` / `rankSpacing` and edge lengths such as `--->` are ignored, as upstream) and edges are
   routed orthogonally and drawn with radius-5 rounded corners (mermaid's `rounded` curve, whatever `curve` is set):
-  ports spread over the facing node side (10 in from its ends), routing slots between layers assigned as ELK's
-  orthogonal router does (only edges that would cross or share a vertical run take separate slots; cycles broken
-  where ELK picks at random, by the first candidate, and nearly coincident verticals are not split), labels inline
-  on the route, self-loops on the west / north side. Nodes are placed with a port of ELK's Brandes–Köpf
+  ports spread over the facing node side (10 in from its ends, 10.8 inside a subgraph), long-edge dummies as thick
+  as their edge, routing slots between layers assigned as ELK's orthogonal router does (only edges that would cross
+  or share a vertical run take separate slots, a jog of a fraction of a pixel included; nearly coincident verticals
+  split one segment in two at a free area; cycles broken with ELK's random generator, continuing its sequence
+  after crossing minimisation), labels inline on the route, self-loops on the west / north side. Nodes are placed with a port of ELK's Brandes–Köpf
   (`BALANCED`, `IMPROVE_STRAIGHTNESS`: blocks line up ports, type-dependent node / edge spacing, class compaction)
   and nodes shorter than their layer are aligned by their edges, as ELK does. Where two edges cross, one hops the
   other as upstream (`elk.lineHops`: a radius-6 arc by default, `gap` breaks the line, `false` turns hops off; the
@@ -165,22 +166,23 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   hierarchy as ELK's hierarchical sweep does: a subgraph is ordered either on its own first (its border ports then
   keep the order of its port dummies) or within its parent's sweeps, as ELK decides; an edge to a whole subgraph
   meets its frame at a port of its own among the others. The random draws inside such sweeps follow ELK's per-graph
-  generators, verified draw for draw against elkjs on a set of clustered graphs; layers wider than 128 nodes skip
-  ELK's transitive model-order bookkeeping (a long-edge dummy of an inverted port that is not the edge's source
-  orders as the subgraph beside it, a simplification of ELK's rule). Where breaking a cycle reverses an edge at a
+  generators, verified draw for draw against elkjs (the router's draws included) on a set of clustered and a set
+  of flat graphs; layers wider than 128 nodes skip ELK's transitive model-order bookkeeping. Where breaking a cycle
+  reverses an edge at a
   subgraph's port, the port keeps its original side as ELK's do (`InvertedPortProcessor`): a dummy beside the
   subgraph takes the edge on, the two joined by an in-layer edge that wraps round the frame in the channel on the
   port's side (outside the first or last layer if need be) and takes part in the sweeps, crossing counts and slot
-  assignment; such a port's place among the others on its side follows the subgraph's own port dummies, and the
-  Brandes–Köpf placement around such dummies can still differ from ELK's by a few pixels to a box's width.
+  assignment; such a port's place among the others on its side follows the subgraph's own port dummies. A
+  subgraph's external port dummies are made in ELK's order (child by child, its unconnected ports last), and node
+  placement takes a subgraph's ports in the order crossing minimisation left them, as ELK does.
   mermaid's post-processing of
   ELK's routes is reproduced (short port-to-channel steps straightened, the labels of two opposite edges between one
   pair of nodes pushed beside them), and so is its handling of start / end labels (class cardinalities): ELK's end
   labels, with the room ELK reserves for them beside their ports (along the flow, stacked where they overlap only in
   a vertical layout, and across it where they stick out of a narrow node), slid off frames and mirrored onto their
-  own side where that is free. Edge labels take their full width in node placement. Where a subgraph is ordered
-  within its parent's sweeps, the crossing count can still differ from ELK's once its border ports are reordered
-  (one of the clustered test graphs then sweeps once more than ELK and comes out mirrored inside a subgraph). `layout: dagre` (or any other non-ELK `layout`)
+  own side where that is free. Edge labels take their full width in node placement. Layers that hold only
+  long-edge dummies are merged into the routing channel around them rather than kept as ELK layers of their own,
+  and an inverted port's in-layer edge is never split by the router. `layout: dagre` (or any other non-ELK `layout`)
   gives dagre's spacing, the dagre
   rules for subgraphs (only uncrossed ones laid out on their own) and the configured curve. ELK's packing of
   disconnected parts inside a container is not reproduced, `@{ view: collapsed }` folds a subgraph into one node as
