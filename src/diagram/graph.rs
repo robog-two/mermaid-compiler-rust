@@ -1788,12 +1788,13 @@ fn nested_route(
     // of the nodes and of the title) and turns into / out of the inner end sideways,
     // so it does not cut through the nodes before / after it in the flow. If that
     // sideways run would cross another node, the lane on the other side is tried,
-    // then a straight run along the flow.
+    // then a straight run along the flow, then a run around the inner end through
+    // the lane on its far side; failing all, the route crossing the fewest nodes.
     let lane = CLUSTER_PADDING / 2.0;
     let (near_x, far_x) = (frame.x + lane, frame.right() - lane);
     let (near_y, far_y) = (frame.y + title_h + lane, frame.bottom() - lane);
     let p = Point::new;
-    let candidates: [Vec<Point>; 3] = if ne.inner_is_target {
+    let candidates: [Vec<Point>; 5] = if ne.inner_is_target {
         // In from the entry side.
         match dir {
             Direction::TopBottom | Direction::BottomTop => {
@@ -1802,10 +1803,27 @@ fn nested_route(
                 } else {
                     (frame.bottom(), inner.bottom())
                 };
+                let (back, back_face) = if dir == Direction::TopBottom {
+                    (far_y, inner.bottom())
+                } else {
+                    (near_y, inner.y)
+                };
                 [
                     vec![p(near_x, entry), p(near_x, cy), p(inner.x, cy)],
                     vec![p(far_x, entry), p(far_x, cy), p(inner.right(), cy)],
                     vec![p(cx, entry), p(cx, face)],
+                    vec![
+                        p(near_x, entry),
+                        p(near_x, back),
+                        p(cx, back),
+                        p(cx, back_face),
+                    ],
+                    vec![
+                        p(far_x, entry),
+                        p(far_x, back),
+                        p(cx, back),
+                        p(cx, back_face),
+                    ],
                 ]
             }
             Direction::LeftRight | Direction::RightLeft => {
@@ -1814,10 +1832,27 @@ fn nested_route(
                 } else {
                     (frame.right(), inner.right())
                 };
+                let (back, back_face) = if dir == Direction::LeftRight {
+                    (far_x, inner.right())
+                } else {
+                    (near_x, inner.x)
+                };
                 [
                     vec![p(entry, near_y), p(cx, near_y), p(cx, inner.y)],
                     vec![p(entry, far_y), p(cx, far_y), p(cx, inner.bottom())],
                     vec![p(entry, cy), p(face, cy)],
+                    vec![
+                        p(entry, near_y),
+                        p(back, near_y),
+                        p(back, cy),
+                        p(back_face, cy),
+                    ],
+                    vec![
+                        p(entry, far_y),
+                        p(back, far_y),
+                        p(back, cy),
+                        p(back_face, cy),
+                    ],
                 ]
             }
         }
@@ -1830,10 +1865,27 @@ fn nested_route(
                 } else {
                     (frame.y, inner.y)
                 };
+                let (back, back_face) = if dir == Direction::TopBottom {
+                    (near_y, inner.y)
+                } else {
+                    (far_y, inner.bottom())
+                };
                 [
                     vec![p(inner.right(), cy), p(far_x, cy), p(far_x, exit)],
                     vec![p(inner.x, cy), p(near_x, cy), p(near_x, exit)],
                     vec![p(cx, face), p(cx, exit)],
+                    vec![
+                        p(cx, back_face),
+                        p(cx, back),
+                        p(far_x, back),
+                        p(far_x, exit),
+                    ],
+                    vec![
+                        p(cx, back_face),
+                        p(cx, back),
+                        p(near_x, back),
+                        p(near_x, exit),
+                    ],
                 ]
             }
             Direction::LeftRight | Direction::RightLeft => {
@@ -1842,32 +1894,54 @@ fn nested_route(
                 } else {
                     (frame.x, inner.x)
                 };
+                let (back, back_face) = if dir == Direction::LeftRight {
+                    (near_x, inner.x)
+                } else {
+                    (far_x, inner.right())
+                };
                 [
                     vec![p(cx, inner.bottom()), p(cx, far_y), p(exit, far_y)],
                     vec![p(cx, inner.y), p(cx, near_y), p(exit, near_y)],
                     vec![p(face, cy), p(exit, cy)],
+                    vec![
+                        p(back_face, cy),
+                        p(back, cy),
+                        p(back, far_y),
+                        p(exit, far_y),
+                    ],
+                    vec![
+                        p(back_face, cy),
+                        p(back, cy),
+                        p(back, near_y),
+                        p(exit, near_y),
+                    ],
                 ]
             }
         }
     };
-    let clear = |pts: &[Point]| {
-        pts.windows(2).all(|w| {
-            let (a, b) = (w[0], w[1]);
-            let seg = Rect::new(
-                a.x.min(b.x),
-                a.y.min(b.y),
-                (a.x - b.x).abs(),
-                (a.y - b.y).abs(),
-            );
-            obstacles.iter().all(|o| !seg.intersects(&o.pad(-1.0)))
-        })
+    // How many nodes the route crosses.
+    let hits = |pts: &[Point]| {
+        obstacles
+            .iter()
+            .filter(|o| {
+                pts.windows(2).any(|w| {
+                    let (a, b) = (w[0], w[1]);
+                    let seg = Rect::new(
+                        a.x.min(b.x),
+                        a.y.min(b.y),
+                        (a.x - b.x).abs(),
+                        (a.y - b.y).abs(),
+                    );
+                    seg.intersects(&o.pad(-1.0))
+                })
+            })
+            .count()
     };
-    let [first, ..] = &candidates;
     let pts = candidates
         .iter()
-        .find(|c| clear(c))
-        .unwrap_or(first)
-        .clone();
+        .min_by_key(|c| hits(c))
+        .cloned()
+        .unwrap_or_default();
     // The label sits on the run along the frame side (in) / to the frame side (out).
     let label = if ne.inner_is_target {
         pts[0].lerp(pts[1], 0.5)
@@ -2891,6 +2965,46 @@ mod tests {
             })
         });
         assert!(on_edge, "label at {label:?} is off its edge");
+    }
+
+    /// `n2 --> g0` (LR) out of g0's member n2, with nodes below, above and after n2
+    /// in g0: the three routes tried first all crossed a node, and the first was
+    /// drawn through it. The route now goes round n2's back through the lane on
+    /// that side.
+    #[test]
+    fn member_to_own_cluster_edge_goes_round_blocked_sides() {
+        let frame = Rect::new(0.0, 0.0, 500.0, 270.0);
+        let inner = Rect::new(40.0, 110.0, 150.0, 50.0);
+        let obstacles = [
+            Rect::new(30.0, 200.0, 170.0, 40.0),
+            Rect::new(60.0, 50.0, 80.0, 30.0),
+            Rect::new(300.0, 120.0, 170.0, 45.0),
+        ];
+        for inner_is_target in [false, true] {
+            let ne = NestedEdge {
+                cluster: ClusterId(0),
+                inner: Endpoint::Node(NodeId(0)),
+                inner_is_target,
+            };
+            let dir = if inner_is_target {
+                Direction::RightLeft
+            } else {
+                Direction::LeftRight
+            };
+            let (pts, _) = nested_route(ne, frame, inner, dir, 24.0, None, &obstacles);
+            for w in pts.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let seg = Rect::new(
+                    a.x.min(b.x),
+                    a.y.min(b.y),
+                    (a.x - b.x).abs(),
+                    (a.y - b.y).abs(),
+                );
+                for o in &obstacles {
+                    assert!(!seg.intersects(o), "{dir:?}: {pts:?} crosses {o:?}");
+                }
+            }
+        }
     }
 
     /// An edge from a cluster to its own member is drawn in the direction the layout
