@@ -840,7 +840,25 @@ fn segments(tree: &Tree, ends: &[(Member, Member)]) -> Vec<Seg> {
     let mut out = Vec::new();
     for (ei, &(a, b)) in ends.iter().enumerate() {
         let anc = tree.common_ancestor(a, b);
-        if anc.is_some_and(|c| a == Member::Cluster(c) || b == Member::Cluster(c)) {
+        if let Some(c) = anc.filter(|&c| a == Member::Cluster(c) || b == Member::Cluster(c)) {
+            // A direct member's edge to or from its own container runs inside
+            // it, to or from a port dummy in its last or first layer
+            // (`CompoundGraphPreprocessor`: the port's side by its net flow).
+            let direct =
+                |m: Member| matches!(m, Member::Node(v) if tree.input.nodes[v].cluster == Some(c));
+            if tree.separate[c] && (direct(a) || direct(b)) {
+                let end = |m: Member| match m {
+                    Member::Node(v) => SegEnd::Node(v),
+                    _ => SegEnd::Ext,
+                };
+                out.push(Seg {
+                    edge: ei,
+                    scope: Some(c),
+                    from: end(a),
+                    to: end(b),
+                    main: true,
+                });
+            }
             continue;
         }
         // The levels from `m`'s up to (not including) the common ancestor's, each

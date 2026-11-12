@@ -932,9 +932,18 @@ pub fn render_with(
         .iter()
         .map(|e| nested_edge(&g.clusters, &nodes, &empty_of, e))
         .collect();
+    // Under ELK a direct member's edge to or from its own container is laid
+    // out as it is: inside the container, to or from a port dummy in its first
+    // or last layer (`CompoundGraphPreprocessor`), not as a loop.
+    let member_edge = |ne: Option<NestedEdge>| {
+        elk && ne.is_some_and(|ne| {
+            matches!(ne.inner, Endpoint::Node(NodeId(i)) if nodes[i].cluster == Some(ne.cluster))
+        })
+    };
     let layout_ends = |ei: usize, e: &Edge| -> ((usize, Option<usize>), (usize, Option<usize>)) {
         match nested[ei] {
             None => (layout_end(e.from, true), layout_end(e.to, false)),
+            ne if member_edge(ne) => (layout_end(e.from, true), layout_end(e.to, false)),
             Some(ne) => {
                 let v = match ne.inner {
                     Endpoint::Node(NodeId(i)) => i,
@@ -1213,7 +1222,12 @@ pub fn render_with(
                 .filter(|&i| ne.inner != Endpoint::Node(NodeId(i)))
                 .map(|i| Rect::centered(out.nodes[i], measured[i].w, measured[i].h))
                 .collect();
-            let (p, l) = nested_route(ne, frame, inner_rect, dir, title_h, lw, &obstacles);
+            // ELK gives a direct member's edge to or from its container a port
+            // dummy in the container's first or last layer, which lines up with
+            // the member: a straight run along the flow.
+            let straight = member_edge(Some(ne));
+            let lane = (lw, straight);
+            let (p, l) = nested_route(ne, frame, inner_rect, dir, title_h, lane, &obstacles);
             pts = p;
             if elk {
                 pts.dedup_by(|a, b| a.dist(*b) < 1e-9);
@@ -2354,7 +2368,7 @@ fn nested_route(
     inner: Rect,
     dir: Direction,
     title_h: f64,
-    label_w: Option<f64>,
+    (label_w, straight_first): (Option<f64>, bool),
     obstacles: &[Rect],
 ) -> (Vec<Point>, Point) {
     if ne.inner == Endpoint::Cluster(ne.cluster) {
@@ -2533,8 +2547,14 @@ fn nested_route(
             })
             .count()
     };
-    let pts = candidates
+    let order = if straight_first {
+        [2, 0, 1, 3, 4]
+    } else {
+        [0, 1, 2, 3, 4]
+    };
+    let pts = order
         .iter()
+        .map(|&k| &candidates[k])
         .min_by_key(|c| hits(c))
         .cloned()
         .unwrap_or_default();
@@ -3351,19 +3371,23 @@ mod tests {
             "{lp:?} {frame:?}"
         );
         assert!((lp.last().unwrap().x - frame.right()).abs() < 10.0);
-        // A --> a1: from the frame's top edge into a1 (not between a1 and a2).
+        // A --> a1: under ELK a port dummy in A's first layer lines up with a1:
+        // straight down from the frame's top edge into a1 (mermaid: 132,117 to
+        // 132,161), not between a1 and a2.
         let into = edge_points(&scene, "L-A-a1-3");
         assert!((into[0].y - frame.y).abs() < eps, "{into:?}");
         let a1 = scene_node_center(&g, &scene, "a1");
         let end = *into.last().unwrap();
         assert!(
-            (end.y - a1.y).abs() < 1.0 && end.x < a1.x,
+            (end.x - a1.x).abs() < 1.0 && end.y < a1.y,
             "{end:?} vs {a1:?}"
         );
-        // a2 --> A: from a2 out to the frame's bottom edge (not a self-loop on a2).
+        assert!(into.iter().all(|p| (p.x - a1.x).abs() < 1.0), "{into:?}");
+        // a2 --> A: from a2 straight out to the frame's bottom edge (not a
+        // self-loop on a2), through a dummy in A's last layer.
         let out = edge_points(&scene, "L-a2-A-4");
         let a2 = scene_node_center(&g, &scene, "a2");
-        assert!((out[0].y - a2.y).abs() < 1.0 && out[0].x > a2.x, "{out:?}");
+        assert!((out[0].x - a2.x).abs() < 1.0 && out[0].y > a2.y, "{out:?}");
         assert!(
             out.last().unwrap().y > frame.bottom() - 8.0,
             "{out:?} {frame:?}"
@@ -3635,7 +3659,7 @@ mod tests {
             } else {
                 Direction::LeftRight
             };
-            let (pts, _) = nested_route(ne, frame, inner, dir, 24.0, None, &obstacles);
+            let (pts, _) = nested_route(ne, frame, inner, dir, 24.0, (None, false), &obstacles);
             for w in pts.windows(2) {
                 let (a, b) = (w[0], w[1]);
                 let seg = Rect::new(

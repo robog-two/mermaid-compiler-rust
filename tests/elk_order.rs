@@ -473,3 +473,36 @@ fn feedback_edges_around_nested_containers_order_like_elk() {
     assert!((at("x1").1 - at("x0").1 - 212.0).abs() < 0.5, "{cs:?}");
     assert!((at("x1").2 - at("x0").2 - 185.25).abs() < 0.5, "{cs:?}");
 }
+
+#[test]
+fn a_members_edges_to_its_own_container_run_to_port_dummies_inside_it() {
+    // `a --> C` leaves through a port dummy in C's last layer, `C --> b` comes
+    // in from one in its first: b's dummy starts C's first layer, so b stands
+    // left of a, 202px apart, as in mermaid's render (not a loop on each).
+    let src = "flowchart TD
+  subgraph C
+    a
+    b
+  end
+  a --> C
+  C --> b
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["a", "b"], false);
+    let at = |n: &str| cs.iter().find(|c| c.0 == n).expect("node");
+    assert!((at("a").2 - at("b").2 - 202.0).abs() < 0.5, "{cs:?}");
+    assert!((at("a").1 - at("b").1).abs() < 0.5, "{cs:?}");
+    // No loop room: b's edge out to C leaves C's frame as tall as without it.
+    let height = |src: &str| {
+        let r = render::render(src, &MermaidConfig::default()).expect("renders");
+        let svg = output::encode_svg(&r, &EncodeOptions::default());
+        let at = svg.find("id=\"cluster-C\"").expect("cluster");
+        let rect = at + svg[at..].find("<rect x=").expect("frame");
+        let end = rect + svg[rect..].find('>').expect("tag end");
+        attr(&svg[rect..end], "height")
+    };
+    let with = height("flowchart TD\n  subgraph C\n    x --> y\n  end\n  y --> C\n");
+    let without = height("flowchart TD\n  subgraph C\n    x --> y\n  end\n");
+    assert!((with - without).abs() < 0.5, "{with} {without}");
+}
