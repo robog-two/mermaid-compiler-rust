@@ -995,7 +995,7 @@ pub fn render_with(
                         .map(|b| {
                             // An SVG label's box includes its background's padding.
                             let pad = if b.svg { 2.0 * SVG_EDGE_LABEL_PAD } else { 0.0 };
-                            if elk {
+                            if elk || g.kind == DiagramKind::Er {
                                 (b.width + pad, b.height + pad)
                             } else {
                                 (b.width + pad + 8.0, b.height + pad + 4.0)
@@ -1030,6 +1030,7 @@ pub fn render_with(
         inner_node_sep: CLUSTER_NODE_SPACING,
         inner_rank_sep: CLUSTER_RANK_SPACING,
         routing: edge_routing(cfg.layout),
+        dagre_groups: g.kind == DiagramKind::Er && !elk,
     };
     // ER group titles wrap at the group's laid-out width. Under ELK mermaid lays
     // out once, with each title measured at the wrapping width, and wraps it again

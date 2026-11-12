@@ -131,6 +131,13 @@ pub struct LayoutInput {
     pub inner_rank_sep: f64,
     /// How edges are routed (dagre-style splines or ELK-style orthogonal routes).
     pub routing: EdgeRouting,
+    /// mermaid's dagre layout of a cluster no edge crosses, as ER groups get it:
+    /// a graph of its own (`recursiveRender`) in the other direction (`TB` turns
+    /// to `LR`, any other to `TB`) unless it has its own, with the parent's node
+    /// spacing and 25 more rank spacing, framed by dagre's compound borders (half
+    /// a rank along the flow, half a node and an edge gap across) with no band
+    /// for its title. `inner_*` and `cluster_padding` do not apply to it.
+    pub dagre_groups: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3421,6 +3428,7 @@ mod tests {
             inner_node_sep: 50.0,
             inner_rank_sep: 24.0,
             routing: EdgeRouting::Splines,
+            dagre_groups: false,
         }
     }
 

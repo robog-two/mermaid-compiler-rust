@@ -1505,6 +1505,20 @@ mod tests {
             let cl = |id: &str| clusters.iter().find(|(c, _)| c == id).unwrap().1;
             let (long, short) = (cl("G"), cl("S"));
             let full = crate::text::line_width(title, font, false);
+            if json != "{}" {
+                // dagre (mermaid 12.3: 213 x 241 beside 205 x 241): each group is a
+                // graph of its own, turned to LR, framed half a rank (52.5) along
+                // and half a node and an edge gap (80) across; the title wraps at
+                // the frame's width (three lines) and widens it by its padding, and
+                // takes no band of its own.
+                assert!((short.w - 205.0).abs() < 1e-6, "{short:?}");
+                assert!((long.w - 213.0).abs() < 1e-6, "{long:?}");
+                // The entity's height plus 2 x 80 (241 with mermaid's 81px entity).
+                assert!((long.h - short.h).abs() < 1e-6, "{long:?} {short:?}");
+                assert!(short.h > 240.0 && short.h < 250.0, "{short:?}");
+                assert!((long.x - short.right() - 140.0).abs() < 1e-6, "{long:?}");
+                continue;
+            }
             // mermaid (148 / 156 px wide): the title wraps instead of widening the frame.
             assert!(long.w < full / 2.0, "{json}: {long:?}");
             assert!(long.w >= short.w, "{json}: {long:?} {short:?}");
