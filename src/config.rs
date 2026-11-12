@@ -214,6 +214,14 @@ pub struct GraphConfig {
     /// `elk.lineHops`: how crossings are drawn under the ELK layout (copied in by
     /// [`MermaidConfig::scoped`]; ignored under dagre).
     pub line_hops: crate::linejump::LineHops,
+    /// Node labels are HTML (`foreignObject`) rather than SVG `<text>`: the top-level
+    /// `htmlLabels`, which is all labelHelper and the class box read (copied in by
+    /// [`MermaidConfig::scoped`]).
+    pub html_labels: bool,
+    /// Edge labels and cluster titles are HTML: mermaid's `getEffectiveHtmlLabels`,
+    /// the top-level `htmlLabels`, else the deprecated `flowchart.htmlLabels` (copied
+    /// in by [`MermaidConfig::scoped`]).
+    pub html_edge_labels: bool,
 }
 
 impl GraphConfig {
@@ -231,6 +239,8 @@ impl GraphConfig {
             wrapping_width: 120.0,
             layout: LayoutAlgorithm::Elk,
             line_hops: crate::linejump::LineHops::Arc,
+            html_labels: true,
+            html_edge_labels: true,
         }
     }
     fn state() -> Self {
@@ -400,6 +410,21 @@ impl Default for MermaidConfig {
     }
 }
 
+/// mermaid's `evaluate` for a config value (`undefined` is `true`).
+fn evaluate(v: Option<&Json>) -> bool {
+    match v {
+        None => true,
+        Some(Json::Bool(b)) => *b,
+        Some(Json::Null) => false,
+        Some(Json::Number(n)) => *n != 0.0,
+        Some(Json::String(s)) => !matches!(
+            s.trim().to_ascii_lowercase().as_str(),
+            "false" | "null" | "0"
+        ),
+        Some(_) => true,
+    }
+}
+
 fn set_f64(j: &Json, key: &str, slot: &mut f64) {
     if let Some(v) = j.get(key).and_then(Json::as_f64) {
         *slot = v;
@@ -453,7 +478,34 @@ impl MermaidConfig {
         self.flowchart.line_hops = hops;
         self.state.line_hops = hops;
         self.class.line_hops = hops;
+        let (html, html_edges) = (self.html_labels(), self.effective_html_labels());
+        for g in [&mut self.flowchart, &mut self.state, &mut self.class] {
+            g.html_labels = html;
+            g.html_edge_labels = html_edges;
+        }
         self
+    }
+
+    /// Latest value of the top-level `key` across all layers, `null` included.
+    fn top_value(&self, key: &str) -> Option<&Json> {
+        self.raw.iter().rev().find_map(|j| j.get(key))
+    }
+
+    /// `evaluate(config.htmlLabels)` as labelHelper reads it: unset is `true`, and
+    /// `false`, `null`, `"false"`, `"null"` and `"0"` are `false`.
+    pub fn html_labels(&self) -> bool {
+        evaluate(self.top_value("htmlLabels"))
+    }
+
+    /// mermaid's `getEffectiveHtmlLabels`: `htmlLabels ?? flowchart.htmlLabels ?? true`.
+    pub fn effective_html_labels(&self) -> bool {
+        fn set(v: Option<&Json>) -> Option<&Json> {
+            v.filter(|v| !matches!(v, Json::Null))
+        }
+        evaluate(
+            set(self.top_value("htmlLabels"))
+                .or_else(|| set(self.section("flowchart", "htmlLabels"))),
+        )
     }
 
     /// `elk.lineHops` (default `true`, i.e. arcs) from the latest layer that sets it.
@@ -686,6 +738,38 @@ fn yaml_scalar(v: &str) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn html_flags(json: &str) -> (bool, bool) {
+        let j = crate::json::parse(json).unwrap();
+        let c = MermaidConfig::default()
+            .with_directive(&j)
+            .unwrap()
+            .scoped("flowchart");
+        assert_eq!(c.state.html_labels, c.flowchart.html_labels);
+        assert_eq!(c.class.html_edge_labels, c.flowchart.html_edge_labels);
+        (c.flowchart.html_labels, c.flowchart.html_edge_labels)
+    }
+
+    #[test]
+    fn html_labels_resolve_like_mermaid() {
+        assert_eq!(html_flags("{}"), (true, true));
+        assert_eq!(html_flags(r#"{"htmlLabels":false}"#), (false, false));
+        assert_eq!(html_flags(r#"{"htmlLabels":"false"}"#), (false, false));
+        // labelHelper reads only the top-level key; edges and titles fall back to the
+        // deprecated `flowchart.htmlLabels`.
+        assert_eq!(
+            html_flags(r#"{"flowchart":{"htmlLabels":false}}"#),
+            (true, false)
+        );
+        assert_eq!(
+            html_flags(r#"{"htmlLabels":true,"flowchart":{"htmlLabels":false}}"#),
+            (true, true)
+        );
+        assert_eq!(
+            html_flags(r#"{"htmlLabels":null,"flowchart":{"htmlLabels":true}}"#),
+            (false, true)
+        );
+    }
 
     #[test]
     fn layering_overrides_fields() {

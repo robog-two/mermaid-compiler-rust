@@ -490,6 +490,8 @@ struct Measured {
     compartments: Option<CompartmentLayout>,
     table: Option<TableMetrics>,
     label_offset: Point,
+    /// The label's width after labelHelper's `minWidth`.
+    label_w: f64,
     metrics: ShapeMetrics,
     w: f64,
     h: f64,
@@ -552,10 +554,20 @@ fn measure_node(
     look: ConfigLook,
     min_label_width: f64,
     wrap_width: f64,
+    svg: bool,
 ) -> Measured {
     let mut block = TextBlock::label(&node.label, font);
     let bold = node.style.bold == Some(true);
-    if wrap_width > 0.0 && !block.is_empty() {
+    if svg {
+        // createText's SVG path: wrapped (markdownAutoWrap or not) and cut inside
+        // words by `splitLineToFitWidth`, 1.1em lines.
+        let lines = if wrap_width > 0.0 && !block.is_empty() {
+            crate::text::svg_wrap_lines(&block.lines, wrap_width, font, bold)
+        } else {
+            block.lines
+        };
+        block = TextBlock::svg(lines, font, bold);
+    } else if wrap_width > 0.0 && !block.is_empty() {
         block = TextBlock::new(wrap_lines(&block.lines, wrap_width, font, bold), font, bold);
     } else if bold {
         block = TextBlock::new(block.lines, font, true);
@@ -573,9 +585,11 @@ fn measure_node(
         } else {
             block.width
         },
-        block
-            .height
-            .max(if block.is_empty() { 0.0 } else { font * 1.5 }),
+        block.height.max(if block.is_empty() || svg {
+            0.0
+        } else {
+            font * 1.5
+        }),
     );
     // Notes carry their own padding: classDb `config.class.padding ?? 6`,
     // state dataFetcher `config.flowchart.padding` (15).
@@ -599,7 +613,19 @@ fn measure_node(
                 sections = node
                     .sections
                     .iter()
-                    .map(|s| TextBlock::new(s.lines.clone(), font, s.bold))
+                    .enumerate()
+                    .map(|(i, s)| match (svg, kind) {
+                        (false, _) => TextBlock::new(s.lines.clone(), font, s.bold),
+                        // shapeUtil's textHelper: one `<text>` per line, annotation and
+                        // name box on box, members and methods 3px apart.
+                        (true, DiagramKind::Class) => TextBlock::svg_stacked(
+                            s.lines.clone(),
+                            font,
+                            s.bold,
+                            Some(if i == 0 { 0.0 } else { 3.0 }),
+                        ),
+                        (true, _) => TextBlock::svg(s.lines.clone(), font, s.bold),
+                    })
                     .collect();
                 let (layout, w, h) = compartment_layout(kind, &sections, pad);
                 compartments = Some(layout);
@@ -624,6 +650,7 @@ fn measure_node(
         compartments,
         table,
         label_offset,
+        label_w: tw,
         metrics,
         w,
         h,
@@ -662,6 +689,21 @@ fn edge_label_block(label: &str, font: f64) -> TextBlock {
         font,
         false,
     )
+}
+
+/// Padding of an SVG edge label's background on each side (`createFormattedText`):
+/// the label's bounding box, and so its size in the layout, includes it.
+const SVG_EDGE_LABEL_PAD: f64 = 2.0;
+
+/// [`edge_label_block`] for `htmlLabels: false`: SVG text wrapped at the same 200px.
+fn svg_edge_label_block(label: &str, font: f64) -> TextBlock {
+    let lines = crate::text::svg_wrap_lines(
+        &crate::text::label_lines(label),
+        EDGE_LABEL_WRAP,
+        font,
+        false,
+    );
+    TextBlock::svg(lines, font, false)
 }
 
 /// Word-wrap already-decoded label lines at `width` with the browser's line breaking,
@@ -724,7 +766,14 @@ pub fn render_with(
     let mut cluster_titles: Vec<TextBlock> = g
         .clusters
         .iter()
-        .map(|c| TextBlock::label(&c.title, font))
+        .map(|c| {
+            let t = TextBlock::label(&c.title, font);
+            if cfg.html_edge_labels {
+                t
+            } else {
+                TextBlock::svg(t.lines, font, false)
+            }
+        })
         .collect();
     let mut measured: Vec<Measured> = nodes
         .iter()
@@ -738,11 +787,15 @@ pub fn render_with(
                 horizontal,
                 cfg.look,
                 opts.min_label_width.max(cfg.min_node_width),
-                if opts.markdown_no_wrap && crate::text::is_markdown_string(&n.label) {
+                if opts.markdown_no_wrap
+                    && cfg.html_labels
+                    && crate::text::is_markdown_string(&n.label)
+                {
                     0.0
                 } else {
                     cfg.wrapping_width
                 },
+                !cfg.html_labels,
             )
         })
         .collect();
@@ -829,7 +882,9 @@ pub fn render_with(
             e.label
                 .as_ref()
                 .map(|l| {
-                    if opts.markdown_no_wrap && crate::text::is_markdown_string(l) {
+                    if !cfg.html_edge_labels {
+                        svg_edge_label_block(l, font)
+                    } else if opts.markdown_no_wrap && crate::text::is_markdown_string(l) {
                         TextBlock::label(l, font)
                     } else {
                         edge_label_block(l, font)
@@ -871,7 +926,11 @@ pub fn render_with(
                     label: lb
                         .as_ref()
                         .filter(|_| !(elk && nested[ei].is_some()))
-                        .map(|b| (b.width + 8.0, b.height + 4.0)),
+                        .map(|b| {
+                            // An SVG label's box includes its background's padding.
+                            let pad = if b.svg { 2.0 * SVG_EDGE_LABEL_PAD } else { 0.0 };
+                            (b.width + pad + 8.0, b.height + pad + 4.0)
+                        }),
                     from_cluster,
                     to_cluster,
                 }
@@ -973,7 +1032,7 @@ pub fn render_with(
             };
             let center = Point::new(r.x + r.w / 2.0, top + t.height / 2.0);
             children.push(Element::classed_text(
-                Text::centered(center, &t.lines, font, t.line_height, &color),
+                t.centered_text(center, &color),
                 "cluster-label",
             ));
         }
@@ -1194,19 +1253,32 @@ pub fn render_with(
         let (mt, mb) = opts.subgraph_title_margin;
         let label_at = label_at.map(|p| Point::new(p.x, p.y + (mt + mb) / 2.0));
         if let (Some(block), Some(at)) = (&edge_labels[ei], label_at) {
-            let r = Rect::centered(at, block.width + 4.0, block.height);
+            // An SVG label's background is its text box padded by 2px on every side,
+            // half transparent (`.edgeLabel rect { opacity: 0.5 }`).
+            let (r, bg) = if block.svg {
+                let pad = 2.0 * SVG_EDGE_LABEL_PAD;
+                // The state stylesheet fills it with `labelBackgroundColor` (stateBkg).
+                let fill = if g.kind == DiagramKind::State {
+                    &pal.main_bkg
+                } else {
+                    edge_label_bg
+                };
+                (
+                    Rect::centered(at, block.width + pad, block.height + pad),
+                    Paint::fill(fill).with_opacity(0.5),
+                )
+            } else {
+                (
+                    Rect::centered(at, block.width + 4.0, block.height),
+                    Paint::fill(edge_label_bg),
+                )
+            };
             bounds.add_rect(r);
             label_els.push(Element::group(
                 "edgeLabel",
                 vec![
-                    Element::rect(r, 0.0, Paint::fill(edge_label_bg)),
-                    Element::text(Text::centered(
-                        at,
-                        &block.lines,
-                        font,
-                        block.line_height,
-                        &text_color,
-                    )),
+                    Element::rect(r, 0.0, bg),
+                    Element::text(block.centered_text(at, &text_color)),
                 ],
             ));
         }
@@ -1414,6 +1486,7 @@ pub fn node_size(
         cfg.look,
         cfg.min_node_width,
         cfg.wrapping_width,
+        !cfg.html_labels,
     );
     (m.w, m.h)
 }
@@ -1441,6 +1514,7 @@ pub fn draw_node(
         cfg.look,
         cfg.min_node_width,
         cfg.wrapping_width,
+        !cfg.html_labels,
     );
     let slot = slot_colors(n.color_slot, pal);
     let painted = Node {
@@ -2334,13 +2408,7 @@ fn node_elements(
                     if !block.is_empty() {
                         let top = y + layout.text_top.get(i).copied().unwrap_or(0.0);
                         let center = Point::new(c.x, top + block.height / 2.0);
-                        let mut t = Text::centered(
-                            center,
-                            &block.lines,
-                            font,
-                            block.line_height,
-                            &text_color,
-                        );
+                        let mut t = block.centered_text(center, &text_color);
                         t.bold = sec.bold;
                         if !sec.centered {
                             t = t.anchored(Anchor::Start, x0 + layout.inset);
@@ -2451,17 +2519,55 @@ fn node_elements(
         }
     }
     if !m.block.is_empty() && shapes::shows_label(n.shape) {
-        let mut t = Text::centered(
-            c.plus(m.label_offset),
-            &m.block.lines,
-            font,
-            m.block.line_height,
-            &text_color,
-        );
+        let mut at = c.plus(m.label_offset);
+        if m.block.svg && corrects_glyph_offset(n.shape) {
+            // These shapes subtract the text's `getBBox().y` when placing the label,
+            // so the glyph box (not the text origin) sits where the HTML box would.
+            at.y -= font - (0.905 * font).round();
+        }
+        let mut t = m.block.centered_text(at, &text_color);
+        if m.block.svg && kind == DiagramKind::State {
+            // State nodes centre their label box (`centerLabel`), but the state
+            // stylesheet has no `text-anchor: middle`: SVG text starts at its left.
+            t = t.anchored(Anchor::Start, at.x - m.label_w / 2.0);
+        }
         t.bold = m.block.bold;
         els.push(Element::classed_text(t, "nodeLabel"));
     }
     (els, boundary)
+}
+
+/// Shapes whose label transform subtracts the label's `bbox.y` (`- (bbox.y -
+/// (bbox.top ?? 0))` in mermaid's shape code), which only matters for SVG labels.
+fn corrects_glyph_offset(shape: Shape) -> bool {
+    matches!(
+        shape,
+        Shape::Browser
+            | Shape::Bucket
+            | Shape::Console
+            | Shape::BraceLeft
+            | Shape::BraceRight
+            | Shape::Braces
+            | Shape::Cylinder
+            | Shape::DividedRect
+            | Shape::FlippedTriangle
+            | Shape::Folder
+            | Shape::Delay
+            | Shape::LinedCylinder
+            | Shape::LinedDocument
+            | Shape::StackedRect
+            | Shape::StackedDocument
+            | Shape::Note
+            | Shape::Person
+            | Shape::Asymmetric
+            | Shape::LinedRect
+            | Shape::SlopedRect
+            | Shape::TaggedDocument
+            | Shape::HorizontalCylinder
+            | Shape::Triangle
+            | Shape::Document
+            | Shape::WindowPane
+    )
 }
 
 /// Paints of an entity table.

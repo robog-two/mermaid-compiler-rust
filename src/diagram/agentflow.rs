@@ -1686,6 +1686,8 @@ fn graph_config(cfg: &MermaidConfig) -> GraphConfig {
         wrapping_width: 0.0,
         layout: cfg.layout,
         line_hops: cfg.elk_line_hops(),
+        html_labels: true,
+        html_edge_labels: true,
     }
 }
 

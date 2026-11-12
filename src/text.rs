@@ -4,6 +4,9 @@
 //! (the same metrics the PDF backend's built-in Helvetica uses), which gives sizes
 //! within a few percent of the browser's "trebuchet ms"/arial rendering.
 
+use crate::geom::Point;
+use crate::scene::{Color, Text};
+
 /// Advance widths for ASCII 0x20..=0x7E in 1/1000 em (Helvetica AFM).
 const HELVETICA: [u16; 95] = [
     278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278,
@@ -203,9 +206,107 @@ pub struct TextBlock {
     pub bold: bool,
     pub width: f64,
     pub height: f64,
+    /// Laid out as SVG `<text>` (`htmlLabels: false`, see [`TextBlock::svg`]) rather
+    /// than as an HTML label: [`TextBlock::centered_text`] places its baselines the
+    /// way `createFormattedText` does.
+    pub svg: bool,
+}
+
+/// Line pitch of SVG text labels in em (`createFormattedText`'s `lineHeight`).
+pub const SVG_LINE_HEIGHT: f64 = 1.1;
+
+/// Whether a glyph reaches below the font's descent line, which grows the browser's
+/// `getBBox()` of an SVG text line (`g`, `p`, brackets, `_`, ...).
+fn has_deep_descender(c: char) -> bool {
+    matches!(
+        c,
+        'g' | 'j'
+            | 'p'
+            | 'q'
+            | 'y'
+            | '('
+            | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '|'
+            | '_'
+            | '@'
+            | '$'
+            | 'ç'
+            | 'Ç'
+            | 'µ'
+            | 'þ'
+            | 'ÿ'
+            | 'ý'
+    )
+}
+
+/// Height of one SVG text line's bounding box, as Chromium's `getBBox()` reports it
+/// for mermaid's fonts (Arial metrics, ascent 0.905em and descent 0.212em, each
+/// rounded to whole pixels; a deep descender rounds the descent up instead):
+/// 16px at 14px, 17px (18px with a descender) at 16px.
+pub fn svg_line_box(font_size: f64, line: &str) -> f64 {
+    let ascent = (0.905 * font_size).round();
+    let descent = (0.212 * font_size).round();
+    let descent = if line.chars().any(has_deep_descender) {
+        descent.max((0.212 * font_size - 1e-6).ceil())
+    } else {
+        descent
+    };
+    ascent + descent
 }
 
 impl TextBlock {
+    /// Lines laid out as mermaid's SVG text labels (`createText` with
+    /// `useHtmlLabels: false`): baselines 1.1em apart, the block as tall as the
+    /// browser's text bounding box (one line box plus 1.1em per further line).
+    pub fn svg(lines: Vec<String>, font_size: f64, bold: bool) -> Self {
+        Self::svg_stacked(lines, font_size, bold, None)
+    }
+
+    /// [`TextBlock::svg`] for lines that are separate `<text>` elements stacked
+    /// box on box with `gap` pixels between them (class members, `shapeUtil`'s
+    /// `textHelper`) instead of tspans 1.1em apart.
+    pub fn svg_stacked(lines: Vec<String>, font_size: f64, bold: bool, gap: Option<f64>) -> Self {
+        let mut b = Self::new(lines, font_size, bold);
+        b.svg = true;
+        let n = b.lines.len();
+        b.line_height = match gap {
+            Some(g) => svg_line_box(font_size, "") + g,
+            None => font_size * SVG_LINE_HEIGHT,
+        };
+        if b.height > 0.0 {
+            let last = b.lines.last().map(String::as_str).unwrap_or("");
+            b.height = match gap {
+                Some(g) => {
+                    b.lines
+                        .iter()
+                        .map(|l| svg_line_box(font_size, l))
+                        .sum::<f64>()
+                        + g * (n - 1) as f64
+                }
+                None => b.line_height * (n - 1) as f64 + svg_line_box(font_size, last),
+            };
+        }
+        b
+    }
+
+    /// The block drawn centred on `center`: an HTML label's lines centred in their
+    /// 1.5em line boxes, or an SVG label's first baseline 1em below the box top
+    /// (`createTspan`'s `y = -0.1em, dy = 1.1em` in a label shifted up by half its
+    /// height).
+    pub fn centered_text(&self, center: Point, fill: &Color) -> Text {
+        if !self.svg {
+            return Text::centered(center, &self.lines, self.font_size, self.line_height, fill);
+        }
+        Text {
+            y: center.y - self.height / 2.0 + self.font_size,
+            ..Text::centered(center, &self.lines, self.font_size, self.line_height, fill)
+        }
+    }
+
     /// Measure already-split lines.
     pub fn new(lines: Vec<String>, font_size: f64, bold: bool) -> Self {
         let line_height = font_size * 1.5;
@@ -225,6 +326,7 @@ impl TextBlock {
             bold,
             width,
             height,
+            svg: false,
         }
     }
 
@@ -279,6 +381,57 @@ pub fn wrap_lines(
             }
         }
         out.push(cur.trim_end().to_string());
+    }
+    balance_marks(out)
+}
+
+/// Wrap already-split lines as mermaid's SVG text labels do (`createFormattedText`
+/// with `splitLineToFitWidth`): a line that fits stays whole; otherwise words are
+/// added while the line fits, and a word too wide on its own is cut between
+/// characters (the browser's HTML line breaking would let it overflow instead).
+pub fn svg_wrap_lines(lines: &[String], width: f64, font_size: f64, bold: bool) -> Vec<String> {
+    let fits = |s: &str| line_width(s, font_size, bold) <= width;
+    let mut out = Vec::new();
+    for para in lines {
+        let mut queue: std::collections::VecDeque<String> =
+            para.split_whitespace().map(str::to_string).collect();
+        let joined = queue
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if fits(&joined) {
+            out.push(joined);
+            continue;
+        }
+        let mut cur: Vec<String> = Vec::new();
+        while let Some(word) = queue.pop_front() {
+            let cand = if cur.is_empty() {
+                word.clone()
+            } else {
+                format!("{} {word}", cur.join(" "))
+            };
+            if fits(&cand) {
+                cur.push(word);
+            } else if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur).join(" "));
+                queue.push_front(word);
+            } else {
+                let chars: Vec<char> = word.chars().collect();
+                let mut k = 0;
+                while k < chars.len() && fits(&chars[..=k].iter().collect::<String>()) {
+                    k += 1;
+                }
+                let k = k.max(1);
+                out.push(chars[..k].iter().collect());
+                if k < chars.len() {
+                    queue.push_front(chars[k..].iter().collect());
+                }
+            }
+        }
+        if !cur.is_empty() {
+            out.push(cur.join(" "));
+        }
     }
     balance_marks(out)
 }
@@ -714,6 +867,84 @@ fn named_entity(name: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn svg_line_box_follows_chromium_get_bbox() {
+        assert_eq!(svg_line_box(14.0, "Christmas"), 16.0);
+        assert_eq!(svg_line_box(14.0, "ggg"), 16.0);
+        assert_eq!(svg_line_box(16.0, "Christmas"), 17.0);
+        assert_eq!(svg_line_box(16.0, "Laptop"), 18.0);
+        assert_eq!(svg_line_box(16.0, "(x)"), 18.0);
+    }
+
+    #[test]
+    fn svg_blocks_grow_by_1_1em_per_line() {
+        let b = TextBlock::svg(
+            vec!["Line1".into(), "Line 2".into(), "Line 3".into()],
+            14.0,
+            false,
+        );
+        assert!(b.svg);
+        assert!((b.line_height - 15.4).abs() < 1e-9);
+        assert!((b.height - 46.8).abs() < 1e-9);
+        // The last line's descender decides the bottom.
+        let up = TextBlock::svg(vec!["Ag".into(), "aa".into()], 16.0, false);
+        let down = TextBlock::svg(vec!["aa".into(), "Ag".into()], 16.0, false);
+        assert!((up.height - 34.6).abs() < 1e-9);
+        assert!((down.height - 35.6).abs() < 1e-9);
+        // Class members: separate text boxes 3px apart.
+        let m = TextBlock::svg_stacked(vec!["+a".into(), "+b".into()], 14.0, false, Some(3.0));
+        assert_eq!(m.height, 35.0);
+        assert_eq!(TextBlock::svg(vec![String::new()], 14.0, false).height, 0.0);
+    }
+
+    #[test]
+    fn svg_text_baseline_sits_1em_below_the_box_top() {
+        let c = Color::new("#000");
+        let b = TextBlock::svg(vec!["x".into()], 14.0, false);
+        assert_eq!(b.centered_text(Point::new(0.0, 0.0), &c).y, -8.0 + 14.0);
+        // HTML blocks keep `Text::centered`.
+        let h = TextBlock::new(vec!["x".into()], 14.0, false);
+        assert_eq!(
+            h.centered_text(Point::new(1.0, 2.0), &c),
+            Text::centered(Point::new(1.0, 2.0), &h.lines, 14.0, h.line_height, &c)
+        );
+    }
+
+    #[test]
+    fn svg_wrapping_fills_lines_and_cuts_words() {
+        let lines = |s: &str| vec![s.to_string()];
+        assert_eq!(
+            svg_wrap_lines(&lines("short"), 120.0, 16.0, false),
+            ["short"]
+        );
+        assert_eq!(
+            svg_wrap_lines(
+                &lines("a very long label that has to wrap"),
+                120.0,
+                16.0,
+                false
+            ),
+            ["a very long label", "that has to wrap"]
+        );
+        let cut = svg_wrap_lines(
+            &lines("Supercalifragilisticexpialidocious"),
+            120.0,
+            16.0,
+            false,
+        );
+        assert_eq!(cut, ["Supercalifragilist", "icexpialidocious"]);
+        // A character wider than the width still makes progress.
+        assert_eq!(svg_wrap_lines(&lines("WW"), 1.0, 16.0, false), ["W", "W"]);
+        // Emphasis survives a cut line.
+        let bold = format!("{}aaaa bbbb{}", mark::BOLD_ON, mark::BOLD_OFF);
+        let w = svg_wrap_lines(&[bold], 40.0, 16.0, false);
+        assert_eq!(w.len(), 2);
+        assert!(
+            w.iter()
+                .all(|l| l.starts_with(mark::BOLD_ON) && l.ends_with(mark::BOLD_OFF))
+        );
+    }
 
     #[test]
     fn splits_br_variants() {

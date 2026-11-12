@@ -126,7 +126,12 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   wrap at `wrappingWidth` and are widened to `minNodeWidth` (both 120, as in mermaid 12), so short-label nodes share one width.
   Wrapping follows the browser's line breaking (CJK between characters, after hyphens); edge labels wrap at 200px;
   `markdownAutoWrap: false` keeps graph-diagram markdown labels on one line. Quoted and markdown strings may span lines.
-  `htmlLabels: false` is ignored: labels keep the HTML-label line height (1.5em, not SVG text's 1.1em).
+  `htmlLabels: false` lays flowchart, state and class labels out as mermaid's SVG text labels: 1.1em lines, the
+  browser's text-box height (16px at 14px), words cut between characters when too wide on their own, half-transparent
+  edge-label backgrounds padded by 2px, left-aligned state labels, class members 3px apart. As upstream, the deprecated
+  `flowchart.htmlLabels: false` only switches edge labels and subgraph titles (node labels read the top-level key).
+  ER, requirement and other diagrams keep HTML-label metrics, and inline HTML tags are still stripped rather than
+  printed literally as mermaid's SVG labels do.
 - **Text is measured with Helvetica/Arial metrics**, not by a browser, so widths can be off by a few percent for other fonts.
 - **PDF text uses the built-in Helvetica fonts** (nothing embedded), so characters outside Windows-1252 become `?` in PDFs.
   SVG and PNG handle any Unicode the system fonts cover.

@@ -163,6 +163,8 @@ pub fn render(
         wrapping_width: 0.0,
         layout: cfg.layout,
         line_hops: cfg.elk_line_hops(),
+        html_labels: true,
+        html_edge_labels: true,
     };
     Ok(graph::render(&g, &gc, pal))
 }
