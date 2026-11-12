@@ -563,12 +563,15 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                     ext_off.insert((c, ei), off);
                 }
             }
-            // A side whose ports are all unconnected inside: ELK spreads them over
-            // it, as a node's own ports.
+            // Ports all unconnected inside: no ELK nodes there (the container
+            // has no external port dummies), so ELK spreads them over their
+            // side, as a node's own ports. (With others, they are dummies
+            // placed inside like the rest.)
             let side_len = if horizontal { h } else { w };
+            let all_unconnected = level.ext_kinds.iter().all(|k| k.2);
             for entering in [true, false] {
                 let on_side = |k: &(usize, bool, bool)| k.1 == entering;
-                if level.ext_kinds.iter().filter(|k| on_side(k)).all(|k| k.2) {
+                if all_unconnected {
                     let mut stub: Vec<(f64, usize)> = level
                         .ext_kinds
                         .iter()

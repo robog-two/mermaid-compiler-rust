@@ -187,3 +187,35 @@ fn hierarchical_sweeps_draw_like_elk() {
     assert!(x("c2n2") < x("c2n1"));
     assert!(x("c3n0") < x("c3n1"));
 }
+
+#[test]
+fn unconnected_port_of_a_container_with_crossing_edges_is_placed_inside() {
+    // C0 has ports for crossing edges, so ELK makes a dummy inside it for the
+    // port of `C0 --> C1` too, placed with the rest: the port is not centred
+    // on C0's bottom, and C0 (with C2 above it) stands 65px right of C1, as
+    // in mermaid's render.
+    let src = "flowchart TD
+  subgraph C0
+    c0n0 --> c0n1
+    c0n1 --> c0n2
+  end
+  subgraph C1
+    c1n0 --> c1n1
+    c1n1 --> c1n2
+  end
+  subgraph C2
+    c2n0 --> c2n1
+  end
+  C2 --> c0n0
+  C0 --> C1
+  c0n2 --> C2
+  c1n2 --> c1n0
+  y --> x
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["c0n0", "c1n0", "c2n0"], false);
+    let x = |n: &str| cs.iter().find(|c| c.0 == n).expect("node").2;
+    assert!((x("c0n0") - x("c1n0") - 65.1).abs() < 1.0, "{cs:?}");
+    assert!((x("c2n0") - x("c1n0") - 102.1).abs() < 1.0, "{cs:?}");
+}
