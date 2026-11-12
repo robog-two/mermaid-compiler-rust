@@ -219,3 +219,36 @@ fn unconnected_port_of_a_container_with_crossing_edges_is_placed_inside() {
     assert!((x("c0n0") - x("c1n0") - 65.1).abs() < 1.0, "{cs:?}");
     assert!((x("c2n0") - x("c1n0") - 102.1).abs() < 1.0, "{cs:?}");
 }
+
+#[test]
+fn external_port_dummies_are_made_in_elks_order() {
+    // ELK makes C2's external port dummies child by child (c2n0, c2n1, c2n2),
+    // then the one of `C2 --> c1n0`, unconnected inside: not in edge order.
+    // From that start the first sweep leaves one crossing, as in ELK, and C2
+    // is not mirrored: c2n2 left of c2n0, left of c2n1, as in mermaid's render.
+    let src = "flowchart TD
+  subgraph C0
+    c0n0 --> c0n1
+    c0n1 --> c0n2
+  end
+  subgraph C1
+    c1n0
+  end
+  subgraph C2
+    c2n0 --> c2n1
+    c2n1 --> c2n2
+  end
+  c2n0 --> x
+  c2n2 --> x
+  C2 --> c1n0
+  c2n1 --> c1n0
+  x --> c1n0
+  c2n0 --> c2n1
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["c2n0", "c2n1", "c2n2", "x", "c0n0"], false);
+    let x = |n: &str| cs.iter().find(|c| c.0 == n).expect("node").2;
+    assert!(x("c2n2") < x("c2n0") && x("c2n0") < x("c2n1"), "{cs:?}");
+    assert!(x("x") < x("c2n0") && x("c2n1") < x("c0n0"), "{cs:?}");
+}

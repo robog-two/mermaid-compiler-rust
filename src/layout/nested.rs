@@ -872,6 +872,60 @@ fn segments(tree: &Tree, ends: &[(Member, Member)]) -> Vec<Seg> {
     out
 }
 
+/// The edges of the segments of level `scope` that reach its border, in the
+/// order `CompoundGraphPreprocessor` makes their external port dummies: first
+/// those passing on from the containers within (`processInnerHierarchicalEdgeSegments`:
+/// container by container, in the order each made its own), then those of the
+/// level's own children (`processOuterHierarchicalEdgeSegments`: child by
+/// child, port by port, a port being an edge end, made in edge order). The
+/// level's unconnected ports (edges to the container itself) come after these.
+fn ext_order(
+    tree: &Tree,
+    ends: &[(Member, Member)],
+    all: &[Seg],
+    scope: Option<usize>,
+) -> Vec<usize> {
+    let input = tree.input;
+    // Where a child stands among the level's children (as `level_input` orders them).
+    let child_key = |c: usize| {
+        (0..input.nodes.len())
+            .find(|&v| {
+                input.nodes[v]
+                    .cluster
+                    .is_some_and(|m| tree.chains[m].contains(&c))
+            })
+            .unwrap_or(usize::MAX)
+    };
+    let mut keyed: Vec<(bool, usize, usize, usize)> = Vec::new();
+    let mut inner: HashMap<usize, Vec<usize>> = HashMap::new();
+    for s in all.iter().filter(|s| s.scope == scope) {
+        let (inside, out) = match (s.from, s.to) {
+            (end, SegEnd::Ext) => (end, true),
+            (SegEnd::Ext, end) => (end, false),
+            _ => continue,
+        };
+        let own_end = if out { ends[s.edge].0 } else { ends[s.edge].1 };
+        let key = match inside {
+            SegEnd::Node(v) => (true, v, s.edge),
+            SegEnd::Box(c) if own_end == Member::Cluster(c) => (true, child_key(c), s.edge),
+            SegEnd::Box(c) => {
+                let order = inner
+                    .entry(c)
+                    .or_insert_with(|| ext_order(tree, ends, all, Some(c)));
+                let r = order
+                    .iter()
+                    .position(|&e| e == s.edge)
+                    .unwrap_or(usize::MAX);
+                (false, child_key(c), r)
+            }
+            SegEnd::Ext => continue,
+        };
+        keyed.push((key.0, key.1, key.2, s.edge));
+    }
+    keyed.sort();
+    keyed.into_iter().map(|k| k.3).collect()
+}
+
 /// One level's layered pass, before it is laid out.
 struct LevelInput {
     items: Vec<Item>,
@@ -936,25 +990,31 @@ fn level_input(
         Item::Box(c) => first_member(c),
         Item::Ext(_) => usize::MAX,
     });
-    // External ports after everything else, one per segment reaching the border.
+    // External ports after everything else, one per segment reaching the border,
+    // in the order ELK makes their dummies (see `ext_order`).
     let segs: Vec<Seg> = all_segs
         .unwrap_or_default()
         .iter()
         .filter(|s| s.scope == scope)
         .copied()
         .collect();
-    let mut ext_item: HashMap<usize, usize> = HashMap::new();
-    for s in segs
+    let mut ext_segs: Vec<Seg> = segs
         .iter()
         .filter(|s| s.from == SegEnd::Ext || s.to == SegEnd::Ext)
-    {
+        .copied()
+        .collect();
+    if let Some(all) = all_segs {
+        let order = ext_order(tree, ends, all, scope);
+        ext_segs.sort_by_key(|s| order.iter().position(|&e| e == s.edge));
+    }
+    let mut ext_item: HashMap<usize, usize> = HashMap::new();
+    for s in &ext_segs {
         ext_item.insert(s.edge, items.len());
         items.push(Item::Ext(s.edge));
     }
     // Per external port: (item, entering, unconnected inside).
-    let mut ext_kinds: Vec<(usize, bool, bool)> = segs
+    let mut ext_kinds: Vec<(usize, bool, bool)> = ext_segs
         .iter()
-        .filter(|s| s.from == SegEnd::Ext || s.to == SegEnd::Ext)
         .filter_map(|s| Some((*ext_item.get(&s.edge)?, s.from == SegEnd::Ext, false)))
         .collect();
     let mut stub_ext = Vec::new();
