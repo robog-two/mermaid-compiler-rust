@@ -4,8 +4,8 @@
 //! 1. remove self-loops, break cycles by reversing DFS back edges (under ELK, the
 //!    search starts from the sources, as ELK's depth-first cycle breaker does);
 //! 2. rank with longest-path + source tightening (minlen-aware) and network simplex;
-//!    under ELK in its layer units (a labelled edge spans two), then balanced and
-//!    each component started on the first layer, as ELK's network simplex layerer;
+//!    under ELK in its layer units, with edge labels as nodes, by a port of ELK's
+//!    own network simplex layerer (`elkns.rs`: its ties, normalisation, balancing);
 //! 3. split long edges into dummy vertices (edge labels become sized dummies, as in dagre);
 //! 4. add left/right border vertices for every cluster on every rank it spans;
 //! 5. order layers with weighted barycentre sweeps, keeping clusters contiguous,
@@ -20,6 +20,7 @@ use crate::geom::{Point, Rect};
 mod bk;
 pub mod boxes;
 mod elkbk;
+mod elkns;
 mod elkorder;
 mod nested;
 mod ortho;
@@ -2500,7 +2501,8 @@ fn rank_nodes(n: usize, edges: &[Option<Oriented>]) -> Vec<usize> {
 /// labelled edge's label a node of its own (in the order of the nodes and their
 /// outgoing edges) before `NetworkSimplexLayerer` runs, so the labels take part in
 /// the layering and in its balancing like any node (where a label stands decides
-/// which ranks are fullest). Returns the real nodes' ranks, twice: the labels are
+/// which ranks are fullest). The layering is ELK's own (`elkns`), so that ties
+/// between equally short layerings break as in ELK. Returns the real nodes' ranks, twice: the labels are
 /// then placed by `LabelDummySwitcher`'s median rule on the balanced ranks (see
 /// `prepare`).
 fn rank_with_label_nodes(
@@ -2508,7 +2510,9 @@ fn rank_with_label_nodes(
     oriented: &[Option<Oriented>],
     input: &LayoutInput,
 ) -> (Vec<usize>, Vec<usize>) {
-    let mut edges: Vec<Option<Oriented>> = Vec::new();
+    // Every edge end is a port of its own, in the order the edges were imported;
+    // a label dummy has its input port, then its output port.
+    let mut edges: Vec<elkns::NsEdge> = Vec::new();
     let mut next = n;
     let mut by_source: Vec<(usize, usize)> = oriented
         .iter()
@@ -2516,32 +2520,45 @@ fn rank_with_label_nodes(
         .filter_map(|(ei, o)| o.as_ref().map(|o| (o.from, ei)))
         .collect();
     by_source.sort_unstable();
+    // Port keys at the edge's (oriented) source and target.
+    let key = |ei: usize, o: &Oriented| {
+        let (a, b) = (2 * ei, 2 * ei + 1);
+        if o.reversed { (b, a) } else { (a, b) }
+    };
+    for (ei, o) in oriented.iter().enumerate() {
+        let Some(o) = o.as_ref() else { continue };
+        if input.edges[ei].label.is_none() || o.from == o.to {
+            edges.push(elkns::NsEdge {
+                from: o.from,
+                to: o.to,
+                delta: o.minlen as i64,
+                ports: key(ei, o),
+            });
+        }
+    }
+    // `LabelDummyInserter` makes the dummies in node order, per node in the order
+    // of its outgoing edges, and appends them to the nodes.
     for (_, ei) in by_source {
         if let Some(o) = oriented[ei].as_ref() {
             if input.edges[ei].label.is_some() && o.from != o.to {
-                let half = |from, to| Oriented {
-                    from,
-                    to,
-                    minlen: 1,
-                    ..*o
-                };
-                edges.push(Some(half(o.from, next)));
-                edges.push(Some(half(next, o.to)));
-                next += 1;
-            } else {
-                edges.push(Some(Oriented {
+                let (ks, kt) = key(ei, o);
+                edges.push(elkns::NsEdge {
                     from: o.from,
+                    to: next,
+                    delta: 1,
+                    ports: (ks, 0),
+                });
+                edges.push(elkns::NsEdge {
+                    from: next,
                     to: o.to,
-                    minlen: o.minlen,
-                    reversed: o.reversed,
-                    weight: o.weight,
-                }));
+                    delta: 1,
+                    ports: (1, kt),
+                });
+                next += 1;
             }
         }
     }
-    let mut ranks = rank_nodes(next, &edges);
-    balance_ranks(&mut ranks, next, &edges, 1);
-    let ranks: Vec<usize> = ranks[..n].to_vec();
+    let ranks = elkns::layer(next, &edges).0[..n].to_vec();
     (ranks.clone(), ranks)
 }
 
@@ -4325,6 +4342,35 @@ mod tests {
             .map(|i| out.nodes[i + 1].y - out.nodes[i].y)
             .collect();
         assert!(gaps.iter().all(|g| (g - gaps[0]).abs() < 1.0), "{gaps:?}");
+    }
+
+    /// Where several layerings are equally short, ELK's network simplex picks its
+    /// own (a random flowchart, as elkjs lays it out: `n1 -->|x| n5`, `n0 --> n1`,
+    /// `n2 -->|l| n3`, `n4 --> n5`, `n2 -->|l| n5`, `n0 --> n3`): `n2` beside
+    /// `n1`, `n3` beside `n5`.
+    #[test]
+    fn elk_layering_breaks_ties_as_elk() {
+        let lb = Some((30.0, 20.0));
+        // n1 n5 n0 n2 n3 n4
+        let edges = vec![
+            LayoutEdge::new(0, 1, 1, lb),
+            edge(2, 0),
+            LayoutEdge::new(3, 4, 1, lb),
+            edge(5, 1),
+            LayoutEdge::new(3, 1, 1, lb),
+            edge(2, 4),
+        ];
+        let out = layout(&elk(input(
+            vec![node(None); 6],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        )));
+        let y = |v: usize| out.nodes[v].y;
+        assert!(y(2) < y(0), "{out:?}");
+        assert!((y(0) - y(3)).abs() < 1.0, "{out:?}");
+        assert!(y(0) < y(5) && y(5) < y(1), "{out:?}");
+        assert!((y(1) - y(4)).abs() < 1.0, "{out:?}");
     }
 
     /// When balancing moves a labelled edge's target down, the label stays in the
