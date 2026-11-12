@@ -345,14 +345,14 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
         let mut layers = kept;
         creation_order(&mut layers, &east, segs, info, real, label, inl);
         if opts.model_order {
+            let other: Vec<bool> = (0..nv).map(|v| label[v] || border[v]).collect();
             sort_by_model_order(
                 &mut layers,
                 &mut east,
                 &mut west,
-                segs,
-                info,
-                real,
+                (segs, info, real),
                 inl,
+                &other,
                 ctx,
             );
         } else {
@@ -892,10 +892,9 @@ fn sort_by_model_order(
     layers: &mut [Vec<usize>],
     east: &mut [Vec<usize>],
     west: &mut [Vec<usize>],
-    segs: &[(usize, usize)],
-    info: &[SegInfo],
-    real: usize,
+    (segs, info, real): (&[(usize, usize)], &[SegInfo], usize),
     inl: &[InLayer],
+    other: &[bool],
     ctx: &OrderCtx,
 ) {
     let nv = east.len();
@@ -904,15 +903,16 @@ fn sort_by_model_order(
     // port on the next layer's side, or the dummy of one on the previous layer's.
     let mut first_in: Vec<Option<usize>> = vec![None; if inl.is_empty() { 0 } else { nv }];
     // Per dummy of an inverted port (a feedback long-edge dummy to ELK): its
-    // edge's source and target nodes, one of them the node beside it.
-    let mut feedback: Vec<Option<(usize, usize)>> = first_in.iter().map(|_| None).collect();
+    // edge's source and target nodes, one of them the node beside it (`true`:
+    // the source).
+    let mut feedback: Vec<Option<(usize, usize, bool)>> = first_in.iter().map(|_| None).collect();
     for l in inl {
         first_in[if l.before { l.dummy } else { l.node }] = Some(l.edge);
         let (into, from) = (&west[l.dummy], &east[l.dummy]);
         feedback[l.dummy] = if l.before {
-            from.first().map(|&s| (l.node, segs[s].1))
+            from.first().map(|&s| (l.node, segs[s].1, true))
         } else {
-            into.first().map(|&s| (segs[s].0, l.node))
+            into.first().map(|&s| (segs[s].0, l.node, false))
         };
     }
     let mut pos = vec![usize::MAX; nv];
@@ -921,7 +921,7 @@ fn sort_by_model_order(
     let mut before = Vec::new();
     for slot in layers.iter_mut() {
         let mut layer = std::mem::take(slot);
-        let ctx_fb = (&first_in[..], &feedback[..]);
+        let ctx_fb = (&first_in[..], &feedback[..], other);
         model_order_sort(&mut layer, west, segs, info, real, &pos, &port_at, ctx_fb);
         for &v in &layer {
             // Incoming ports by where they come from (top to bottom).
@@ -948,7 +948,7 @@ fn sort_by_model_order(
                 port_at[s] = i;
             }
         }
-        let ctx_fb = (&first_in[..], &feedback[..]);
+        let ctx_fb = (&first_in[..], &feedback[..], other);
         model_order_sort(&mut layer, west, segs, info, real, &pos, &port_at, ctx_fb);
         let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
         let layer = ctx.arrange(&layer, &keys, &mut before);
@@ -972,48 +972,87 @@ fn model_order_sort(
     real: usize,
     pos: &[usize],
     port_at: &[usize],
-    (first_in, feedback): Feedback,
+    (first_in, feedback, other): Feedback,
 ) {
     use std::cmp::Ordering::{Greater, Less};
     let n = layer.len();
     if n < 2 {
         return;
     }
-    let old = layer.to_vec();
+    let fb = |v: usize| feedback.get(v).copied().flatten();
+    // The layer's slots, then (as slots of their own, never placed) the
+    // sources outside the layer of dummies of inverted ports on the next
+    // layer's side, which ELK compares those dummies by.
+    let mut old = layer.to_vec();
     let mut slot_of = std::collections::HashMap::new();
     for (i, &v) in old.iter().enumerate() {
         slot_of.insert(v, i);
     }
-    let fb = |v: usize| feedback.get(v).copied().flatten();
-    // `handleHelperDummyNodes`: a feedback dummy goes after the node beside it
-    // (its edge's source or target), and otherwise as that node goes; `None`
-    // where it says nothing.
+    let mut i = 0;
+    while i < old.len() {
+        if let Some((src, dst, by_source)) = fb(old[i]) {
+            // Its edge's source, and (for one outside the layer) its node.
+            let node = if by_source { src } else { dst };
+            for v in [src, node] {
+                if let std::collections::hash_map::Entry::Vacant(e) = slot_of.entry(v) {
+                    e.insert(old.len());
+                    old.push(v);
+                }
+            }
+        }
+        i += 1;
+    }
+    let all = old.len();
+    #[derive(PartialEq)]
+    enum Type {
+        Normal,
+        LongEdge,
+        Other,
+    }
+    let kind = |v: usize| {
+        if v < real {
+            Type::Normal
+        } else if other.get(v).copied().unwrap_or(false) {
+            Type::Other
+        } else {
+            Type::LongEdge
+        }
+    };
+    // `handleHelperDummyNodes`: a feedback dummy (one of an inverted port: its
+    // edge's source or target is in the layer) goes after a node it leads from
+    // or to, and otherwise as its edge's source goes; two long-edge dummies go
+    // as their reference nodes (a feedback dummy's node in the layer, else the
+    // dummy itself). `None` where it says nothing.
     let helper = |i: usize, j: usize| -> Option<Rule> {
         let (a, b) = (old[i], old[j]);
-        let side = |(src, dst): (usize, usize)| -> Option<usize> {
-            [src, dst].into_iter().find(|v| slot_of.contains_key(v))
-        };
-        match (fb(a), fb(b)) {
-            (Some(fa), None) if b < real => {
-                if fa.0 == b || fa.1 == b {
+        match (kind(a), kind(b)) {
+            (Type::LongEdge, Type::Normal) => {
+                let (src, dst, _) = fb(a)?;
+                if src == b || dst == b {
                     return Some(Rule::Decided(Greater));
                 }
-                side(fa).map(|r| Rule::Redirect(slot_of[&r], j))
+                Some(Rule::Redirect(slot_of[&src], j))
             }
-            (None, Some(fb_)) if a < real => {
-                if fb_.0 == a || fb_.1 == a {
+            (Type::Normal, Type::LongEdge) => {
+                let (src, dst, _) = fb(b)?;
+                if src == a || dst == a {
                     return Some(Rule::Decided(Less));
                 }
-                side(fb_).map(|r| Rule::Redirect(i, slot_of[&r]))
+                Some(Rule::Redirect(i, slot_of[&src]))
             }
-            (Some(fa), Some(fb_)) => {
-                let (ra, rb) = (side(fa)?, side(fb_)?);
+            (Type::LongEdge, Type::LongEdge) => {
+                let reference = |v: usize| match fb(v) {
+                    Some((s, _, true)) => (s, true),
+                    Some((_, t, false)) => (t, false),
+                    None => (v, false),
+                };
+                let ((ra, sa), (rb, sb)) = (reference(a), reference(b));
                 if ra != rb {
                     return Some(Rule::Redirect(slot_of[&ra], slot_of[&rb]));
                 }
                 // On one node: a source feedback dummy (of a port towards the
                 // previous layer) after a target one.
-                match (fa.0 == ra, fb_.0 == rb) {
+                match (sa, sb) {
                     (true, true) => Some(Rule::Decided(if first_in[a] > first_in[b] {
                         Greater
                     } else {
@@ -1078,7 +1117,7 @@ fn model_order_sort(
     };
     // A rule followed through its redirections, without bookkeeping.
     let plain = |mut i: usize, mut j: usize| -> std::cmp::Ordering {
-        for _ in 0..=n {
+        for _ in 0..=all {
             match rule(i, j) {
                 Rule::Decided(o) => return o,
                 Rule::Redirect(a, b) => (i, j) = (a, b),
@@ -1091,7 +1130,7 @@ fn model_order_sort(
     // total order (sources are distinct ports), which the insertion sort below
     // would only find more slowly.
     let key = |i: usize| source[i].map(|s| (pos[segs[s].0], port_at[s]));
-    if source.iter().all(Option::is_some) {
+    if source[..n].iter().all(Option::is_some) {
         let mut reals: Vec<usize> = (0..n).filter(|&i| old[i] < real).collect();
         reals.sort_unstable_by_key(|&i| old[i]);
         if reals.windows(2).all(|w| key(w[0]) < key(w[1])) {
@@ -1115,12 +1154,12 @@ fn model_order_sort(
     }
     // `biggerThan` / `smallerThan`, as bit sets over the layer's slots: row `i`
     // holds the slots known to be smaller (bigger) than slot `i`.
-    let words = n.div_ceil(64);
-    let mut bigger = vec![0u64; n * words];
-    let mut smaller = vec![0u64; n * words];
+    let words = all.div_ceil(64);
+    let mut bigger = vec![0u64; all * words];
+    let mut smaller = vec![0u64; all * words];
     let has = |set: &[u64], i: usize, j: usize| set[i * words + j / 64] >> (j % 64) & 1 == 1;
     let mut row = vec![0u64; words];
-    let mut members = Vec::with_capacity(n);
+    let mut members = Vec::with_capacity(all);
     // `updateBiggerAndSmallerAssociations(b, s)`.
     let mut associate = |bigger: &mut [u64], smaller: &mut [u64], b: usize, s: usize| {
         bigger[b * words + s / 64] |= 1 << (s % 64);
@@ -1149,7 +1188,7 @@ fn model_order_sort(
         }
     };
     let mut compare = |mut i: usize, mut j: usize| -> std::cmp::Ordering {
-        for _ in 0..=n {
+        for _ in 0..=all {
             if has(&bigger, i, j) {
                 return Greater;
             }
@@ -1179,9 +1218,16 @@ fn model_order_sort(
     }
 }
 
-/// Per vertex: the model order an in-layer edge gives it, and for a dummy of
-/// an inverted port its edge's source and target (see `sort_by_model_order`).
-type Feedback<'a> = (&'a [Option<usize>], &'a [Option<(usize, usize)>]);
+/// Per vertex: the model order an in-layer edge gives it, for a dummy of an
+/// inverted port its edge's source and target (see `sort_by_model_order`) and
+/// whether the source is the node beside it, and
+/// whether it is neither a real node nor a long-edge dummy to ELK (a label
+/// dummy, a cluster border).
+type Feedback<'a> = (
+    &'a [Option<usize>],
+    &'a [Option<(usize, usize, bool)>],
+    &'a [bool],
+);
 
 /// What `ModelOrderNodeComparator` makes of two nodes: an order, or the order
 /// of two others (a feedback dummy goes as the node beside it).
@@ -1946,7 +1992,7 @@ mod tests {
             3,
             &pos,
             &port_at,
-            (&[], &[]),
+            (&[], &[], &[]),
         );
         assert_eq!(layer, vec![3, 2]);
         // Real nodes keep their model order whatever their sources.
@@ -1961,9 +2007,37 @@ mod tests {
             3,
             &pos,
             &port_at,
-            (&[], &[]),
+            (&[], &[], &[]),
         );
         assert_eq!(layer, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn model_order_sort_puts_a_feedback_dummy_by_its_edges_source() {
+        // Layer 0: real 2 (model order 2). Layer 1: real 0 and 1 (no edge from
+        // layer 0), and the dummy 3 of node 0's inverted port on the next
+        // layer's side, fed from 2. ELK compares the dummy with 1 by the
+        // dummy's source (2 after 1), not by the node beside it (0 before 1).
+        let segs = [(2, 3)];
+        let info = info(&segs);
+        let west = vec![Vec::new(), Vec::new(), Vec::new(), vec![0]];
+        let pos = [usize::MAX, usize::MAX, 0, usize::MAX];
+        let first_in = [Some(0), None, None, None];
+        let feedback = [None, None, None, Some((2, 0, false))];
+        for start in [vec![3, 1, 0], vec![0, 3, 1], vec![1, 0, 3]] {
+            let mut layer = start;
+            model_order_sort(
+                &mut layer,
+                &west,
+                &segs,
+                &info,
+                3,
+                &pos,
+                &[0],
+                (&first_in, &feedback, &[]),
+            );
+            assert_eq!(layer, vec![0, 1, 3]);
+        }
     }
 
     #[test]
@@ -1973,7 +2047,7 @@ mod tests {
             let mut layer: Vec<usize> = (0..n).rev().collect();
             let west = vec![Vec::new(); n];
             let pos = vec![usize::MAX; n];
-            model_order_sort(&mut layer, &west, &[], &[], n, &pos, &[], (&[], &[]));
+            model_order_sort(&mut layer, &west, &[], &[], n, &pos, &[], (&[], &[], &[]));
             assert_eq!(layer, (0..n).collect::<Vec<_>>());
         }
     }
