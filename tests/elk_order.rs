@@ -322,3 +322,53 @@ fn placement_follows_the_port_order_crossing_minimisation_leaves() {
     assert!((at("c1n0").2 - at("y").2 - 56.0).abs() < 1.0, "{cs:?}");
     assert!((at("c0n0").1 - at("c1n0").1 - 197.0).abs() < 1.0, "{cs:?}");
 }
+
+#[test]
+fn port_list_sorter_reverses_all_but_the_last_west_port() {
+    // ELK's `PortListSorter` reverses a west side of four or more ports but for
+    // its last one; s0n1's ports stand [s0n0, x0, x0, s0n0], so the edges from
+    // x0 pass on both sides of s0n0 and s0n1 sits 8.7px left of it, x0 0.5px,
+    // as in mermaid's render.
+    let src = "flowchart TD
+  subgraph S0
+    s0n0
+    s0n1
+    s0n0 --> s0n1
+    s0n0 --> s0n1
+  end
+  x0 --> s0n1
+  x0 --> s0n1
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["s0n0", "s0n1", "x0"], false);
+    let x = |n: &str| cs.iter().find(|c| c.0 == n).expect("node").2;
+    assert!((x("s0n0") - x("s0n1") - 8.7).abs() < 0.5, "{cs:?}");
+    assert!((x("s0n0") - x("x0") - 0.5).abs() < 0.5, "{cs:?}");
+}
+
+#[test]
+fn ports_reaching_a_container_keep_the_crossing_minimisation_order() {
+    // x2's ports stay in the order crossing minimisation left them (s0n2's
+    // edge first, from S0's ports as made), although S0's contents place
+    // s0n1's port left of s0n2's: the edges cross below S0 and x2 is centred
+    // under it (balanced between the alignments), as in mermaid's render.
+    let src = "flowchart TD
+  subgraph S0
+    s0n0
+    s0n1
+    s0n2
+    s0n0 -->|x| s0n1
+  end
+  x2 --> x1
+  s0n2 --> x2
+  s0n1 --> x2
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["s0n1", "s0n2", "x2"], false);
+    let at = |n: &str| cs.iter().find(|c| c.0 == n).expect("node");
+    let mid = (at("s0n1").2 + at("s0n2").2) / 2.0;
+    assert!((at("x2").2 - mid).abs() < 0.5, "{cs:?}");
+    assert!((at("x2").1 - at("s0n1").1 - 139.0).abs() < 0.5, "{cs:?}");
+}

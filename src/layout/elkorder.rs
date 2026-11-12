@@ -387,6 +387,7 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
             // them clockwise, so its west side runs bottom to top.
             for w in west.iter_mut() {
                 w.sort_by_key(|&s| std::cmp::Reverse((info[s].edge, s)));
+                port_list_sorter_west(w);
             }
         }
         let mut own = if gi == 0 {
@@ -806,6 +807,18 @@ impl Run<'_> {
             let end = if forward { n - 1 } else { 0 };
             self.ports_from_dummies(c, end, g, v, forward);
         }
+    }
+}
+
+/// `PortListSorter.reverseWestAndSouthSide` on a node's west side (`west`, top
+/// to bottom: the reverse of ELK's port list, which runs clockwise). It means to
+/// reverse the side, but `findPortSideRange` reads the side of the range's first
+/// port again and again, so the range runs on to the list's last port and
+/// `reverse` leaves that one out (and does nothing for fewer than four ports):
+/// of ELK's list `l0 .. lk` the side becomes `lk-1 .. l0, lk`.
+fn port_list_sorter_west(west: &mut [usize]) {
+    if west.len() >= 4 {
+        west[1..].reverse();
     }
 }
 
@@ -1864,6 +1877,24 @@ mod tests {
         greedy_switch: false,
         thoroughness: 7,
     };
+
+    #[test]
+    fn port_list_sorter_leaves_short_sides_and_the_last_port() {
+        // `west` is top to bottom, ELK's list bottom to top: [l3 l2 l1 l0]
+        // becomes ELK's [l2 l1 l0 l3], top to bottom [l3 l0 l1 l2].
+        let mut w = vec![3, 2, 1, 0];
+        port_list_sorter_west(&mut w);
+        assert_eq!(w, vec![3, 0, 1, 2]);
+        let mut w = vec![4, 3, 2, 1, 0];
+        port_list_sorter_west(&mut w);
+        assert_eq!(w, vec![4, 0, 1, 2, 3]);
+        for n in 0..4 {
+            let mut w: Vec<usize> = (0..n).rev().collect();
+            let before = w.clone();
+            port_list_sorter_west(&mut w);
+            assert_eq!(w, before);
+        }
+    }
 
     #[test]
     fn a_single_layer_is_still_minimised_as_in_a_hierarchical_run() {
