@@ -18,6 +18,8 @@ Inquiries: `sam@robog.net`.
 
 ---
 
+**Examples of diagrams generated with this tool:**
+
 <table>
   <tr>
     <td align="center" width="25%"><a href="docs/gallery/flowchart.svg"><img src="docs/gallery/flowchart.png" alt="Flowchart diagram" width="200"></a><br><sub>Flowchart</sub></td>
