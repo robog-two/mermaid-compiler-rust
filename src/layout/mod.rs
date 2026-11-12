@@ -1834,6 +1834,9 @@ struct InLayerRoute {
     before: bool,
     channel: Option<usize>,
     slot: usize,
+    /// Split in two by the router (a critical cycle in its channel): where the
+    /// two parts meet across, and the second part's slot.
+    split: Option<(f64, usize)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2013,6 +2016,7 @@ fn ortho_plan(
             before: l.before,
             channel: channel.map(|c| c.0),
             slot: 0,
+            split: None,
         });
         match channel {
             Some((ra, rb)) => {
@@ -2056,8 +2060,9 @@ fn ortho_plan(
                 })
                 .collect();
             let out = ortho::assign_slots_trunks(&segs, spacing.edge_edge, rng);
-            for (&k, l) in list.iter().zip(out.slot) {
-                in_layer[k].slot = l;
+            for (i, &k) in list.iter().enumerate() {
+                in_layer[k].slot = out.slot[i];
+                in_layer[k].split = out.split[i];
             }
             out.count
         };
@@ -2079,6 +2084,7 @@ fn ortho_plan(
         for (i, &(ei, k, ref t)) in list.iter().enumerate() {
             if ei == usize::MAX {
                 in_layer[k].slot = out.slot[i];
+                in_layer[k].split = out.split[i];
             } else if (t.incoming[0] - t.outgoing[0]).abs() >= ortho::TOLERANCE {
                 jogs[ei][k] = Some(out.slot[i]);
                 splits[ei][k] = out.split[i];
@@ -2158,30 +2164,39 @@ impl OrthoPlan {
             let start = |q: usize| rank_y[q] - rank_h[q] / 2.0 - start_pad[q];
             let end = |q: usize| rank_y[q] + rank_h[q] / 2.0 + end_pad[q];
             let rank = verts[r.dummy].rank;
-            let y = match r.channel {
+            let level = |slot: usize| match r.channel {
                 Some(ra) => {
                     let (rb, slots) = self.channels[ra].unwrap_or((rank, 1));
-                    (end(ra) + start(rb)) / 2.0 - (slots - 1) as f64 * ee / 2.0 + r.slot as f64 * ee
+                    (end(ra) + start(rb)) / 2.0 - (slots - 1) as f64 * ee / 2.0 + slot as f64 * ee
                 }
                 None if r.before => {
-                    start(rank) - self.spacing.edge_node - (self.outer.0 - 1 - r.slot) as f64 * ee
+                    start(rank) - self.spacing.edge_node - (self.outer.0 - 1 - slot) as f64 * ee
                 }
-                None => end(rank) + self.spacing.edge_node + r.slot as f64 * ee,
+                None => end(rank) + self.spacing.edge_node + slot as f64 * ee,
             };
+            // Along the in-layer edge, source to target (the port to the dummy
+            // before the layer, the dummy to the port after it): its slot, and
+            // where the router split it, the second part's slot from there on.
+            let (from, to) = if r.before {
+                (r.port, r.at)
+            } else {
+                (r.at, r.port)
+            };
+            let y = level(r.slot);
+            let mut run = vec![Point::new(from, y)];
+            if let Some((sx, second)) = r.split {
+                let y2 = level(second);
+                run.extend([Point::new(sx, y), Point::new(sx, y2), Point::new(to, y2)]);
+            } else {
+                run.push(Point::new(to, y));
+            }
             let h = verts[r.node].h / 2.0;
             if r.before {
-                let head = [
-                    Point::new(r.port, vy[r.node] - h),
-                    Point::new(r.port, y),
-                    Point::new(r.at, y),
-                ];
-                pts.splice(0..0, head);
+                run.insert(0, Point::new(r.port, vy[r.node] - h));
+                pts.splice(0..0, run);
             } else {
-                pts.extend([
-                    Point::new(r.at, y),
-                    Point::new(r.port, y),
-                    Point::new(r.port, vy[r.node] + h),
-                ]);
+                run.push(Point::new(r.port, vy[r.node] + h));
+                pts.extend(run);
             }
         }
         ortho::simplify(&pts)
@@ -3649,6 +3664,66 @@ mod tests {
                 if dir.is_horizontal() { a.y } else { l.y },
             ));
             assert!(d.dist(off) < 1e-9, "{dir:?}: {d:?} vs {off:?}");
+        }
+    }
+
+    /// An inverted port's in-layer edge split by the router (a critical cycle in
+    /// its channel) is drawn as ELK's `calculateBendPoints` draws any split segment:
+    /// from its source along its own slot to the split position, across to the
+    /// partner's slot, and on to its target. Here a port on node 0's side towards
+    /// the previous layer (before the first one) leads to the dummy beside it.
+    #[test]
+    fn inverted_port_in_layer_edge_follows_its_split() {
+        let vert = |kind, rank| Vertex {
+            kind,
+            rank,
+            w: 40.0,
+            h: 40.0,
+            cluster: None,
+        };
+        let verts = vec![
+            vert(Kind::Real, 0),
+            vert(Kind::Real, 2),
+            vert(Kind::Dummy { labeled: false }, 0),
+        ];
+        let route = InLayerRoute {
+            edge: 0,
+            node: 0,
+            dummy: 2,
+            port: 10.0,
+            at: 100.0,
+            before: true,
+            channel: None,
+            slot: 0,
+            split: Some((60.0, 1)),
+        };
+        let plan = OrthoPlan {
+            stops: vec![vec![(2, 100.0), (1, 100.0)]],
+            jogs: vec![vec![None]],
+            splits: vec![vec![None]],
+            channels: vec![None; 3],
+            spacing: OrthoSpacing::ROOT,
+            xs: vec![10.0, 100.0, 100.0],
+            in_layer: vec![route],
+            outer: (2, 0),
+        };
+        let rank_y = [0.0, 50.0, 100.0];
+        let vy = [0.0, 100.0, 0.0];
+        let rank_h = [40.0, 0.0, 40.0];
+        let pts = plan.route(0, &verts, &rank_y, &vy, &rank_h, &[0.0; 3], &[0.0; 3]);
+        // Two slots before the first layer (top at -20): 20 clear of it, 20 apart.
+        let (y0, y1) = (-20.0 - 20.0 - 20.0, -20.0 - 20.0);
+        let expect = [
+            Point::new(10.0, -20.0),
+            Point::new(10.0, y0),
+            Point::new(60.0, y0),
+            Point::new(60.0, y1),
+            Point::new(100.0, y1),
+            Point::new(100.0, 80.0),
+        ];
+        assert_eq!(pts.len(), expect.len(), "{pts:?}");
+        for (p, q) in pts.iter().zip(expect) {
+            assert!(p.dist(q) < 1e-9, "{pts:?}");
         }
     }
 

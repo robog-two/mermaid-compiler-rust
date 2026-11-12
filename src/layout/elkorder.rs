@@ -1137,16 +1137,6 @@ fn model_order_sort(
             }
         })
     };
-    // A rule followed through its redirections, without bookkeeping.
-    let plain = |mut i: usize, mut j: usize| -> std::cmp::Ordering {
-        for _ in 0..=all {
-            match rule(i, j) {
-                Rule::Decided(o) => return o,
-                Rule::Redirect(a, b) => (i, j) = (a, b),
-            }
-        }
-        Less
-    };
     // Where every node has an edge from the layer before and the real nodes'
     // model order agrees with where their edges come from, the rules are one
     // total order (sources are distinct ports), which the insertion sort below
@@ -1165,15 +1155,6 @@ fn model_order_sort(
         }
     }
     let mut slots: Vec<usize> = (0..n).collect();
-    if n > EXACT_MODEL_ORDER_SORT {
-        // The transitive bookkeeping grows with the cube of the layer's width:
-        // wider layers are insertion-sorted with the rules alone.
-        insertion_sort(&mut slots, |i, j| plain(i, j) == Greater);
-        for (dst, &i) in layer.iter_mut().zip(&slots) {
-            *dst = old[i];
-        }
-        return;
-    }
     // `biggerThan` / `smallerThan`, as bit sets over the layer's slots: row `i`
     // holds the slots known to be smaller (bigger) than slot `i`.
     let words = all.div_ceil(64);
@@ -1258,9 +1239,6 @@ enum Rule {
     Decided(std::cmp::Ordering),
     Redirect(usize, usize),
 }
-
-/// The widest layer `model_order_sort` sorts exactly as ELK does.
-const EXACT_MODEL_ORDER_SORT: usize = 128;
 
 /// `SortByInputModelProcessor.insertionSort`: `greater(a, b)` says `a` belongs
 /// after `b`.
@@ -2095,7 +2073,7 @@ mod tests {
 
     #[test]
     fn wide_layers_sort_like_narrow_ones_where_the_rules_agree() {
-        for n in [40, EXACT_MODEL_ORDER_SORT + 72] {
+        for n in [40, 200] {
             // Real nodes in reverse, without edges from the layer before.
             let mut layer: Vec<usize> = (0..n).rev().collect();
             let west = vec![Vec::new(); n];
@@ -2103,6 +2081,51 @@ mod tests {
             model_order_sort(&mut layer, &west, &[], &[], n, &pos, &[], (&[], &[], &[]));
             assert_eq!(layer, (0..n).collect::<Vec<_>>());
         }
+    }
+
+    /// Where ELK's rules disagree with themselves (two feedback dummies redirected
+    /// to their edges' sources), `ModelOrderNodeComparator`'s remembered decisions
+    /// and their transitive consequences settle the order, in a layer of any width:
+    /// here five slots (real 0, dummies 151..=154 fed from 155 / 156) that the rules
+    /// alone sort `[151, 153, 0, 154, 152]`, beside 150 more real nodes.
+    #[test]
+    fn wide_layers_keep_elks_transitive_bookkeeping() {
+        let pad = 150;
+        let (real, d, p) = (1 + pad, |i: usize| 150 + i, |i: usize| 150 + i);
+        let total = real + 6;
+        let segs = [(p(5), 0), (p(5), d(3)), (p(6), d(4))];
+        let mut info = info(&segs);
+        for (i, e) in info.iter_mut().zip([2, 0, 3]) {
+            i.edge = e;
+        }
+        let mut west = vec![Vec::new(); total];
+        west[0] = vec![0];
+        west[d(3)] = vec![1];
+        west[d(4)] = vec![2];
+        let mut pos = vec![usize::MAX; total];
+        pos[p(5)] = 0;
+        pos[p(6)] = 1;
+        let mut first_in = vec![None; total];
+        first_in[0] = Some(5);
+        first_in[d(3)] = Some(1);
+        first_in[p(6)] = Some(4);
+        let mut feedback = vec![None; total];
+        feedback[d(1)] = Some((p(6), 0, false));
+        feedback[d(4)] = Some((0, 0, true));
+        let mut layer = vec![d(4), d(1), d(3), d(2), 0];
+        layer.extend(1..=pad);
+        model_order_sort(
+            &mut layer,
+            &west,
+            &segs,
+            &info,
+            real,
+            &pos,
+            &[1, 1, 0],
+            (&first_in, &feedback, &vec![false; total]),
+        );
+        let first: Vec<usize> = layer.into_iter().filter(|&v| v == 0 || v > pad).collect();
+        assert_eq!(first, vec![0, d(1), d(3), d(4), d(2)]);
     }
 
     /// A container with two ports on a side, whose paths all lead to its ports,
