@@ -453,9 +453,9 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
     let order: Vec<usize> = bfs.into_iter().rev().filter(|&g| !run.into[g]).collect();
     for g in order {
         let opts = run.extra[g].0;
-        // A lone graph of a single layer has nothing to order (`process`'s
-        // short cut); a container is still swept.
-        if run.sw[g].layers.is_empty() || (ng == 1 && run.sw[g].layers.len() < 2) {
+        // An empty graph has nothing to order (`process`'s short cut; a single
+        // node is swept too, the run being hierarchical as mermaid lays out).
+        if run.sw[g].layers.iter().all(Vec::is_empty) {
             continue;
         }
         run.sw[0].rng.set_seed(run.seed);
@@ -1838,6 +1838,37 @@ mod tests {
         greedy_switch: false,
         thoroughness: 7,
     };
+
+    #[test]
+    fn a_single_layer_is_still_minimised_as_in_a_hierarchical_run() {
+        // ELK skips only an empty graph: one layer of three nodes draws the
+        // seed, the port distributor's coin, and the sweep direction of the
+        // first (model order) try, which finds no crossing and keeps the order.
+        let n = 3;
+        let vs = verts(n);
+        let ctx = OrderCtx {
+            verts: &vs,
+            chains: &[],
+        };
+        let flags = vec![false; n];
+        let graph = Graph {
+            border: &flags,
+            label: &flags,
+            segs: &[],
+            info: &[],
+            real: n,
+            inl: &[],
+        };
+        let out = minimize(vec![vec![0, 1, 2]], &graph, &ctx, OPTS);
+        assert_eq!(out.layers, vec![vec![0, 1, 2]]);
+        let mut want = JavaRandom::new(1);
+        let seed = want.next_long();
+        let _ = want.next_boolean();
+        want.set_seed(seed);
+        let _ = want.next_boolean();
+        let mut got = out.rng;
+        assert_eq!(got.next_long(), want.next_long());
+    }
 
     #[test]
     fn unconnected_ports_of_a_container_without_others_are_kept_aside() {
