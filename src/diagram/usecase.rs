@@ -3635,6 +3635,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         inner_node_sep: super::graph::CLUSTER_NODE_SPACING,
         inner_rank_sep: super::graph::CLUSTER_RANK_SPACING,
         routing: super::graph::edge_routing(o.layout),
+        dagre_groups: false,
     };
     let out = layout::layout(&input);
 

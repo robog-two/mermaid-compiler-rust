@@ -167,6 +167,19 @@ impl Tree<'_> {
         true
     }
 
+    /// How many graphs deep a separate cluster's own graph is (the root's: 0).
+    fn depth(&self, scope: Option<usize>) -> usize {
+        scope.map_or(0, |c| 1 + self.depth(self.owner_of_cluster(c)))
+    }
+
+    /// Under `dagre_groups`: a separate cluster's padding along its flow and across
+    /// it (dagre's compound borders, half a rank and half a node and edge gap away).
+    fn dagre_group_padding(&self, c: usize) -> (f64, f64) {
+        let input = self.input;
+        let rank_sep = input.rank_sep + 25.0 * self.depth(Some(c)) as f64;
+        (rank_sep / 2.0, (input.node_sep + input.edge_sep) / 2.0)
+    }
+
     /// Nearest separate cluster strictly above `c` (`None` = root).
     fn owner_of_cluster(&self, c: usize) -> Option<usize> {
         self.chains[c][..self.chains[c].len() - 1]
@@ -209,6 +222,12 @@ impl Tree<'_> {
         }
         if let Some(d) = self.input.clusters[c].direction {
             return d;
+        }
+        if self.input.dagre_groups {
+            return match self.direction(self.owner_of_cluster(c)) {
+                Direction::TopBottom => Direction::LeftRight,
+                _ => Direction::TopBottom,
+            };
         }
         let mut owner = self.owner_of_cluster(c);
         for _ in 0..=self.parent.len() {
@@ -630,10 +649,23 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
         let level = level_output(li, out);
         if let Some(c) = scope {
             let cl = &input.clusters[c];
-            let (w, h) = (
-                (level.bbox.w + 2.0 * pad).max(cl.min_width),
-                level.bbox.h + 2.0 * pad + cl.title_height,
-            );
+            let (w, h) = if input.dagre_groups {
+                let (along, across) = tree.dagre_group_padding(c);
+                let (px, py) = if tree.direction(scope).is_horizontal() {
+                    (along, across)
+                } else {
+                    (across, along)
+                };
+                (
+                    (level.bbox.w + 2.0 * px).max(cl.min_width),
+                    level.bbox.h + 2.0 * py,
+                )
+            } else {
+                (
+                    (level.bbox.w + 2.0 * pad).max(cl.min_width),
+                    level.bbox.h + 2.0 * pad + cl.title_height,
+                )
+            };
             box_size[c] = (w, h);
             // Where the composition below puts the contents in the box.
             let bb = level.bbox;
@@ -707,10 +739,14 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                     clusters[b] = r;
                     let inner = levels[slot(Some(b))].as_ref().map(|l| l.bbox);
                     if let Some(bb) = inner {
-                        let origin = Point::new(
-                            r.x + pad + (r.w - 2.0 * pad - bb.w) / 2.0,
-                            r.y + pad + input.clusters[b].title_height,
-                        );
+                        let origin = if input.dagre_groups {
+                            Point::new(r.x + (r.w - bb.w) / 2.0, r.y + (r.h - bb.h) / 2.0)
+                        } else {
+                            Point::new(
+                                r.x + pad + (r.w - 2.0 * pad - bb.w) / 2.0,
+                                r.y + pad + input.clusters[b].title_height,
+                            )
+                        };
                         stack.push((Some(b), Point::new(origin.x - bb.x, origin.y - bb.y)));
                     }
                 }
@@ -1074,6 +1110,7 @@ fn level_input(
     // only leaves half the gap each side, so pad the label along the rank axis.
     let label_of = |l: Option<(f64, f64)>| match scope {
         None => l,
+        Some(_) if input.dagre_groups => l,
         // The orthogonal pass pads its label layers itself.
         Some(_) if matches!(input.routing, EdgeRouting::Orthogonal(_)) => l,
         Some(_) if tree.direction(scope).is_horizontal() => {
@@ -1225,6 +1262,10 @@ fn level_input(
         .collect();
     let (node_sep, rank_sep) = match scope {
         None => (input.node_sep, input.rank_sep),
+        Some(_) if input.dagre_groups => (
+            input.node_sep,
+            input.rank_sep + 25.0 * tree.depth(scope) as f64,
+        ),
         Some(_) => (input.inner_node_sep, input.inner_rank_sep),
     };
     // A container laid out on its own routes with its own (wider) edge spacing.
@@ -1382,7 +1423,8 @@ fn order_runs(tree: &Tree, scopes: &[Option<usize>], inputs: &[LevelInput]) -> V
     let mut setups = Vec::with_capacity(k);
     let mut elk_layers = Vec::with_capacity(k);
     for p in &preps {
-        let (setup, layers) = ElkLayers::new(p.layers.clone(), &p.verts, &p.chains, &p.inl);
+        let (setup, layers) =
+            ElkLayers::new(p.layers.clone(), (&p.verts, &p.created), &p.chains, &p.inl);
         setups.push(setup);
         elk_layers.push(Some(layers));
     }
@@ -1513,6 +1555,7 @@ mod tests {
             inner_node_sep: 50.0,
             inner_rank_sep: 24.0,
             routing: EdgeRouting::Splines,
+            dagre_groups: false,
         }
     }
 
@@ -1820,6 +1863,76 @@ mod tests {
             "{pts:?}"
         );
         assert!((pts[pts.len() - 1].y - c0.y).abs() < 1e-6, "{pts:?}");
+    }
+
+    /// A member whose only edges leave its container takes ELK's `LAST` layer
+    /// constraint (`LayerConstraintPreprocessor`): it sits on the container's last
+    /// layer, not on its first (`subgraph S0: a -->|x| b; c end; b --> x; c --> x`).
+    #[test]
+    fn elk_member_only_leaving_its_container_sits_on_its_last_layer() {
+        let inp = elk(input(
+            vec![node(Some(0)), node(Some(0)), node(Some(0)), node(None)],
+            vec![
+                LayoutEdge::new(0, 1, 1, Some((30.0, 20.0))),
+                LayoutEdge::new(2, 3, 1, None),
+                LayoutEdge::new(1, 3, 1, None),
+            ],
+            vec![with_dir(None, None)],
+            Direction::TopBottom,
+        ));
+        let out = layout(&inp);
+        assert!((out.nodes[2].y - out.nodes[1].y).abs() < 1e-6, "{out:?}");
+        assert!(out.nodes[0].y < out.nodes[1].y, "{out:?}");
+    }
+
+    /// mermaid's dagre group (ER): a graph of its own turned to LR, with 25 more
+    /// rank spacing, framed by dagre's compound borders and no title band.
+    #[test]
+    fn dagre_group_is_its_own_turned_graph() {
+        let mut inp = input(
+            vec![node(Some(0)), node(Some(0)), node(None)],
+            vec![LayoutEdge::new(0, 1, 1, None)],
+            vec![with_dir(None, None)],
+            Direction::TopBottom,
+        );
+        inp.dagre_groups = true;
+        let out = layout(&inp);
+        assert_eq!(out.cluster_directions[0], Direction::LeftRight);
+        let c = out.clusters[0];
+        // Along the flow: two 80px nodes 75 apart, borders 37.5 away; across: the
+        // 40px nodes, borders (50 + 20) / 2 away.
+        assert!((c.w - (80.0 + 75.0 + 80.0 + 75.0)).abs() < 1e-6, "{c:?}");
+        assert!((c.h - (40.0 + 70.0)).abs() < 1e-6, "{c:?}");
+        assert!((out.nodes[0].y - out.nodes[1].y).abs() < 1e-6, "{out:?}");
+        assert!((out.nodes[0].y - c.y - c.h / 2.0).abs() < 1e-6, "{out:?}");
+    }
+
+    /// A member joined only to ports where edges enter takes ELK's `FIRST`
+    /// constraint, and `LayerConstraintPostprocessor` puts it back at the end of
+    /// the first layer's list, which the crossing minimisation starts from (elkjs:
+    /// `subgraph S0: s0n0 s0n1 s0n2 s0n3, s0n3 --> s0n0 end; x1 --> s0n1;
+    /// s0n0 --> x1`: s0n2, s0n1, s0n3 from the left).
+    #[test]
+    fn elk_member_only_entered_from_outside_goes_last_in_its_layer() {
+        let inp = elk(input(
+            vec![
+                node(Some(0)),
+                node(Some(0)),
+                node(Some(0)),
+                node(Some(0)),
+                node(None),
+            ],
+            vec![
+                LayoutEdge::new(3, 0, 1, None),
+                LayoutEdge::new(4, 1, 1, None),
+                LayoutEdge::new(0, 4, 1, None),
+            ],
+            vec![with_dir(None, None)],
+            Direction::TopBottom,
+        ));
+        let out = layout(&inp);
+        let x = |v: usize| out.nodes[v].x;
+        assert!(x(2) < x(1) && x(1) < x(3), "{out:?}");
     }
 
     fn elk(mut inp: LayoutInput) -> LayoutInput {

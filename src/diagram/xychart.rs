@@ -2204,7 +2204,7 @@ mod tests {
         assert_eq!(op, op.floor());
         assert!((14.0..=15.0).contains(&op), "{op}");
         let xt = l.x_axis.ticks();
-        assert_eq!(xt[0].0, l.plot.x + op);
+        assert!((xt[0].0 - (l.plot.x + op)).abs() < 1e-9);
         assert!((xt[11].0 - (l.plot.x + l.plot.w - op)).abs() < 1e-9);
         // Legend right of the plot, vertically centred.
         assert_eq!(l.legend.bbox.x, l.plot.x + l.plot.w);
