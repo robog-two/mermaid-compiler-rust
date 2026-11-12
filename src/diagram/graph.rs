@@ -1202,12 +1202,17 @@ pub fn render_with(
                 continue;
             }
         }
+        // A neo edge takes the `*-margin` markers (`useMargin`), the neo barb's
+        // pull-back, and leaves its last `markerOffsets2` px undrawn.
+        let neo = cfg.look == ConfigLook::Neo;
+        let trim = |h: Head| markers::pullback_for(h, neo) + markers::hidden_end(h, neo);
+        let (start_trim, end_trim) = (trim(e.start), trim(e.end));
         if elk {
             hop_edges.push((
                 linejump::EdgeGeom {
                     points: pts.clone(),
-                    start_offset: markers::pullback(e.start),
-                    end_offset: markers::pullback(e.end),
+                    start_offset: start_trim,
+                    end_offset: end_trim,
                     rounded: true,
                     corner_radius: EDGE_CORNER_RADIUS,
                 },
@@ -1248,7 +1253,7 @@ pub fn render_with(
             end_dir,
             colors,
             width,
-            cfg.look == ConfigLook::Neo,
+            neo,
         ));
         heads.extend(markers::elements(
             e.start,
@@ -1257,9 +1262,9 @@ pub fn render_with(
             start_dir,
             colors,
             width,
-            cfg.look == ConfigLook::Neo,
+            neo,
         ));
-        let (end_back, start_back) = (markers::pullback(e.end), markers::pullback(e.start));
+        let (end_back, start_back) = (end_trim, start_trim);
         if end_back > 0.0 && pts[last].dist(pts[last - 1]) > end_back {
             pts[last] = pts[last].minus(end_dir.scale(end_back));
         }
