@@ -19,6 +19,7 @@ use crate::geom::{Point, Rect};
 
 mod bk;
 pub mod boxes;
+mod elkbk;
 mod elkorder;
 mod nested;
 mod ortho;
@@ -207,11 +208,24 @@ enum ElkGraph {
 
 /// One layered pass over the whole input (every cluster integrated).
 fn layout_flat(input: &LayoutInput) -> LayoutOutput {
-    layout_flat_in(input, ElkGraph::Root)
+    layout_flat_in(input, ElkGraph::Root, &Hierarchy::default())
+}
+
+/// What one graph of ELK's hierarchy adds to a layered pass (see `nested`).
+#[derive(Debug, Clone, Default)]
+struct Hierarchy {
+    /// External ports: nodes (of zero size) standing for where an edge crossing
+    /// the container's border meets it, `true` for one where it enters (ELK's
+    /// `FIRST_SEPARATE` layer), `false` where it leaves (`LAST_SEPARATE`). They
+    /// are left out of the layering, and their layers take no room.
+    ext: Vec<(usize, bool)>,
+    /// Per edge: fixed cross-axis offsets (from the node's centre) of its source
+    /// and target ports, where it meets a laid out container's external port.
+    ports: Vec<(Option<f64>, Option<f64>)>,
 }
 
 /// `layout_flat` for one graph of the ELK hierarchy.
-fn layout_flat_in(input: &LayoutInput, graph: ElkGraph) -> LayoutOutput {
+fn layout_flat_in(input: &LayoutInput, graph: ElkGraph, hier: &Hierarchy) -> LayoutOutput {
     let horizontal = input.direction.is_horizontal();
     let swap = |w: f64, h: f64| if horizontal { (h, w) } else { (w, h) };
     let n = input.nodes.len();
@@ -235,7 +249,50 @@ fn layout_flat_in(input: &LayoutInput, graph: ElkGraph) -> LayoutOutput {
     }
 
     // 2. Ranking.
-    let (mut ranks, layered) = rank_with_clusters(n, &mut oriented, input);
+    let mut is_ext = vec![false; n];
+    for &(v, _) in &hier.ext {
+        is_ext[v] = true;
+    }
+    // External ports and their edges are hidden from the layering.
+    let hidden: Vec<Option<Oriented>> = oriented
+        .iter_mut()
+        .map(|o| {
+            if o.as_ref().is_some_and(|o| is_ext[o.from] || is_ext[o.to]) {
+                o.take()
+            } else {
+                None
+            }
+        })
+        .collect();
+    let (mut ranks, mut layered) = rank_with_clusters(n, &mut oriented, input);
+    for (o, h) in oriented.iter_mut().zip(hidden) {
+        if h.is_some() {
+            *o = h;
+        }
+    }
+    // Then they take a layer of their own before (or after) all others.
+    let mut hidden_layers: (Option<usize>, Option<usize>) = (None, None);
+    if !hier.ext.is_empty() {
+        let shift = usize::from(hier.ext.iter().any(|&(_, first)| first));
+        for v in (0..n).filter(|&v| !is_ext[v]) {
+            ranks[v] += shift;
+            layered[v] += shift;
+        }
+        let last = (0..n)
+            .filter(|&v| !is_ext[v])
+            .map(|v| ranks[v])
+            .max()
+            .unwrap_or(0)
+            + 1;
+        for &(v, first) in &hier.ext {
+            ranks[v] = if first { 0 } else { last };
+            layered[v] = ranks[v];
+        }
+        hidden_layers = (
+            (shift == 1).then_some(0),
+            hier.ext.iter().any(|e| !e.1).then_some(last),
+        );
+    }
     // Under ELK, per edge: the rank of its label (the layer its label dummy took).
     let mut label_ranks: Vec<Option<usize>> = vec![None; input.edges.len()];
     if elk {
@@ -249,6 +306,7 @@ fn layout_flat_in(input: &LayoutInput, graph: ElkGraph) -> LayoutOutput {
             }
         }
         ranks = ranks.iter().map(|&l| to_rank(l)).collect();
+        hidden_layers = (hidden_layers.0.map(&to_rank), hidden_layers.1.map(&to_rank));
     }
 
     // 3. Vertices + chains.
@@ -562,9 +620,41 @@ fn layout_flat_in(input: &LayoutInput, graph: ElkGraph) -> LayoutOutput {
             g
         }
     };
-    let x = assign_x(&layers, &verts, &links, &borders, &gap);
+    // ELK's own node placement where no cluster is integrated into this pass.
+    let elk_placed = (elk && borders.iter().all(|b| b.is_empty())).then(|| {
+        let label_across: Vec<f64> = verts
+            .iter()
+            .map(|v| match v.kind {
+                Kind::Dummy { labeled: true } => (v.w
+                    - if horizontal {
+                        ELK_LABEL_PAD.1
+                    } else {
+                        ELK_LABEL_PAD.0
+                    })
+                .max(0.0),
+                _ => 0.0,
+            })
+            .collect();
+        elk_place(
+            &layers,
+            &verts,
+            n,
+            &chains,
+            &loop_reach,
+            &label_across,
+            &is_ext,
+            &hier.ports,
+            elk_spacing(graph, input.node_sep),
+        )
+    });
+    let (x, ports) = match elk_placed {
+        Some((x, start, end)) => (x, Some((start, end))),
+        None => (assign_x(&layers, &verts, &links, &borders, &gap), None),
+    };
     let plan = match input.routing {
-        EdgeRouting::Orthogonal(s) => Some(ortho_plan(&verts, n, &chains, &x, &layers, &gap, s)),
+        EdgeRouting::Orthogonal(s) => {
+            Some(ortho_plan(&verts, n, &chains, &x, &layers, &gap, s, ports))
+        }
         EdgeRouting::Splines => None,
     };
 
@@ -622,7 +712,18 @@ fn layout_flat_in(input: &LayoutInput, graph: ElkGraph) -> LayoutOutput {
             }
         }
     }
-    let gap_before = |r: usize| rank_sep + label_gap[r - 1] + label_gap[r];
+    // The layers of external ports take no room: only their edges' slots do.
+    let beside_hidden = |r: usize| {
+        hidden_layers.0.is_some_and(|h| r > h && r <= h + RANK_STEP)
+            || hidden_layers.1.is_some_and(|h| r <= h && r + RANK_STEP > h)
+    };
+    let gap_before = |r: usize| {
+        if beside_hidden(r) {
+            0.0
+        } else {
+            rank_sep + label_gap[r - 1] + label_gap[r]
+        }
+    };
     let mut extra = vec![0.0f64; max_rank + 1];
     if let Some(p) = &plan {
         for (ra, ch) in p.channels.iter().enumerate() {
@@ -696,7 +797,30 @@ fn layout_flat_in(input: &LayoutInput, graph: ElkGraph) -> LayoutOutput {
             (a.y - b.y).abs(),
         )
     };
-    let pos = |v: usize| to_out(Point::new(x[v], rank_y[verts[v].rank]));
+    // ELK aligns a node narrower than its layer (along the flow) by its edges
+    // (`LGraphUtil.placeNodesHorizontally`, `alignment: AUTOMATIC`): towards the
+    // side most of them leave from, as the share of outgoing ones.
+    let mut vy: Vec<f64> = verts.iter().map(|v| rank_y[v.rank]).collect();
+    if plan.is_some() {
+        let mut ins = vec![0usize; n];
+        let mut outs = vec![0usize; n];
+        for (chain, _, _) in chains.iter().flatten() {
+            outs[chain[0]] += 1;
+            ins[chain[chain.len() - 1]] += 1;
+        }
+        for e in input.edges.iter().filter(|e| e.from == e.to) {
+            outs[e.from] += 1;
+            ins[e.from] += 1;
+        }
+        for v in 0..n {
+            let total = ins[v] + outs[v];
+            if total > 0 {
+                let ratio = outs[v] as f64 / total as f64;
+                vy[v] += (rank_h[verts[v].rank] - verts[v].h) * (ratio - 0.5);
+            }
+        }
+    }
+    let pos = |v: usize| to_out(Point::new(x[v], vy[v]));
 
     let nodes: Vec<Point> = (0..n).map(pos).collect();
     let edges = input
@@ -709,7 +833,7 @@ fn layout_flat_in(input: &LayoutInput, graph: ElkGraph) -> LayoutOutput {
                     // ELK: a loop on the node's low cross-axis side (west in TB,
                     // north in LR).
                     let v = e.from;
-                    let (cx, cy) = (x[v], rank_y[verts[v].rank]);
+                    let (cx, cy) = (x[v], vy[v]);
                     let (side, half) = (cx - verts[v].w / 2.0, loop_half[ei]);
                     let out = side - loop_out[ei];
                     let points = [
@@ -736,7 +860,7 @@ fn layout_flat_in(input: &LayoutInput, graph: ElkGraph) -> LayoutOutput {
             };
             if let Some(p) = &plan {
                 let mut points: Vec<Point> = p
-                    .route(ei, &verts, &rank_y, &rank_h, &start_pad, &end_pad)
+                    .route(ei, &verts, &rank_y, &vy, &rank_h, &start_pad, &end_pad)
                     .into_iter()
                     .map(to_out)
                     .collect();
@@ -931,6 +1055,210 @@ fn self_loop(c: Point, node: &LayoutNode, label: Option<(f64, f64)>) -> EdgeRout
     EdgeRoute { points, label }
 }
 
+/// The padding the diagrams add around an edge label's text (width, height) for
+/// the layout; mermaid hands ELK the bare text size.
+const ELK_LABEL_PAD: (f64, f64) = (8.0, 4.0);
+
+/// ELK keeps a node's ports this far from the ends of its side (and spreads
+/// them evenly over the rest).
+const ELK_PORT_INSET: f64 = 10.0;
+
+/// Offsets from a side's start of `n` ports spread over a side of length `len`.
+fn elk_port_offsets(n: usize, len: f64) -> impl Iterator<Item = f64> {
+    let inset = ELK_PORT_INSET.min(len / 2.0);
+    let free = len - 2.0 * inset;
+    (0..n).map(move |i| inset + free * (i + 1) as f64 / (n + 1) as f64)
+}
+
+/// The spacings between the vertices of one ELK layer. The root graph derives
+/// them from `spacing.baseValue: 40` (edges at half the node spacing); a
+/// container from its own `spacing.baseValue: 24`, of which `spacing.edgeNode`
+/// is half, with `spacing.nodeNode: 50` and `elk.spacing.edgeEdge: 20` set
+/// explicitly (mermaid's `buildSubgraphLayoutOptions`).
+fn elk_spacing(graph: ElkGraph, node_sep: f64) -> elkbk::Spacing {
+    match graph {
+        ElkGraph::Root => elkbk::Spacing {
+            node_node: node_sep,
+            edge_node: node_sep / 2.0,
+            edge_edge: node_sep / 2.0,
+            port_port: node_sep / 2.0,
+        },
+        ElkGraph::Container { .. } => elkbk::Spacing {
+            node_node: node_sep,
+            edge_node: ELK_CONTAINER_BASE_SPACING / 2.0,
+            edge_edge: ELK_CONTAINER_EDGE_SPACING,
+            port_port: ELK_CONTAINER_BASE_SPACING / 2.0,
+        },
+    }
+}
+
+/// A container's `spacing.baseValue` and `elk.spacing.edgeEdge` (mermaid's
+/// `DEFAULT_SUBGRAPH_SPACING_BASE_VALUE` and `buildSubgraphLayoutOptions`).
+const ELK_CONTAINER_BASE_SPACING: f64 = 24.0;
+const ELK_CONTAINER_EDGE_SPACING: f64 = 20.0;
+
+/// ELK's node placement (see `elkbk`) for a pass without integrated clusters:
+/// cross-axis centres of every vertex (an edge label's: where its edge passes,
+/// through the label's middle as mermaid's labels are inline), and every edge's
+/// source and target port positions.
+///
+/// ELK's layers are the kept ranks of `elk_order`; an edge runs between two
+/// consecutive ones through a port on each end: on a node one of the ports spread
+/// over its side, in the order of the vertices they lead to; on a long-edge dummy
+/// its top (it has no extent); on a label its middle.
+#[allow(clippy::too_many_arguments)]
+fn elk_place(
+    layers: &[Vec<usize>],
+    verts: &[Vertex],
+    real: usize,
+    chains: &[Option<Chain>],
+    loop_reach: &[f64],
+    label_across: &[f64],
+    is_ext: &[bool],
+    fixed: &[(Option<f64>, Option<f64>)],
+    spacing: elkbk::Spacing,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let nv = verts.len();
+    let kept_rank = |r: usize| {
+        r % RANK_STEP == 0
+            || layers[r]
+                .iter()
+                .any(|&v| matches!(verts[v].kind, Kind::Dummy { labeled: true }))
+    };
+    let elk_layers: Vec<Vec<usize>> = (0..layers.len())
+        .filter(|&r| kept_rank(r))
+        .map(|r| layers[r].clone())
+        .collect();
+    let mut index = vec![0usize; nv];
+    for layer in &elk_layers {
+        for (i, &v) in layer.iter().enumerate() {
+            index[v] = i;
+        }
+    }
+    let kept = |v: usize| kept_rank(verts[v].rank);
+    let nodes: Vec<elkbk::Node> = verts
+        .iter()
+        .enumerate()
+        .map(|(v, vx)| {
+            let (kind, size) = match vx.kind {
+                Kind::Real if is_ext.get(v).copied().unwrap_or(false) => {
+                    (elkbk::NodeType::ExternalPort, 0.0)
+                }
+                Kind::Real => (elkbk::NodeType::Normal, vx.w),
+                Kind::Dummy { labeled: true } => (elkbk::NodeType::Label, label_across[v]),
+                _ => (elkbk::NodeType::LongEdge, 0.0),
+            };
+            elkbk::Node {
+                kind,
+                size,
+                margin_top: loop_reach.get(v).copied().unwrap_or(0.0),
+                margin_bottom: 0.0,
+            }
+        })
+        .collect();
+    // Per edge: its vertices on ELK's layers.
+    let ne = chains.len();
+    let stops: Vec<Vec<usize>> = chains
+        .iter()
+        .map(|c| {
+            c.as_ref()
+                .map(|(chain, _, _)| chain.iter().copied().filter(|&v| kept(v)).collect())
+                .unwrap_or_default()
+        })
+        .collect();
+    // Ports on the nodes' two flow sides.
+    let mut out_side: Vec<Vec<(usize, usize)>> = vec![Vec::new(); real];
+    let mut in_side: Vec<Vec<(usize, usize)>> = vec![Vec::new(); real];
+    for (ei, s) in stops.iter().enumerate().filter(|(_, s)| s.len() >= 2) {
+        out_side[s[0]].push((index[s[1]], ei));
+        in_side[s[s.len() - 1]].push((index[s[s.len() - 2]], ei));
+    }
+    let mut out_port = vec![0.0; ne];
+    let mut in_port = vec![0.0; ne];
+    for v in 0..real {
+        for (side, port, at_end) in [
+            (&mut out_side[v], &mut out_port, false),
+            (&mut in_side[v], &mut in_port, true),
+        ] {
+            side.sort_unstable();
+            // Ports fixed by a laid out container stay where its contents put them.
+            let fixed_at = |ei: usize| {
+                let (from, to) = fixed.get(ei).copied().unwrap_or((None, None));
+                // The chain is oriented; a reversed edge's ends are swapped.
+                let reversed = chains[ei].as_ref().is_some_and(|c| c.2);
+                if at_end != reversed { to } else { from }
+            };
+            side.retain(|&(_, ei)| match fixed_at(ei) {
+                Some(off) => {
+                    port[ei] = verts[v].w / 2.0 + off;
+                    false
+                }
+                None => true,
+            });
+            for (&(_, ei), off) in side.iter().zip(elk_port_offsets(side.len(), verts[v].w)) {
+                port[ei] = off;
+            }
+        }
+    }
+    let port_of = |v: usize| match nodes[v].kind {
+        elkbk::NodeType::Label => nodes[v].size / 2.0,
+        _ => 0.0,
+    };
+    let mut edges = Vec::new();
+    for (ei, s) in stops.iter().enumerate() {
+        for (k, w) in s.windows(2).enumerate() {
+            edges.push(elkbk::Edge {
+                from: w[0],
+                to: w[1],
+                from_port: if k == 0 { out_port[ei] } else { port_of(w[0]) },
+                to_port: if k + 2 == s.len() {
+                    in_port[ei]
+                } else {
+                    port_of(w[1])
+                },
+            });
+        }
+    }
+    let top = elkbk::place(&elk_layers, &nodes, &edges, spacing);
+    let mut x: Vec<f64> = (0..nv)
+        .map(|v| match nodes[v].kind {
+            elkbk::NodeType::Normal => top[v] + verts[v].w / 2.0,
+            _ => top[v] + port_of(v),
+        })
+        .collect();
+    // Vertices between ELK's layers follow their edge from the stop before.
+    for (ei, c) in chains.iter().enumerate() {
+        let Some((chain, _, _)) = c else { continue };
+        let mut at = top[chain[0]] + out_port[ei];
+        for &v in &chain[1..chain.len() - 1] {
+            if kept(v) {
+                at = x[v];
+            } else {
+                x[v] = at;
+            }
+        }
+    }
+    let mut start: Vec<f64> = (0..ne)
+        .map(|ei| stops[ei].first().map_or(0.0, |&u| top[u] + out_port[ei]))
+        .collect();
+    let mut end: Vec<f64> = (0..ne)
+        .map(|ei| stops[ei].last().map_or(0.0, |&w| top[w] + in_port[ei]))
+        .collect();
+    let min = (0..nv)
+        .filter(|&v| kept(v))
+        .map(|v| match nodes[v].kind {
+            elkbk::NodeType::LongEdge => x[v],
+            _ => top[v],
+        })
+        .fold(f64::INFINITY, f64::min);
+    if min.is_finite() {
+        for p in x.iter_mut().chain(&mut start).chain(&mut end) {
+            *p -= min;
+        }
+    }
+    (x, start, end)
+}
+
 /// How far an orthogonal self-loop stands off its node.
 const SELF_LOOP_EXT: f64 = 20.0;
 /// The least room between an orthogonal self-loop (or its label) and the node beside it.
@@ -953,6 +1281,7 @@ struct OrthoPlan {
     xs: Vec<f64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ortho_plan(
     verts: &[Vertex],
     n: usize,
@@ -961,6 +1290,7 @@ fn ortho_plan(
     layers: &[Vec<usize>],
     gap: &dyn Fn(usize, usize) -> f64,
     spacing: OrthoSpacing,
+    ports: Option<(Vec<f64>, Vec<f64>)>,
 ) -> OrthoPlan {
     let max_rank = verts.iter().map(|v| v.rank).max().unwrap_or(0);
     // Ranks holding nodes or edge labels; ranks of plain long-edge dummies are free.
@@ -981,9 +1311,9 @@ fn ortho_plan(
         out_side[u].push((x[chain[1]], x[w], ei));
         in_side[w].push((x[chain[chain.len() - 2]], x[u], ei));
     }
-    let mut start_x = vec![0.0; ne];
-    let mut end_x = vec![0.0; ne];
-    for v in 0..n {
+    let placed = ports.is_some();
+    let (mut start_x, mut end_x) = ports.unwrap_or_else(|| (vec![0.0; ne], vec![0.0; ne]));
+    for v in (0..n).filter(|_| !placed) {
         for (side, port_x) in [
             (&mut out_side[v], &mut start_x),
             (&mut in_side[v], &mut end_x),
@@ -993,7 +1323,10 @@ fn ortho_plan(
                     .then(a.1.total_cmp(&b.1))
                     .then(a.2.cmp(&b.2))
             });
-            for (&(_, _, ei), off) in side.iter().zip(ortho::port_offsets(side.len(), verts[v].w)) {
+            for (&(_, _, ei), off) in side.iter().zip(ortho::port_offsets(
+                side.len(),
+                (verts[v].w - 2.0 * ELK_PORT_INSET).max(0.0),
+            )) {
                 port_x[ei] = x[v] + off;
             }
         }
@@ -1023,7 +1356,7 @@ fn ortho_plan(
             }
         }
     }
-    for layer in layers {
+    for layer in layers.iter().filter(|_| !placed) {
         for (i, &v) in layer.iter().enumerate() {
             let Some((ei, prev, to_target)) = arrive[v] else {
                 continue;
@@ -1082,7 +1415,7 @@ fn ortho_plan(
             continue;
         }
         let segs: Vec<ortho::Jog> = list.iter().map(|&(_, _, j)| j).collect();
-        let (levels, count) = ortho::assign_slots(&segs, spacing.edge_edge / 2.0);
+        let (levels, count) = ortho::assign_slots_elk(&segs, spacing.edge_edge);
         for (&(ei, k, _), l) in list.iter().zip(levels) {
             jogs[ei][k] = Some(l);
         }
@@ -1102,11 +1435,13 @@ fn ortho_plan(
 impl OrthoPlan {
     /// Edge `ei`'s route in layout space, oriented along the flow: from its source
     /// port on the node's side, through its stops, to its target port.
+    #[allow(clippy::too_many_arguments)]
     fn route(
         &self,
         ei: usize,
         verts: &[Vertex],
         rank_y: &[f64],
+        vy: &[f64],
         rank_h: &[f64],
         start_pad: &[f64],
         end_pad: &[f64],
@@ -1115,7 +1450,7 @@ impl OrthoPlan {
         let (Some(&(u, ux)), Some(&(w, _))) = (stops.first(), stops.last()) else {
             return Vec::new();
         };
-        let mut pts = vec![Point::new(ux, rank_y[verts[u].rank] + verts[u].h / 2.0)];
+        let mut pts = vec![Point::new(ux, vy[u] + verts[u].h / 2.0)];
         // A run without a jog keeps its cross position: stops less than the jog
         // threshold apart would otherwise leave it slightly slanted.
         let mut cur = ux;
@@ -1134,10 +1469,10 @@ impl OrthoPlan {
                 cur = bx;
             }
             if b != w {
-                pts.push(Point::new(cur, rank_y[verts[b].rank]));
+                pts.push(Point::new(cur, vy[b]));
             }
         }
-        pts.push(Point::new(cur, rank_y[verts[w].rank] - verts[w].h / 2.0));
+        pts.push(Point::new(cur, vy[w] - verts[w].h / 2.0));
         ortho::simplify(&pts)
     }
 }
@@ -2875,5 +3210,31 @@ mod tests {
         assert!((out.nodes[3].y - out.nodes[4].y).abs() < 1.0, "{out:?}");
         let ly = |e: usize| out.edges[e].label.expect("label").y;
         assert!((ly(2) - ly(0)).abs() < 1.0, "{out:?}");
+    }
+
+    /// ELK spreads a node's ports over its side less 10 at each end, and its node
+    /// placement lines ports up, not centres: `0 → 1`, `0 → 2`, `3 → 2` in TB puts
+    /// node 1 straight under node 0's first port.
+    #[test]
+    fn elk_aligns_ports_spread_over_the_side() {
+        let edges = edges_of(&[(0, 1), (0, 2), (3, 2)]);
+        let inp = elk(input(
+            vec![node(None); 4],
+            edges,
+            vec![],
+            Direction::TopBottom,
+        ));
+        let out = layout(&inp);
+        let start = |e: usize| out.edges[e].points[0];
+        let end = |e: usize| *out.edges[e].points.last().expect("point");
+        // Two ports on node 0's 80 wide bottom: 60 to spread, 20 apart.
+        assert!((start(1).x - start(0).x - 20.0).abs() < 1e-6, "{out:?}");
+        assert!(
+            (start(0).x - (out.nodes[0].x - 10.0)).abs() < 1e-6,
+            "{out:?}"
+        );
+        // Edge 0 runs straight into node 1, whose centre is off node 0's.
+        assert!((start(0).x - end(0).x).abs() < 1e-6, "{out:?}");
+        assert!((out.nodes[1].x - out.nodes[0].x).abs() > 1.0, "{out:?}");
     }
 }

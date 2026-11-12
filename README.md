@@ -136,27 +136,35 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
 - **PDF text uses the built-in Helvetica fonts** (nothing embedded), so characters outside Windows-1252 become `?` in PDFs.
   SVG and PNG handle any Unicode the system fonts cover.
 - **PNG text needs system fonts.** macOS always has them. Minimal Linux containers may need a font package.
-- **Layout engine:** mermaid 12 defaults to ELK (`layout: elk`) for graph diagrams; this implementation uses a
-  dagre-style layered layout and reproduces ELK's container rules instead: a subgraph with no edge crossing its border
-  is laid out on its own in its own `direction`, with ELK's padding (24) and spacing (50 between nodes, 24 between
-  layers). Under ELK (the default) the root graph uses ELK's spacing (40 between nodes and layers, the diagram's
-  `nodeSpacing` / `rankSpacing` and edge lengths such as `--->` are ignored, as upstream) and edges are routed
-  orthogonally and drawn with radius-5 rounded corners (mermaid's `rounded` curve, whatever `curve` is set): ports
-  spread over the facing node side, one slot per bend between layers, labels on the route, self-loops on the
-  west / north side. Where two edges cross, one hops the other as upstream (`elk.lineHops`: a radius-6 arc by
-  default, `gap` breaks the line, `false` turns hops off; the horizontal segment of a horizontal / vertical pair gives
-  way, otherwise the later edge; hops shrink or drop near rounded corners and each other, invisible `~~~` edges take
-  part). The order within layers comes from ELK's layer sweep (model order first, port-aware barycentres, 7 seeded
-  random restarts drawn from ELK's `java.util.Random` sequence, the greedy switch only where ELK runs it); a subgraph
-  is kept contiguous within its parent's sweep rather than ordered as a nested graph of its own, and layers wider than
-  128 nodes skip ELK's transitive model-order bookkeeping, so order can still differ there. Node placement is still
-  the dagre-style one, so positions (and so which edges cross) can differ from ELK's;
-  ELK's side-of-edge label placement and its edges attached to a container's frame border (ours run to a member node
-  and are cut at the frame) are not reproduced. `layout: dagre` (or any other non-ELK `layout`) gives
-  dagre's spacing and the configured curve. ELK's packing of disconnected parts inside a container is not
-  reproduced, `@{ view: collapsed }` folds a subgraph into one node as upstream.
+- **Layout engine:** mermaid 12 defaults to ELK (`layout: elk`) for graph diagrams; this implementation uses its own
+  layered layout and reproduces ELK's rules instead. Every subgraph is laid out as a graph of its own, bottom-up, and
+  placed as one box in its parent, with ELK's container padding (24) and spacing (50 between nodes, 24 between
+  layers, 12 / 20 around edges): one with no edge crossing its border in its own `direction`, one an edge crosses
+  in its parent's. An edge crossing subgraph borders is split as ELK splits it: inside a subgraph it runs to a port
+  on the border (an external port in a hidden first or last layer), and the parent places the box by that port.
+  Under ELK (the default) the root graph uses ELK's spacing (40 between nodes and layers, 20 around edges; the
+  diagram's `nodeSpacing` / `rankSpacing` and edge lengths such as `--->` are ignored, as upstream) and edges are
+  routed orthogonally and drawn with radius-5 rounded corners (mermaid's `rounded` curve, whatever `curve` is set):
+  ports spread over the facing node side (10 in from its ends), routing slots between layers assigned as ELK's
+  orthogonal router does (only edges that would cross or share a vertical run take separate slots; cycles broken
+  where ELK picks at random, by the first candidate, and nearly coincident verticals are not split), labels inline
+  on the route, self-loops on the west / north side. Nodes are placed with a port of ELK's Brandes–Köpf
+  (`BALANCED`, `IMPROVE_STRAIGHTNESS`: blocks line up ports, type-dependent node / edge spacing, class compaction)
+  and nodes shorter than their layer are aligned by their edges, as ELK does. Where two edges cross, one hops the
+  other as upstream (`elk.lineHops`: a radius-6 arc by default, `gap` breaks the line, `false` turns hops off; the
+  horizontal segment of a horizontal / vertical pair gives way, otherwise the later edge; hops shrink or drop near
+  rounded corners and each other, invisible `~~~` edges take part). The order within layers comes from ELK's layer
+  sweep (model order first, port-aware barycentres, 7 seeded random restarts drawn from ELK's `java.util.Random`
+  sequence, the greedy switch only where ELK runs it), run on each subgraph's graph on its own: ELK's sweep across
+  the whole hierarchy (where a parent's order fixes the order of a subgraph's border ports) is not reproduced, so
+  the order of a subgraph's contents, and of its edges leaving it, can differ; layers wider than 128 nodes skip ELK's
+  transitive model-order bookkeeping. ELK's side-of-edge label placement and where an edge to a whole subgraph meets
+  its frame are not reproduced. `layout: dagre` (or any other non-ELK `layout`) gives dagre's spacing, the dagre
+  rules for subgraphs (only uncrossed ones laid out on their own) and the configured curve. ELK's packing of
+  disconnected parts inside a container is not reproduced, `@{ view: collapsed }` folds a subgraph into one node as
+  upstream.
 - **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction (under `layout: dagre`;
-  ELK's layer sweep otherwise, see above) and Brandes–Köpf
+  ELK's layer sweep otherwise, see above) and, under `layout: dagre`, Brandes–Köpf
   coordinate assignment ported from dagre's `position/bk` (every edge gets a midpoint vertex, as with dagre's
   `makeSpaceForEdgeLabels`, which gives mermaid's curved "S" edges). Crossing reduction differs from dagre's, so
   node order can differ. Sibling subgraph frames never overlap: where a frame's sides would zig-zag over its layers
