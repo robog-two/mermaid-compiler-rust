@@ -236,6 +236,7 @@ fn graph_config(cfg: &MermaidConfig) -> GraphConfig {
         min_node_width: 0.0,
         wrapping_width: 0.0,
         layout: cfg.layout,
+        line_hops: cfg.elk_line_hops(),
     }
 }
 

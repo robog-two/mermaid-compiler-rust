@@ -26,6 +26,7 @@ pub mod error;
 pub mod geom;
 pub mod json;
 pub mod layout;
+pub mod linejump;
 pub mod markdown;
 pub mod output;
 pub mod plan;

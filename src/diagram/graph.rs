@@ -8,6 +8,7 @@ use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::layout::{
     self, Direction, EdgeRouting, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode, OrthoSpacing,
 };
+use crate::linejump;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
 use crate::theme::{ColorSlot, DropShadow, Palette, SlotColors};
@@ -1007,10 +1008,11 @@ pub fn render_with(
         }
     }
 
+    // Every rendered edge's points, for ELK's line hops (`applyElkLineJumps`), with the
+    // index in `edge_els` of its drawn group (none for an invisible edge, which still
+    // takes part: upstream paints it with an invisible stroke).
+    let mut hop_edges: Vec<(linejump::EdgeGeom, Option<usize>)> = Vec::new();
     for (ei, (e, route)) in g.edges.iter().zip(&out.edges).enumerate() {
-        if e.line == LineKind::Invisible {
-            continue;
-        }
         let mut pts = route.points.clone();
         let mut label_at = route.label;
         if let Some(ne) = nested[ei] {
@@ -1076,6 +1078,21 @@ pub fn render_with(
             if pts.len() < 2 {
                 continue;
             }
+        }
+        if elk {
+            hop_edges.push((
+                linejump::EdgeGeom {
+                    points: pts.clone(),
+                    start_offset: markers::pullback(e.start),
+                    end_offset: markers::pullback(e.end),
+                    rounded: true,
+                    corner_radius: EDGE_CORNER_RADIUS,
+                },
+                (e.line != LineKind::Invisible).then_some(edge_els.len()),
+            ));
+        }
+        if e.line == LineKind::Invisible {
+            continue;
         }
         let stroke = e
             .style
@@ -1198,6 +1215,16 @@ pub fn render_with(
         }
     }
 
+    if elk {
+        let (geoms, slots): (Vec<_>, Vec<_>) = hop_edges.into_iter().unzip();
+        let hopped = linejump::line_hops(&geoms, linejump::ELK_JUMP_RADIUS, cfg.line_hops);
+        for (cmds, slot) in hopped.into_iter().zip(slots) {
+            if let (Some(cmds), Some(k)) = (cmds, slot) {
+                set_edge_path(&mut edge_els[k], cmds);
+            }
+        }
+    }
+
     // Title above everything.
     let mut title_els = Vec::new();
     if let Some(t) = g.title.as_ref().filter(|t| !t.trim().is_empty()) {
@@ -1242,6 +1269,15 @@ pub fn render_with(
         acc_descr: None,
         font_family: pal.font_family.clone(),
         css: String::new(),
+    }
+}
+
+/// Replace the path of an `edgePath` group (its first child) with `cmds`.
+pub(crate) fn set_edge_path(group: &mut Element, cmds: Vec<PathCmd>) {
+    if let Element::Group { children, .. } = group
+        && let Some(Element::Shape { geom, .. }) = children.first_mut()
+    {
+        *geom = Geometry::Path(cmds);
     }
 }
 
@@ -3096,6 +3132,51 @@ mod tests {
             gaps.iter().all(|g| (g - gaps[0]).abs() < 1e-6),
             "evenly spread: {gaps:?}"
         );
+    }
+
+    /// ELK's line hops (`elk.lineHops`): arcs by default, gaps on request, none when
+    /// off or under dagre. Every edge of K3,3 crosses another.
+    #[test]
+    fn elk_line_hops_at_crossings() {
+        use crate::linejump::LineHops;
+        let g =
+            crate::diagram::flowchart::parse("flowchart TD\n a1 & a2 & a3 --> b1 & b2 & b3", None)
+                .unwrap();
+        let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let base = crate::config::MermaidConfig::default().flowchart;
+        let paths = |line_hops, layout| {
+            let cfg = GraphConfig {
+                line_hops,
+                layout,
+                ..base.clone()
+            };
+            edge_paths(&render(&g, &cfg, &pal))
+        };
+        let elk = LayoutAlgorithm::Elk;
+        let (off, arc, gap) = (
+            paths(LineHops::Off, elk),
+            paths(LineHops::Arc, elk),
+            paths(LineHops::Gap, elk),
+        );
+        let moves = |cmds: &[PathCmd]| {
+            cmds.iter()
+                .filter(|c| matches!(c, PathCmd::MoveTo(_)))
+                .count()
+        };
+        // Plain paths are single runs; some edges gain arcs (two cubics each) ...
+        assert!(off.iter().chain(&arc).all(|c| moves(c) == 1));
+        let extra: usize = arc.iter().zip(&off).map(|(a, o)| a.len() - o.len()).sum();
+        assert!(extra >= 3 && extra % 3 == 0, "{extra}");
+        // ... or gaps (a line to the hop, a move past it), at the same crossings.
+        let gaps: usize = gap.iter().map(|c| moves(c) - 1).sum();
+        assert_eq!(gaps * 3, extra);
+        // The crossings stay put: every path still starts and ends where it did.
+        for (a, o) in arc.iter().zip(&off) {
+            assert_eq!(a.first(), o.first());
+            assert_eq!(a.last(), o.last());
+        }
+        let dagre = LayoutAlgorithm::Dagre;
+        assert_eq!(paths(LineHops::Arc, dagre), paths(LineHops::Off, dagre));
     }
 
     /// mermaid's ELK adapter never reads `nodeSpacing` / `rankSpacing`; dagre does.

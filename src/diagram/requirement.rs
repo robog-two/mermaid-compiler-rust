@@ -162,6 +162,7 @@ pub fn render(
         min_node_width: 0.0,
         wrapping_width: 0.0,
         layout: cfg.layout,
+        line_hops: cfg.elk_line_hops(),
     };
     Ok(graph::render(&g, &gc, pal))
 }

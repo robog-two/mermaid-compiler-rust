@@ -211,6 +211,9 @@ pub struct GraphConfig {
     pub wrapping_width: f64,
     /// The top-level `layout` (copied in by [`MermaidConfig::scoped`]).
     pub layout: LayoutAlgorithm,
+    /// `elk.lineHops`: how crossings are drawn under the ELK layout (copied in by
+    /// [`MermaidConfig::scoped`]; ignored under dagre).
+    pub line_hops: crate::linejump::LineHops,
 }
 
 impl GraphConfig {
@@ -227,6 +230,7 @@ impl GraphConfig {
             min_node_width: 120.0,
             wrapping_width: 120.0,
             layout: LayoutAlgorithm::Elk,
+            line_hops: crate::linejump::LineHops::Arc,
         }
     }
     fn state() -> Self {
@@ -445,7 +449,16 @@ impl MermaidConfig {
         self.flowchart.layout = self.layout;
         self.state.layout = self.layout;
         self.class.layout = self.layout;
+        let hops = self.elk_line_hops();
+        self.flowchart.line_hops = hops;
+        self.state.line_hops = hops;
+        self.class.line_hops = hops;
         self
+    }
+
+    /// `elk.lineHops` (default `true`, i.e. arcs) from the latest layer that sets it.
+    pub fn elk_line_hops(&self) -> crate::linejump::LineHops {
+        crate::linejump::LineHops::from_json(self.section("elk", "lineHops"))
     }
 
     fn refresh_global_appearance(&mut self) {
@@ -700,6 +713,30 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn elk_line_hops_default_to_arcs() {
+        use crate::linejump::LineHops;
+        let c = MermaidConfig::default();
+        assert_eq!(
+            c.clone().scoped("flowchart").flowchart.line_hops,
+            LineHops::Arc
+        );
+        let gap = c
+            .clone()
+            .with_directive(&parse_yaml_subset("elk:\n  lineHops: gap"))
+            .unwrap()
+            .scoped("class");
+        assert_eq!(gap.class.line_hops, LineHops::Gap);
+        let off = c
+            .with_json(&json(r#"{"elk":{"lineHops":false}}"#))
+            .unwrap()
+            .scoped("state");
+        assert_eq!(
+            (off.state.line_hops, off.elk_line_hops()),
+            (LineHops::Off, LineHops::Off)
+        );
     }
 
     #[test]

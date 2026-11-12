@@ -2830,6 +2830,7 @@ struct Options {
     rotate: bool,
     curve: Curve,
     layout: LayoutAlgorithm,
+    line_hops: crate::linejump::LineHops,
     role: RoleColors,
 }
 
@@ -2856,6 +2857,7 @@ impl Options {
             rotate: s("colorScheme") == Some("rotate"),
             curve: cfg.flowchart.curve,
             layout: cfg.layout,
+            line_hops: cfg.elk_line_hops(),
             role: role_colors(cfg.theme, &cfg.theme_variables, pal),
         }
     }
@@ -3730,6 +3732,8 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
     };
     let mut edge_els = Vec::new();
     let mut label_els = Vec::new();
+    // Every edge's points for ELK's line hops (`applyElkLineJumps`).
+    let mut hop_edges = Vec::new();
     for (e, route) in edges.iter().zip(&out.edges) {
         let mut pts = route.points.clone();
         if pts.len() < 2 {
@@ -3746,7 +3750,15 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             let last = pts.len() - 1;
             pts[last] = clips[e.to].clip(pts[last - 1]);
         }
-        if !elk {
+        if elk {
+            hop_edges.push(crate::linejump::EdgeGeom {
+                points: pts.clone(),
+                start_offset: markers::pullback(e.start),
+                end_offset: markers::pullback(e.end),
+                rounded: true,
+                corner_radius: super::graph::EDGE_CORNER_RADIUS,
+            });
+        } else {
             pts = geom::fix_corners(&pts);
         }
         let line_color = match e.kind {
@@ -3840,6 +3852,16 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
                     b.text(at, &color),
                 ],
             ));
+        }
+    }
+
+    if o.layout == LayoutAlgorithm::Elk {
+        let hopped =
+            crate::linejump::line_hops(&hop_edges, crate::linejump::ELK_JUMP_RADIUS, o.line_hops);
+        for (el, cmds) in edge_els.iter_mut().zip(hopped) {
+            if let Some(cmds) = cmds {
+                super::graph::set_edge_path(el, cmds);
+            }
         }
     }
 

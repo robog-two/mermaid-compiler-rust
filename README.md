@@ -136,9 +136,12 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   `nodeSpacing` / `rankSpacing` and edge lengths such as `--->` are ignored, as upstream) and edges are routed
   orthogonally and drawn with radius-5 rounded corners (mermaid's `rounded` curve, whatever `curve` is set): ports
   spread over the facing node side, one slot per bend between layers, labels on the route, self-loops on the
-  west / north side. Node placement is still the dagre-style one, so positions can differ from ELK's; ELK's line hops
-  at crossings, its side-of-edge label placement and its edges attached to a container's frame border (ours run to a
-  member node and are cut at the frame) are not reproduced. `layout: dagre` (or any other non-ELK `layout`) gives
+  west / north side. Where two edges cross, one hops the other as upstream (`elk.lineHops`: a radius-6 arc by
+  default, `gap` breaks the line, `false` turns hops off; the horizontal segment of a horizontal / vertical pair gives
+  way, otherwise the later edge; hops shrink or drop near rounded corners and each other, invisible `~~~` edges take
+  part). Node placement is still the dagre-style one, so positions (and so which edges cross) can differ from ELK's;
+  ELK's side-of-edge label placement and its edges attached to a container's frame border (ours run to a member node
+  and are cut at the frame) are not reproduced. `layout: dagre` (or any other non-ELK `layout`) gives
   dagre's spacing and the configured curve. ELK's packing of disconnected parts inside a container is not
   reproduced, `@{ view: collapsed }` folds a subgraph into one node as upstream.
 - **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction and Brandes–Köpf
