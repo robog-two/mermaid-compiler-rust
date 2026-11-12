@@ -368,9 +368,10 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
         verts: &verts,
         chains: &cluster_chain,
     };
+    let mut before = Vec::new();
     for layer in layers.iter_mut() {
         let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
-        *layer = ctx.arrange(layer, &keys);
+        *layer = ctx.arrange(layer, &keys, &mut before);
     }
     let mut best = layers.clone();
     let mut best_cross = total_crossings(&layers, &down, nv);
@@ -1305,15 +1306,30 @@ impl OrderCtx<'_> {
     }
 
     /// Sort a layer by key while keeping every cluster contiguous and its border
-    /// vertices at the block ends.
-    fn arrange(&self, layer: &[usize], keys: &[f64]) -> Vec<usize> {
+    /// vertices at the block ends. Sibling clusters keep the order `before` holds
+    /// from the layers arranged earlier in the same sweep, and this layer's order
+    /// is added to it (dagre's `addSubgraphConstraints` / `resolveConflicts`):
+    /// otherwise two clusters could swap sides between layers and their boxes
+    /// overlap.
+    fn arrange(
+        &self,
+        layer: &[usize],
+        keys: &[f64],
+        before: &mut Vec<(usize, usize)>,
+    ) -> Vec<usize> {
         let items: Vec<(usize, f64)> = layer.iter().copied().zip(keys.iter().copied()).collect();
         let mut out = Vec::with_capacity(layer.len());
-        self.arrange_rec(items, 0, &mut out);
+        self.arrange_rec(items, 0, &mut out, before);
         out
     }
 
-    fn arrange_rec(&self, items: Vec<(usize, f64)>, depth: usize, out: &mut Vec<usize>) {
+    fn arrange_rec(
+        &self,
+        items: Vec<(usize, f64)>,
+        depth: usize,
+        out: &mut Vec<usize>,
+        before: &mut Vec<(usize, usize)>,
+    ) {
         let mut units: Vec<(u8, f64, Unit)> = Vec::new();
         for (v, k) in items {
             let chain = self.chain(v);
@@ -1351,13 +1367,67 @@ impl OrderCtx<'_> {
             a.0.cmp(&b.0)
                 .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         });
-        for (_, _, u) in units {
+        // The sibling clusters, in key order, rearranged over their own slots so
+        // that none comes before one the constraints put ahead of it.
+        let slots: Vec<usize> = (0..units.len())
+            .filter(|&i| matches!(units[i].2, Unit::Group(..)))
+            .collect();
+        let group = |u: &Unit| match u {
+            Unit::Group(c, _) => *c,
+            Unit::Single(_) => usize::MAX,
+        };
+        let mut pending: Vec<usize> = slots.iter().map(|&i| group(&units[i].2)).collect();
+        let mut order = Vec::with_capacity(pending.len());
+        while !pending.is_empty() {
+            let k = (0..pending.len())
+                .find(|&k| {
+                    pending
+                        .iter()
+                        .all(|&h| h == pending[k] || !precedes(before, h, pending[k]))
+                })
+                .unwrap_or(0);
+            order.push(pending.remove(k));
+        }
+        for w in order.windows(2) {
+            if !before.contains(&(w[0], w[1])) {
+                before.push((w[0], w[1]));
+            }
+        }
+        let mut taken: Vec<Option<(u8, f64, Unit)>> = units.into_iter().map(Some).collect();
+        let mut groups: Vec<Option<(u8, f64, Unit)>> =
+            slots.iter().map(|&i| taken[i].take()).collect();
+        for (&slot, c) in slots.iter().zip(&order) {
+            let k = groups
+                .iter()
+                .position(|g| g.as_ref().is_some_and(|g| group(&g.2) == *c))
+                .unwrap_or(0);
+            taken[slot] = groups[k].take();
+        }
+        for (_, _, u) in taken.into_iter().flatten() {
             match u {
                 Unit::Single(v) => out.push(v),
-                Unit::Group(_, members) => self.arrange_rec(members, depth + 1, out),
+                Unit::Group(_, members) => self.arrange_rec(members, depth + 1, out, before),
             }
         }
     }
+}
+
+/// Whether the constraints put cluster `a` (transitively) before cluster `b`.
+fn precedes(before: &[(usize, usize)], a: usize, b: usize) -> bool {
+    let mut seen = vec![a];
+    let mut stack = vec![a];
+    while let Some(x) = stack.pop() {
+        for &(p, q) in before {
+            if p == x && !seen.contains(&q) {
+                if q == b {
+                    return true;
+                }
+                seen.push(q);
+                stack.push(q);
+            }
+        }
+    }
+    false
 }
 
 fn sweep(
@@ -1379,6 +1449,7 @@ fn sweep(
     } else {
         (0..n_layers.saturating_sub(1)).rev().collect()
     };
+    let mut before = Vec::new();
     for li in order {
         let layer = &layers[li];
         let keys: Vec<f64> = layer
@@ -1391,7 +1462,7 @@ fn sweep(
                 if wsum > 0.0 { sum / wsum } else { i as f64 }
             })
             .collect();
-        let new_layer = ctx.arrange(layer, &keys);
+        let new_layer = ctx.arrange(layer, &keys, &mut before);
         for (i, &v) in new_layer.iter().enumerate() {
             pos[v] = i as f64;
         }
@@ -1798,6 +1869,38 @@ mod tests {
                     "slanted: {:?}",
                     r.points
                 );
+            }
+        }
+    }
+
+    /// Two sibling clusters in two layers: `c1 = {0, 2, 4, 6}`, `c0 = {1, 3, 5}`, with
+    /// `2 --> 1` and `0 --> 6`. Each layer was sorted on its own, so the barycenters
+    /// put c1 left of c0 in the first layer and right of it in the second, and the
+    /// two cluster boxes overlapped. Sibling clusters now keep one order over the
+    /// layers.
+    #[test]
+    fn sibling_clusters_keep_their_order_over_layers() {
+        for routing in [
+            EdgeRouting::Splines,
+            EdgeRouting::Orthogonal(OrthoSpacing::ROOT),
+        ] {
+            let c = [1, 0, 1, 0, 1, 0, 1];
+            let mut inp = input(
+                c.iter().map(|&c| node(Some(c))).collect(),
+                vec![edge(2, 1), edge(0, 6)],
+                vec![
+                    LayoutCluster::new(None, 24.0),
+                    LayoutCluster::new(None, 24.0),
+                ],
+                Direction::TopBottom,
+            );
+            inp.routing = routing;
+            let out = layout(&inp);
+            let (a, b) = (out.clusters[0], out.clusters[1]);
+            assert!(!a.intersects(&b), "{routing:?}: {a:?} {b:?}");
+            for (k, r) in rects(&inp, &out).iter().enumerate() {
+                let other = out.clusters[1 - c[k]];
+                assert!(!r.intersects(&other), "{routing:?}: node {k} in {other:?}");
             }
         }
     }
