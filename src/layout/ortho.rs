@@ -86,68 +86,151 @@ impl Jog {
     fn hi(&self) -> f64 {
         self.from.max(self.to)
     }
-    fn covers(&self, x: f64) -> bool {
-        x > self.lo() - 1e-6 && x < self.hi() + 1e-6
-    }
 }
 
-/// Assign every jog of one channel a slot level (0 = nearest the upper layer) and
-/// return the levels and the number of slots used.
+/// ELK's routing-slot assignment for one channel (`OrthogonalRoutingGenerator`),
+/// with every jog a hyperedge segment of its own (mermaid has ELK give each edge
+/// its own ports). Returns the slot of each jog (0 = nearest the upper layer)
+/// and the number of slots.
 ///
-/// Two jogs conflict when their spans come within `gap` of each other. For each
-/// conflicting pair the order with fewer crossings is preferred (a jog placed above
-/// another crosses that one's incoming vertical if it spans the other's `from`, and
-/// is crossed by the other on its own outgoing vertical); the preferences are turned
-/// into a total order greedily (fewest unmet preferences first, which also breaks
-/// cycles), and each jog then takes the lowest level below every conflicting jog
-/// ordered before it.
-pub fn assign_slots(jogs: &[Jog], gap: f64) -> (Vec<usize>, usize) {
+/// Only jogs that would cross or nearly share a vertical run depend on each
+/// other: for each pair, the order with the lower penalty (a crossing weighs 16,
+/// two verticals closer than half the edge spacing 1) is preferred by the
+/// difference; equal non-zero penalties tie both ways. Cycles are broken as
+/// `HyperEdgeCycleDetector` does (a linear ordering from sinks and sources, the
+/// node of largest outflow next, where ELK picks at random among ties the first
+/// here), dropping tied dependencies and reversing the rest; each jog's slot is
+/// then its longest dependency path. ELK splits segments in critical conflicts
+/// (verticals almost on top of each other); here those are plain conflicts.
+pub fn assign_slots_elk(jogs: &[Jog], edge_spacing: f64) -> (Vec<usize>, usize) {
     let n = jogs.len();
-    let conflict = |a: &Jog, b: &Jog| a.lo() < b.hi() + gap && b.lo() < a.hi() + gap;
-    // prefer[a][b]: a should be above b.
-    let mut prefer = vec![vec![false; n]; n];
-    let mut conflicts = vec![vec![false; n]; n];
+    let threshold = 0.5 * edge_spacing;
+    let near = |a: f64, b: f64| usize::from(a > b - threshold && a < b + threshold);
+    let within = |p: f64, j: &Jog| usize::from(p >= j.lo() && p <= j.hi());
+    // deps[a] = (b, weight): a before b.
+    let mut edges: Vec<(usize, usize, i64)> = Vec::new();
     for a in 0..n {
         for b in a + 1..n {
             let (ja, jb) = (&jogs[a], &jogs[b]);
-            if !conflict(ja, jb) {
-                continue;
-            }
-            conflicts[a][b] = true;
-            conflicts[b][a] = true;
-            let a_above = usize::from(ja.covers(jb.from)) + usize::from(jb.covers(ja.to));
-            let b_above = usize::from(jb.covers(ja.from)) + usize::from(ja.covers(jb.to));
-            if a_above < b_above {
-                prefer[a][b] = true;
-            } else if b_above < a_above {
-                prefer[b][a] = true;
+            let c1 = near(ja.to, jb.from) as i64;
+            let c2 = near(jb.to, ja.from) as i64;
+            let x1 = (within(ja.to, jb) + within(jb.from, ja)) as i64;
+            let x2 = (within(jb.to, ja) + within(ja.from, jb)) as i64;
+            let (d1, d2) = (c1 + 16 * x1, c2 + 16 * x2);
+            if d1 < d2 {
+                edges.push((a, b, d2 - d1));
+            } else if d1 > d2 {
+                edges.push((b, a, d1 - d2));
+            } else if d1 > 0 {
+                edges.push((a, b, 0));
+                edges.push((b, a, 0));
             }
         }
     }
-    let mut placed = vec![false; n];
-    let mut order = Vec::with_capacity(n);
-    for _ in 0..n {
-        let unmet = |j: usize| (0..n).filter(|&i| !placed[i] && prefer[i][j]).count();
-        let Some(next) = (0..n)
-            .filter(|&j| !placed[j])
-            .min_by_key(|&j| (unmet(j), j))
-        else {
-            break;
-        };
-        placed[next] = true;
-        order.push(next);
+    // Linear ordering marks (`computeLinearOrderingMarks`).
+    let mut inw = vec![0i64; n];
+    let mut outw = vec![0i64; n];
+    for &(a, b, w) in &edges {
+        outw[a] += w;
+        inw[b] += w;
     }
-    let mut level = vec![0usize; n];
-    for (k, &j) in order.iter().enumerate() {
-        level[j] = order[..k]
-            .iter()
-            .filter(|&&i| conflicts[i][j])
-            .map(|&i| level[i] + 1)
-            .max()
-            .unwrap_or(0);
+    let mut mark: Vec<i64> = (0..n).map(|i| -(i as i64) - 1).collect();
+    let mut sources = std::collections::VecDeque::new();
+    let mut sinks = std::collections::VecDeque::new();
+    for i in 0..n {
+        if outw[i] == 0 {
+            sinks.push_back(i);
+        } else if inw[i] == 0 {
+            sources.push_back(i);
+        }
     }
-    let count = level.iter().map(|l| l + 1).max().unwrap_or(0);
-    (level, count)
+    let base = n as i64;
+    let (mut next_sink, mut next_source) = (base - 1, base + 1);
+    let mut done = vec![false; n];
+    let update = |v: usize,
+                  mark: &[i64],
+                  inw: &mut [i64],
+                  outw: &mut [i64],
+                  sources: &mut std::collections::VecDeque<usize>,
+                  sinks: &mut std::collections::VecDeque<usize>| {
+        for &(a, b, w) in &edges {
+            if a == v && mark[b] < 0 && w > 0 {
+                inw[b] -= w;
+                if inw[b] <= 0 && outw[b] > 0 {
+                    sources.push_back(b);
+                }
+            }
+            if b == v && mark[a] < 0 && w > 0 {
+                outw[a] -= w;
+                if outw[a] <= 0 && inw[a] > 0 {
+                    sinks.push_back(a);
+                }
+            }
+        }
+    };
+    while done.iter().any(|d| !d) {
+        while let Some(v) = sinks.pop_front() {
+            done[v] = true;
+            mark[v] = next_sink;
+            next_sink -= 1;
+            update(v, &mark, &mut inw, &mut outw, &mut sources, &mut sinks);
+        }
+        while let Some(v) = sources.pop_front() {
+            done[v] = true;
+            mark[v] = next_source;
+            next_source += 1;
+            update(v, &mark, &mut inw, &mut outw, &mut sources, &mut sinks);
+        }
+        // Unprocessed in ascending (initial) mark: the last jog first.
+        let mut best: Option<(i64, usize)> = None;
+        for v in (0..n).rev().filter(|&v| !done[v]) {
+            let flow = outw[v] - inw[v];
+            if best.is_none_or(|(f, _)| flow > f) {
+                best = Some((flow, v));
+            }
+        }
+        if let Some((_, v)) = best {
+            done[v] = true;
+            mark[v] = next_source;
+            next_source += 1;
+            update(v, &mark, &mut inw, &mut outw, &mut sources, &mut sinks);
+        }
+    }
+    for m in mark.iter_mut() {
+        if *m < base {
+            *m += base + 1;
+        }
+    }
+    let mut deps: Vec<(usize, usize)> = Vec::new();
+    for &(a, b, w) in &edges {
+        if mark[a] > mark[b] {
+            if w != 0 {
+                deps.push((b, a));
+            }
+        } else {
+            deps.push((a, b));
+        }
+    }
+    // Topological numbering: longest path from the sources.
+    let mut indeg = vec![0usize; n];
+    for &(_, b) in &deps {
+        indeg[b] += 1;
+    }
+    let mut slot = vec![0usize; n];
+    let mut queue: std::collections::VecDeque<usize> = (0..n).filter(|&v| indeg[v] == 0).collect();
+    while let Some(v) = queue.pop_front() {
+        for &(a, b) in &deps {
+            if a == v {
+                slot[b] = slot[b].max(slot[v] + 1);
+                indeg[b] -= 1;
+                if indeg[b] == 0 {
+                    queue.push_back(b);
+                }
+            }
+        }
+    }
+    let count = slot.iter().map(|l| l + 1).max().unwrap_or(0);
+    (slot, count)
 }
 
 /// Drop repeated points and the middle of three collinear points.
@@ -194,7 +277,7 @@ mod tests {
 
     #[test]
     fn disjoint_jogs_share_a_slot() {
-        let (lv, n) = assign_slots(
+        let (lv, n) = assign_slots_elk(
             &[
                 Jog {
                     from: 0.0,
@@ -205,7 +288,7 @@ mod tests {
                     to: 300.0,
                 },
             ],
-            10.0,
+            20.0,
         );
         assert_eq!((lv, n), (vec![0, 0], 1));
     }
@@ -224,7 +307,7 @@ mod tests {
                 to: 110.0,
             },
         ];
-        let (lv, n) = assign_slots(&jogs, 10.0);
+        let (lv, n) = assign_slots_elk(&jogs, 20.0);
         assert_eq!(n, 2);
         assert!(lv[1] < lv[0]);
         // Mirrored: running left, the leftmost start turns first.
@@ -238,7 +321,7 @@ mod tests {
                 to: 10.0,
             },
         ];
-        let (lv, _) = assign_slots(&jogs, 10.0);
+        let (lv, _) = assign_slots_elk(&jogs, 20.0);
         assert!(lv[1] < lv[0]);
     }
 
