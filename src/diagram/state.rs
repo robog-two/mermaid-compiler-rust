@@ -680,4 +680,63 @@ mod tests {
         let note = g.nodes.iter().find(|n| n.shape == Shape::Note).unwrap();
         close(size(note), (150.0, 51.0));
     }
+
+    /// Every stroked shape of a rendered state diagram with the id of the group
+    /// holding it.
+    fn stroked(src: &str) -> Vec<(String, crate::scene::Paint)> {
+        use crate::scene::Element;
+        fn walk(e: &Element, group: &str, out: &mut Vec<(String, crate::scene::Paint)>) {
+            match e {
+                Element::Group { id, children, .. } => {
+                    let g = id.as_deref().unwrap_or(group);
+                    for c in children {
+                        walk(c, g, out);
+                    }
+                }
+                Element::Shape { paint, .. } if paint.stroke_width > 0.0 => {
+                    out.push((group.to_string(), paint.clone()));
+                }
+                _ => {}
+            }
+        }
+        let r =
+            crate::render::render(src, &crate::config::MermaidConfig::default()).expect("renders");
+        let mut out = Vec::new();
+        for e in &r.scene.elements {
+            walk(e, "", &mut out);
+        }
+        out
+    }
+
+    const NOTED: &str = "stateDiagram-v2\n  [*] --> A\n  state c <<choice>>\n  A --> c\n  c --> A : yes\n  note right of A : a note";
+
+    /// The note edge: 2px dashes under the (default) neo look, which writes the
+    /// pattern inline; `.note-edge`'s 5 under the classic look.
+    #[test]
+    fn note_edge_dashes_follow_the_look() {
+        let dash = |src: &str| {
+            stroked(src)
+                .into_iter()
+                .filter(|(g, _)| g.starts_with("L-"))
+                .find_map(|(_, p)| p.dash)
+        };
+        assert_eq!(dash(NOTED), Some(vec![2.0, 2.0]));
+        let classic = format!("---\nconfig:\n  look: classic\n---\n{NOTED}");
+        assert_eq!(dash(&classic), Some(vec![5.0]));
+    }
+
+    /// Choice and note outlines are rough.js paths at its 1.3px.
+    #[test]
+    fn choice_and_note_outlines_are_rough_width() {
+        let shapes = stroked(NOTED);
+        let width = |part: &str| {
+            shapes
+                .iter()
+                .find(|(g, _)| g.starts_with("state-") && g.contains(part))
+                .map(|(_, p)| p.stroke_width)
+        };
+        assert_eq!(width("-c-"), Some(1.3));
+        assert_eq!(width("-note"), Some(1.3));
+        assert_ne!(width("-A-"), Some(1.3));
+    }
 }

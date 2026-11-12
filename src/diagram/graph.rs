@@ -385,6 +385,13 @@ pub struct GraphDiagram {
     pub title: Option<String>,
 }
 
+/// The dash pattern of a dotted or dashed edge under the neo look
+/// (`generateDashArray`'s dash and gap).
+const NEO_DASH: [f64; 2] = [2.0, 2.0];
+
+/// rough.js's stroke width where nothing sets one (`handDrawnShapeStyles`).
+const ROUGH_STROKE_WIDTH: f64 = 1.3;
+
 /// Per-diagram visual conventions.
 struct Look {
     edge_width: f64,
@@ -1333,6 +1340,9 @@ pub fn render_with(
         };
         let mut paint = Paint::stroke(&stroke, width);
         paint.dash = e.style.dash.clone().or_else(|| match e.line {
+            // A neo edge writes its pattern inline (`generateDashArray`): 2px
+            // dashes and gaps, dotted or dashed, outranking the stylesheet's.
+            LineKind::Dotted | LineKind::Dashed if neo => Some(NEO_DASH.to_vec()),
             LineKind::Dotted => Some(lk.dotted_dash.clone()),
             LineKind::Dashed => Some(lk.dashed_dash.clone()),
             _ => None,
@@ -2374,10 +2384,16 @@ fn node_elements(
         .stroke
         .clone()
         .unwrap_or_else(|| default_stroke.clone());
+    // A state's choice and note outlines are rough.js paths no stylesheet rule
+    // reaches: `strokeWidth` falls back to rough's 1.3 (`userNodeOverrides`).
+    let default_width = match (kind, n.shape) {
+        (DiagramKind::State, Shape::Choice | Shape::Note) => ROUGH_STROKE_WIDTH,
+        _ => lk.node_stroke_width,
+    };
     let mut paint = Paint::both(
         &fill,
         &stroke,
-        n.style.stroke_width.unwrap_or(lk.node_stroke_width),
+        n.style.stroke_width.unwrap_or(default_width),
     );
     paint.dash = n.style.dash.clone();
     let text_color = n.style.color.clone().unwrap_or_else(|| {

@@ -1959,7 +1959,9 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let pts = &mut drawn_routes[k];
         let last = pts.len() - 1;
         for (head, at, from) in [(e.end, last, last - 1), (e.start, 0, 1)] {
-            let back = markers::pullback(head);
+            // The marker's pull-back and, under the neo look, the end the path
+            // leaves undrawn beneath it (as `graph` does).
+            let back = markers::pullback_for(head, neo) + markers::hidden_end(head, neo);
             if back > 0.0 && pts[at].dist(pts[from]) > back {
                 let dir = pts[at].minus(pts[from]).norm();
                 pts[at] = pts[at].minus(dir.scale(back));
@@ -2694,5 +2696,40 @@ G2 --> E";
     fn bad_input_is_a_parse_error() {
         assert!(parse("swimlane-beta XY\n a --> b", None).is_err());
         assert!(parse("swimlane-beta\nsubgraph A\n a", None).is_err());
+    }
+
+    /// Under the neo look a circle or cross head leaves the last 12.5px of its
+    /// line undrawn beneath it (`markerOffsets2`), as `graph` does.
+    #[test]
+    fn neo_circle_head_leaves_the_line_end_undrawn() {
+        let end = |look: &str| -> Point {
+            let src = format!(
+                "---\nconfig:\n  look: {look}\n---\nswimlane-beta\nsubgraph L\n  a\n  b\nend\na --o b"
+            );
+            let r = crate::render::render(&src, &MermaidConfig::default()).expect("renders");
+            fn find(e: &Element) -> Option<Point> {
+                match e {
+                    Element::Group {
+                        class: Some(c),
+                        children,
+                        ..
+                    } if c == "edgePath" => children.iter().find_map(|c| match c {
+                        Element::Shape {
+                            geom: Geometry::Path(cmds),
+                            ..
+                        } => cmds.iter().rev().find_map(|c| match c {
+                            PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(*p),
+                            _ => None,
+                        }),
+                        _ => None,
+                    }),
+                    Element::Group { children, .. } => children.iter().find_map(find),
+                    _ => None,
+                }
+            }
+            r.scene.elements.iter().find_map(find).expect("edge path")
+        };
+        let (classic, neo) = (end("classic"), end("neo"));
+        assert!(classic.dist(neo) >= 12.5 - 1e-6, "{classic:?} {neo:?}");
     }
 }
