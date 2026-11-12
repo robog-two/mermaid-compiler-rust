@@ -218,6 +218,26 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     let mut links: Vec<(usize, usize, f64)> = Vec::new();
     // Per edge: chain in oriented order, label vertex.
     let mut chains: Vec<Option<Chain>> = vec![None; input.edges.len()];
+    // Under ELK an edge into (out of) a cluster enters (leaves) it through a port on
+    // its border and runs inside it over the ranks the cluster spans, rather than
+    // outside it until the last rank: it would otherwise cross the cluster's side,
+    // and so its title in LR / RL, in the channel before its end.
+    let orthogonal = matches!(input.routing, EdgeRouting::Orthogonal(_));
+    let rank_span: Vec<Option<(usize, usize)>> = if orthogonal {
+        let mut span = vec![None; input.clusters.len()];
+        for (v, nd) in input.nodes.iter().enumerate() {
+            for &c in nd.cluster.map_or(&[][..], |c| &cluster_chain[c][..]) {
+                let r = ranks[v];
+                span[c] = Some(match span[c] {
+                    Some((lo, hi)) => (r.min(lo), r.max(hi)),
+                    None => (r, r),
+                });
+            }
+        }
+        span
+    } else {
+        Vec::new()
+    };
     for (ei, o) in oriented.iter().enumerate() {
         let Some(o) = o else { continue };
         let (ru, rv) = (ranks[o.from], ranks[o.to]);
@@ -231,6 +251,22 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
         );
         let mut chain = vec![o.from];
         let mut label_vertex = None;
+        // The deepest cluster of either end (below their common one) spanning `r`.
+        let cluster_at = |r: usize| -> Option<usize> {
+            let base = dummy_cluster.map_or(0, |c| cluster_chain[c].len());
+            [o.from, o.to]
+                .into_iter()
+                .filter_map(|end| input.nodes[end].cluster)
+                .filter_map(|c| {
+                    cluster_chain[c][base..]
+                        .iter()
+                        .take_while(|&&a| rank_span[a].is_some_and(|(lo, hi)| lo <= r && r <= hi))
+                        .last()
+                        .copied()
+                })
+                .max_by_key(|&a| cluster_chain[a].len())
+                .or(dummy_cluster)
+        };
         for r in ru + 1..rv {
             let is_label = label.is_some() && r == label_rank;
             let (w, h) = if is_label {
@@ -243,7 +279,11 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
                 rank: r,
                 w,
                 h,
-                cluster: dummy_cluster,
+                cluster: if orthogonal {
+                    cluster_at(r)
+                } else {
+                    dummy_cluster
+                },
             });
             let id = verts.len() - 1;
             if is_label {
@@ -1684,6 +1724,35 @@ mod tests {
                     }
                     taken.push(lr);
                 }
+            }
+        }
+    }
+
+    /// LR: `s --> a`, `a --> b`, `s --> b` with `a`, `b` in a titled cluster. Under ELK
+    /// the long edge enters the cluster across its side facing `s` and runs inside it,
+    /// rather than staying outside until `b`'s rank and dropping in across the
+    /// cluster's top border, where its title is.
+    #[test]
+    fn orthogonal_edge_into_cluster_enters_across_its_side() {
+        let mut inp = input(
+            vec![node(None), node(Some(0)), node(Some(0)), node(None)],
+            vec![edge(0, 1), edge(1, 2), edge(0, 2), edge(3, 1), edge(3, 2)],
+            vec![LayoutCluster::new(None, 24.0)],
+            Direction::LeftRight,
+        );
+        inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+        let out = layout(&inp);
+        let c = out.clusters[0];
+        for (ei, r) in out.edges.iter().enumerate() {
+            for w in r.points.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let across = |y: f64| a.y.min(b.y) < y - 0.5 && a.y.max(b.y) > y + 0.5;
+                let inside = a.x > c.x + 0.5 && a.x < c.right() - 0.5;
+                assert!(
+                    !(inside && (across(c.y) || across(c.bottom()))),
+                    "edge {ei} crosses the top / bottom of {c:?}: {:?}",
+                    r.points
+                );
             }
         }
     }
