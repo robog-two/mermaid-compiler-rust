@@ -251,16 +251,27 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
         );
         let mut chain = vec![o.from];
         let mut label_vertex = None;
-        // The deepest cluster of either end (below their common one) spanning `r`.
+        // The deepest cluster of either end (below their common one) spanning `r`;
+        // not a cluster the edge attaches to as a whole: it is cut at that one's
+        // border, and its label stays outside.
+        let e = &input.edges[ei];
+        let (whole_from, whole_to) = if o.reversed {
+            (e.to_cluster, e.from_cluster)
+        } else {
+            (e.from_cluster, e.to_cluster)
+        };
         let cluster_at = |r: usize| -> Option<usize> {
             let base = dummy_cluster.map_or(0, |c| cluster_chain[c].len());
-            [o.from, o.to]
+            [(o.from, whole_from), (o.to, whole_to)]
                 .into_iter()
-                .filter_map(|end| input.nodes[end].cluster)
-                .filter_map(|c| {
+                .filter_map(|(end, whole)| Some((input.nodes[end].cluster?, whole)))
+                .filter_map(|(c, whole)| {
                     cluster_chain[c][base..]
                         .iter()
-                        .take_while(|&&a| rank_span[a].is_some_and(|(lo, hi)| lo <= r && r <= hi))
+                        .take_while(|&&a| {
+                            Some(a) != whole
+                                && rank_span[a].is_some_and(|(lo, hi)| lo <= r && r <= hi)
+                        })
                         .last()
                         .copied()
                 })

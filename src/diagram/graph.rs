@@ -2834,6 +2834,65 @@ mod tests {
         assert!(corners >= 4, "fan-out / fan-in edges bend");
     }
 
+    /// `n1 -- lbl --> g0` where the cluster constraints contradict (`n2 --o n1` runs
+    /// from inside g0 back to n1): the edge is ranked to its plain end deep inside
+    /// g0 and cut at g0's border, and its label must stay on the drawn part instead
+    /// of floating inside the cluster.
+    #[test]
+    fn elk_label_of_an_edge_to_a_cluster_stays_on_the_drawn_edge() {
+        let (_, scene) = render_flowchart(
+            "flowchart BT\nn0[(N0)]\nn1[/N1/]\nn2(N2)\nn3[(N3)]\nsubgraph g0\ndirection BT\n\
+             n2\nn3\nend\nn2 --o n1\nn2 ==> n2\nn1 -- lbl --> g0\nn0 ==> n3\nn1 --- n0",
+        );
+        let label = scene
+            .elements
+            .iter()
+            .find_map(|e| match e {
+                Element::Group {
+                    class: Some(c),
+                    children,
+                    ..
+                } if c == "edgeLabels" => Some(children),
+                _ => None,
+            })
+            .and_then(|ls| {
+                ls.iter().find_map(|l| match l {
+                    Element::Group { children, .. } => match children.first() {
+                        Some(Element::Shape {
+                            geom: Geometry::Rect { rect, .. },
+                            ..
+                        }) => Some(rect.center()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+            })
+            .expect("a label");
+        let on_edge = edge_paths(&scene).iter().any(|cmds| {
+            let mut at = Point::new(f64::NAN, f64::NAN);
+            cmds.iter().any(|c| match *c {
+                PathCmd::MoveTo(p) => {
+                    at = p;
+                    false
+                }
+                PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => {
+                    let hit = Rect::new(
+                        at.x.min(p.x),
+                        at.y.min(p.y),
+                        (at.x - p.x).abs(),
+                        (at.y - p.y).abs(),
+                    )
+                    .pad(1.0)
+                    .contains(label);
+                    at = p;
+                    hit
+                }
+                _ => false,
+            })
+        });
+        assert!(on_edge, "label at {label:?} is off its edge");
+    }
+
     /// An edge from a cluster to its own member is drawn in the direction the layout
     /// really used inside the cluster: an ancestor's `direction` that an edge across
     /// its border cancelled does not apply, so the route comes in from the top (TB)
