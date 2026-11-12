@@ -43,10 +43,10 @@ pub enum BlockShape {
     Trapezoid,
     InvTrapezoid,
     /// Block arrow pointing in the given directions.
-    Arrow(ArrowDir),
+    Arrow(ArrowDirs),
 }
 
-/// Block-arrow directions (`x`/`y` = double-headed horizontal/vertical).
+/// One block-arrow direction as written (`x`/`y` = both horizontal/vertical ones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArrowDir {
     Right,
@@ -55,6 +55,47 @@ pub enum ArrowDir {
     Down,
     X,
     Y,
+}
+
+impl ArrowDir {
+    fn parse(s: &str) -> Option<ArrowDir> {
+        Some(match s {
+            "right" => ArrowDir::Right,
+            "left" => ArrowDir::Left,
+            "up" => ArrowDir::Up,
+            "down" => ArrowDir::Down,
+            "x" => ArrowDir::X,
+            "y" => ArrowDir::Y,
+            _ => return None,
+        })
+    }
+}
+
+/// The set of directions a block arrow points in (`block.jison`'s `dirList`,
+/// expanded and deduplicated as `blockArrow.ts` does).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ArrowDirs {
+    pub right: bool,
+    pub left: bool,
+    pub up: bool,
+    pub down: bool,
+}
+
+impl ArrowDirs {
+    pub fn of(dirs: &[ArrowDir]) -> ArrowDirs {
+        let mut d = ArrowDirs::default();
+        for dir in dirs {
+            match dir {
+                ArrowDir::Right => d.right = true,
+                ArrowDir::Left => d.left = true,
+                ArrowDir::Up => d.up = true,
+                ArrowDir::Down => d.down = true,
+                ArrowDir::X => (d.right, d.left) = (true, true),
+                ArrowDir::Y => (d.up, d.down) = (true, true),
+            }
+        }
+        d
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,7 +188,16 @@ const SHAPES: [(&str, &str, BlockShape); 15] = [
     ("[\\", "\\]", BlockShape::LeanLeft),
     ("[\\", "/]", BlockShape::InvTrapezoid),
     ("{{", "}}", BlockShape::Hexagon),
-    ("<[", "]>", BlockShape::Arrow(ArrowDir::Right)),
+    (
+        "<[",
+        "]>",
+        BlockShape::Arrow(ArrowDirs {
+            right: true,
+            left: false,
+            up: false,
+            down: false,
+        }),
+    ),
     ("{", "}", BlockShape::Diamond),
     ("(", ")", BlockShape::Rounded),
     ("[", "]", BlockShape::Rect),
@@ -264,15 +314,26 @@ fn tokenize(s: &str, line_no: usize) -> Result<Vec<Tok>> {
                     .ok_or_else(|| err("Expecting ')'"))?;
                 let dir: String = b[i + 1..i + end].iter().collect();
                 i += end + 1;
-                BlockShape::Arrow(match dir.trim() {
-                    "right" => ArrowDir::Right,
-                    "left" => ArrowDir::Left,
-                    "up" => ArrowDir::Up,
-                    "down" => ArrowDir::Down,
-                    "x" => ArrowDir::X,
-                    "y" => ArrowDir::Y,
-                    d => return Err(err(&format!("Unknown block arrow direction '{d}'"))),
-                })
+                // block.jison ARROW_DIR: one or more `,?\s*(right|left|x|y|up|down)\s*`.
+                let mut dirs = Vec::new();
+                let mut rest = dir.trim_start();
+                while !rest.is_empty() {
+                    if !dirs.is_empty() {
+                        rest = rest.strip_prefix(',').unwrap_or(rest).trim_start();
+                    }
+                    let n = rest
+                        .find(|c: char| c == ',' || c.is_whitespace())
+                        .unwrap_or(rest.len());
+                    let d = ArrowDir::parse(&rest[..n]).ok_or_else(|| {
+                        err(&format!("Unknown block arrow direction '{}'", dir.trim()))
+                    })?;
+                    dirs.push(d);
+                    rest = rest[n..].trim_start();
+                }
+                if dirs.is_empty() {
+                    return Err(err("Expecting a block arrow direction like '(right)'"));
+                }
+                BlockShape::Arrow(ArrowDirs::of(&dirs))
             } else {
                 sh
             };
@@ -658,6 +719,9 @@ pub struct Metrics {
     /// `block.padding`: gap between blocks and inset of composites.
     pub pad: f64,
 }
+
+/// A block node's `padding` (`block.padding`, 8) as the shapes see it.
+const NODE_PADDING: f64 = 8.0;
 
 fn node_size(label: &str, shape: BlockShape, font: f64) -> (f64, f64) {
     let tb = TextBlock::label(label, font);
@@ -1081,7 +1145,7 @@ pub(crate) fn shape_elements(shape: BlockShape, r: Rect, paint: &Paint) -> (Vec<
                 Point::new(x0 + k, c.y),
             ])
         }
-        BlockShape::Arrow(dir) => poly(block_arrow(r, dir)),
+        BlockShape::Arrow(dirs) => poly(block_arrow(r, dirs, NODE_PADDING)),
     }
 }
 
@@ -1090,88 +1154,116 @@ fn cylinder_ry(r: Rect) -> f64 {
     (r.w / 2.0 / (2.5 + r.w / 50.0)).min(r.h / 5.0)
 }
 
-/// Polygon of a block arrow filling `r`.
-fn block_arrow(r: Rect, dir: ArrowDir) -> Vec<Point> {
-    let c = r.center();
-    // Horizontal template: shaft half-height `s`, head length `hl`.
-    let horiz = |double: bool, flip: bool| {
-        let hl = (r.h / 2.0).min(r.w / 3.0);
-        let s = r.h * 0.3;
-        let (x0, x1) = (r.x, r.right());
-        let mut pts = if double {
-            vec![
-                Point::new(x0, c.y),
-                Point::new(x0 + hl, r.y),
-                Point::new(x0 + hl, c.y - s),
-                Point::new(x1 - hl, c.y - s),
-                Point::new(x1 - hl, r.y),
-                Point::new(x1, c.y),
-                Point::new(x1 - hl, r.bottom()),
-                Point::new(x1 - hl, c.y + s),
-                Point::new(x0 + hl, c.y + s),
-                Point::new(x0 + hl, r.bottom()),
-            ]
-        } else {
-            vec![
-                Point::new(x0, c.y - s),
-                Point::new(x1 - hl, c.y - s),
-                Point::new(x1 - hl, r.y),
-                Point::new(x1, c.y),
-                Point::new(x1 - hl, r.bottom()),
-                Point::new(x1 - hl, c.y + s),
-                Point::new(x0, c.y + s),
-            ]
-        };
-        if flip {
-            for p in &mut pts {
-                p.x = 2.0 * c.x - p.x;
-            }
-        }
-        pts
+/// Polygon of a block arrow in `r` (`blockArrow.ts` `getArrowPoints`): `pad` is the
+/// node padding; points are laid out from the bottom-left corner upwards, and the
+/// polygon of each direction set is upstream's (some, such as `up`, `down` or
+/// `right|left|down`, are not arrow-like there either).
+fn block_arrow(r: Rect, dirs: ArrowDirs, pad: f64) -> Vec<Point> {
+    let p = pad / 2.0;
+    let (h, w) = (r.h, r.w);
+    let m = h / 2.0;
+    let key = (dirs.right, dirs.left, dirs.up, dirs.down);
+    let pts: Vec<(f64, f64)> = match key {
+        (true, true, true, true) => vec![
+            (0.0, 0.0),
+            (m, 0.0),
+            (w / 2.0, 2.0 * p),
+            (w - m, 0.0),
+            (w, 0.0),
+            (w, -h / 3.0),
+            (w + 2.0 * p, -h / 2.0),
+            (w, -2.0 * h / 3.0),
+            (w, -h),
+            (w - m, -h),
+            (w / 2.0, -h - 2.0 * p),
+            (m, -h),
+            (0.0, -h),
+            (0.0, -2.0 * h / 3.0),
+            (-2.0 * p, -h / 2.0),
+            (0.0, -h / 3.0),
+        ],
+        (true, true, true, false) => vec![
+            (m, 0.0),
+            (w - m, 0.0),
+            (w, -h / 2.0),
+            (w - m, -h),
+            (m, -h),
+            (0.0, -h / 2.0),
+        ],
+        (true, true, false, true) => vec![(0.0, 0.0), (m, -h), (w - m, -h), (w, 0.0)],
+        (true, false, true, true) => vec![(0.0, 0.0), (w, -m), (w, -h + m), (0.0, -h)],
+        (false, true, true, true) => vec![(w, 0.0), (0.0, -m), (0.0, -h + m), (w, -h)],
+        (true, true, false, false) => vec![
+            (m, 0.0),
+            (m, -p),
+            (w - m, -p),
+            (w - m, 0.0),
+            (w, -h / 2.0),
+            (w - m, -h),
+            (w - m, -h + p),
+            (m, -h + p),
+            (m, -h),
+            (0.0, -h / 2.0),
+        ],
+        (false, false, true, true) => vec![
+            (w / 2.0, 0.0),
+            (0.0, -p),
+            (m, -p),
+            (m, -h + p),
+            (0.0, -h + p),
+            (w / 2.0, -h),
+            (w, -h + p),
+            (w - m, -h + p),
+            (w - m, -p),
+            (w, -p),
+        ],
+        (true, false, true, false) => vec![(0.0, 0.0), (w, -m), (0.0, -h)],
+        (true, false, false, true) => vec![(0.0, 0.0), (w, 0.0), (0.0, -h)],
+        (false, true, true, false) => vec![(w, 0.0), (0.0, -m), (w, -h)],
+        (false, true, false, true) => vec![(w, 0.0), (0.0, 0.0), (w, -h)],
+        (true, false, false, false) => vec![
+            (m, -p),
+            (m, -p),
+            (w - m, -p),
+            (w - m, 0.0),
+            (w, -h / 2.0),
+            (w - m, -h),
+            (w - m, -h + p),
+            (m, -h + p),
+            (m, -h + p),
+        ],
+        (false, true, false, false) => vec![
+            (m, 0.0),
+            (m, -p),
+            (w - m, -p),
+            (w - m, -h + p),
+            (m, -h + p),
+            (m, -h),
+            (0.0, -h / 2.0),
+        ],
+        (false, false, true, false) => vec![
+            (m, -p),
+            (m, -h + p),
+            (0.0, -h + p),
+            (w / 2.0, -h),
+            (w, -h + p),
+            (w - m, -h + p),
+            (w - m, -p),
+        ],
+        (false, false, false, true) => vec![
+            (w / 2.0, 0.0),
+            (0.0, -p),
+            (m, -p),
+            (m, -h + p),
+            (w - m, -h + p),
+            (w - m, -p),
+            (w, -p),
+        ],
+        (false, false, false, false) => vec![(0.0, 0.0)],
     };
-    let vert = |double: bool, flip: bool| {
-        let hl = (r.w / 2.0).min(r.h / 3.0);
-        let s = r.w * 0.3;
-        let (y0, y1) = (r.y, r.bottom());
-        let mut pts = if double {
-            vec![
-                Point::new(c.x, y0),
-                Point::new(r.right(), y0 + hl),
-                Point::new(c.x + s, y0 + hl),
-                Point::new(c.x + s, y1 - hl),
-                Point::new(r.right(), y1 - hl),
-                Point::new(c.x, y1),
-                Point::new(r.x, y1 - hl),
-                Point::new(c.x - s, y1 - hl),
-                Point::new(c.x - s, y0 + hl),
-                Point::new(r.x, y0 + hl),
-            ]
-        } else {
-            vec![
-                Point::new(c.x - s, y0),
-                Point::new(c.x + s, y0),
-                Point::new(c.x + s, y1 - hl),
-                Point::new(r.right(), y1 - hl),
-                Point::new(c.x, y1),
-                Point::new(r.x, y1 - hl),
-                Point::new(c.x - s, y1 - hl),
-            ]
-        };
-        if flip {
-            for p in &mut pts {
-                p.y = 2.0 * c.y - p.y;
-            }
-        }
-        pts
-    };
-    match dir {
-        ArrowDir::Right => horiz(false, false),
-        ArrowDir::Left => horiz(false, true),
-        ArrowDir::X => horiz(true, false),
-        ArrowDir::Down => vert(false, false),
-        ArrowDir::Up => vert(false, true),
-        ArrowDir::Y => vert(true, false),
-    }
+    pts.into_iter()
+        .map(|(x, y)| Point::new(r.x + x, r.bottom() + y))
+        .collect()
 }
 
 /// Render a block diagram.
@@ -1507,7 +1599,7 @@ class c hot
             d.children[6].kind,
             BlockKind::Node {
                 label: "go".into(),
-                shape: BlockShape::Arrow(ArrowDir::Down)
+                shape: BlockShape::Arrow(ArrowDirs::of(&[ArrowDir::Down]))
             }
         );
         assert_eq!(d.edges.len(), 3);
@@ -1633,6 +1725,65 @@ class c hot
             assert!(c.rect.y >= comp.rect.y && c.rect.bottom() <= comp.rect.bottom() + 0.5);
         }
         assert!(!comp.children[0].rect.intersects(&comp.children[1].rect));
+    }
+
+    #[test]
+    fn block_arrows_take_a_list_of_directions() {
+        let d = parse(
+            "block\n  a<[\"A\"]>(x, down)\n  b<[\"B\"]>( y )\n  c<[\"C\"]>(right,left up)",
+            None,
+        )
+        .unwrap();
+        let dirs = |i: usize| match &d.children[i].kind {
+            BlockKind::Node {
+                shape: BlockShape::Arrow(a),
+                ..
+            } => *a,
+            k => panic!("{k:?}"),
+        };
+        let all = |r, l, u, dn| ArrowDirs {
+            right: r,
+            left: l,
+            up: u,
+            down: dn,
+        };
+        assert_eq!(dirs(0), all(true, true, false, true));
+        assert_eq!(dirs(1), all(false, false, true, true));
+        assert_eq!(dirs(2), all(true, true, true, false));
+        assert!(parse("block\n  a<[\"A\"]>(sideways)", None).is_err());
+        assert!(parse("block\n  a<[\"A\"]>()", None).is_err());
+    }
+
+    #[test]
+    fn block_arrow_polygons_follow_get_arrow_points() {
+        // `x, down` is upstream's trapezoid; points run from the bottom-left corner.
+        let r = Rect::new(0.0, 0.0, 87.15625, 40.0);
+        let one = |r: bool, l: bool, u: bool, d: bool| {
+            block_arrow(
+                Rect::new(0.0, 0.0, 87.15625, 40.0),
+                ArrowDirs {
+                    right: r,
+                    left: l,
+                    up: u,
+                    down: d,
+                },
+                8.0,
+            )
+        };
+        let p = one(true, true, false, true);
+        let xy: Vec<(f64, f64)> = p.iter().map(|p| (p.x, p.y)).collect();
+        assert_eq!(
+            xy,
+            [(0.0, 40.0), (20.0, 0.0), (67.15625, 0.0), (87.15625, 40.0)]
+        );
+        // `right`: shaft inset by padding / 2, head from `width - midpoint`.
+        let p = one(true, false, false, false);
+        assert_eq!((p[2].x, p[2].y), (67.15625, 36.0));
+        assert_eq!((p[4].x, p[4].y), (r.w, 20.0));
+        // `up|down` (`y`) is a double-headed vertical arrow.
+        let p = one(false, false, true, true);
+        assert_eq!((p[0].x, p[0].y), (r.w / 2.0, 40.0));
+        assert_eq!((p[5].x, p[5].y), (r.w / 2.0, 0.0));
     }
 
     #[test]

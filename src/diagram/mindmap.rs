@@ -16,7 +16,7 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{TextBlock, line_width};
+use crate::text::{BreakRule, TextBlock, line_width};
 use crate::theme::Palette;
 
 /// Node shapes.
@@ -58,8 +58,8 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Mindmap> {
         nodes: Vec::new(),
     };
     let mut header = false;
-    for (i, raw) in body.lines().enumerate() {
-        let line_no = i + 1;
+    for (line_no, raw) in logical_lines(body) {
+        let raw = raw.as_str();
         let t = raw.trim();
         if t.is_empty() {
             continue;
@@ -168,6 +168,32 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Mindmap> {
     Ok(mm)
 }
 
+/// The body's lines with each `"string"` (plain or markdown) that runs over line
+/// ends joined into one line, as mindmap.jison's `NSTR` / `NSTR2` states match
+/// newlines. Each line keeps its 1-based starting line number. A string never
+/// closed is left to fail on its own line.
+fn logical_lines(body: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let mut cur = lines[i].to_string();
+        let mut j = i;
+        while cur.matches('"').count() % 2 == 1 && j + 1 < lines.len() {
+            j += 1;
+            cur.push('\n');
+            cur.push_str(lines[j]);
+        }
+        if cur.matches('"').count() % 2 == 1 {
+            j = i;
+            cur = lines[i].to_string();
+        }
+        out.push((i + 1, cur));
+        i = j + 1;
+    }
+    out
+}
+
 const DELIMS: [(&str, &str, NodeShape); 7] = [
     ("((", "))", NodeShape::Circle),
     ("))", "((", NodeShape::Bang),
@@ -252,40 +278,50 @@ impl Placed {
     }
 }
 
-/// Greedy word wrap at `max` pixels.
-fn wrap(text: &str, font: f64, max: f64) -> Vec<String> {
-    let mut out = Vec::new();
-    for para in crate::text::label_lines(text) {
-        let mut cur = String::new();
-        for word in para.split_whitespace() {
-            let cand = if cur.is_empty() {
-                word.to_string()
-            } else {
-                format!("{cur} {word}")
-            };
-            if !cur.is_empty() && line_width(&cand, font, false) > max {
-                out.push(std::mem::replace(&mut cur, word.to_string()));
-            } else {
-                cur = cand;
-            }
-        }
-        out.push(cur);
-    }
-    out
+/// Wrap a label as labelHelper's `createText` does: mindmap labels are always
+/// markdown (`labelType: 'markdown'`), laid out in a `div` of `max-width: width`
+/// that is given the whole width once a line had to wrap. Returns the lines and
+/// the label's width.
+fn wrap(text: &str, font: f64, width: f64) -> (Vec<String>, f64) {
+    let raw = crate::text::markdown_lines(text);
+    let natural = raw
+        .iter()
+        .map(|l| line_width(l, font, false))
+        .fold(0.0, f64::max);
+    let lines = crate::text::wrap_lines(&raw, width, font, false, BreakRule::Browser);
+    let tw = if natural > width {
+        width
+    } else {
+        TextBlock::new(lines.clone(), font, false).width
+    };
+    (lines, tw)
 }
 
-fn measure(n: &Node, font: f64, padding: f64, max_w: f64) -> (Vec<String>, f64, f64) {
-    let lines = wrap(&n.label, font, max_w);
+/// Label widths: `mindmap.maxNodeWidth` and `flowchart.wrappingWidth`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Widths {
+    pub max_node: f64,
+    pub wrapping: f64,
+}
+
+fn measure(n: &Node, font: f64, padding: f64, widths: Widths) -> (Vec<String>, f64, f64) {
+    // mindmapRenderer (12.3) zeroes `width` of rect, rounded and hexagon nodes, so
+    // labelHelper wraps those at `flowchart.wrappingWidth`; the rest at maxNodeWidth.
+    let width = match n.shape {
+        NodeShape::Square | NodeShape::Rounded | NodeShape::Hexagon => widths.wrapping,
+        _ => widths.max_node,
+    };
+    let (lines, tw) = wrap(&n.label, font, width);
     let tb = TextBlock::new(lines.clone(), font, false);
-    let (tw, th) = (tb.width, tb.height.max(font * 1.5));
+    let th = tb.height.max(font * 1.5);
     let (w, h) = match n.shape {
         // defaultMindmapNode.ts: w = tw + 8·(p/2), h = th + 2·(p/2).
         NodeShape::Default => (tw + 4.0 * padding, th + padding),
-        // mindmapDb doubles the padding for rect / rounded / hexagon, then
-        // squareRect (tw + 4p', th + 2p'), roundedRect (tw + 2p', th + 2p') and
-        // hexagon (h = th + p', w = tw + p' + h/2) apply it.
-        NodeShape::Square => (tw + 8.0 * padding, th + 4.0 * padding),
-        NodeShape::Rounded => (tw + 4.0 * padding, th + 4.0 * padding),
+        // mindmapRenderer (12.3) sets the padding of rect nodes to 10 and of rounded
+        // ones to 15; `rect` is tw + 4p × th + 2p, `rounded` tw + 2p × th + 2p.
+        NodeShape::Square => (tw + 40.0, th + 20.0),
+        NodeShape::Rounded => (tw + 30.0, th + 30.0),
+        // mindmapDb doubles the hexagon's padding: h = th + p', w = tw + p' + h/2.
         NodeShape::Hexagon => {
             let h = th + 2.0 * padding;
             (tw + 2.0 * padding + h / 2.0, h)
@@ -305,13 +341,13 @@ const H_GAP: f64 = 70.0;
 const V_GAP: f64 = 18.0;
 
 /// Lay out the tree. Returns one `Placed` per node (same indices as `mm.nodes`).
-pub fn layout(mm: &Mindmap, font: f64, padding: f64, max_w: f64) -> Vec<Placed> {
+pub fn layout(mm: &Mindmap, font: f64, padding: f64, widths: Widths) -> Vec<Placed> {
     let n = mm.nodes.len();
     let mut placed: Vec<Placed> = mm
         .nodes
         .iter()
         .map(|nd| {
-            let (lines, w, h) = measure(nd, font, padding, max_w);
+            let (lines, w, h) = measure(nd, font, padding, widths);
             Placed {
                 center: Point::default(),
                 w,
@@ -392,8 +428,11 @@ pub fn render(
 ) -> Result<Scene> {
     let mm = parse(body, title)?;
     let padding = cfg.section_f64("mindmap", "padding", 10.0);
-    let max_w = cfg.section_f64("mindmap", "maxNodeWidth", 200.0);
-    let placed = layout(&mm, pal.font_size, padding, max_w);
+    let widths = Widths {
+        max_node: cfg.section_f64("mindmap", "maxNodeWidth", 200.0),
+        wrapping: cfg.section_f64("flowchart", "wrappingWidth", 120.0),
+    };
+    let placed = layout(&mm, pal.font_size, padding, widths);
     Ok(draw(&mm, &placed, pal))
 }
 
@@ -638,6 +677,11 @@ fn bang(r: Rect) -> Vec<PathCmd> {
 mod tests {
     use super::*;
 
+    const W: Widths = Widths {
+        max_node: 200.0,
+        wrapping: 120.0,
+    };
+
     const SRC: &str = "mindmap
   root((mindmap))
     Origins
@@ -701,7 +745,7 @@ mod tests {
     #[test]
     fn layout_has_no_overlaps_and_both_sides() {
         let mm = parse(SRC, None).unwrap();
-        let p = layout(&mm, 16.0, 10.0, 200.0);
+        let p = layout(&mm, 16.0, 10.0, W);
         for i in 0..p.len() {
             for j in i + 1..p.len() {
                 let (a, b) = (p[i].rect(), p[j].rect());
@@ -721,6 +765,44 @@ mod tests {
         assert!(right > 0 && left > 0);
         // Wrapped long label stays within maxNodeWidth (+ padding).
         assert!(p.iter().all(|n| n.w <= 200.0 + 60.0));
+    }
+
+    #[test]
+    fn markdown_strings_may_span_lines_and_wrap_at_the_wrapping_width() {
+        let src = "mindmap
+    id1[\"`**Root** with
+a second line
+Unicode works too: 🤓`\"]
+      id2[\"`The dog in **the** hog... a *very long text* that wraps to a new line`\"]
+      id3[Regular labels still works]
+      id4)\"multi
+line\"(";
+        let mm = parse(src, None).unwrap();
+        assert_eq!(mm.nodes.len(), 4);
+        assert_eq!(
+            mm.nodes[0].label,
+            "**Root** with\na second line\nUnicode works too: 🤓"
+        );
+        assert_eq!(mm.nodes[2].parent, Some(0));
+        assert_eq!(mm.nodes[3].label, "multi\nline");
+        let p = layout(&mm, 16.0, 10.0, W);
+        let plain = |i: usize| -> Vec<String> {
+            p[i].lines.iter().map(|l| crate::text::plain(l)).collect()
+        };
+        // Rect nodes wrap at 120 and take the whole width (+ 4 × 10 padding).
+        assert_eq!(
+            plain(0),
+            ["Root with", "a second line", "Unicode works", "too: 🤓"]
+        );
+        assert_eq!(plain(2), ["Regular labels", "still works"]);
+        assert_eq!((p[2].w, p[2].h), (160.0, 68.0));
+        assert!(crate::text::has_marks(&p[0].lines[0]));
+        // A cloud wraps at maxNodeWidth and is not widened.
+        assert_eq!(plain(3), ["multi", "line"]);
+        assert!(p[3].w < 120.0);
+        // An unclosed string still fails on its own line.
+        let e = parse("mindmap\n  root\n    a[\"open\n    b", None).unwrap_err();
+        assert!(matches!(e, Error::Parse { line: 3, .. }), "{e:?}");
     }
 
     #[test]

@@ -1706,6 +1706,7 @@ pub fn render(
     let ro = RenderOptions {
         min_label_width: cfg.section_f64("agentflow", "minNodeWidth", 120.0),
         subgraph_title_margin: cfg.subgraph_title_margin(),
+        ..Default::default()
     };
     Ok(graph::render_with(&g, &graph_config(cfg), pal, &ro))
 }

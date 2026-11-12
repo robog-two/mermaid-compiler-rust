@@ -638,6 +638,9 @@ pub struct RenderOptions {
     /// moves a `rect` cluster's title down by `top` and every edge label down by
     /// `(top + bottom) / 2` (`positionEdgeLabel`); the layout itself is unchanged.
     pub subgraph_title_margin: (f64, f64),
+    /// `markdownAutoWrap: false`: markdown-string node and edge labels keep their
+    /// lines unwrapped (`markdownToHTML` turns their spaces into `&nbsp;`).
+    pub markdown_no_wrap: bool,
 }
 
 /// Edge labels wrap at 200px: `insertEdgeLabel` calls `createText` without a
@@ -734,7 +737,11 @@ pub fn render_with(
                 horizontal,
                 cfg.look,
                 opts.min_label_width.max(cfg.min_node_width),
-                cfg.wrapping_width,
+                if opts.markdown_no_wrap && crate::text::is_markdown_string(&n.label) {
+                    0.0
+                } else {
+                    cfg.wrapping_width
+                },
             )
         })
         .collect();
@@ -820,7 +827,13 @@ pub fn render_with(
         .map(|e| {
             e.label
                 .as_ref()
-                .map(|l| edge_label_block(l, font))
+                .map(|l| {
+                    if opts.markdown_no_wrap && crate::text::is_markdown_string(l) {
+                        TextBlock::label(l, font)
+                    } else {
+                        edge_label_block(l, font)
+                    }
+                })
                 .filter(|b| !b.is_empty())
         })
         .collect();

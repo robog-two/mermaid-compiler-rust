@@ -204,15 +204,37 @@ impl Ctx {
             };
             let y = t.y + i as f64 * t.line_height;
             // The page CTM flips y; flip glyphs back with a negative d in Tm.
-            let _ = writeln!(
+            if !crate::text::has_marks(line) {
+                let _ = writeln!(
+                    self.out,
+                    "BT /{font} 1 Tf {} 0 0 {} {} {} Tm ({}) Tj ET",
+                    n(t.font_size),
+                    n(-t.font_size),
+                    n(x),
+                    n(y),
+                    pdf_string(line)
+                );
+                continue;
+            }
+            // Markdown emphasis: one font switch per run, in one text object.
+            let _ = write!(
                 self.out,
-                "BT /{font} 1 Tf {} 0 0 {} {} {} Tm ({}) Tj ET",
+                "BT {} 0 0 {} {} {} Tm",
                 n(t.font_size),
                 n(-t.font_size),
                 n(x),
                 n(y),
-                pdf_string(line)
             );
+            for run in crate::text::styled_runs(line, t.bold) {
+                let f = match (run.bold, run.italic) {
+                    (false, false) => "F1",
+                    (true, false) => "F2",
+                    (false, true) => "F3",
+                    (true, true) => "F4",
+                };
+                let _ = write!(self.out, " /{f} 1 Tf ({}) Tj", pdf_string(&run.text));
+            }
+            self.out.push_str(" ET\n");
         }
         self.out.push_str("Q\n");
     }
@@ -388,12 +410,12 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
     let mut objects: Vec<String> = Vec::new();
     objects.push("<< /Type /Catalog /Pages 2 0 R >>".into());
     objects.push("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into());
-    let gs_base = 7;
+    let gs_base = 9;
     let ext: String = (0..ctx.alphas.len())
         .map(|i| format!("/GS{i} {} 0 R ", gs_base + i))
         .collect();
     objects.push(format!(
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> /ExtGState << {ext}>> >> >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R >> /ExtGState << {ext}>> >> >>",
         n(page_w),
         n(page_h)
     ));
@@ -409,6 +431,11 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"
             .into(),
     );
+    for face in ["Helvetica-Oblique", "Helvetica-BoldOblique"] {
+        objects.push(format!(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /{face} /Encoding /WinAnsiEncoding >>"
+        ));
+    }
     for &alpha in &ctx.alphas {
         let v = n(alpha as f64 / 1000.0);
         objects.push(format!("<< /Type /ExtGState /ca {v} /CA {v} >>"));

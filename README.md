@@ -65,7 +65,7 @@ compare the two directly.
 | Timeline (`timeline`) | **Taffy** flex | sections, multi-event periods |
 | User journey (`journey`) | **Taffy** flex | scores as faces, actors |
 | Kanban (`kanban`) | **Taffy** flex | columns, cards, ticket/assignee/priority |
-| Block (`block-beta`) | port of mermaid's block layout | nested `block:id:span`, `columns`, `space:N`, shapes, block arrows, edges, styles/classes |
+| Block (`block-beta`) | port of mermaid's block layout | nested `block:id:span`, `columns`, `space:N`, shapes, block arrows (any direction list, e.g. `(x, down)`), edges, styles/classes |
 | Packet (`packet-beta`) | **Taffy** CSS grid | bit ranges, `+N`, row splitting |
 | C4 (`C4Context/Container/Component/Dynamic/Deployment`) | **Taffy** flex/wrap | unified shapes (person, cylinder, queue), Structurizr type lines, boundaries, all element/rel kinds, curved rels, style updates |
 | xychart (`xychart-beta`) | port of mermaid's chartBuilder (d3 band/linear scales) | bar and line series, horizontal, numeric/category x-axis, legend, data and point labels, axis toggles and label rotation, themes |
@@ -73,7 +73,7 @@ compare the two directly.
 | Radar (`radar-beta`) | geometry | circle/polygon graticule, legend |
 | Sankey (`sankey-beta`) | sankey (d3-style) | CSV input, relaxation, link colouring |
 | gitGraph (`gitGraph`) | lanes | branches, merges, cherry-picks, tags, LR/TB/BT |
-| Mindmap (`mindmap`) | two-sided tree | all node shapes |
+| Mindmap (`mindmap`) | two-sided tree | all node shapes, multi-line markdown labels |
 | Treemap (`treemap-beta`) | squarified | sections, values, classDef |
 | ZenUML (`zenuml`) | sequence (lowered) | translated into the sequence engine |
 | Agentflow (`agentflow-beta`) | layered graph (upstream default is ELK) | flow/global containers with nesting and collapse, connectors, task/tool/input/decision/refdoc/action shapes, sequence/reference/failure edges, `@{}` metadata, per-kind colours |
@@ -119,12 +119,14 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
 
 ### Known limitations
 
-- **Labels are SVG `<text>`, not HTML `<foreignObject>`.** Markdown/HTML formatting inside labels is stripped to plain text
-  (emphasis markers are removed by CommonMark's rules, but bold/italic are not drawn)
-  (`<br>` line breaks are honoured). Flowchart, state, swimlane, agentflow and use-case node labels
+- **Labels are SVG `<text>`, not HTML `<foreignObject>`.** Markdown strings (`` "`…`" ``) draw `**bold**`, `*italic*`
+  and `***both***` (matched by CommonMark's delimiter rules) as styled runs, as do `<b>`/`<strong>`/`<i>`/`<em>` tags;
+  other markdown (links, code, lists) and HTML formatting is stripped to plain text (`<br>` line breaks are honoured).
+  Flowchart, state, swimlane, agentflow and use-case node labels
   wrap at `wrappingWidth` and are widened to `minNodeWidth` (both 120, as in mermaid 12), so short-label nodes share one width.
-  Wrapping follows the browser's line breaking (CJK between characters, after hyphens); edge labels wrap at 200px.
-  Quoted and markdown strings may span lines.
+  Wrapping follows the browser's line breaking (CJK between characters, after hyphens); edge labels wrap at 200px;
+  `markdownAutoWrap: false` keeps graph-diagram markdown labels on one line. Quoted and markdown strings may span lines.
+  `htmlLabels: false` is ignored: labels keep the HTML-label line height (1.5em, not SVG text's 1.1em).
 - **Text is measured with Helvetica/Arial metrics**, not by a browser, so widths can be off by a few percent for other fonts.
 - **PDF text uses the built-in Helvetica fonts** (nothing embedded), so characters outside Windows-1252 become `?` in PDFs.
   SVG and PNG handle any Unicode the system fonts cover.

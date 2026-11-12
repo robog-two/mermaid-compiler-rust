@@ -529,6 +529,15 @@ impl MermaidConfig {
             .find_map(|j| j.get(section).and_then(|s| s.get(key)))
     }
 
+    /// Latest top-level boolean `key` across all layers (e.g. `markdownAutoWrap`).
+    pub fn top_bool(&self, key: &str, default: bool) -> bool {
+        self.raw
+            .iter()
+            .rev()
+            .find_map(|j| j.get(key).and_then(Json::as_bool))
+            .unwrap_or(default)
+    }
+
     /// Latest value of `section.sub.key` across all layers, merged key by key
     /// (e.g. `("xyChart", "xAxis", "showTick")`).
     pub fn section_nested(&self, section: &str, sub: &str, key: &str) -> Option<&Json> {
