@@ -586,7 +586,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     let mut ext_off: HashMap<(usize, usize), f64> = HashMap::new();
     // Under ELK the graphs of one run are ordered together (see `order_runs`)
     // before any is placed.
-    let mut ordered: Vec<Option<(Prepared, Vec<Vec<usize>>)>> = (0..=nc).map(|_| None).collect();
+    let mut ordered: Vec<Option<RunLevel>> = (0..=nc).map(|_| None).collect();
     if elk {
         let inputs: Vec<LevelInput> = scopes
             .iter()
@@ -617,7 +617,13 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             &ext_off,
         );
         let out = match ordered[slot(scope)].take() {
-            Some((prep, layers)) => finish(&li.flat, li.graph, &li.hier, prep, layers),
+            Some((prep, layers, port_rank)) => {
+                let hier = Hierarchy {
+                    port_rank,
+                    ..li.hier.clone()
+                };
+                finish(&li.flat, li.graph, &hier, prep, layers)
+            }
             None => layout_flat_in(&li.flat, li.graph, &li.hier),
         };
         let level = level_output(li, out);
@@ -1353,11 +1359,7 @@ const ELK_PORTS_SURROUNDING: f64 = 12.0;
 /// (the root, or a container laid out on its own, with the containers laid out
 /// within it: `INCLUDE_CHILDREN`) ordered together (`elkorder::minimize_run`).
 /// Per level (in `scopes`' order): its prepared pass and its ordered layers.
-fn order_runs(
-    tree: &Tree,
-    scopes: &[Option<usize>],
-    inputs: &[LevelInput],
-) -> Vec<(Prepared, Vec<Vec<usize>>)> {
+fn order_runs(tree: &Tree, scopes: &[Option<usize>], inputs: &[LevelInput]) -> Vec<RunLevel> {
     let k = scopes.len();
     let preps: Vec<Prepared> = inputs
         .iter()
@@ -1387,7 +1389,7 @@ fn order_runs(
             chains: &p.cluster_chain,
         })
         .collect();
-    let mut ordered: Vec<Option<Vec<Vec<usize>>>> = (0..k).map(|_| None).collect();
+    let mut ordered: Vec<Option<elkorder::RunOrder>> = (0..k).map(|_| None).collect();
     for root in (0..k).filter(|&i| parent[i].is_none()) {
         // The run: its root first, then every level whose chain of containers
         // leads to it.
@@ -1428,19 +1430,44 @@ fn order_runs(
                 }
             })
             .collect();
-        for (&i, layers) in members.iter().zip(elkorder::minimize_run(graphs)) {
-            ordered[i] = Some(layers);
+        for (&i, o) in members.iter().zip(elkorder::minimize_run(graphs)) {
+            ordered[i] = Some(o);
         }
     }
-    let complete: Vec<Vec<Vec<usize>>> = setups
+    let complete: Vec<(Vec<Vec<usize>>, PortRanks)> = setups
         .into_iter()
         .zip(ordered)
         .enumerate()
-        .map(|(i, (setup, o))| setup.complete(o.unwrap_or_default(), &preps[i].verts, &ctxs[i]))
+        .map(|(i, (setup, o))| {
+            let (layers, seg_rank) = o.map(|o| (o.layers, o.port_rank)).unwrap_or_default();
+            // Per edge of the level: the ranks at its real ends.
+            let mut rank: PortRanks = Vec::new();
+            for (e, r) in setup.seg_edges().zip(seg_rank) {
+                if rank.len() <= e {
+                    rank.resize(e + 1, (None, None));
+                }
+                rank[e].0 = rank[e].0.or(r.0);
+                rank[e].1 = rank[e].1.or(r.1);
+            }
+            let layers = setup.complete(layers, &preps[i].verts, &ctxs[i]);
+            (layers, rank)
+        })
         .collect();
     drop(ctxs);
-    preps.into_iter().zip(complete).collect()
+    preps
+        .into_iter()
+        .zip(complete)
+        .map(|(p, (l, r))| (p, l, r))
+        .collect()
 }
+
+/// Per edge: the ranks of its ports in ELK's port lists (see
+/// `elkorder::RunOrder::port_rank`).
+type PortRanks = Vec<(Option<usize>, Option<usize>)>;
+
+/// One level of an ELK run, ordered: its prepared pass, its layers and its
+/// port ranks.
+type RunLevel = (Prepared, Vec<Vec<usize>>, PortRanks);
 
 #[cfg(test)]
 mod tests {

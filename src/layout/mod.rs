@@ -227,6 +227,10 @@ struct Hierarchy {
     /// Per edge: fixed cross-axis offsets (from the node's centre) of its source
     /// and target ports, where it meets a laid out container's external port.
     ports: Vec<(Option<f64>, Option<f64>)>,
+    /// Per edge (in the layering's orientation): where its ports at its upper
+    /// and lower ends are in ELK's port lists after crossing minimisation
+    /// (`elkorder::RunOrder::port_rank`).
+    port_rank: Vec<(Option<usize>, Option<usize>)>,
     /// Per node with any: its margins along the rank axis (before, after). ELK
     /// puts a container's ports for edges crossing its border
     /// (`CompoundGraphPreprocessor`) half an edge spacing outside it
@@ -872,6 +876,7 @@ fn finish(
             &label_across,
             &is_ext,
             &hier.ports,
+            &hier.port_rank,
             &end_labels,
             elk_spacing(graph, input.node_sep),
         )
@@ -1510,6 +1515,7 @@ fn elk_place(
     label_across: &[f64],
     is_ext: &[bool],
     fixed: &[(Option<f64>, Option<f64>)],
+    port_rank: &[(Option<usize>, Option<usize>)],
     end_labels: &[[Option<f64>; 2]],
     spacing: elkbk::Spacing,
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
@@ -1635,17 +1641,54 @@ fn elk_place(
         elkbk::NodeType::Label => nodes[v].size / 2.0,
         _ => 0.0,
     };
+    // The order of a node's ports on a side: where a laid out container fixes
+    // them all, the order crossing minimisation left them in (which its
+    // contents' placement need not follow), else their positions.
+    let mut out_order = out_port.clone();
+    let mut in_order = in_port.clone();
+    for (at_end, order) in [(false, &mut out_order), (true, &mut in_order)] {
+        let mut by_node: Vec<Vec<usize>> = vec![Vec::new(); real];
+        for (ei, s) in stops.iter().enumerate().filter(|(_, s)| s.len() >= 2) {
+            let v = if at_end { s[s.len() - 1] } else { s[0] };
+            if v < real {
+                by_node[v].push(ei);
+            }
+        }
+        for list in by_node {
+            let ranks: Option<Vec<usize>> = list
+                .iter()
+                .map(|&ei| {
+                    fixed_end(ei, at_end)?;
+                    let r = port_rank.get(ei).copied().unwrap_or_default();
+                    if at_end { r.1 } else { r.0 }
+                })
+                .collect();
+            if let Some(ranks) = ranks {
+                for (&ei, r) in list.iter().zip(ranks) {
+                    order[ei] = r as f64;
+                }
+            }
+        }
+    }
     let mut edges = Vec::new();
     for (ei, s) in stops.iter().enumerate() {
         for (k, w) in s.windows(2).enumerate() {
+            let from_port = if k == 0 { out_port[ei] } else { port_of(w[0]) };
+            let to_port = if k + 2 == s.len() {
+                in_port[ei]
+            } else {
+                port_of(w[1])
+            };
             edges.push(elkbk::Edge {
                 from: w[0],
                 to: w[1],
-                from_port: if k == 0 { out_port[ei] } else { port_of(w[0]) },
-                to_port: if k + 2 == s.len() {
-                    in_port[ei]
+                from_port,
+                to_port,
+                from_order: if k == 0 { out_order[ei] } else { from_port },
+                to_order: if k + 2 == s.len() {
+                    in_order[ei]
                 } else {
-                    port_of(w[1])
+                    to_port
                 },
             });
         }

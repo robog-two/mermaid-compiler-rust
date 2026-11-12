@@ -228,7 +228,10 @@ pub(super) fn minimize(
         seg_key: (0..graph.segs.len()).collect(),
         parent: None,
     }];
-    minimize_run(run).pop().unwrap_or_default()
+    minimize_run(run)
+        .pop()
+        .map(|o| o.layers)
+        .unwrap_or_default()
 }
 
 /// One graph of an ELK run (`hierarchyHandling: INCLUDE_CHILDREN`): the root of
@@ -246,6 +249,16 @@ pub(super) struct RunGraph<'a> {
     pub seg_key: Vec<usize>,
     /// The graph's container: (its graph's index in the run, its vertex there).
     pub parent: Option<(usize, usize)>,
+}
+
+/// One graph's order after crossing minimisation.
+pub(super) struct RunOrder {
+    pub layers: Vec<Vec<usize>>,
+    /// Per segment: where its port is in ELK's port list of its source's side
+    /// (top to bottom) and of its target's (top to bottom), where those are real
+    /// nodes. A container's ports keep the order crossing minimisation leaves
+    /// them in, which its contents' placement need not follow.
+    pub port_rank: Vec<(Option<usize>, Option<usize>)>,
 }
 
 /// ELK's `hierarchicalSweepiness` default: a container whose paths lead
@@ -268,8 +281,8 @@ type RunExtra = (
 /// others within their parent's sweeps, which dive into them on reaching their
 /// layer (the parent's ports there order the container's first layer of port
 /// dummies, and its last layer then orders the ports on the far side).
-/// `graphs[0]` is the root. Returns each graph's layers.
-pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
+/// `graphs[0]` is the root. Returns each graph's order.
+pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
     let ng = graphs.len();
     let mut rng = JavaRandom::new(1);
     // `LayerSweepCrossingMinimizer.initialize`: the seed every run restarts from,
@@ -279,6 +292,7 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
     // Per graph, per layer: its ghost vertices, and whether it has others.
     let mut ghosts: Vec<Vec<(Vec<usize>, bool)>> = Vec::with_capacity(ng);
     let mut extra: Vec<RunExtra> = Vec::with_capacity(ng);
+    let mut reals = Vec::with_capacity(ng);
     for (gi, g) in graphs.into_iter().enumerate() {
         let RunGraph {
             layers,
@@ -298,6 +312,7 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
             inl,
         } = graph;
         let nv = border.len();
+        reals.push(real);
         let mut inl_of = vec![Vec::new(); nv];
         for (k, l) in inl.iter().enumerate() {
             inl_of[l.node].push(k);
@@ -453,9 +468,20 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
     run.sw
         .into_iter()
         .zip(ghosts)
-        .map(|(s, gs)| {
+        .zip(reals)
+        .map(|((s, gs), real)| {
+            let mut port_rank = vec![(None, None); s.segs.len()];
+            for u in 0..real.min(s.east.len()) {
+                for (i, &k) in s.east[u].iter().enumerate() {
+                    port_rank[k].0 = Some(i);
+                }
+                for (i, &k) in s.west[u].iter().enumerate() {
+                    port_rank[k].1 = Some(i);
+                }
+            }
             let mut kept = s.layers.into_iter();
-            gs.into_iter()
+            let layers = gs
+                .into_iter()
                 .map(|(g, has_others)| {
                     let mut layer = if has_others {
                         kept.next().unwrap_or_default()
@@ -465,7 +491,8 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
                     layer.extend(g);
                     layer
                 })
-                .collect()
+                .collect();
+            RunOrder { layers, port_rank }
         })
         .collect()
 }
@@ -1797,7 +1824,7 @@ mod tests {
             },
         ];
         let out = minimize_run(graphs);
-        assert_eq!(out[1], vec![vec![2], vec![0], vec![1, 3]]);
+        assert_eq!(out[1].layers, vec![vec![2], vec![0], vec![1, 3]]);
     }
 
     /// An inverted port's in-layer edge (from a's port towards the previous
@@ -2012,7 +2039,7 @@ mod tests {
             },
         ];
         let out = minimize_run(graphs);
-        assert_eq!(out[1], vec![vec![1, 0], vec![2, 3]]);
+        assert_eq!(out[1].layers, vec![vec![1, 0], vec![2, 3]]);
     }
 
     /// `new Random(1)` in Java.

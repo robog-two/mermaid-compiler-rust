@@ -46,6 +46,12 @@ pub(super) struct Edge {
     pub to: usize,
     pub from_port: f64,
     pub to_port: f64,
+    /// Where the ports are in ELK's port lists of their sides, top to bottom
+    /// (which, for ports a laid out container fixes, its placement need not
+    /// follow): ELK takes a node's neighbours and the edge between two
+    /// vertices in that order.
+    pub from_order: f64,
+    pub to_order: f64,
 }
 
 /// The spacings between the vertices of a layer.
@@ -116,10 +122,10 @@ impl<'a> Graph<'a> {
             incoming[e.to].push(ei);
         }
         for list in &mut outgoing {
-            list.sort_by(|&a, &b| edges[a].from_port.total_cmp(&edges[b].from_port));
+            list.sort_by(|&a, &b| edges[a].from_order.total_cmp(&edges[b].from_order));
         }
         for list in &mut incoming {
-            list.sort_by(|&a, &b| edges[b].to_port.total_cmp(&edges[a].to_port));
+            list.sort_by(|&a, &b| edges[b].to_order.total_cmp(&edges[a].to_order));
         }
         let left: Vec<Vec<(usize, usize)>> = incoming
             .iter()
@@ -901,6 +907,8 @@ mod tests {
             to,
             from_port,
             to_port,
+            from_order: from_port,
+            to_order: to_port,
         }
     }
 

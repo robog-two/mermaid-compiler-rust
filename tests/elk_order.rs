@@ -252,3 +252,38 @@ fn external_port_dummies_are_made_in_elks_order() {
     assert!(x("c2n2") < x("c2n0") && x("c2n0") < x("c2n1"), "{cs:?}");
     assert!(x("x") < x("c2n0") && x("c2n1") < x("c0n0"), "{cs:?}");
 }
+
+#[test]
+fn placement_follows_the_port_order_crossing_minimisation_leaves() {
+    // C1's ports towards C0 stay in the order they were made (the root's
+    // model order has no crossing, so crossing minimisation keeps it): the one
+    // of `C1 --> c0n0` first, although C1's contents put it right of the one
+    // of `c1n0 --> c0n1`. Brandes-Koepf takes edges in that order: C0 stands
+    // 10px left of C1 (centres of c0n0 and c1n0), and two edges cross between
+    // them, as in mermaid's render.
+    let src = "flowchart TD
+  subgraph C0
+    c0n0 --> c0n1
+    c0n1 --> c0n2
+  end
+  subgraph C1
+    c1n0
+  end
+  subgraph C2
+    c2n0
+  end
+  y --> c1n0
+  c0n2 --> c0n1
+  C0 --> C1
+  c0n0 --> C1
+  x --> C1
+  c1n0 --> c0n1
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["c0n0", "c1n0", "y"], false);
+    let at = |n: &str| cs.iter().find(|c| c.0 == n).expect("node");
+    assert!((at("c1n0").2 - at("c0n0").2 - 10.0).abs() < 1.0, "{cs:?}");
+    assert!((at("c1n0").2 - at("y").2 - 56.0).abs() < 1.0, "{cs:?}");
+    assert!((at("c0n0").1 - at("c1n0").1 - 197.0).abs() < 1.0, "{cs:?}");
+}
