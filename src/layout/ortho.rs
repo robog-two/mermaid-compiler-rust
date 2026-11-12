@@ -79,13 +79,68 @@ pub struct Jog {
     pub to: f64,
 }
 
-impl Jog {
+/// A hyperedge segment of one channel in general: the cross-axis positions
+/// where it meets the layer before (`incoming`) and the layer after
+/// (`outgoing`). An in-layer edge has both its ends on one of them.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Trunk {
+    pub incoming: Vec<f64>,
+    pub outgoing: Vec<f64>,
+}
+
+impl Trunk {
     fn lo(&self) -> f64 {
-        self.from.min(self.to)
+        self.incoming
+            .iter()
+            .chain(&self.outgoing)
+            .copied()
+            .fold(f64::INFINITY, f64::min)
     }
     fn hi(&self) -> f64 {
-        self.from.max(self.to)
+        self.incoming
+            .iter()
+            .chain(&self.outgoing)
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
     }
+}
+
+impl From<Jog> for Trunk {
+    fn from(j: Jog) -> Self {
+        Trunk {
+            incoming: vec![j.from],
+            outgoing: vec![j.to],
+        }
+    }
+}
+
+/// `OrthogonalRoutingGenerator.countConflicts` (critical ones count as plain
+/// ones): a merge walk over two sorted lists of positions.
+fn conflicts(a: &[f64], b: &[f64], threshold: f64) -> i64 {
+    let (Some(&a0), Some(&b0)) = (a.first(), b.first()) else {
+        return 0;
+    };
+    let (mut i, mut j, mut p1, mut p2) = (0, 0, a0, b0);
+    let mut count = 0;
+    loop {
+        if p1 > p2 - threshold && p1 < p2 + threshold {
+            count += 1;
+        }
+        if p1 <= p2 && i + 1 < a.len() {
+            i += 1;
+            p1 = a[i];
+        } else if p2 <= p1 && j + 1 < b.len() {
+            j += 1;
+            p2 = b[j];
+        } else {
+            return count;
+        }
+    }
+}
+
+/// `OrthogonalRoutingGenerator.countCrossings`: the positions within `[lo, hi]`.
+fn crossings(posis: &[f64], lo: f64, hi: f64) -> i64 {
+    posis.iter().filter(|&&p| p >= lo && p <= hi).count() as i64
 }
 
 /// ELK's routing-slot assignment for one channel (`OrthogonalRoutingGenerator`),
@@ -102,20 +157,28 @@ impl Jog {
 /// here), dropping tied dependencies and reversing the rest; each jog's slot is
 /// then its longest dependency path. ELK splits segments in critical conflicts
 /// (verticals almost on top of each other); here those are plain conflicts.
+#[cfg(test)]
 pub fn assign_slots_elk(jogs: &[Jog], edge_spacing: f64) -> (Vec<usize>, usize) {
+    let trunks: Vec<Trunk> = jogs.iter().map(|&j| j.into()).collect();
+    assign_slots_trunks(&trunks, edge_spacing)
+}
+
+/// [`assign_slots_elk`] for trunks with any number of ends on either side
+/// (positions sorted ascending).
+pub fn assign_slots_trunks(jogs: &[Trunk], edge_spacing: f64) -> (Vec<usize>, usize) {
     let n = jogs.len();
     let threshold = 0.5 * edge_spacing;
-    let near = |a: f64, b: f64| usize::from(a > b - threshold && a < b + threshold);
-    let within = |p: f64, j: &Jog| usize::from(p >= j.lo() && p <= j.hi());
     // deps[a] = (b, weight): a before b.
     let mut edges: Vec<(usize, usize, i64)> = Vec::new();
     for a in 0..n {
         for b in a + 1..n {
             let (ja, jb) = (&jogs[a], &jogs[b]);
-            let c1 = near(ja.to, jb.from) as i64;
-            let c2 = near(jb.to, ja.from) as i64;
-            let x1 = (within(ja.to, jb) + within(jb.from, ja)) as i64;
-            let x2 = (within(jb.to, ja) + within(ja.from, jb)) as i64;
+            let c1 = conflicts(&ja.outgoing, &jb.incoming, threshold);
+            let c2 = conflicts(&jb.outgoing, &ja.incoming, threshold);
+            let x1 = crossings(&ja.outgoing, jb.lo(), jb.hi())
+                + crossings(&jb.incoming, ja.lo(), ja.hi());
+            let x2 = crossings(&jb.outgoing, ja.lo(), ja.hi())
+                + crossings(&ja.incoming, jb.lo(), jb.hi());
             let (d1, d2) = (c1 + 16 * x1, c2 + 16 * x2);
             if d1 < d2 {
                 edges.push((a, b, d2 - d1));

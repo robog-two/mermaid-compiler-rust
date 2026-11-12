@@ -936,6 +936,18 @@ fn level_input(
     let mut seg_of = Vec::new();
     let mut hier = Hierarchy::default();
     hier.ext.extend(stub_ext);
+    // A container with external port dummies keeps its ports' sides
+    // (`CompoundGraphPreprocessor` makes it `FIXED_SIDE`).
+    hier.side_fixed = items
+        .iter()
+        .map(|it| match *it {
+            Item::Box(c) => all_segs
+                .unwrap_or_default()
+                .iter()
+                .any(|s| s.scope == Some(c) && (s.from == SegEnd::Ext || s.to == SegEnd::Ext)),
+            _ => false,
+        })
+        .collect();
     // ELK makes a node's ports as it imports the edges, breadth-first by the
     // graph containing each (the two ends' common ancestor): an edge from further
     // out comes first.
@@ -1193,7 +1205,7 @@ fn order_runs(
     let mut setups = Vec::with_capacity(k);
     let mut elk_layers = Vec::with_capacity(k);
     for p in &preps {
-        let (setup, layers) = ElkLayers::new(p.layers.clone(), &p.verts, &p.chains);
+        let (setup, layers) = ElkLayers::new(p.layers.clone(), &p.verts, &p.chains, &p.inl);
         setups.push(setup);
         elk_layers.push(Some(layers));
     }
@@ -1659,6 +1671,42 @@ mod tests {
         assert!((mid(c2) - mid(c0) - 5.0).abs() < 1e-6, "{c0:?} {c2:?}");
         let (c0, c2) = (direct.clusters[0], direct.clusters[2]);
         assert!((mid(c2) - mid(c0)).abs() < 1e-6, "{c0:?} {c2:?}");
+    }
+
+    /// Where breaking a cycle reverses an edge between containers, ELK keeps
+    /// their ports on their sides (`InvertedPortProcessor`). Here (LR) the
+    /// edges `y --> x --> y`, `y --> c1n0`, `c0n0 --> x` and `c1n0 --> C0` (c0n0
+    /// in C0, c1n0 in C1) put C1 after C0, so `c1n0 --> C0` runs backwards: it
+    /// leaves C1 eastwards, runs round below everything and enters C0 from
+    /// the west.
+    #[test]
+    fn elk_reversed_edge_keeps_the_container_ports_on_their_sides() {
+        let nodes = vec![node(Some(0)), node(Some(1)), node(None), node(None)];
+        let clusters = vec![with_dir(None, None), with_dir(None, None)];
+        let edges = vec![
+            LayoutEdge::new(2, 3, 1, None),
+            LayoutEdge::new(2, 1, 1, None),
+            to_cluster(1, 0, 0),
+            LayoutEdge::new(3, 2, 1, None),
+            LayoutEdge::new(0, 3, 1, None),
+        ];
+        let out = layout(&elk(input(nodes, edges, clusters, Direction::LeftRight)));
+        let (c0, c1) = (out.clusters[0], out.clusters[1]);
+        assert!(c0.right() < c1.x, "{c0:?} {c1:?}");
+        let pts = &out.edges[2].points;
+        assert!(super::super::ortho::is_orthogonal(pts), "{pts:?}");
+        let (first, last) = (pts[0], pts[pts.len() - 1]);
+        // Out of C1's east side, eastwards ...
+        assert!(
+            (first.x - c1.right()).abs() < 1e-6 && pts[1].x > first.x,
+            "{pts:?}"
+        );
+        // ... round below both ...
+        let low = pts.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+        assert!(low > c0.bottom().max(c1.bottom()), "{pts:?}");
+        // ... into C0's west side, eastwards.
+        let before = pts[pts.len() - 2];
+        assert!((last.x - c0.x).abs() < 1e-6 && before.x < last.x, "{pts:?}");
     }
 
     /// ELK gives an edge to a container of the run a port dummy inside it too,

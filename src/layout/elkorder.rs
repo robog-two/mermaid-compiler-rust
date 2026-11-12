@@ -28,7 +28,7 @@
 //! over the layers, through the same `OrderCtx::arrange` the dagre-style sweeps
 //! use.
 
-use super::OrderCtx;
+use super::{InLayer, OrderCtx};
 
 /// `java.util.Random` (a 48-bit linear congruential generator), bit for bit.
 #[derive(Debug, Clone)]
@@ -110,6 +110,73 @@ struct Sweeper<'a> {
     /// External port dummies.
     ext: Vec<bool>,
     ctx: &'a OrderCtx<'a>,
+    /// The in-layer edges of inverted ports, and per vertex the ones it has.
+    inl: &'a [InLayer],
+    inl_of: Vec<Vec<usize>>,
+    /// Per in-layer edge: where its port on the node is among the node's ports
+    /// on that side, top to bottom (`usize::MAX`: last).
+    inl_pos: Vec<usize>,
+    /// Per in-layer edge: the key of its edge (see `RunGraph::seg_key`).
+    inl_key: Vec<usize>,
+}
+
+/// A port in the sweeps: a segment's on its source (east) or target (west), or
+/// an end of an in-layer edge (`true`: on its node, else on its dummy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Port {
+    East(usize),
+    West(usize),
+    InLayer(usize, bool),
+}
+
+/// ELK's `BinaryIndexedTree`: counts of positions, with `rank(i)` the number
+/// below `i`.
+struct Fenwick {
+    tree: Vec<usize>,
+    count: Vec<usize>,
+    size: usize,
+}
+
+impl Fenwick {
+    fn new(n: usize) -> Self {
+        Fenwick {
+            tree: vec![0; n + 1],
+            count: vec![0; n],
+            size: 0,
+        }
+    }
+
+    fn add(&mut self, i: usize) {
+        self.count[i] += 1;
+        self.size += 1;
+        let mut j = i + 1;
+        while j < self.tree.len() {
+            self.tree[j] += 1;
+            j += j & j.wrapping_neg();
+        }
+    }
+
+    fn rank(&self, i: usize) -> usize {
+        let (mut j, mut sum) = (i, 0);
+        while j > 0 {
+            sum += self.tree[j];
+            j -= j & j.wrapping_neg();
+        }
+        sum
+    }
+
+    fn remove_all(&mut self, i: usize) {
+        let c = std::mem::take(&mut self.count[i]);
+        if c == 0 {
+            return;
+        }
+        self.size -= c;
+        let mut j = i + 1;
+        while j < self.tree.len() {
+            self.tree[j] -= c;
+            j += j & j.wrapping_neg();
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -117,6 +184,7 @@ struct Snapshot {
     layers: Vec<Vec<usize>>,
     east: Vec<Vec<usize>>,
     west: Vec<Vec<usize>>,
+    inl_pos: Vec<usize>,
 }
 
 /// What ELK knows of an edge segment: its edge (whose index is the edge's model
@@ -139,6 +207,8 @@ pub(super) struct Graph<'a> {
     pub segs: &'a [(usize, usize)],
     pub info: &'a [SegInfo],
     pub real: usize,
+    /// The in-layer edges of inverted ports.
+    pub inl: &'a [InLayer],
 }
 
 /// Order the layers as ELK's layer sweep does. `layers` holds ELK's layers.
@@ -225,8 +295,14 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
             segs,
             info,
             real,
+            inl,
         } = graph;
         let nv = border.len();
+        let mut inl_of = vec![Vec::new(); nv];
+        for (k, l) in inl.iter().enumerate() {
+            inl_of[l.node].push(k);
+            inl_of[l.dummy].push(k);
+        }
         let mut east = vec![Vec::new(); nv];
         let mut west = vec![Vec::new(); nv];
         for (s, &(a, b)) in segs.iter().enumerate() {
@@ -252,9 +328,18 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
         }
         ghosts.push(layer_ghosts);
         let mut layers = kept;
-        creation_order(&mut layers, &east, segs, info, real, label);
+        creation_order(&mut layers, &east, segs, info, real, label, inl);
         if opts.model_order {
-            sort_by_model_order(&mut layers, &mut east, &mut west, segs, info, real, ctx);
+            sort_by_model_order(
+                &mut layers,
+                &mut east,
+                &mut west,
+                segs,
+                info,
+                real,
+                inl,
+                ctx,
+            );
         } else {
             for layer in layers.iter_mut() {
                 let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
@@ -286,6 +371,17 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
             nested: vec![None; nv],
             ext: ext_key.iter().map(Option::is_some).collect(),
             ctx,
+            inl,
+            inl_of,
+            inl_pos: vec![usize::MAX; inl.len()],
+            inl_key: inl
+                .iter()
+                .map(|l| {
+                    (0..segs.len())
+                        .find(|&s| info[s].edge == l.edge)
+                        .map_or(usize::MAX, |s| seg_key[s])
+                })
+                .collect(),
         });
         extra.push((opts, ext_key, seg_key, parent));
     }
@@ -336,6 +432,7 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
                     run.sw[k].layers = snap.layers;
                     run.sw[k].east = snap.east;
                     run.sw[k].west = snap.west;
+                    run.sw[k].inl_pos = snap.inl_pos;
                 }
             }
         }
@@ -376,7 +473,7 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<Vec<Vec<usize>>> {
 /// `LayerSweepTypeDecider.useBottomUp` for the graph of `child`, the container
 /// at vertex `v` of `parent`.
 fn bottom_up(child: &Sweeper, parent: &Sweeper, v: usize) -> bool {
-    if parent.east[v].len() < 2 && parent.west[v].len() < 2 {
+    if parent.side_ports(v, true).len() < 2 && parent.side_ports(v, false).len() < 2 {
         return true;
     }
     let nv = child.border.len();
@@ -395,16 +492,28 @@ fn bottom_up(child: &Sweeper, parent: &Sweeper, v: usize) -> bool {
                 if li == last && li > 0 {
                     to_hier += cur.0;
                 }
-            } else if child.west[u].is_empty() {
+            } else if child.side_ports(u, false).is_empty() {
                 cur.2 = 1;
-            } else if child.east[u].is_empty() {
+            } else if child.side_ports(u, true).is_empty() {
                 to_random += cur.0;
             }
             info[u] = cur;
-            for &s in &child.east[u] {
+            // Its outgoing edges: to the next layer, and in-layer ones.
+            let in_layer = child.inl_of[u]
+                .iter()
+                .map(|&k| child.inl[k])
+                .filter_map(|l| {
+                    let source = if l.before { l.node } else { l.dummy };
+                    (source == u).then_some(if l.before { l.dummy } else { l.node })
+                });
+            let targets: Vec<usize> = child.east[u]
+                .iter()
+                .map(|&s| child.segs[s].1)
+                .chain(in_layer)
+                .collect();
+            for t in targets {
                 to_random += cur.2;
                 to_hier += cur.1;
-                let t = child.segs[s].1;
                 info[t].0 += cur.0 + 1;
                 info[t].1 += cur.1;
                 info[t].2 += cur.2;
@@ -443,28 +552,44 @@ impl Run<'_> {
         }
         let keys: Vec<usize> = layer.iter().filter_map(|&u| self.extra[g].1[u]).collect();
         let seg_key = &self.extra[pg].2;
+        let rank_of = |key: usize| keys.iter().position(|&k| k == key).unwrap_or(usize::MAX);
+        let parent = &mut self.sw[pg];
         let ports = if east {
-            &mut self.sw[pg].east[v]
+            &mut parent.east[v]
         } else {
-            &mut self.sw[pg].west[v]
+            &mut parent.west[v]
         };
-        let rank = |s: usize| {
-            keys.iter()
-                .position(|&k| k == seg_key[s])
-                .unwrap_or(usize::MAX)
-        };
-        ports.sort_by_key(|&s| rank(s));
+        ports.sort_by_key(|&s| rank_of(seg_key[s]));
+        // An inverted port on that side goes where its dummy is.
+        for i in 0..parent.inl_of[v].len() {
+            let k = parent.inl_of[v][i];
+            let l = parent.inl[k];
+            if l.node != v || l.before == east {
+                continue;
+            }
+            let r = rank_of(parent.inl_key[k]);
+            let ports = if east {
+                &parent.east[v]
+            } else {
+                &parent.west[v]
+            };
+            parent.inl_pos[k] = ports.iter().filter(|&&s| rank_of(seg_key[s]) < r).count();
+        }
     }
 
     /// Order layer `li` of graph `g` (its port dummies) by the ports on one side
     /// of its container, vertex `v` of graph `pg` (`sortPortDummiesByPortPositions`).
     fn dummies_from_ports(&mut self, g: usize, li: usize, pg: usize, v: usize, west: bool) {
-        let ports = if west {
-            &self.sw[pg].west[v]
-        } else {
-            &self.sw[pg].east[v]
-        };
-        let keys: Vec<usize> = ports.iter().map(|&s| self.extra[pg].2[s]).collect();
+        let parent = &self.sw[pg];
+        let keys: Vec<usize> = parent
+            .side_ports(v, !west)
+            .into_iter()
+            .filter_map(|p| match p {
+                Port::East(s) | Port::West(s) => Some(self.extra[pg].2[s]),
+                Port::InLayer(k, true) => Some(parent.inl_key[k]),
+                Port::InLayer(_, false) => None,
+            })
+            .collect();
         let ext_key = &self.extra[g].1;
         let rank = |u: usize| {
             ext_key[u]
@@ -633,7 +758,9 @@ impl Run<'_> {
 /// The order ELK's layers have before crossing minimisation: real nodes in model
 /// order, then label dummies (made before layering) in edge order, then long-edge
 /// dummies as `LongEdgeSplitter` appends them, layer by layer, node by node, edge
-/// by edge.
+/// by edge (an inverted port's dummy not yet there: the edge leaves its node
+/// through the port, its clockwise last), and last the dummies of inverted
+/// ports (`InvertedPortProcessor`), by their nodes.
 fn creation_order(
     layers: &mut [Vec<usize>],
     east: &[Vec<usize>],
@@ -641,6 +768,7 @@ fn creation_order(
     info: &[SegInfo],
     real: usize,
     label: &[bool],
+    inl: &[InLayer],
 ) {
     let nv = east.len();
     let mut edge_of = vec![usize::MAX; nv];
@@ -648,6 +776,19 @@ fn creation_order(
         edge_of[b] = edge_of[b].min(info[s].edge);
     }
     let mut placed = vec![false; nv];
+    let mut inverted = vec![false; nv];
+    // Per node: the dummies of its inverted ports on its previous layer's side.
+    let mut before_of: Vec<Vec<usize>> = vec![Vec::new(); nv];
+    for l in inl {
+        placed[l.dummy] = true;
+        inverted[l.dummy] = true;
+        if l.before {
+            before_of[l.node].push(l.dummy);
+        }
+    }
+    for layer in layers.iter_mut() {
+        layer.retain(|&v| !inverted[v]);
+    }
     for layer in layers.iter_mut() {
         let mut first: Vec<usize> = layer
             .iter()
@@ -665,7 +806,10 @@ fn creation_order(
     for li in 0..layers.len().saturating_sub(1) {
         let mut appended = Vec::new();
         for &u in &layers[li] {
-            for &s in &east[u] {
+            for &s in east[u]
+                .iter()
+                .chain(before_of[u].iter().flat_map(|&d| &east[d]))
+            {
                 let d = segs[s].1;
                 if !placed[d] {
                     placed[d] = true;
@@ -689,6 +833,25 @@ fn creation_order(
         debug_assert!(order.len() == next.len() && fresh <= order.len());
         *next = order;
     }
+    // The dummies of inverted ports, node by node: those of input ports on the
+    // next layer's side, then of output ports on the previous layer's.
+    let mut at = vec![usize::MAX; if inl.is_empty() { 0 } else { nv }];
+    for layer in layers.iter_mut().filter(|_| !inl.is_empty()) {
+        for (i, &v) in layer.iter().enumerate() {
+            at[v] = i;
+        }
+        let mut dummies: Vec<(usize, bool, usize, usize)> = inl
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| at[l.node] != usize::MAX)
+            .map(|(k, l)| (at[l.node], l.before, k, l.dummy))
+            .collect();
+        dummies.sort_unstable();
+        for &v in layer.iter() {
+            at[v] = usize::MAX;
+        }
+        layer.extend(dummies.into_iter().map(|d| d.3));
+    }
 }
 
 /// `SortByInputModelProcessor` with `considerModelOrder: NODES_AND_EDGES`, layer
@@ -697,6 +860,7 @@ fn creation_order(
 /// nodes keep their model order among themselves; a dummy goes by where its edge
 /// comes from in the layer before, and above a real node without an edge from
 /// there (`longEdgeStrategy: DUMMY_NODE_OVER`), else by its edge's model order.
+#[allow(clippy::too_many_arguments)]
 fn sort_by_model_order(
     layers: &mut [Vec<usize>],
     east: &mut [Vec<usize>],
@@ -704,16 +868,34 @@ fn sort_by_model_order(
     segs: &[(usize, usize)],
     info: &[SegInfo],
     real: usize,
+    inl: &[InLayer],
     ctx: &OrderCtx,
 ) {
     let nv = east.len();
+    // An in-layer edge into a node's first port (clockwise) with an incoming
+    // edge gives the node its edge model order: the port of an inverted input
+    // port on the next layer's side, or the dummy of one on the previous layer's.
+    let mut first_in: Vec<Option<usize>> = vec![None; if inl.is_empty() { 0 } else { nv }];
+    // Per dummy of an inverted port (a feedback long-edge dummy to ELK): its
+    // edge's source and target nodes, one of them the node beside it.
+    let mut feedback: Vec<Option<(usize, usize)>> = first_in.iter().map(|_| None).collect();
+    for l in inl {
+        first_in[if l.before { l.dummy } else { l.node }] = Some(l.edge);
+        let (into, from) = (&west[l.dummy], &east[l.dummy]);
+        feedback[l.dummy] = if l.before {
+            from.first().map(|&s| (l.node, segs[s].1))
+        } else {
+            into.first().map(|&s| (segs[s].0, l.node))
+        };
+    }
     let mut pos = vec![usize::MAX; nv];
     // Per segment: its port's index on its source's east side.
     let mut port_at = vec![0usize; segs.len()];
     let mut before = Vec::new();
     for slot in layers.iter_mut() {
         let mut layer = std::mem::take(slot);
-        model_order_sort(&mut layer, west, segs, info, real, &pos, &port_at);
+        let ctx_fb = (&first_in[..], &feedback[..]);
+        model_order_sort(&mut layer, west, segs, info, real, &pos, &port_at, ctx_fb);
         for &v in &layer {
             // Incoming ports by where they come from (top to bottom).
             west[v].sort_by_key(|&s| (pos[segs[s].0], port_at[s]));
@@ -739,7 +921,8 @@ fn sort_by_model_order(
                 port_at[s] = i;
             }
         }
-        model_order_sort(&mut layer, west, segs, info, real, &pos, &port_at);
+        let ctx_fb = (&first_in[..], &feedback[..]);
+        model_order_sort(&mut layer, west, segs, info, real, &pos, &port_at, ctx_fb);
         let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
         let layer = ctx.arrange(&layer, &keys, &mut before);
         for (i, &v) in layer.iter().enumerate() {
@@ -753,6 +936,7 @@ fn sort_by_model_order(
 /// layers sorted so far, `usize::MAX` elsewhere). Like ELK's, the comparator
 /// remembers its decisions and their transitive consequences, which settles
 /// pairs its rules alone would order inconsistently.
+#[allow(clippy::too_many_arguments)]
 fn model_order_sort(
     layer: &mut [usize],
     west: &[Vec<usize>],
@@ -761,6 +945,7 @@ fn model_order_sort(
     real: usize,
     pos: &[usize],
     port_at: &[usize],
+    (first_in, feedback): Feedback,
 ) {
     use std::cmp::Ordering::{Greater, Less};
     let n = layer.len();
@@ -768,6 +953,53 @@ fn model_order_sort(
         return;
     }
     let old = layer.to_vec();
+    let mut slot_of = std::collections::HashMap::new();
+    for (i, &v) in old.iter().enumerate() {
+        slot_of.insert(v, i);
+    }
+    let fb = |v: usize| feedback.get(v).copied().flatten();
+    // `handleHelperDummyNodes`: a feedback dummy goes after the node beside it
+    // (its edge's source or target), and otherwise as that node goes; `None`
+    // where it says nothing.
+    let helper = |i: usize, j: usize| -> Option<Rule> {
+        let (a, b) = (old[i], old[j]);
+        let side = |(src, dst): (usize, usize)| -> Option<usize> {
+            [src, dst].into_iter().find(|v| slot_of.contains_key(v))
+        };
+        match (fb(a), fb(b)) {
+            (Some(fa), None) if b < real => {
+                if fa.0 == b || fa.1 == b {
+                    return Some(Rule::Decided(Greater));
+                }
+                side(fa).map(|r| Rule::Redirect(slot_of[&r], j))
+            }
+            (None, Some(fb_)) if a < real => {
+                if fb_.0 == a || fb_.1 == a {
+                    return Some(Rule::Decided(Less));
+                }
+                side(fb_).map(|r| Rule::Redirect(i, slot_of[&r]))
+            }
+            (Some(fa), Some(fb_)) => {
+                let (ra, rb) = (side(fa)?, side(fb_)?);
+                if ra != rb {
+                    return Some(Rule::Redirect(slot_of[&ra], slot_of[&rb]));
+                }
+                // On one node: a source feedback dummy (of a port towards the
+                // previous layer) after a target one.
+                match (fa.0 == ra, fb_.0 == rb) {
+                    (true, true) => Some(Rule::Decided(if first_in[a] > first_in[b] {
+                        Greater
+                    } else {
+                        Less
+                    })),
+                    (true, false) => Some(Rule::Decided(Greater)),
+                    (false, true) => Some(Rule::Decided(Less)),
+                    (false, false) => None,
+                }
+            }
+            _ => None,
+        }
+    };
     // Per slot: the first port (clockwise: the west side from the bottom) with an
     // edge from the layer before, and the model order of the last west port's edge.
     let source: Vec<Option<usize>> = old
@@ -782,18 +1014,19 @@ fn model_order_sort(
         .collect();
     let order: Vec<i64> = old
         .iter()
-        .map(|&v| {
-            west[v]
+        .map(|&v| match first_in.get(v).copied().flatten() {
+            Some(edge) => edge as i64,
+            None => west[v]
                 .last()
-                .map_or(i64::from(i32::MAX), |&s| info[s].edge as i64)
+                .map_or(i64::from(i32::MAX), |&s| info[s].edge as i64),
         })
         .collect();
-    let rule = |i: usize, j: usize| -> std::cmp::Ordering {
+    let rule = |i: usize, j: usize| -> Rule {
         let (a, b) = (old[i], old[j]);
         if a < real && b < real {
-            return a.cmp(&b);
+            return Rule::Decided(a.cmp(&b));
         }
-        match (source[i], source[j]) {
+        Rule::Decided(match (source[i], source[j]) {
             (Some(sa), Some(sb)) => {
                 let (na, nb) = (segs[sa].0, segs[sb].0);
                 if na == nb {
@@ -803,14 +1036,28 @@ fn model_order_sort(
                 }
             }
             (Some(_), None) | (None, Some(_)) => {
-                if order[i] > order[j] {
-                    Greater
-                } else {
-                    Less
+                if let Some(r) = helper(i, j) {
+                    return r;
                 }
+                if order[i] > order[j] { Greater } else { Less }
             }
-            (None, None) => Less,
+            (None, None) => {
+                if let Some(r) = helper(i, j) {
+                    return r;
+                }
+                Less
+            }
+        })
+    };
+    // A rule followed through its redirections, without bookkeeping.
+    let plain = |mut i: usize, mut j: usize| -> std::cmp::Ordering {
+        for _ in 0..=n {
+            match rule(i, j) {
+                Rule::Decided(o) => return o,
+                Rule::Redirect(a, b) => (i, j) = (a, b),
+            }
         }
+        Less
     };
     // Where every node has an edge from the layer before and the real nodes'
     // model order agrees with where their edges come from, the rules are one
@@ -833,7 +1080,7 @@ fn model_order_sort(
     if n > EXACT_MODEL_ORDER_SORT {
         // The transitive bookkeeping grows with the cube of the layer's width:
         // wider layers are insertion-sorted with the rules alone.
-        insertion_sort(&mut slots, |i, j| rule(i, j) == Greater);
+        insertion_sort(&mut slots, |i, j| plain(i, j) == Greater);
         for (dst, &i) in layer.iter_mut().zip(&slots) {
             *dst = old[i];
         }
@@ -874,26 +1121,47 @@ fn model_order_sort(
             }
         }
     };
-    let mut compare = |i: usize, j: usize| -> std::cmp::Ordering {
-        if has(&bigger, i, j) {
-            return Greater;
+    let mut compare = |mut i: usize, mut j: usize| -> std::cmp::Ordering {
+        for _ in 0..=n {
+            if has(&bigger, i, j) {
+                return Greater;
+            }
+            if has(&bigger, j, i) || has(&smaller, i, j) {
+                return Less;
+            }
+            let o = match rule(i, j) {
+                Rule::Decided(o) => o,
+                Rule::Redirect(a, b) => {
+                    (i, j) = (a, b);
+                    continue;
+                }
+            };
+            if o == Greater {
+                associate(&mut bigger, &mut smaller, i, j);
+            } else {
+                associate(&mut bigger, &mut smaller, j, i);
+            }
+            return o;
         }
-        if has(&bigger, j, i) || has(&smaller, i, j) {
-            return Less;
-        }
-        let o = rule(i, j);
-        if o == Greater {
-            associate(&mut bigger, &mut smaller, i, j);
-        } else {
-            associate(&mut bigger, &mut smaller, j, i);
-        }
-        o
+        Less
     };
     // Sort slots, so that the sets are indexed by them.
     insertion_sort(&mut slots, |i, j| compare(i, j) == Greater);
     for (dst, &i) in layer.iter_mut().zip(&slots) {
         *dst = old[i];
     }
+}
+
+/// Per vertex: the model order an in-layer edge gives it, and for a dummy of
+/// an inverted port its edge's source and target (see `sort_by_model_order`).
+type Feedback<'a> = (&'a [Option<usize>], &'a [Option<(usize, usize)>]);
+
+/// What `ModelOrderNodeComparator` makes of two nodes: an order, or the order
+/// of two others (a feedback dummy goes as the node beside it).
+#[derive(Debug, Clone, Copy)]
+enum Rule {
+    Decided(std::cmp::Ordering),
+    Redirect(usize, usize),
 }
 
 /// The widest layer `model_order_sort` sorts exactly as ELK does.
@@ -931,6 +1199,7 @@ impl Sweeper<'_> {
             layers: self.layers.clone(),
             east: self.east.clone(),
             west: self.west.clone(),
+            inl_pos: self.inl_pos.clone(),
         }
     }
 
@@ -983,7 +1252,18 @@ impl Sweeper<'_> {
             } else {
                 &mut self.west_rank
             };
-            let k = ports.len();
+            // In-layer ports count by their type (output towards the next
+            // layer, input from the previous one), whatever their side: an
+            // output one comes after the others clockwise, an input one first.
+            let extra = self.inl_of[v]
+                .iter()
+                .filter(|&&k| {
+                    let l = &self.inl[k];
+                    let output = (l.node == v) == l.before;
+                    output == east
+                })
+                .count();
+            let k = ports.len() + extra;
             if self.node_relative {
                 let incr = 1.0 / (k + 1) as f64;
                 if east {
@@ -994,7 +1274,7 @@ impl Sweeper<'_> {
                     }
                 } else {
                     // Assigned bottom to top, as ELK walks the west side clockwise.
-                    let mut p = sum + 1.0 - incr;
+                    let mut p = sum + 1.0 - incr - extra as f64 * incr;
                     for &s in ports.iter().rev() {
                         ranks[s] = p;
                         p -= incr;
@@ -1014,28 +1294,37 @@ impl Sweeper<'_> {
     /// layer (whose ranks are set), as `BarycenterHeuristic.minimizeCrossings`.
     fn barycenters(&mut self, layer: &[usize], forward: bool, first: bool) -> Vec<(usize, f64)> {
         let mut bary: Vec<(usize, Option<f64>)> = Vec::with_capacity(layer.len());
-        for &v in layer {
-            if self.border[v] {
-                continue;
+        if self.inl.is_empty() {
+            for &v in layer {
+                if self.border[v] {
+                    continue;
+                }
+                // ELK walks a node's ports clockwise: the west side bottom to top.
+                let (sum, degree) = self.own_weight(v, forward);
+                let b = if degree > 0 {
+                    let sum = sum + self.rng.next_float() * RANDOM_AMOUNT - RANDOM_AMOUNT / 2.0;
+                    Some(sum / degree as f64)
+                } else {
+                    None
+                };
+                bary.push((v, b));
             }
-            // ELK walks a node's ports clockwise: the west side bottom to top.
-            let (sum, degree) = if forward {
-                self.west[v]
-                    .iter()
-                    .rev()
-                    .fold((0.0, 0usize), |(s, d), &p| (s + self.east_rank[p], d + 1))
-            } else {
-                self.east[v]
-                    .iter()
-                    .fold((0.0, 0usize), |(s, d), &p| (s + self.west_rank[p], d + 1))
-            };
-            let b = if degree > 0 {
-                let sum = sum + self.rng.next_float() * RANDOM_AMOUNT - RANDOM_AMOUNT / 2.0;
-                Some(sum / degree as f64)
-            } else {
-                None
-            };
-            bary.push((v, b));
+        } else {
+            // An in-layer edge adds the weight of the node at its other end (with
+            // that node's random perturbation), computed first where it is not yet.
+            let mut state: Vec<Option<(f64, usize)>> = vec![None; self.border.len()];
+            for &v in layer {
+                if !self.border[v] {
+                    self.weigh(v, forward, &mut state);
+                }
+            }
+            for &v in layer {
+                if self.border[v] {
+                    continue;
+                }
+                let b = state[v].filter(|w| w.1 > 0).map(|(s, d)| s / d as f64);
+                bary.push((v, b));
+            }
         }
         // `fillInUnknownBarycenters`.
         let mut out = Vec::with_capacity(bary.len());
@@ -1065,6 +1354,63 @@ impl Sweeper<'_> {
             }
         }
         out
+    }
+
+    /// The summed ranks and the number of the ports `v`'s edges reach in the
+    /// fixed layer (before or after it).
+    fn own_weight(&self, v: usize, forward: bool) -> (f64, usize) {
+        if forward {
+            self.west[v]
+                .iter()
+                .rev()
+                .fold((0.0, 0usize), |(s, d), &p| (s + self.east_rank[p], d + 1))
+        } else {
+            self.east[v]
+                .iter()
+                .fold((0.0, 0usize), |(s, d), &p| (s + self.west_rank[p], d + 1))
+        }
+    }
+
+    /// `BarycenterHeuristic.calculateBarycenter` with in-layer edges: `state`
+    /// holds each visited vertex's summed weight and degree.
+    fn weigh(&mut self, v: usize, forward: bool, state: &mut [Option<(f64, usize)>]) {
+        if state[v].is_some() {
+            return;
+        }
+        state[v] = Some((0.0, 0));
+        // Clockwise: the in-layer ports on the next layer's side, then the
+        // ports to the fixed layer, then the in-layer ones on the previous side.
+        // Walking forward, a node's predecessors count (it is the in-layer
+        // edge's target); backward its successors (it is the source).
+        let partners = |before: bool| -> Vec<usize> {
+            self.inl_of[v]
+                .iter()
+                .map(|&k| self.inl[k])
+                .filter(|l| l.before == before && ((l.node == v) != l.before) == forward)
+                .map(|l| if l.node == v { l.dummy } else { l.node })
+                .collect()
+        };
+        let (east_side, west_side) = (partners(false), partners(true));
+        let (mut sum, mut degree) = (0.0, 0usize);
+        for other in east_side {
+            self.weigh(other, forward, state);
+            let (s, d) = state[other].unwrap_or_default();
+            sum += s;
+            degree += d;
+        }
+        let (s, d) = self.own_weight(v, forward);
+        sum += s;
+        degree += d;
+        for other in west_side {
+            self.weigh(other, forward, state);
+            let (s, d) = state[other].unwrap_or_default();
+            sum += s;
+            degree += d;
+        }
+        if degree > 0 {
+            sum += self.rng.next_float() * RANDOM_AMOUNT - RANDOM_AMOUNT / 2.0;
+        }
+        state[v] = Some((sum, degree));
     }
 
     /// `distributePortsWhileSweeping`: sort the free layer's ports facing the
@@ -1109,6 +1455,9 @@ impl Sweeper<'_> {
     /// Crossings between consecutive layers, counted between ports
     /// (`CrossingsCounter.countCrossingsBetweenLayers`).
     fn crossings(&self) -> usize {
+        if !self.inl.is_empty() {
+            return self.crossings_with_in_layer_edges();
+        }
         let mut total = 0;
         let mut west_pos = vec![0usize; self.segs.len()];
         let mut tree: Vec<usize> = Vec::new();
@@ -1142,6 +1491,104 @@ impl Sweeper<'_> {
                     inserted += 1;
                 }
             }
+        }
+        total
+    }
+
+    /// The ports of `v` on its side towards the next layer (`east`) or the
+    /// previous one, top to bottom, its in-layer ports among them.
+    fn side_ports(&self, v: usize, east: bool) -> Vec<Port> {
+        let segs = if east { &self.east[v] } else { &self.west[v] };
+        let mut out: Vec<Port> = segs
+            .iter()
+            .map(|&s| if east { Port::East(s) } else { Port::West(s) })
+            .collect();
+        for &k in &self.inl_of[v] {
+            let l = &self.inl[k];
+            if l.before == east {
+                continue;
+            }
+            let node_end = l.node == v;
+            let at = if node_end {
+                self.inl_pos[k]
+            } else {
+                usize::MAX
+            };
+            out.insert(at.min(out.len()), Port::InLayer(k, node_end));
+        }
+        out
+    }
+
+    /// `AllCrossingsCounter.countAllCrossings` where in-layer edges take part:
+    /// between two layers the ports of both form a circle (the left layer's
+    /// east sides top down, the right layer's west sides bottom up), every
+    /// edge between them a chord, the in-layer edges on those sides included;
+    /// on the outer sides of the first and last layers, in-layer edges cross
+    /// each other and the edges leaving there.
+    fn crossings_with_in_layer_edges(&self) -> usize {
+        let ns = self.segs.len();
+        let index = |p: Port| match p {
+            Port::East(s) => s,
+            Port::West(s) => ns + s,
+            Port::InLayer(k, node_end) => 2 * ns + 2 * k + usize::from(node_end),
+        };
+        let other = |p: Port| match p {
+            Port::East(s) => Port::West(s),
+            Port::West(s) => Port::East(s),
+            Port::InLayer(k, node_end) => Port::InLayer(k, !node_end),
+        };
+        let mut pos = vec![usize::MAX; 2 * ns + 2 * self.inl.len()];
+        let mut total = 0;
+        let nl = self.layers.len();
+        // Ports in order; `between`: counting on one layer's outer side.
+        let mut count = |ports: &[Port], between: bool| {
+            for (i, &p) in ports.iter().enumerate() {
+                pos[index(p)] = i;
+            }
+            let mut tree = Fenwick::new(ports.len());
+            let mut ends = Vec::new();
+            for (i, &p) in ports.iter().enumerate() {
+                tree.remove_all(i);
+                let q = other(p);
+                let in_layer = matches!(p, Port::InLayer(..));
+                if between && !in_layer {
+                    total += tree.size;
+                    continue;
+                }
+                let end = pos[index(q)];
+                if end != usize::MAX && end > i {
+                    total += tree.rank(end);
+                    ends.push(end);
+                }
+                for e in ends.drain(..) {
+                    tree.add(e);
+                }
+            }
+            for &p in ports {
+                pos[index(p)] = usize::MAX;
+            }
+        };
+        if nl > 0 {
+            let first: Vec<Port> = self.layers[0]
+                .iter()
+                .flat_map(|&v| self.side_ports(v, false))
+                .collect();
+            count(&first, true);
+            let last: Vec<Port> = self.layers[nl - 1]
+                .iter()
+                .flat_map(|&v| self.side_ports(v, true))
+                .collect();
+            count(&last, true);
+        }
+        for li in 0..nl.saturating_sub(1) {
+            let mut ports: Vec<Port> = self.layers[li]
+                .iter()
+                .flat_map(|&v| self.side_ports(v, true))
+                .collect();
+            for &v in self.layers[li + 1].iter().rev() {
+                ports.extend(self.side_ports(v, false).into_iter().rev());
+            }
+            count(&ports, false);
         }
         total
     }
@@ -1286,6 +1733,7 @@ mod tests {
             segs,
             info: &info,
             real: n,
+            inl: &[],
         };
         minimize(layers, &graph, &ctx, opts)
     }
@@ -1323,6 +1771,7 @@ mod tests {
                     segs: &[],
                     info: &[],
                     real: 1,
+                    inl: &[],
                 },
                 ctx: &root_ctx,
                 opts: OPTS,
@@ -1338,6 +1787,7 @@ mod tests {
                     segs: &segs,
                     info: &child_info,
                     real: 2,
+                    inl: &[],
                 },
                 ctx: &child_ctx,
                 opts: OPTS,
@@ -1348,6 +1798,55 @@ mod tests {
         ];
         let out = minimize_run(graphs);
         assert_eq!(out[1], vec![vec![2], vec![0], vec![1, 3]]);
+    }
+
+    /// An inverted port's in-layer edge (from a's port towards the previous
+    /// layer to its dummy d) crosses the edge into b where b lies between: the
+    /// sweeps keep d next to a, and the dummy starts at the end of its layer.
+    #[test]
+    fn in_layer_edges_count_as_crossings() {
+        // p (0), q (1); a (2), b (3), t (4) real; d (5) the dummy.
+        let segs = [(0, 2), (1, 3), (5, 4)];
+        let nv = 6;
+        let vs = verts(nv);
+        let ctx = OrderCtx {
+            verts: &vs,
+            chains: &[],
+        };
+        let no = vec![false; nv];
+        let info = info(&segs);
+        let inl = [InLayer {
+            edge: 2,
+            node: 2,
+            dummy: 5,
+            before: true,
+        }];
+        let graph = Graph {
+            border: &no,
+            label: &no,
+            segs: &segs,
+            info: &info,
+            real: 5,
+            inl: &inl,
+        };
+        let mut sweeper_layers = vec![vec![0, 1], vec![5, 2, 3], vec![4]];
+        let mut east = vec![Vec::new(); nv];
+        for (s, &(a, _)) in segs.iter().enumerate() {
+            east[a].push(s);
+        }
+        creation_order(&mut sweeper_layers, &east, &segs, &info, 5, &no, &inl);
+        assert_eq!(sweeper_layers[1], vec![2, 3, 5]);
+        for opts in [
+            OPTS,
+            Options {
+                model_order: false,
+                ..OPTS
+            },
+        ] {
+            let out = minimize(sweeper_layers.clone(), &graph, &ctx, opts);
+            let at = |v: usize| out[1].iter().position(|&u| u == v).unwrap_or(9);
+            assert_eq!(at(2).abs_diff(at(5)), 1, "{out:?}");
+        }
     }
 
     #[test]
@@ -1412,13 +1911,31 @@ mod tests {
         let pos = [0, 1, usize::MAX, usize::MAX];
         let port_at = [0, 0];
         let mut layer = vec![2, 3];
-        model_order_sort(&mut layer, &west, &segs, &info, 3, &pos, &port_at);
+        model_order_sort(
+            &mut layer,
+            &west,
+            &segs,
+            &info,
+            3,
+            &pos,
+            &port_at,
+            (&[], &[]),
+        );
         assert_eq!(layer, vec![3, 2]);
         // Real nodes keep their model order whatever their sources.
         west[3].clear();
         let mut layer = vec![2, 0, 1];
         let pos = [usize::MAX, usize::MAX, usize::MAX, usize::MAX];
-        model_order_sort(&mut layer, &west, &segs, &info, 3, &pos, &port_at);
+        model_order_sort(
+            &mut layer,
+            &west,
+            &segs,
+            &info,
+            3,
+            &pos,
+            &port_at,
+            (&[], &[]),
+        );
         assert_eq!(layer, vec![0, 1, 2]);
     }
 
@@ -1429,7 +1946,7 @@ mod tests {
             let mut layer: Vec<usize> = (0..n).rev().collect();
             let west = vec![Vec::new(); n];
             let pos = vec![usize::MAX; n];
-            model_order_sort(&mut layer, &west, &[], &[], n, &pos, &[]);
+            model_order_sort(&mut layer, &west, &[], &[], n, &pos, &[], (&[], &[]));
             assert_eq!(layer, (0..n).collect::<Vec<_>>());
         }
     }
@@ -1466,6 +1983,7 @@ mod tests {
                     segs: &root_segs,
                     info: &root_info,
                     real: 2,
+                    inl: &[],
                 },
                 ctx: &root_ctx,
                 opts: OPTS,
@@ -1481,6 +1999,7 @@ mod tests {
                     segs: &segs,
                     info: &child_info,
                     real: 4,
+                    inl: &[],
                 },
                 ctx: &child_ctx,
                 opts: Options {

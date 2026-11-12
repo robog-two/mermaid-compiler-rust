@@ -232,6 +232,29 @@ struct Hierarchy {
     /// (`CompoundGraphPreprocessor`) half an edge spacing outside it
     /// (`portBorderOffset`), which widens its layer.
     margins: Vec<(f64, f64)>,
+    /// Per node: whether its ports keep their sides (a laid out container with
+    /// external port dummies inside: `CompoundGraphPreprocessor` makes its port
+    /// constraints `FIXED_SIDE`), so that an edge reversed by cycle breaking
+    /// meets it on its original side (see [`InLayer`]).
+    side_fixed: Vec<bool>,
+}
+
+/// ELK's `InvertedPortProcessor`: where cycle breaking reverses an edge at a node
+/// whose ports keep their sides, its port there faces away from the edge's
+/// (reversed) direction. A long-edge dummy in the node's layer takes the edge
+/// on, and the node's port is joined to the dummy by an in-layer edge, routed
+/// in the channel on the port's side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InLayer {
+    /// The edge (whose oriented chain now starts or ends at `dummy`).
+    edge: usize,
+    /// The node with the port.
+    node: usize,
+    dummy: usize,
+    /// The port is on the node's side towards the previous layer (an output
+    /// port there: the chain starts at the dummy), else towards the next one
+    /// (an input port there: the chain ends at the dummy).
+    before: bool,
 }
 
 /// ELK's border offset of the ports it makes for edges crossing a container's
@@ -293,6 +316,8 @@ struct Prepared {
     cluster_chain: Vec<Vec<usize>>,
     links: Vec<(usize, usize, f64)>,
     chains: Vec<Option<Chain>>,
+    /// The in-layer edges of inverted ports.
+    inl: Vec<InLayer>,
     span: Vec<Option<(usize, usize)>>,
     borders: Vec<Vec<(usize, usize)>>,
     up: Vec<Vec<(usize, f64)>>,
@@ -427,6 +452,7 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
     let mut links: Vec<(usize, usize, f64)> = Vec::new();
     // Per edge: chain in oriented order, label vertex.
     let mut chains: Vec<Option<Chain>> = vec![None; input.edges.len()];
+    let mut inl: Vec<InLayer> = Vec::new();
     // Under ELK an edge into (out of) a cluster enters (leaves) it through a port on
     // its border and runs inside it over the ranks the cluster spans, rather than
     // outside it until the last rank: it would otherwise cross the cluster's side,
@@ -515,6 +541,32 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
             chain.push(id);
         }
         chain.push(o.to);
+        // ELK keeps a side-fixed node's port on its side when the edge is
+        // reversed: a dummy beside the node takes the edge on.
+        if elk && o.reversed && o.from != o.to {
+            let last = chain.len() - 1;
+            for (at, before) in [(0, true), (last, false)] {
+                let node = chain[at];
+                if !hier.side_fixed.get(node).copied().unwrap_or(false) {
+                    continue;
+                }
+                verts.push(Vertex {
+                    kind: Kind::Dummy { labeled: false },
+                    rank: verts[node].rank,
+                    w: 0.0,
+                    h: 0.0,
+                    cluster: verts[node].cluster,
+                });
+                let dummy = verts.len() - 1;
+                chain[at] = dummy;
+                inl.push(InLayer {
+                    edge: ei,
+                    node,
+                    dummy,
+                    before,
+                });
+            }
+        }
         for pair in chain.windows(2) {
             let dummies = pair.iter().filter(|&&v| v >= n).count();
             links.push((pair[0], pair[1], [1.0, 2.0, 8.0][dummies]));
@@ -581,10 +633,14 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         // from the model order: real nodes in input order, an edge's dummies after
         // the node the edge leaves, in edge order.
         let mut key: Vec<(usize, usize)> = (0..verts.len()).map(|v| (v, 0)).collect();
+        let mut head: Vec<usize> = (0..verts.len()).collect();
+        for l in &inl {
+            head[l.dummy] = l.node;
+        }
         for (ei, c) in chains.iter().enumerate() {
             if let Some((chain, _, _)) = c {
                 for &d in &chain[1..chain.len() - 1] {
-                    key[d] = (chain[0], 1 + ei);
+                    key[d] = (head[chain[0]], 1 + ei);
                 }
             }
         }
@@ -610,6 +666,7 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         cluster_chain,
         links,
         chains,
+        inl,
         span,
         borders,
         up,
@@ -645,6 +702,7 @@ fn order_flat(input: &LayoutInput, graph: ElkGraph, prep: &Prepared) -> Vec<Vec<
             verts,
             n,
             chains,
+            &prep.inl,
             &border,
             &ctx,
             elk_options(graph, n),
@@ -673,6 +731,7 @@ fn finish(
         cluster_chain,
         links,
         chains,
+        inl,
         span,
         borders,
         max_rank,
@@ -821,9 +880,18 @@ fn finish(
         None => (assign_x(&layers, &verts, &links, &borders, &gap), None),
     };
     let plan = match input.routing {
-        EdgeRouting::Orthogonal(s) => {
-            Some(ortho_plan(&verts, n, &chains, &x, &layers, &gap, s, ports))
-        }
+        EdgeRouting::Orthogonal(s) => Some(ortho_plan(
+            &verts,
+            n,
+            &chains,
+            &x,
+            &layers,
+            &gap,
+            s,
+            ports,
+            &inl,
+            &hier.ports,
+        )),
         EdgeRouting::Splines => None,
     };
 
@@ -962,10 +1030,11 @@ fn finish(
             extra[rb] = extra[rb].max(p.spacing.required_gap(slots) - have);
         }
     }
+    let outer_room = plan.as_ref().map_or((0.0, 0.0), OrthoPlan::outer_room);
     let mut rank_y = vec![0.0f64; max_rank + 1];
     for r in 0..=max_rank {
         rank_y[r] = if r == 0 {
-            start_pad[0] + rank_h[0] / 2.0
+            outer_room.0 + start_pad[0] + rank_h[0] / 2.0
         } else {
             rank_y[r - 1]
                 + rank_h[r - 1] / 2.0
@@ -1005,7 +1074,8 @@ fn finish(
     // 8. Transform to output space.
     let extent_y = rank_y.last().copied().unwrap_or(0.0)
         + rank_h.last().copied().unwrap_or(0.0) / 2.0
-        + end_pad.last().copied().unwrap_or(0.0);
+        + end_pad.last().copied().unwrap_or(0.0)
+        + outer_room.1;
     let to_out = |p: Point| -> Point {
         match input.direction {
             Direction::TopBottom => p,
@@ -1032,8 +1102,21 @@ fn finish(
         let mut ins = vec![0usize; n];
         let mut outs = vec![0usize; n];
         for (chain, _, _) in chains.iter().flatten() {
-            outs[chain[0]] += 1;
-            ins[chain[chain.len() - 1]] += 1;
+            if chain[0] < n {
+                outs[chain[0]] += 1;
+            }
+            if chain[chain.len() - 1] < n {
+                ins[chain[chain.len() - 1]] += 1;
+            }
+        }
+        // An inverted port: an output on the previous layer's side, an input
+        // on the next one's.
+        for l in &inl {
+            if l.before {
+                outs[l.node] += 1;
+            } else {
+                ins[l.node] += 1;
+            }
         }
         for e in input.edges.iter().filter(|e| e.from == e.to) {
             outs[e.from] += 1;
@@ -1145,16 +1228,18 @@ fn finish(
 /// the midpoints of edges (see `elk_ranks`), are left out, their edges joined
 /// across them, and each is then ordered after its edges' upper ends, so it adds
 /// no crossing.
+#[allow(clippy::too_many_arguments)]
 fn elk_order(
     layers: Vec<Vec<usize>>,
     verts: &[Vertex],
     real: usize,
     chains: &[Option<Chain>],
+    inl: &[InLayer],
     border: &[bool],
     ctx: &OrderCtx,
     opts: elkorder::Options,
 ) -> Vec<Vec<usize>> {
-    let (setup, elk_layers) = ElkLayers::new(layers, verts, chains);
+    let (setup, elk_layers) = ElkLayers::new(layers, verts, chains, inl);
     let ordered = elkorder::minimize(elk_layers, &setup.graph(border, real), ctx, opts);
     setup.complete(ordered, verts, ctx)
 }
@@ -1172,6 +1257,7 @@ struct ElkLayers {
     across: Vec<Option<(usize, usize)>>,
     /// The layers, the kept ones taken out.
     rest: Vec<Vec<usize>>,
+    inl: Vec<InLayer>,
 }
 
 impl ElkLayers {
@@ -1180,6 +1266,7 @@ impl ElkLayers {
         layers: Vec<Vec<usize>>,
         verts: &[Vertex],
         chains: &[Option<Chain>],
+        inl: &[InLayer],
     ) -> (Self, Vec<Vec<usize>>) {
         let mut kept = vec![false; layers.len()];
         for (r, k) in kept.iter_mut().enumerate() {
@@ -1237,6 +1324,7 @@ impl ElkLayers {
             label,
             across,
             rest,
+            inl: inl.to_vec(),
         };
         (setup, elk_layers)
     }
@@ -1253,6 +1341,7 @@ impl ElkLayers {
             segs: &self.segs,
             info: &self.info,
             real,
+            inl: &self.inl,
         }
     }
 
@@ -1484,8 +1573,13 @@ fn elk_place(
         let direct = s.len() == 2;
         let to_key = key(fixed_end(ei, true).filter(|_| direct));
         let from_key = key(fixed_end(ei, false).filter(|_| direct));
-        out_side[s[0]].push((index[s[1]], to_key, ei));
-        in_side[s[s.len() - 1]].push((index[s[s.len() - 2]], from_key, ei));
+        // (An inverted port's dummy has no ports to spread.)
+        if s[0] < real {
+            out_side[s[0]].push((index[s[1]], to_key, ei));
+        }
+        if s[s.len() - 1] < real {
+            in_side[s[s.len() - 1]].push((index[s[s.len() - 2]], from_key, ei));
+        }
     }
     let mut out_port = vec![0.0; ne];
     let mut in_port = vec![0.0; ne];
@@ -1587,6 +1681,26 @@ struct OrthoPlan {
     spacing: OrthoSpacing,
     /// Cross-axis positions, with dummies moved in line with their edges' ports.
     xs: Vec<f64>,
+    /// Per in-layer edge of an inverted port: the edge, its port and dummy
+    /// positions, whether it is on the node's previous layer's side, the
+    /// channel it runs in (named by the obstacle rank above it, `None` outside
+    /// the outer layers) and its slot there.
+    in_layer: Vec<InLayerRoute>,
+    /// Slots in the channels outside the first and the last layer.
+    outer: (usize, usize),
+}
+
+/// The route of an inverted port's in-layer edge (see [`OrthoPlan`]).
+#[derive(Debug, Clone, Copy)]
+struct InLayerRoute {
+    edge: usize,
+    node: usize,
+    dummy: usize,
+    port: f64,
+    at: f64,
+    before: bool,
+    channel: Option<usize>,
+    slot: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1599,6 +1713,8 @@ fn ortho_plan(
     gap: &dyn Fn(usize, usize) -> f64,
     spacing: OrthoSpacing,
     ports: Option<(Vec<f64>, Vec<f64>)>,
+    inl: &[InLayer],
+    fixed: &[(Option<f64>, Option<f64>)],
 ) -> OrthoPlan {
     let max_rank = verts.iter().map(|v| v.rank).max().unwrap_or(0);
     // Ranks holding nodes or edge labels; ranks of plain long-edge dummies are free.
@@ -1616,8 +1732,12 @@ fn ortho_plan(
     for (ei, ch) in chains.iter().enumerate() {
         let Some((chain, _, _)) = ch else { continue };
         let (u, w) = (chain[0], chain[chain.len() - 1]);
-        out_side[u].push((x[chain[1]], x[w], ei));
-        in_side[w].push((x[chain[chain.len() - 2]], x[u], ei));
+        if u < n {
+            out_side[u].push((x[chain[1]], x[w], ei));
+        }
+        if w < n {
+            in_side[w].push((x[chain[chain.len() - 2]], x[u], ei));
+        }
     }
     let placed = ports.is_some();
     let (mut start_x, mut end_x) = ports.unwrap_or_else(|| (vec![0.0; ne], vec![0.0; ne]));
@@ -1701,8 +1821,10 @@ fn ortho_plan(
             })
             .collect();
     }
-    // Jogs, channel by channel (a channel is named by the obstacle rank above it).
-    let mut by_channel: Vec<Vec<(usize, usize, ortho::Jog)>> = vec![Vec::new(); max_rank + 1];
+    // Jogs, channel by channel (a channel is named by the obstacle rank above it);
+    // `usize::MAX` is an in-layer edge (by its index in `in_layer`).
+    type Entry = (usize, usize, ortho::Trunk);
+    let mut by_channel: Vec<Vec<Entry>> = vec![Vec::new(); max_rank + 1];
     let mut channels: Vec<Option<(usize, usize)>> = vec![None; max_rank + 1];
     let mut jogs: Vec<Vec<Option<usize>>> = stops
         .iter()
@@ -1713,22 +1835,101 @@ fn ortho_plan(
             let ((a, ax), (b, bx)) = (w[0], w[1]);
             if (ax - bx).abs() > 0.5 {
                 let ra = verts[a].rank;
-                by_channel[ra].push((ei, k, ortho::Jog { from: ax, to: bx }));
+                by_channel[ra].push((ei, k, ortho::Jog { from: ax, to: bx }.into()));
                 channels[ra] = Some((verts[b].rank, 0));
             }
+        }
+    }
+    // An inverted port's in-layer edge runs in the channel on its port's side,
+    // both its ends on that side's layer.
+    let mut in_layer: Vec<InLayerRoute> = Vec::new();
+    let mut outer_lists: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+    for l in inl {
+        let r = verts[l.dummy].rank;
+        let (f, t) = fixed.get(l.edge).copied().unwrap_or((None, None));
+        let port = x[l.node] + if l.before { t } else { f }.unwrap_or(0.0);
+        let at = xs[l.dummy];
+        let (lo, hi) = (port.min(at), port.max(at));
+        let trunk = if l.before {
+            ortho::Trunk {
+                incoming: Vec::new(),
+                outgoing: vec![lo, hi],
+            }
+        } else {
+            ortho::Trunk {
+                incoming: vec![lo, hi],
+                outgoing: Vec::new(),
+            }
+        };
+        let channel = if l.before {
+            (0..r).rev().find(|&q| obstacle[q]).map(|ra| (ra, r))
+        } else {
+            (r + 1..=max_rank).find(|&q| obstacle[q]).map(|rb| (r, rb))
+        };
+        let k = in_layer.len();
+        in_layer.push(InLayerRoute {
+            edge: l.edge,
+            node: l.node,
+            dummy: l.dummy,
+            port,
+            at,
+            before: l.before,
+            channel: channel.map(|c| c.0),
+            slot: 0,
+        });
+        match channel {
+            Some((ra, rb)) => {
+                by_channel[ra].push((usize::MAX, k, trunk));
+                channels[ra] = Some((rb, 0));
+            }
+            None => outer_lists[usize::from(!l.before)].push(k),
         }
     }
     for (ra, list) in by_channel.iter().enumerate() {
         if list.is_empty() {
             continue;
         }
-        let segs: Vec<ortho::Jog> = list.iter().map(|&(_, _, j)| j).collect();
-        let (levels, count) = ortho::assign_slots_elk(&segs, spacing.edge_edge);
+        let segs: Vec<ortho::Trunk> = list.iter().map(|(_, _, j)| j.clone()).collect();
+        let (levels, count) = ortho::assign_slots_trunks(&segs, spacing.edge_edge);
         for (&(ei, k, _), l) in list.iter().zip(levels) {
-            jogs[ei][k] = Some(l);
+            if ei == usize::MAX {
+                in_layer[k].slot = l;
+            } else {
+                jogs[ei][k] = Some(l);
+            }
         }
         if let Some((rb, _)) = channels[ra] {
             channels[ra] = Some((rb, count));
+        }
+    }
+    // The channels outside the outer layers.
+    let mut outer = (0, 0);
+    for (side, list) in outer_lists.iter().enumerate() {
+        let segs: Vec<ortho::Trunk> = list
+            .iter()
+            .map(|&k| {
+                let r = &in_layer[k];
+                let ends = vec![r.port.min(r.at), r.port.max(r.at)];
+                match side {
+                    0 => ortho::Trunk {
+                        incoming: Vec::new(),
+                        outgoing: ends,
+                    },
+                    _ => ortho::Trunk {
+                        incoming: ends,
+                        outgoing: Vec::new(),
+                    },
+                }
+            })
+            .collect();
+        let (levels, count) = ortho::assign_slots_trunks(&segs, spacing.edge_edge);
+        for (&k, l) in list.iter().zip(levels) {
+            in_layer[k].slot = l;
+        }
+        if side == 0 {
+            outer.0 = count;
+        } else {
+            outer.1 = count;
         }
     }
     OrthoPlan {
@@ -1737,6 +1938,8 @@ fn ortho_plan(
         channels,
         spacing,
         xs,
+        in_layer,
+        outer,
     }
 }
 
@@ -1781,7 +1984,52 @@ impl OrthoPlan {
             }
         }
         pts.push(Point::new(cur, vy[w] - verts[w].h / 2.0));
+        // An inverted port: from the node's port round through its channel to
+        // the dummy, or from the dummy back to the port.
+        for r in self.in_layer.iter().filter(|r| r.edge == ei) {
+            let ee = self.spacing.edge_edge;
+            let start = |q: usize| rank_y[q] - rank_h[q] / 2.0 - start_pad[q];
+            let end = |q: usize| rank_y[q] + rank_h[q] / 2.0 + end_pad[q];
+            let rank = verts[r.dummy].rank;
+            let y = match r.channel {
+                Some(ra) => {
+                    let (rb, slots) = self.channels[ra].unwrap_or((rank, 1));
+                    (end(ra) + start(rb)) / 2.0 - (slots - 1) as f64 * ee / 2.0 + r.slot as f64 * ee
+                }
+                None if r.before => {
+                    start(rank) - self.spacing.edge_node - (self.outer.0 - 1 - r.slot) as f64 * ee
+                }
+                None => end(rank) + self.spacing.edge_node + r.slot as f64 * ee,
+            };
+            let h = verts[r.node].h / 2.0;
+            if r.before {
+                let head = [
+                    Point::new(r.port, vy[r.node] - h),
+                    Point::new(r.port, y),
+                    Point::new(r.at, y),
+                ];
+                pts.splice(0..0, head);
+            } else {
+                pts.extend([
+                    Point::new(r.at, y),
+                    Point::new(r.port, y),
+                    Point::new(r.port, vy[r.node] + h),
+                ]);
+            }
+        }
         ortho::simplify(&pts)
+    }
+
+    /// The room the channels outside the first and the last layer take.
+    fn outer_room(&self) -> (f64, f64) {
+        let room = |slots: usize| {
+            if slots == 0 {
+                0.0
+            } else {
+                self.spacing.edge_node + (slots - 1) as f64 * self.spacing.edge_edge
+            }
+        };
+        (room(self.outer.0), room(self.outer.1))
     }
 }
 
