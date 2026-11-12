@@ -1382,7 +1382,8 @@ fn order_runs(tree: &Tree, scopes: &[Option<usize>], inputs: &[LevelInput]) -> V
     let mut setups = Vec::with_capacity(k);
     let mut elk_layers = Vec::with_capacity(k);
     for p in &preps {
-        let (setup, layers) = ElkLayers::new(p.layers.clone(), &p.verts, &p.chains, &p.inl);
+        let (setup, layers) =
+            ElkLayers::new(p.layers.clone(), (&p.verts, &p.created), &p.chains, &p.inl);
         setups.push(setup);
         elk_layers.push(Some(layers));
     }

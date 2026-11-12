@@ -217,6 +217,10 @@ pub(super) struct Graph<'a> {
     pub border: &'a [bool],
     /// Label dummies (made before layering).
     pub label: &'a [bool],
+    /// Per vertex: when ELK's layering put it in its layer (real nodes and label
+    /// dummies), which orders them in their layers before crossing
+    /// minimisation. Empty: real nodes in model order, then label dummies.
+    pub created: &'a [usize],
     /// Edge segments between consecutive layers (from the upper layer's vertex).
     pub segs: &'a [(usize, usize)],
     pub info: &'a [SegInfo],
@@ -324,6 +328,7 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
         let Graph {
             border,
             label,
+            created,
             segs,
             info,
             real,
@@ -361,7 +366,7 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
         }
         ghosts.push(layer_ghosts);
         let mut layers = kept;
-        creation_order(&mut layers, &east, segs, info, real, label, inl);
+        creation_order(&mut layers, &east, segs, info, real, (label, created), inl);
         if opts.model_order {
             let other: Vec<bool> = (0..nv).map(|v| label[v] || border[v]).collect();
             sort_by_model_order(
@@ -804,8 +809,9 @@ impl Run<'_> {
     }
 }
 
-/// The order ELK's layers have before crossing minimisation: real nodes in model
-/// order, then label dummies (made before layering) in edge order, then long-edge
+/// The order ELK's layers have before crossing minimisation: real nodes and label
+/// dummies (made before layering) as the layering put them there (`created`; if
+/// not given, real nodes in model order, then label dummies in edge order), then long-edge
 /// dummies as `LongEdgeSplitter` appends them, layer by layer, node by node, edge
 /// by edge (an inverted port's dummy not yet there: the edge leaves its node
 /// through the port, its clockwise last), and last the dummies of inverted
@@ -816,7 +822,7 @@ fn creation_order(
     segs: &[(usize, usize)],
     info: &[SegInfo],
     real: usize,
-    label: &[bool],
+    (label, created): (&[bool], &[usize]),
     inl: &[InLayer],
 ) {
     let nv = east.len();
@@ -844,7 +850,11 @@ fn creation_order(
             .copied()
             .filter(|&v| v < real || label[v])
             .collect();
-        first.sort_by_key(|&v| if v < real { (0, v) } else { (1, edge_of[v]) });
+        if created.is_empty() {
+            first.sort_by_key(|&v| if v < real { (0, v) } else { (1, edge_of[v]) });
+        } else {
+            first.sort_by_key(|&v| (created[v], v));
+        }
         for &v in &first {
             placed[v] = true;
         }
@@ -1803,6 +1813,7 @@ mod tests {
         let graph = Graph {
             border: &border,
             label: &label,
+            created: &[],
             segs,
             info: &info,
             real: n,
@@ -1832,6 +1843,7 @@ mod tests {
         let graph = Graph {
             border: &flags,
             label: &flags,
+            created: &[],
             segs: &[],
             info: &[],
             real: n,
@@ -1872,6 +1884,7 @@ mod tests {
                 graph: Graph {
                     border: &no[..1],
                     label: &no[..1],
+                    created: &[],
                     segs: &[],
                     info: &[],
                     real: 1,
@@ -1888,6 +1901,7 @@ mod tests {
                 graph: Graph {
                     border: &no,
                     label: &no,
+                    created: &[],
                     segs: &segs,
                     info: &child_info,
                     real: 2,
@@ -1928,6 +1942,7 @@ mod tests {
         let graph = Graph {
             border: &no,
             label: &no,
+            created: &[],
             segs: &segs,
             info: &info,
             real: 5,
@@ -1938,7 +1953,15 @@ mod tests {
         for (s, &(a, _)) in segs.iter().enumerate() {
             east[a].push(s);
         }
-        creation_order(&mut sweeper_layers, &east, &segs, &info, 5, &no, &inl);
+        creation_order(
+            &mut sweeper_layers,
+            &east,
+            &segs,
+            &info,
+            5,
+            (&no, &[]),
+            &inl,
+        );
         assert_eq!(sweeper_layers[1], vec![2, 3, 5]);
         for opts in [
             OPTS,
@@ -2157,6 +2180,7 @@ mod tests {
                 graph: Graph {
                     border: &no[..2],
                     label: &no[..2],
+                    created: &[],
                     segs: &root_segs,
                     info: &root_info,
                     real: 2,
@@ -2173,6 +2197,7 @@ mod tests {
                 graph: Graph {
                     border: &no,
                     label: &no,
+                    created: &[],
                     segs: &segs,
                     info: &child_info,
                     real: 4,

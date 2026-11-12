@@ -340,6 +340,11 @@ struct Prepared {
     max_rank: usize,
     /// The initial order.
     layers: Vec<Vec<usize>>,
+    /// Under ELK, per vertex: when ELK's layering put it in its layer (real
+    /// nodes and label dummies; `usize::MAX` for the rest). Empty otherwise.
+    created: Vec<usize>,
+    /// Per edge: the rank its label moves to after crossing minimisation.
+    label_switch: Vec<Option<usize>>,
 }
 
 impl Prepared {
@@ -402,9 +407,10 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
             }
         })
         .collect();
-    let (mut ranks, mut layered) = rank_with_clusters(n, &mut oriented, input);
+    let (mut ranks, mut layered, mut created, label_layer) =
+        rank_with_clusters(n, &mut oriented, input, &is_ext);
     if elk && !hier.ext.is_empty() {
-        pin_ext_neighbours(
+        let moved = pin_ext_neighbours(
             &mut ranks,
             &mut layered,
             input,
@@ -413,6 +419,12 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
             &is_ext,
             hier,
         );
+        // `LayerConstraintPostprocessor` appends what it moves to the last layer.
+        for (k, v) in moved.into_iter().enumerate() {
+            if let Some(c) = created.get_mut(v) {
+                *c = usize::MAX / 2 + k;
+            }
+        }
     }
     for (o, h) in oriented.iter_mut().zip(hidden) {
         if h.is_some() {
@@ -442,16 +454,25 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
             hier.ext.iter().any(|e| !e.1).then_some(last),
         );
     }
-    // Under ELK, per edge: the rank of its label (the layer its label dummy took).
+    // Under ELK, per edge: the rank of its label (the layer its label dummy took),
+    // and where `LabelDummySwitcher` moves it after crossing minimisation.
     let mut label_ranks: Vec<Option<usize>> = vec![None; input.edges.len()];
+    let mut label_switch: Vec<Option<usize>> = vec![None; input.edges.len()];
     if elk {
         let to_rank = elk_ranks(&ranks);
+        let ext_shift = usize::from(hier.ext.iter().any(|&(_, first)| first));
         for (ei, o) in oriented.iter().enumerate() {
             if let Some(o) = o.as_ref().filter(|_| input.edges[ei].label.is_some()) {
-                // The label dummy stays where the layering put it, half-way, when
-                // `balance_ranks` then moves an end.
+                // The switcher's median layer: half-way, on the balanced layers.
                 let (lu, lv) = (layered[o.from], layered[o.to]);
-                label_ranks[ei] = Some(to_rank(lu + lv.saturating_sub(lu) / 2));
+                let median = to_rank(lu + lv.saturating_sub(lu) / 2);
+                match label_layer.get(ei).copied().flatten() {
+                    Some(l) => {
+                        label_ranks[ei] = Some(to_rank(l + ext_shift));
+                        label_switch[ei] = Some(median);
+                    }
+                    None => label_ranks[ei] = Some(median),
+                }
             }
         }
         ranks = ranks.iter().map(|&l| to_rank(l)).collect();
@@ -600,6 +621,19 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         chains[ei] = Some((chain, label_vertex, o.reversed));
     }
 
+    let created: Vec<usize> = if created.is_empty() {
+        Vec::new()
+    } else {
+        let mut by_vertex = vec![usize::MAX; verts.len()];
+        by_vertex[..n].copy_from_slice(&created[..n]);
+        for (ei, c) in chains.iter().enumerate() {
+            if let Some((_, Some(lv), _)) = c {
+                by_vertex[*lv] = created[n + ei];
+            }
+        }
+        by_vertex
+    };
+
     // 4. Cluster spans and border vertices.
     let nc = input.clusters.len();
     let mut span: Vec<Option<(usize, usize)>> = vec![None; nc];
@@ -699,6 +733,8 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         down,
         max_rank,
         layers,
+        created,
+        label_switch,
     }
 }
 
@@ -716,7 +752,8 @@ fn pin_ext_neighbours(
     hidden: &[Option<Oriented>],
     is_ext: &[bool],
     hier: &Hierarchy,
-) {
+) -> Vec<usize> {
+    let mut moved = Vec::new();
     let n = ranks.len();
     let entering: Vec<Option<bool>> = {
         let mut k = vec![None; n];
@@ -747,13 +784,14 @@ fn pin_ext_neighbours(
     }
     let real: Vec<usize> = (0..n).filter(|&v| !is_ext[v]).collect();
     let Some(mut last) = real.iter().map(|&v| ranks[v]).max() else {
-        return;
+        return moved;
     };
     for &v in &real {
         if seen[v] != (false, false, true) || ranks[v] == last {
             continue;
         }
         let old = ranks[v];
+        moved.push(v);
         ranks[v] = last;
         layered[v] = last;
         // The layer it left may now be empty (a label dummy's layer lies between
@@ -772,6 +810,40 @@ fn pin_ext_neighbours(
             }
             last -= 1;
         }
+    }
+    moved
+}
+
+/// ELK's `LabelDummySwitcher`, after crossing minimisation: a label dummy moves
+/// to the median layer of its edge, swapping places with the edge's long-edge
+/// dummy there (which takes the label dummy's place in its layer).
+fn switch_labels(prep: &mut Prepared) {
+    for (ei, target) in prep.label_switch.iter().enumerate() {
+        let (Some(target), Some((chain, Some(lv), _))) = (*target, prep.chains[ei].as_mut()) else {
+            continue;
+        };
+        let lv_ = *lv;
+        if prep.verts[lv_].rank == target {
+            continue;
+        }
+        let Some(&d) = chain[1..chain.len() - 1]
+            .iter()
+            .find(|&&d| prep.verts[d].rank == target && d != lv_)
+        else {
+            continue;
+        };
+        let (a, b) = (prep.verts[lv_].clone(), prep.verts[d].clone());
+        prep.verts[d] = Vertex {
+            rank: b.rank,
+            cluster: b.cluster,
+            ..a
+        };
+        prep.verts[lv_] = Vertex {
+            rank: a.rank,
+            cluster: a.cluster,
+            ..b
+        };
+        *lv = d;
     }
 }
 
@@ -803,7 +875,7 @@ fn order_flat(
         let border = prep.border();
         let (layers, rng) = elk_order(
             layers,
-            verts,
+            (verts, &prep.created),
             n,
             chains,
             &prep.inl,
@@ -824,9 +896,10 @@ fn finish(
     input: &LayoutInput,
     graph: ElkGraph,
     hier: &Hierarchy,
-    prep: Prepared,
+    mut prep: Prepared,
     layers: Vec<Vec<usize>>,
 ) -> LayoutOutput {
+    switch_labels(&mut prep);
     let Prepared {
         n,
         rank_sep,
@@ -1349,7 +1422,7 @@ fn finish(
 #[allow(clippy::too_many_arguments)]
 fn elk_order(
     layers: Vec<Vec<usize>>,
-    verts: &[Vertex],
+    (verts, created): (&[Vertex], &[usize]),
     real: usize,
     chains: &[Option<Chain>],
     inl: &[InLayer],
@@ -1357,7 +1430,7 @@ fn elk_order(
     ctx: &OrderCtx,
     opts: elkorder::Options,
 ) -> (Vec<Vec<usize>>, elkorder::JavaRandom) {
-    let (setup, elk_layers) = ElkLayers::new(layers, verts, chains, inl);
+    let (setup, elk_layers) = ElkLayers::new(layers, (verts, created), chains, inl);
     let ordered = elkorder::minimize(elk_layers, &setup.graph(border, real), ctx, opts);
     let layers = setup.complete(ordered.layers, verts, ctx);
     (layers, ordered.rng)
@@ -1372,6 +1445,7 @@ struct ElkLayers {
     segs: Vec<(usize, usize)>,
     info: Vec<elkorder::SegInfo>,
     label: Vec<bool>,
+    created: Vec<usize>,
     /// Per left-out vertex: its edge's ends on the kept layers above and below.
     across: Vec<Option<(usize, usize)>>,
     /// The layers, the kept ones taken out.
@@ -1383,7 +1457,7 @@ impl ElkLayers {
     /// Split `layers` into ELK's layers (returned) and the rest.
     fn new(
         layers: Vec<Vec<usize>>,
-        verts: &[Vertex],
+        (verts, created): (&[Vertex], &[usize]),
         chains: &[Option<Chain>],
         inl: &[InLayer],
     ) -> (Self, Vec<Vec<usize>>) {
@@ -1441,6 +1515,7 @@ impl ElkLayers {
             segs,
             info,
             label,
+            created: created.to_vec(),
             across,
             rest,
             inl: inl.to_vec(),
@@ -1457,6 +1532,7 @@ impl ElkLayers {
         elkorder::Graph {
             border,
             label: &self.label,
+            created: &self.created,
             segs: &self.segs,
             info: &self.info,
             real,
@@ -2586,18 +2662,27 @@ fn rank_nodes(n: usize, edges: &[Option<Oriented>]) -> Vec<usize> {
 /// outgoing edges) before `NetworkSimplexLayerer` runs, so the labels take part in
 /// the layering and in its balancing like any node (where a label stands decides
 /// which ranks are fullest). The layering is ELK's own (`elkns`), so that ties
-/// between equally short layerings break as in ELK. Returns the real nodes' ranks, twice: the labels are
-/// then placed by `LabelDummySwitcher`'s median rule on the balanced ranks (see
-/// `prepare`).
+/// between equally short layerings break as in ELK. Returns the real nodes' ranks,
+/// twice: the labels are then placed by `LabelDummySwitcher`'s median rule on the
+/// balanced ranks (see `prepare`); and the order the layering put the nodes and
+/// labels in their layers (see [`Ranking`]).
 fn rank_with_label_nodes(
     n: usize,
     oriented: &[Option<Oriented>],
     input: &LayoutInput,
-) -> (Vec<usize>, Vec<usize>) {
+    hidden: &[bool],
+) -> Ranking {
     // Every edge end is a port of its own, in the order the edges were imported;
     // a label dummy has its input port, then its output port.
+    // Hidden nodes (external port dummies) are no nodes of the layering at all.
+    let mut id = vec![usize::MAX; n];
+    let mut next = 0;
+    for v in (0..n).filter(|&v| !hidden.get(v).copied().unwrap_or(false)) {
+        id[v] = next;
+        next += 1;
+    }
     let mut edges: Vec<elkns::NsEdge> = Vec::new();
-    let mut next = n;
+    let mut label_of: Vec<Option<usize>> = vec![None; oriented.len()];
     let mut by_source: Vec<(usize, usize)> = oriented
         .iter()
         .enumerate()
@@ -2613,8 +2698,8 @@ fn rank_with_label_nodes(
         let Some(o) = o.as_ref() else { continue };
         if input.edges[ei].label.is_none() || o.from == o.to {
             edges.push(elkns::NsEdge {
-                from: o.from,
-                to: o.to,
+                from: id[o.from],
+                to: id[o.to],
                 delta: o.minlen as i64,
                 ports: key(ei, o),
             });
@@ -2627,24 +2712,46 @@ fn rank_with_label_nodes(
             if input.edges[ei].label.is_some() && o.from != o.to {
                 let (ks, kt) = key(ei, o);
                 edges.push(elkns::NsEdge {
-                    from: o.from,
+                    from: id[o.from],
                     to: next,
                     delta: 1,
                     ports: (ks, 0),
                 });
                 edges.push(elkns::NsEdge {
                     from: next,
-                    to: o.to,
+                    to: id[o.to],
                     delta: 1,
                     ports: (1, kt),
                 });
+                label_of[ei] = Some(next);
                 next += 1;
             }
         }
     }
-    let ranks = elkns::layer(next, &edges).0[..n].to_vec();
-    (ranks.clone(), ranks)
+    let layering = elkns::layer(next, &edges);
+    let of = |at: &[usize], v: usize, none: usize| at.get(id[v]).copied().unwrap_or(none);
+    let ranks: Vec<usize> = (0..n).map(|v| of(&layering.layers, v, 0)).collect();
+    let mut created: Vec<usize> = (0..n)
+        .map(|v| of(&layering.created, v, usize::MAX))
+        .collect();
+    created.extend(
+        label_of
+            .iter()
+            .map(|l| l.map_or(usize::MAX, |v| layering.created[v])),
+    );
+    let label_layer = label_of
+        .iter()
+        .map(|l| l.map(|v| layering.layers[v]))
+        .collect();
+    (ranks.clone(), ranks, created, label_layer)
 }
+
+/// Ranks of the real nodes, the layering's own (before ELK's balancing), and
+/// under ELK the order the layering put things in their layers (see
+/// `elkns::Layering::created`): per node, then per edge for its label dummy
+/// (`usize::MAX` for none), and per edge the layer of its label dummy; both
+/// empty otherwise.
+type Ranking = (Vec<usize>, Vec<usize>, Vec<usize>, Vec<Option<usize>>);
 
 /// Rank like `rank_nodes`, but an edge leaving (entering) a whole cluster is
 /// constrained to start below its last (end above its first) member, the way
@@ -2662,7 +2769,8 @@ fn rank_with_clusters(
     n: usize,
     oriented: &mut [Option<Oriented>],
     input: &LayoutInput,
-) -> (Vec<usize>, Vec<usize>) {
+    hidden: &[bool],
+) -> Ranking {
     let mut slot: Vec<Option<usize>> = vec![None; input.clusters.len()];
     let mut used = Vec::new();
     let mut ends = Vec::with_capacity(oriented.len());
@@ -2683,7 +2791,7 @@ fn rank_with_clusters(
     }
     let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
     if used.is_empty() && elk {
-        return rank_with_label_nodes(n, oriented, input);
+        return rank_with_label_nodes(n, oriented, input, hidden);
     }
     if used.is_empty() {
         let mut ranks = rank_nodes(n, oriented);
@@ -2692,7 +2800,7 @@ fn rank_with_clusters(
         } else {
             ranks.clone()
         };
-        return (ranks, layered);
+        return (ranks, layered, Vec::new(), Vec::new());
     }
     let chains = cluster_chains(&input.clusters);
     let top = |c: usize| slot[c].map(|k| n + 2 * k);
@@ -2813,7 +2921,7 @@ fn rank_with_clusters(
             }
         }
     }
-    (ranks, layered)
+    (ranks, layered, Vec::new(), Vec::new())
 }
 
 /// Root-to-cluster ancestor chains (inclusive).
@@ -4351,7 +4459,7 @@ mod tests {
                 Direction::TopBottom,
             ));
             let oriented = orient_edges(n, &inp.edges, 1, true);
-            let (ranks, _) = rank_with_label_nodes(n, &oriented, &inp);
+            let (ranks, _, _, _) = rank_with_label_nodes(n, &oriented, &inp, &[]);
             let mut used: Vec<usize> = ranks.clone();
             for (o, e) in oriented.iter().zip(&inp.edges) {
                 if let (Some(o), Some(_)) = (o, e.label) {
@@ -4455,6 +4563,33 @@ mod tests {
         assert!((y(0) - y(3)).abs() < 1.0, "{out:?}");
         assert!(y(0) < y(5) && y(5) < y(1), "{out:?}");
         assert!((y(1) - y(4)).abs() < 1.0, "{out:?}");
+    }
+
+    /// ELK's layers list their nodes as the layering put them there (depth first
+    /// over the ports), and a label dummy sits in the layer the layering gave it
+    /// until crossing minimisation is over (elkjs: `n0 -->|x| n3`, `n1 --> n2`,
+    /// `n1 -->|a longer label| n3`, `n2 -->|x| n3`, LR): `n0` stays above `n2`.
+    #[test]
+    fn elk_layer_order_and_labels_follow_the_layering() {
+        let lb = Some((30.0, 20.0));
+        // n0 n3 n1 n2
+        let edges = vec![
+            LayoutEdge::new(0, 1, 1, lb),
+            edge(2, 3),
+            LayoutEdge::new(2, 1, 1, Some((80.0, 20.0))),
+            LayoutEdge::new(3, 1, 1, lb),
+        ];
+        let out = layout(&elk(input(
+            vec![node(None); 4],
+            edges,
+            vec![],
+            Direction::LeftRight,
+        )));
+        assert!((out.nodes[0].x - out.nodes[3].x).abs() < 1.0, "{out:?}");
+        assert!(out.nodes[0].y < out.nodes[3].y, "{out:?}");
+        // The long edge's label ends up half-way, in the layer after its source.
+        let label = out.edges[2].label.expect("label");
+        assert!(label.x < out.nodes[1].x - 60.0, "{out:?}");
     }
 
     /// When balancing moves a labelled edge's target down, the label stays in the

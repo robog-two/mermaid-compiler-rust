@@ -28,9 +28,20 @@ const REMOVE_SUBTREES_THRESH: usize = 40;
 /// `NetworkSimplex.FUZZY_ST_ZERO`.
 const FUZZY_ST_ZERO: f64 = -1e-10;
 
-/// The layers of `n` nodes: (after balancing, before balancing). Each connected
-/// component starts on layer 0.
-pub(super) fn layer(n: usize, edges: &[NsEdge]) -> (Vec<usize>, Vec<usize>) {
+/// ELK's layering of a graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Layering {
+    /// Per node: its layer. Each connected component starts on layer 0.
+    pub layers: Vec<usize>,
+    /// Per node: its layer before balancing.
+    pub unbalanced: Vec<usize>,
+    /// Per node: when it was put in its layer (layers list their nodes in that
+    /// order: component by component, each in `NetworkSimplex`'s node order).
+    pub created: Vec<usize>,
+}
+
+/// The layers of `n` nodes.
+pub(super) fn layer(n: usize, edges: &[NsEdge]) -> Layering {
     // Per node: its ports in order, each (key, edge).
     let mut ports: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
     for (i, e) in edges.iter().enumerate() {
@@ -57,6 +68,8 @@ pub(super) fn layer(n: usize, edges: &[NsEdge]) -> (Vec<usize>, Vec<usize>) {
     }
     let mut balanced = vec![0usize; n];
     let mut plain = vec![0usize; n];
+    let mut created = vec![0usize; n];
+    let mut next = 0;
     let mut counts: Vec<usize> = Vec::new();
     let several = components.len() > 1;
     let mut previous: Option<Vec<usize>> = None;
@@ -64,10 +77,13 @@ pub(super) fn layer(n: usize, edges: &[NsEdge]) -> (Vec<usize>, Vec<usize>) {
         let limit = ITER_FACTOR * (comp.len() as f64).sqrt() as usize;
         let mut g = NGraph::new(comp, &ports, edges, n);
         let unbalanced = g.execute(limit, previous.as_deref());
-        for (k, &v) in comp.iter().enumerate() {
+        for &k in &g.order {
+            let v = comp[k];
             let l = g.nodes[k].layer as usize;
             balanced[v] = l;
             plain[v] = unbalanced[k];
+            created[v] = next;
+            next += 1;
             if counts.len() <= l {
                 counts.resize(l + 1, 0);
             }
@@ -77,7 +93,11 @@ pub(super) fn layer(n: usize, edges: &[NsEdge]) -> (Vec<usize>, Vec<usize>) {
             previous = Some(counts.clone());
         }
     }
-    (balanced, plain)
+    Layering {
+        layers: balanced,
+        unbalanced: plain,
+        created,
+    }
 }
 
 fn dfs(
@@ -105,7 +125,6 @@ struct NNode {
     internal_id: usize,
     incoming: Vec<usize>,
     outgoing: Vec<usize>,
-    unknown_cutvalues: Vec<usize>,
 }
 
 impl NNode {
@@ -149,11 +168,18 @@ struct NGraph {
     /// `treeEdges`, a linked hash set: insertion order.
     tree_edges: Vec<usize>,
     edge_visited: Vec<bool>,
-    post_order: usize,
+    /// Per node: its post-order number in the tree, and the lowest in its subtree
+    /// (`poID`, `lowestPoID`).
     po_id: Vec<usize>,
     lowest_po_id: Vec<usize>,
+    /// Per edge: its cut value (tree edges).
     cutvalue: Vec<f64>,
+    /// Per node: its tree edges.
+    tree_adj: Vec<Vec<usize>>,
     subtrees: Vec<(usize, usize)>,
+    /// Per node: its connected edges while the simplex runs (they only change
+    /// when subtrees are removed and put back).
+    conn: Vec<Vec<usize>>,
 }
 
 impl NGraph {
@@ -172,7 +198,6 @@ impl NGraph {
                 internal_id: 0,
                 incoming: Vec::new(),
                 outgoing: Vec::new(),
-                unknown_cutvalues: Vec::new(),
             })
             .collect();
         let mut all_edges = Vec::new();
@@ -204,11 +229,12 @@ impl NGraph {
             edges: Vec::new(),
             tree_edges: Vec::new(),
             edge_visited: Vec::new(),
-            post_order: 1,
             po_id: Vec::new(),
             lowest_po_id: Vec::new(),
             cutvalue: Vec::new(),
+            tree_adj: Vec::new(),
             subtrees: Vec::new(),
+            conn: Vec::new(),
         }
     }
 
@@ -302,13 +328,13 @@ impl NGraph {
             self.all_edges[e].tree_edge = false;
         }
         let m = edges.len();
-        self.cutvalue = vec![0.0; m];
+        self.cutvalue = vec![0.0; self.all_edges.len()];
         self.edge_visited = vec![false; m];
-        self.po_id = vec![0; self.order.len()];
-        self.lowest_po_id = vec![0; self.order.len()];
+        self.po_id = vec![0; self.nodes.len()];
+        self.lowest_po_id = vec![0; self.nodes.len()];
         self.edges = edges;
+        self.conn = self.nodes.iter().map(NNode::connected).collect();
         self.tree_edges.clear();
-        self.post_order = 1;
     }
 
     fn sources(&self) -> Vec<usize> {
@@ -341,9 +367,13 @@ impl NGraph {
             }
             self.edge_visited.fill(false);
         }
-        self.edge_visited.fill(false);
-        self.postorder_traversal(first);
-        self.cutvalues();
+        self.tree_adj = vec![Vec::new(); self.nodes.len()];
+        for &e in &self.tree_edges {
+            let (s, t) = (self.all_edges[e].source, self.all_edges[e].target);
+            self.tree_adj[s].push(e);
+            self.tree_adj[t].push(e);
+        }
+        self.tree_values();
     }
 
     fn layering_topological_numbering(&mut self, roots: Vec<usize>) {
@@ -369,7 +399,8 @@ impl NGraph {
     fn tight_tree_dfs(&mut self, v: usize) -> usize {
         let mut count = 1;
         self.nodes[v].tree_node = true;
-        for e in self.nodes[v].connected() {
+        for k in 0..self.conn[v].len() {
+            let e = self.conn[v][k];
             let id = self.all_edges[e].internal_id;
             if self.edge_visited[id] {
                 continue;
@@ -406,29 +437,73 @@ impl NGraph {
         best
     }
 
-    fn postorder_traversal(&mut self, v: usize) -> usize {
-        let mut lowest = usize::MAX;
-        for e in self.nodes[v].connected() {
-            let id = self.all_edges[e].internal_id;
-            if self.all_edges[e].tree_edge && !self.edge_visited[id] {
-                self.edge_visited[id] = true;
-                let other = self.all_edges[e].other(v);
-                lowest = lowest.min(self.postorder_traversal(other));
+    /// `postorderTraversal` and `cutvalues`: the post-order numbers of the tree
+    /// (rooted at the first node) and the cut values of its edges. Which way the
+    /// tree is walked (ELK: in the order of each node's edges) changes the numbers
+    /// but neither which side of a tree edge a node is on (`isInHead`) nor the cut
+    /// values, so the tree is walked in any order and the cut values are summed
+    /// bottom-up (each from its lower end's edges and its subtree's tree edges).
+    fn tree_values(&mut self) {
+        let root = self.order[0];
+        // Iterative post-order walk: (node, edge to its parent, next tree edge).
+        let mut post = Vec::with_capacity(self.order.len());
+        let mut parent_edge = vec![usize::MAX; self.nodes.len()];
+        let mut stack: Vec<(usize, usize, usize)> = vec![(root, usize::MAX, 0)];
+        let mut next_po = 1;
+        while let Some(top) = stack.last_mut() {
+            let (v, pe, k) = *top;
+            if k < self.tree_adj[v].len() {
+                top.2 += 1;
+                let e = self.tree_adj[v][k];
+                if e != pe {
+                    let w = self.all_edges[e].other(v);
+                    parent_edge[w] = e;
+                    stack.push((w, e, 0));
+                }
+                continue;
             }
+            stack.pop();
+            let lowest = self.tree_adj[v]
+                .iter()
+                .filter(|&&e| e != pe)
+                .map(|&e| self.lowest_po_id[self.all_edges[e].other(v)])
+                .min()
+                .unwrap_or(usize::MAX);
+            self.po_id[v] = next_po;
+            self.lowest_po_id[v] = lowest.min(next_po);
+            next_po += 1;
+            post.push(v);
         }
-        let id = self.nodes[v].internal_id;
-        self.po_id[id] = self.post_order;
-        self.lowest_po_id[id] = lowest.min(self.post_order);
-        self.post_order += 1;
-        self.lowest_po_id[id]
+        for &v in &post {
+            let e = parent_edge[v];
+            if e == usize::MAX {
+                continue;
+            }
+            let child_is_tail = self.all_edges[e].source == v;
+            let mut cut = self.all_edges[e].weight;
+            for &f in &self.conn[v] {
+                if f == e {
+                    continue;
+                }
+                let fe = &self.all_edges[f];
+                let points_to_head = (fe.source == v) == child_is_tail;
+                cut += if points_to_head {
+                    fe.weight
+                } else {
+                    -fe.weight
+                };
+                if fe.tree_edge {
+                    let c = self.cutvalue[f];
+                    cut += if points_to_head { -c } else { c };
+                }
+            }
+            self.cutvalue[e] = cut;
+        }
     }
 
     fn is_in_head(&self, v: usize, e: usize) -> bool {
-        let (s, t) = (
-            self.nodes[self.all_edges[e].source].internal_id,
-            self.nodes[self.all_edges[e].target].internal_id,
-        );
-        let p = self.po_id[self.nodes[v].internal_id];
+        let (s, t) = (self.all_edges[e].source, self.all_edges[e].target);
+        let p = self.po_id[v];
         let (lo, po) = (&self.lowest_po_id, &self.po_id);
         if lo[s] <= p && p <= po[s] && lo[t] <= p && p <= po[t] {
             return po[s] >= po[t];
@@ -436,61 +511,11 @@ impl NGraph {
         po[s] < po[t]
     }
 
-    fn cutvalues(&mut self) {
-        let mut leafs = Vec::new();
-        for &v in &self.order {
-            let tree: Vec<usize> = self.nodes[v]
-                .connected()
-                .into_iter()
-                .filter(|&e| self.all_edges[e].tree_edge)
-                .collect();
-            if tree.len() == 1 {
-                leafs.push(v);
-            }
-            self.nodes[v].unknown_cutvalues = tree;
-        }
-        for leaf in leafs {
-            let mut v = leaf;
-            while self.nodes[v].unknown_cutvalues.len() == 1 {
-                let det = self.nodes[v].unknown_cutvalues[0];
-                let did = self.all_edges[det].internal_id;
-                let (source, target) = (self.all_edges[det].source, self.all_edges[det].target);
-                let mut cut = self.all_edges[det].weight;
-                for e in self.nodes[v].connected() {
-                    if e == det {
-                        continue;
-                    }
-                    let ed = &self.all_edges[e];
-                    if ed.tree_edge {
-                        let c = self.cutvalue[ed.internal_id] - ed.weight;
-                        if source == ed.source || target == ed.target {
-                            cut -= c;
-                        } else {
-                            cut += c;
-                        }
-                    } else if (v == source) == (ed.source == v) {
-                        cut += ed.weight;
-                    } else {
-                        cut -= ed.weight;
-                    }
-                }
-                self.cutvalue[did] = cut;
-                for end in [source, target] {
-                    let list = &mut self.nodes[end].unknown_cutvalues;
-                    if let Some(p) = list.iter().position(|&x| x == det) {
-                        list.remove(p);
-                    }
-                }
-                v = if source == v { target } else { source };
-            }
-        }
-    }
-
     fn leave_edge(&self) -> Option<usize> {
-        self.tree_edges.iter().copied().find(|&e| {
-            self.all_edges[e].tree_edge
-                && self.cutvalue[self.all_edges[e].internal_id] < FUZZY_ST_ZERO
-        })
+        self.tree_edges
+            .iter()
+            .copied()
+            .find(|&e| self.all_edges[e].tree_edge && self.cutvalue[e] < FUZZY_ST_ZERO)
     }
 
     fn enter_edge(&self, leave: usize) -> usize {
@@ -514,24 +539,28 @@ impl NGraph {
         self.tree_edges.retain(|&e| e != leave);
         self.all_edges[enter].tree_edge = true;
         self.tree_edges.push(enter);
+        for (e, add) in [(leave, false), (enter, true)] {
+            for end in [self.all_edges[e].source, self.all_edges[e].target] {
+                let adj = &mut self.tree_adj[end];
+                if add {
+                    adj.push(e);
+                } else if let Some(p) = adj.iter().position(|&x| x == e) {
+                    adj.remove(p);
+                }
+            }
+        }
         let ed = &self.all_edges[enter];
         let mut delta = self.nodes[ed.target].layer - self.nodes[ed.source].layer - ed.delta;
         if !self.is_in_head(ed.target, leave) {
             delta = -delta;
         }
-        let shift: Vec<usize> = self
-            .order
-            .iter()
-            .copied()
-            .filter(|&v| !self.is_in_head(v, leave))
-            .collect();
-        for v in shift {
-            self.nodes[v].layer += delta;
+        for k in 0..self.order.len() {
+            let v = self.order[k];
+            if !self.is_in_head(v, leave) {
+                self.nodes[v].layer += delta;
+            }
         }
-        self.post_order = 1;
-        self.edge_visited.fill(false);
-        self.postorder_traversal(self.order[0]);
-        self.cutvalues();
+        self.tree_values();
     }
 
     /// Shifts the layers to start at 0; returns the nodes per layer, those of
@@ -621,20 +650,20 @@ mod tests {
 
     #[test]
     fn chain_takes_consecutive_layers() {
-        let (l, _) = layer(3, &edges(&[(0, 1), (1, 2)]));
+        let l = layer(3, &edges(&[(0, 1), (1, 2)])).layers;
         assert_eq!(l, vec![0, 1, 2]);
     }
 
     #[test]
     fn edges_are_as_short_as_possible() {
         // 3 hangs off 2 alone: longest path would put it on layer 0.
-        let (_, l) = layer(4, &edges(&[(0, 1), (1, 2), (3, 2)]));
+        let l = layer(4, &edges(&[(0, 1), (1, 2), (3, 2)])).unbalanced;
         assert_eq!(l, vec![0, 1, 2, 1]);
     }
 
     #[test]
     fn components_each_start_on_layer_zero() {
-        let (l, _) = layer(4, &edges(&[(0, 1), (2, 3)]));
+        let l = layer(4, &edges(&[(0, 1), (2, 3)])).layers;
         assert_eq!(l, vec![0, 1, 0, 1]);
     }
 
@@ -655,7 +684,7 @@ mod tests {
             (5, 9),
             (9, 8),
         ]);
-        let (l, _) = layer(10, &e);
+        let l = layer(10, &e).layers;
         assert_eq!(l, vec![0, 1, 2, 2, 2, 0, 1, 2, 3, 1]);
         // Alone, it moves to layer 2.
         let alone: Vec<NsEdge> = e[4..]
@@ -666,7 +695,19 @@ mod tests {
                 ..*x
             })
             .collect();
-        assert_eq!(layer(5, &alone).0, vec![0, 1, 2, 3, 2]);
+        assert_eq!(layer(5, &alone).layers, vec![0, 1, 2, 3, 2]);
+    }
+
+    #[test]
+    fn layers_list_nodes_depth_first_over_ports() {
+        // 0 -> 2, 1 -> 2, 0 -> 3: from 0, its first port leads to 2, whose next
+        // port leads to 1; 3 comes last.
+        let e = edges(&[(0, 2), (1, 2), (0, 3)]);
+        let l = layer(4, &e);
+        assert_eq!(l.created, vec![0, 2, 1, 3]);
+        // The biggest component is layered first.
+        let e = edges(&[(0, 1), (2, 3), (3, 4)]);
+        assert_eq!(layer(5, &e).created, vec![3, 4, 0, 1, 2]);
     }
 
     #[test]
@@ -677,7 +718,11 @@ mod tests {
         }
         pairs.push((3, 50));
         let e = edges(&pairs);
-        let (l, p) = layer(60, &e);
+        let Layering {
+            layers: l,
+            unbalanced: p,
+            ..
+        } = layer(60, &e);
         for x in &e {
             assert!(l[x.to] > l[x.from] && p[x.to] > p[x.from]);
         }
