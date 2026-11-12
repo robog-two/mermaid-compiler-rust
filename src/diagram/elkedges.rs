@@ -334,7 +334,10 @@ pub fn place_terminal_labels(
     // ELK: below the edge (the cross axis' positive side), off the node by the
     // edge-label spacing; the labels on one side of a node that would overlap
     // stack away from it (`RectangleStripOverlapRemover`, greedily in the order
-    // of their near cross borders).
+    // of their near cross borders). ELK removes the overlaps only on the sides
+    // a vertical layout's edges leave from (in a horizontal one it runs on the
+    // sides across the flow, which carry none): labels beside a node's left or
+    // right side stay where they are, overlapping or not.
     let geometry = |t: &Terminal| {
         let (far, port, _) = end_of(t)?;
         let d = far.minus(port);
@@ -351,7 +354,7 @@ pub fn place_terminal_labels(
         let Some((vertical, sign, _, _, _, _)) = geometry(&terms[i]) else {
             continue;
         };
-        if done[i] {
+        if done[i] || !vertical {
             continue;
         }
         let mut side: Vec<usize> = (i..terms.len())
@@ -657,5 +660,22 @@ mod tests {
         let at = place_terminal_labels(&routes, &terms, &nodes, &[], &[]);
         assert!(close(at[0], 39.9375, 105.25), "{at:?}");
         assert!(close(at[1], 38.52, 121.75), "{at:?}");
+    }
+
+    /// Beside a node's left or right side (a horizontal layout) ELK leaves the
+    /// labels where they are: the same pair, turned, does not stack.
+    #[test]
+    fn terminal_labels_beside_a_horizontal_side_do_not_stack() {
+        let routes = vec![
+            Some(vec![p(93.0, 48.0), p(150.0, 48.0), p(150.0, 29.1)]),
+            Some(vec![p(93.0, 52.7), p(150.0, 52.7), p(150.0, 71.6)]),
+        ];
+        let terms = [term(0, true, 0, 6.125, 0.0), term(1, true, 0, 18.36, 0.0)];
+        let nodes = [Rect::centered(p(52.5, 50.3), 81.0, 34.1)];
+        let at = place_terminal_labels(&routes, &terms, &nodes, &[], &[]);
+        let x = |k: usize| at[k].map_or(f64::NAN, |c| c.x);
+        // Both start the edge-label spacing off the node's right side (93).
+        let lefts = [x(0) - 6.125 / 2.0, x(1) - 18.36 / 2.0];
+        assert!(lefts.iter().all(|l| (l - 97.0).abs() < 1e-6), "{at:?}");
     }
 }

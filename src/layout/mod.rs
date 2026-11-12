@@ -954,7 +954,13 @@ fn finish(
             }
         }
         for ((v, after), labels) in sides {
-            let depth = ELK_END_LABEL_SPACING + strip_depth(labels);
+            // (Stacked only in a vertical layout, see `place_terminal_labels`.)
+            let depth = ELK_END_LABEL_SPACING
+                + if horizontal {
+                    labels.iter().map(|l| l.2).fold(0.0, f64::max)
+                } else {
+                    strip_depth(labels)
+                };
             let m = &mut margins[v];
             if after {
                 m.1 += depth;
@@ -3714,6 +3720,28 @@ mod tests {
             gap >= inp.node_sep - 1e-6 && gap < inp.node_sep + 1.0,
             "{gap}"
         );
+    }
+
+    #[test]
+    fn elk_end_labels_beside_a_horizontal_side_do_not_stack() {
+        // LR: A -> B, A -> C, both with a start label at A. ELK leaves the two
+        // where they are (no overlap removal there), so the layer gap grows by
+        // the wider one only, however close their ports.
+        let gap = |labels: bool| {
+            let mut inp = elk(input(
+                vec![node(None), node(None), node(None)],
+                vec![edge(0, 1), edge(0, 2)],
+                vec![],
+                Direction::LeftRight,
+            ));
+            if labels {
+                inp.edges[0].terminals = [Some((30.0, 16.5)), None];
+                inp.edges[1].terminals = [Some((50.0, 16.5)), None];
+            }
+            let out = layout(&inp);
+            out.nodes[1].x - out.nodes[0].x
+        };
+        assert!((gap(true) - gap(false) - (4.0 + 50.0)).abs() < 1e-9);
     }
 
     #[test]
