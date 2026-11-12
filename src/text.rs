@@ -31,10 +31,141 @@ const HELVETICA_BOLD: [u16; 95] = [
     389, 280, 389, 584,
 ];
 
-/// Advance width of one character in em units.
+/// Inline emphasis inside display lines.
+///
+/// A label's display lines are plain `String`s that every diagram wraps, measures
+/// and hands to [`crate::scene::Text`]. Markdown strings (`` "`**bold** _it_`" ``)
+/// and `<b>` / `<i>` tags keep their emphasis as these private-use marks, which take
+/// no width, survive wrapping (each wrapped line is re-balanced so it opens and
+/// closes its own styles) and are turned into styled runs by the output backends
+/// ([`styled_runs`]). Nothing else in a label can produce them.
+pub mod mark {
+    pub const BOLD_ON: char = '\u{E000}';
+    pub const BOLD_OFF: char = '\u{E001}';
+    pub const ITALIC_ON: char = '\u{E002}';
+    pub const ITALIC_OFF: char = '\u{E003}';
+
+    pub fn is_mark(c: char) -> bool {
+        matches!(c, BOLD_ON | BOLD_OFF | ITALIC_ON | ITALIC_OFF)
+    }
+}
+
+/// A piece of a display line drawn in one style.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StyledRun {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// Running emphasis state while reading marks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Emphasis {
+    bold: u32,
+    italic: u32,
+}
+
+impl Emphasis {
+    fn apply(&mut self, c: char) -> bool {
+        match c {
+            mark::BOLD_ON => self.bold += 1,
+            mark::BOLD_OFF => self.bold = self.bold.saturating_sub(1),
+            mark::ITALIC_ON => self.italic += 1,
+            mark::ITALIC_OFF => self.italic = self.italic.saturating_sub(1),
+            _ => return false,
+        }
+        true
+    }
+}
+
+/// Whether a display line carries emphasis marks.
+pub fn has_marks(line: &str) -> bool {
+    line.chars().any(mark::is_mark)
+}
+
+/// A display line without its emphasis marks.
+pub fn plain(line: &str) -> String {
+    line.chars().filter(|&c| !mark::is_mark(c)).collect()
+}
+
+/// Split a display line into runs of one style (`bold` is the text's base weight).
+/// Empty runs are dropped; a line without marks is one run.
+pub fn styled_runs(line: &str, bold: bool) -> Vec<StyledRun> {
+    let mut out: Vec<StyledRun> = Vec::new();
+    let mut st = Emphasis::default();
+    let mut cur = String::new();
+    let mut cur_style = (bold, false);
+    for c in line.chars() {
+        if st.apply(c) {
+            let style = (bold || st.bold > 0, st.italic > 0);
+            if style != cur_style {
+                if !cur.is_empty() {
+                    out.push(StyledRun {
+                        text: std::mem::take(&mut cur),
+                        bold: cur_style.0,
+                        italic: cur_style.1,
+                    });
+                }
+                cur_style = style;
+            }
+            continue;
+        }
+        cur.push(c);
+    }
+    if !cur.is_empty() || out.is_empty() {
+        out.push(StyledRun {
+            text: cur,
+            bold: cur_style.0,
+            italic: cur_style.1,
+        });
+    }
+    out
+}
+
+/// Make every line open the styles still open at the end of the line before it and
+/// close its own open styles, so each line can be drawn (and measured) alone.
+pub fn balance_marks(lines: Vec<String>) -> Vec<String> {
+    if !lines.iter().any(|l| has_marks(l)) {
+        return lines;
+    }
+    let mut carry = Emphasis::default();
+    lines
+        .into_iter()
+        .map(|l| {
+            let mut st = carry;
+            let mut out = String::new();
+            out.extend(std::iter::repeat_n(
+                mark::BOLD_ON,
+                carry.bold.min(1) as usize,
+            ));
+            out.extend(std::iter::repeat_n(
+                mark::ITALIC_ON,
+                carry.italic.min(1) as usize,
+            ));
+            st.bold = st.bold.min(1);
+            st.italic = st.italic.min(1);
+            for c in l.chars() {
+                if c == mark::BOLD_OFF && st.bold == 0 || c == mark::ITALIC_OFF && st.italic == 0 {
+                    continue;
+                }
+                st.apply(c);
+                out.push(c);
+            }
+            carry = st;
+            out.extend(std::iter::repeat_n(mark::ITALIC_OFF, st.italic as usize));
+            out.extend(std::iter::repeat_n(mark::BOLD_OFF, st.bold as usize));
+            out
+        })
+        .collect()
+}
+
+/// Advance width of one character in em units (emphasis marks take none).
 pub fn char_width_em(c: char, bold: bool) -> f64 {
     let table = if bold { &HELVETICA_BOLD } else { &HELVETICA };
     let code = c as u32;
+    if mark::is_mark(c) {
+        return 0.0;
+    }
     let units = match code {
         0x20..=0x7E => table[(code - 0x20) as usize] as f64,
         0xA0..=0x24F => 556.0,
@@ -50,7 +181,17 @@ pub fn char_width_em(c: char, bold: bool) -> f64 {
 
 /// Width of a single line in pixels.
 pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
-    text.chars().map(|c| char_width_em(c, bold)).sum::<f64>() * font_size
+    let mut st = Emphasis::default();
+    text.chars()
+        .map(|c| {
+            if st.apply(c) {
+                0.0
+            } else {
+                char_width_em(c, bold || st.bold > 0)
+            }
+        })
+        .sum::<f64>()
+        * font_size
 }
 
 /// Multi-line text with its measured extent.
@@ -129,7 +270,9 @@ pub fn wrap_lines(
         let mut cur = String::new();
         for seg in segments(&para, rule) {
             let cand = format!("{cur}{seg}");
-            if !cur.trim().is_empty() && line_width(cand.trim_end(), font_size, bold) > max_width {
+            if !plain(&cur).trim().is_empty()
+                && line_width(cand.trim_end(), font_size, bold) > max_width
+            {
                 out.push(std::mem::replace(&mut cur, seg).trim_end().to_string());
             } else {
                 cur = cand;
@@ -137,7 +280,7 @@ pub fn wrap_lines(
         }
         out.push(cur.trim_end().to_string());
     }
-    out
+    balance_marks(out)
 }
 
 /// CJK ideographs, kana, Hangul and full-width forms: each is its own word to the
@@ -296,40 +439,76 @@ fn br_tag_len(s: &str) -> Option<usize> {
 /// Decode mermaid entity codes, strip markdown-string backticks, emphasis
 /// markers and inline HTML tags other than `<br>`.
 pub fn normalize_label(raw: &str) -> String {
-    decode_entities(&strip_markup(raw))
+    plain(&decode_entities(&strip_markup(raw)))
 }
 
 /// A label's display lines: split on `\n` / `<br>` *before* decoding entities, so an
-/// escaped `&lt;br&gt;` stays literal text as in mermaid's HTML labels.
+/// escaped `&lt;br&gt;` stays literal text as in mermaid's HTML labels. Emphasis
+/// from markdown strings and `<b>` / `<i>` tags is kept as [`mark`]s.
 pub fn label_lines(raw: &str) -> Vec<String> {
-    split_lines(&strip_markup(raw))
-        .iter()
-        .map(|l| decode_entities(l))
-        .collect()
+    to_lines(&strip_markup(raw))
 }
 
-/// [`normalize_label`] without the entity decoding.
+/// Display lines of text that is markdown whether or not it is wrapped in
+/// backticks (mindmap and kanban labels are `labelType: 'markdown'`).
+pub fn markdown_lines(text: &str) -> Vec<String> {
+    to_lines(&strip_tags(&markdown_body(text.trim())))
+}
+
+fn to_lines(marked: &str) -> Vec<String> {
+    balance_marks(
+        split_lines(marked)
+            .iter()
+            .map(|l| decode_entities(l))
+            .collect(),
+    )
+}
+
+/// Whether a raw label is a markdown string (`` `…` ``, optionally in quotes).
+pub fn is_markdown_string(raw: &str) -> bool {
+    let s = raw.trim();
+    let s = s
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .unwrap_or(s);
+    s.len() >= 2 && s.starts_with('`') && s.ends_with('`')
+}
+
+/// [`normalize_label`] without the entity decoding (emphasis kept as marks).
 fn strip_markup(raw: &str) -> String {
     let mut s = raw.trim().to_string();
     if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
         s = s[1..s.len() - 1].to_string();
     }
     if s.len() >= 2 && s.starts_with('`') && s.ends_with('`') {
-        // A markdown string: blank lines only separate paragraphs (`<p>` without
-        // margins), single newlines are line breaks.
-        let body: Vec<&str> = s[1..s.len() - 1]
-            .split('\n')
-            .filter(|l| !l.trim().is_empty())
-            .collect();
-        s = strip_emphasis(&body.join("\n"));
+        s = markdown_body(&s[1..s.len() - 1]);
     }
     strip_tags(&s)
 }
 
+/// A markdown string's body as mermaid's `markdownToHTML` / `markdownToLines`
+/// lays it out: blank lines only separate paragraphs (`<p>` without margins),
+/// single newlines are line breaks, each line's indentation is dropped, and
+/// `**strong**` / `*em*` become emphasis marks.
+fn markdown_body(body: &str) -> String {
+    let body: Vec<&str> = body
+        .split('\n')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    emphasize(&body.join("\n"))
+}
+
 /// Remove the `*` / `_` delimiters that markdown (marked, CommonMark rules) turns
 /// into `<em>` / `<strong>`, keeping the ones that stay literal: `snake_case`,
-/// `2 * 3`, unmatched runs. Text is drawn without the emphasis styles.
+/// `2 * 3`, unmatched runs.
 pub fn strip_emphasis(s: &str) -> String {
+    plain(&emphasize(s))
+}
+
+/// [`strip_emphasis`], with each matched delimiter pair replaced by emphasis
+/// [`mark`]s (`**`/`__` bold, `*`/`_` italic).
+fn emphasize(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let punct = |c: Option<char>| c.is_some_and(|c| c.is_ascii_punctuation());
     let space = |c: Option<char>| c.is_none_or(char::is_whitespace);
@@ -377,6 +556,9 @@ pub fn strip_emphasis(s: &str) -> String {
     }
     // CommonMark "process emphasis": match each closer with the nearest opener.
     let mut removed = vec![false; chars.len()];
+    // The mark that takes a removed delimiter's place (opening one first, closing
+    // one last, so nested pairs nest).
+    let mut marks: Vec<Option<char>> = vec![None; chars.len()];
     for ci in 0..runs.len() {
         if !runs[ci].close {
             continue;
@@ -404,6 +586,13 @@ pub fn strip_emphasis(s: &str) -> String {
             removed[o_end - used..o_end].fill(true);
             let c_start = runs[ci].start + (runs[ci].len - runs[ci].left);
             removed[c_start..c_start + used].fill(true);
+            let (on, off) = if used == 2 {
+                (mark::BOLD_ON, mark::BOLD_OFF)
+            } else {
+                (mark::ITALIC_ON, mark::ITALIC_OFF)
+            };
+            marks[o_end - used] = Some(on);
+            marks[c_start] = Some(off);
             runs[oi].left -= used;
             runs[ci].left -= used;
             // Runs between the pair can no longer match anything.
@@ -414,9 +603,8 @@ pub fn strip_emphasis(s: &str) -> String {
     }
     chars
         .iter()
-        .zip(&removed)
-        .filter(|(_, r)| !**r)
-        .map(|(c, _)| c)
+        .zip(removed.iter().zip(&marks))
+        .filter_map(|(&c, (&r, &m))| if r { m } else { Some(c) })
         .collect()
 }
 
@@ -433,7 +621,23 @@ fn strip_tags(s: &str) -> String {
         }
         let looks_like_tag = tail[1..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '/');
         match (looks_like_tag, tail.find('>')) {
-            (true, Some(end)) => rest = &tail[end + 1..],
+            (true, Some(end)) => {
+                // `<b>` / `<strong>` / `<i>` / `<em>` style the text in an HTML label.
+                let inner = tail[1..end].trim().to_ascii_lowercase();
+                let (close, name) = match inner.strip_prefix('/') {
+                    Some(n) => (true, n.trim()),
+                    None => (false, inner.split_whitespace().next().unwrap_or("")),
+                };
+                let m = match (name, close) {
+                    ("b" | "strong", false) => Some(mark::BOLD_ON),
+                    ("b" | "strong", true) => Some(mark::BOLD_OFF),
+                    ("i" | "em", false) => Some(mark::ITALIC_ON),
+                    ("i" | "em", true) => Some(mark::ITALIC_OFF),
+                    _ => None,
+                };
+                out.extend(m);
+                rest = &tail[end + 1..];
+            }
             _ => {
                 out.push('<');
                 rest = &tail[1..];
@@ -560,6 +764,96 @@ mod tests {
         assert_eq!(n("md1\n\nmd3"), "md1\nmd3");
         // Plain strings keep `_` and `*`, and their blank lines.
         assert_eq!(normalize_label("_x_ *y*\n\nz"), "_x_ *y*\n\nz");
+    }
+
+    fn runs(line: &str) -> Vec<(String, bool, bool)> {
+        styled_runs(line, false)
+            .into_iter()
+            .map(|r| (r.text, r.bold, r.italic))
+            .collect()
+    }
+
+    #[test]
+    fn markdown_strings_keep_bold_and_italic_as_styled_runs() {
+        let l = label_lines("\"`This **is** _Markdown_`\"");
+        assert_eq!(l.len(), 1);
+        assert_eq!(plain(&l[0]), "This is Markdown");
+        assert_eq!(
+            runs(&l[0]),
+            [
+                ("This ".into(), false, false),
+                ("is".into(), true, false),
+                (" ".into(), false, false),
+                ("Markdown".into(), false, true),
+            ]
+        );
+        // `***x***` is both; nested pairs nest.
+        let l = label_lines("`***both*** __under__`");
+        assert_eq!(runs(&l[0])[0], ("both".into(), true, true));
+        assert_eq!(runs(&l[0])[2], ("under".into(), true, false));
+        // Indentation of continuation lines is dropped; emphasis may span lines.
+        let l = label_lines("`The **cat\n    in** the hat`");
+        assert_eq!(
+            l.iter().map(|l| plain(l)).collect::<Vec<_>>(),
+            ["The cat", "in the hat"]
+        );
+        assert_eq!(runs(&l[1])[0], ("in".into(), true, false));
+        assert_eq!(runs(&l[1])[1], (" the hat".into(), false, false));
+        // Plain strings do not interpret markdown; normalize_label stays plain.
+        assert!(!has_marks(&label_lines("**not md**")[0]));
+        assert_eq!(normalize_label("`**md**`"), "md");
+        assert!(is_markdown_string("\"`x`\"") && is_markdown_string("`x`"));
+        assert!(!is_markdown_string("\"x\"") && !is_markdown_string("`"));
+    }
+
+    #[test]
+    fn html_emphasis_tags_become_styled_runs() {
+        let l = label_lines("<b>html</b> <i>tags</i> and <strong>x</STRONG><em>y</em>");
+        assert_eq!(plain(&l[0]), "html tags and xy");
+        assert_eq!(
+            runs(&l[0]),
+            [
+                ("html".into(), true, false),
+                (" ".into(), false, false),
+                ("tags".into(), false, true),
+                (" and ".into(), false, false),
+                ("x".into(), true, false),
+                ("y".into(), false, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn emphasis_is_measured_bold_and_survives_wrapping() {
+        let bold = label_lines("`**Wide**`");
+        assert_eq!(
+            line_width(&bold[0], 16.0, false),
+            line_width("Wide", 16.0, true)
+        );
+        let l = wrap(
+            "`A **long bold markdown label** that wraps`",
+            120.0,
+            16.0,
+            false,
+            BreakRule::Browser,
+        );
+        assert!(l.len() > 2, "{l:?}");
+        // Every line opens and closes its own styles.
+        for line in &l {
+            let mut st = Emphasis::default();
+            line.chars().for_each(|c| {
+                st.apply(c);
+            });
+            assert_eq!(st, Emphasis::default(), "{line:?}");
+        }
+        assert!(runs(&l[1]).iter().all(|r| r.1), "{:?}", runs(&l[1]));
+        // A stray closing tag is dropped, an unclosed one carries to the next line.
+        let l = label_lines("a</b> <b>b<br>c");
+        assert_eq!(
+            runs(&l[0]),
+            [("a ".into(), false, false), ("b".into(), true, false)]
+        );
+        assert_eq!(runs(&l[1]), [("c".into(), true, false)]);
     }
 
     #[test]

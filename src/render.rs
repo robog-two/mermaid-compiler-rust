@@ -30,6 +30,7 @@ impl Rendered {
 fn graph_options(cfg: &MermaidConfig) -> diagram::graph::RenderOptions {
     diagram::graph::RenderOptions {
         subgraph_title_margin: cfg.subgraph_title_margin(),
+        markdown_no_wrap: !cfg.top_bool("markdownAutoWrap", true),
         ..Default::default()
     }
 }

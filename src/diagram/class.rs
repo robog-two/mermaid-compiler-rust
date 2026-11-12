@@ -36,6 +36,65 @@ struct Builder {
     class_defs: HashMap<String, StyleOverrides>,
     css_classes: Vec<(String, String)>,
     styles: Vec<(String, StyleOverrides)>,
+    /// Backtick class names (classDiagram.jison `classLiteralName`), by placeholder index.
+    literals: Literals,
+}
+
+/// Backtick class names (`` `Animal Class!` ``) may hold spaces and punctuation the
+/// statement parser splits on, so each is swapped for an opaque placeholder token
+/// (private-use characters, which no other syntax uses) before parsing, and the
+/// name comes back when the class is built.
+#[derive(Default)]
+struct Literals(Vec<String>);
+
+impl Literals {
+    const MARK: char = '\u{F0000}';
+
+    /// Replace each `` `name` `` outside a `"string"` by its placeholder.
+    fn protect(&mut self, s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut in_quote = false;
+        let mut rest = s;
+        while let Some(c) = rest.chars().next() {
+            if c == '"' {
+                in_quote = !in_quote;
+            } else if c == '`' && !in_quote {
+                if let Some(end) = rest[1..].find('`').filter(|&e| e > 0) {
+                    let name = &rest[1..1 + end];
+                    let i = match self.0.iter().position(|n| n == name) {
+                        Some(i) => i,
+                        None => {
+                            self.0.push(name.to_string());
+                            self.0.len() - 1
+                        }
+                    };
+                    out.push(Self::MARK);
+                    out.push_str(&i.to_string());
+                    out.push(Self::MARK);
+                    rest = &rest[end + 2..];
+                    continue;
+                }
+            }
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+        out
+    }
+
+    /// Undo [`Literals::protect`].
+    fn restore(&self, s: &str) -> String {
+        if !s.contains(Self::MARK) {
+            return s.to_string();
+        }
+        let mut out = String::new();
+        for (k, part) in s.split(Self::MARK).enumerate() {
+            match part.parse::<usize>().ok().and_then(|i| self.0.get(i)) {
+                Some(name) if k % 2 == 1 => out.push_str(name),
+                _ => out.push_str(part),
+            }
+        }
+        out
+    }
 }
 
 /// Config that changes how a class diagram is built.
@@ -131,6 +190,7 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
             }
             continue;
         }
+        let s = b.literals.protect(&s);
         if s == "}" {
             b.ns_stack
                 .pop()
@@ -516,13 +576,14 @@ impl Builder {
             let info = &self.classes[name];
             let mut header: Vec<String> =
                 info.annotations.iter().map(|a| format!("«{a}»")).collect();
+            let id = self.literals.restore(name);
             let display = info.label.clone().unwrap_or_else(|| match &info.generic {
-                Some(g) => format!("{name}<{}>", generic_text(g)),
-                None => name.clone(),
+                Some(g) => format!("{id}<{}>", generic_text(g)),
+                None => id.clone(),
             });
             // A label spanning lines breaks there (`first<br>second`).
             header.extend(display.split('\n').map(|l| l.trim().to_string()));
-            let mut n = Node::new(name.clone(), String::new(), Shape::Compartments);
+            let mut n = Node::new(id, String::new(), Shape::Compartments);
             // Only classes consume a palette slot (classDb: `classColorIndex++`); notes do not.
             n.color_slot = Some(ColorSlot(nodes.len()));
             n.cluster = info.namespace;
@@ -704,6 +765,30 @@ mod tests {
         assert_eq!(of("C"), None);
         // The default stays hierarchical.
         assert_eq!(parse(src, None).unwrap().clusters.len(), 6);
+    }
+
+    #[test]
+    fn backtick_class_names_may_hold_spaces_and_punctuation() {
+        let src = "classDiagram
+    class `Animal Class!` {
+      +int age
+    }
+    class `Car Class`~T~
+    `Animal Class!` <|-- `Car Class` : drives
+    `Animal Class!` : +eat()
+    note for `Car Class` \"a note\"
+    class B[\"`md` label\"]";
+        let g = parse(src, None).unwrap();
+        let ids: Vec<&str> = g.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["Animal Class!", "Car Class", "B", "note0"]);
+        assert_eq!(g.nodes[0].sections[0].lines, ["Animal Class!"]);
+        assert_eq!(g.nodes[0].sections[1].lines, ["+int age"]);
+        assert_eq!(g.nodes[0].sections[2].lines, ["+eat()"]);
+        assert_eq!(g.nodes[1].sections[0].lines, ["Car Class<T>"]);
+        // Backticks inside a string are left alone.
+        assert_eq!(g.nodes[2].sections[0].lines, ["`md` label"]);
+        assert_eq!(g.edges.len(), 2);
+        assert_eq!(g.edges[0].label.as_deref(), Some("drives"));
     }
 
     #[test]

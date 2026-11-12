@@ -123,19 +123,43 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>) {
         if t.bold { " font-weight=\"bold\"" } else { "" }
     );
     if t.lines.len() == 1 {
-        out.push_str(&esc(&t.lines[0]));
+        write_line(out, &t.lines[0], t.bold);
     } else {
         for (i, line) in t.lines.iter().enumerate() {
             let _ = write!(
                 out,
-                "<tspan x=\"{}\" y=\"{}\">{}</tspan>",
+                "<tspan x=\"{}\" y=\"{}\">",
                 num(t.x),
                 num(t.y + i as f64 * t.line_height),
-                esc(line)
             );
+            write_line(out, line, t.bold);
+            out.push_str("</tspan>");
         }
     }
     out.push_str("</text>");
+}
+
+/// One display line: plain text, or one `<tspan>` per run of markdown emphasis.
+fn write_line(out: &mut String, line: &str, bold: bool) {
+    if !crate::text::has_marks(line) {
+        out.push_str(&esc(line));
+        return;
+    }
+    for run in crate::text::styled_runs(line, bold) {
+        if run.bold == bold && !run.italic {
+            out.push_str(&esc(&run.text));
+            continue;
+        }
+        out.push_str("<tspan");
+        // Runs are never lighter than the text's own weight.
+        if run.bold != bold {
+            out.push_str(" font-weight=\"bold\"");
+        }
+        if run.italic {
+            out.push_str(" font-style=\"italic\"");
+        }
+        let _ = write!(out, ">{}</tspan>", esc(&run.text));
+    }
 }
 
 fn write_element(out: &mut String, el: &Element) {
@@ -303,5 +327,23 @@ mod tests {
     #[test]
     fn escaping() {
         assert_eq!(esc("a<b & \"c\""), "a&lt;b &amp; &quot;c&quot;");
+    }
+
+    #[test]
+    fn emphasis_marks_become_styled_tspans() {
+        let mut out = String::new();
+        write_line(
+            &mut out,
+            &crate::text::label_lines("`a **b** *c<d*`")[0],
+            false,
+        );
+        assert_eq!(
+            out,
+            "a <tspan font-weight=\"bold\">b</tspan> <tspan font-style=\"italic\">c&lt;d</tspan>"
+        );
+        // Text that is bold already needs no bold tspans.
+        let mut out = String::new();
+        write_line(&mut out, &crate::text::label_lines("<b>x</b>y")[0], true);
+        assert_eq!(out, "xy");
     }
 }
