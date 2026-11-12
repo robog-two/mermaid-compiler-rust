@@ -895,12 +895,16 @@ impl OrthoPlan {
         end_pad: &[f64],
     ) -> Vec<Point> {
         let stops = &self.stops[ei];
-        let (Some(&(u, ux)), Some(&(w, wx))) = (stops.first(), stops.last()) else {
+        let (Some(&(u, ux)), Some(&(w, _))) = (stops.first(), stops.last()) else {
             return Vec::new();
         };
         let mut pts = vec![Point::new(ux, rank_y[verts[u].rank] + verts[u].h / 2.0)];
+        // A run without a jog keeps its cross position: stops less than the jog
+        // threshold apart would otherwise leave it slightly slanted.
+        let mut cur = ux;
         for (k, pair) in stops.windows(2).enumerate() {
-            let ((a, ax), (b, bx)) = (pair[0], pair[1]);
+            let ((a, _), (b, bx)) = (pair[0], pair[1]);
+            let ax = cur;
             if let Some(level) = self.jogs[ei][k] {
                 let ra = verts[a].rank;
                 let (rb, slots) = self.channels[ra].unwrap_or((verts[b].rank, 1));
@@ -910,12 +914,13 @@ impl OrthoPlan {
                 let y = (top + bottom) / 2.0 - (slots - 1) as f64 * ee / 2.0 + level as f64 * ee;
                 pts.push(Point::new(ax, y));
                 pts.push(Point::new(bx, y));
+                cur = bx;
             }
             if b != w {
-                pts.push(Point::new(bx, rank_y[verts[b].rank]));
+                pts.push(Point::new(cur, rank_y[verts[b].rank]));
             }
         }
-        pts.push(Point::new(wx, rank_y[verts[w].rank] - verts[w].h / 2.0));
+        pts.push(Point::new(cur, rank_y[verts[w].rank] - verts[w].h / 2.0));
         ortho::simplify(&pts)
     }
 }
@@ -1751,6 +1756,35 @@ mod tests {
                 assert!(
                     !(inside && (across(c.y) || across(c.bottom()))),
                     "edge {ei} crosses the top / bottom of {c:?}: {:?}",
+                    r.points
+                );
+            }
+        }
+    }
+
+    /// `a --> b`, `b --> a` between nodes of slightly different widths: their ports
+    /// are less than the jog threshold apart, so the route gets no jog, and it used
+    /// to end at the far port anyway, slightly slanted.
+    #[test]
+    fn orthogonal_run_without_a_jog_is_straight() {
+        let size = |w, h| LayoutNode {
+            width: w,
+            height: h,
+            cluster: None,
+        };
+        let mut inp = input(
+            vec![size(113.0, 31.0), size(42.0, 47.0), size(43.0, 44.0)],
+            vec![edge(1, 2), edge(2, 1)],
+            vec![],
+            Direction::TopBottom,
+        );
+        inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+        let out = layout(&inp);
+        for r in &out.edges {
+            for w in r.points.windows(2) {
+                assert!(
+                    (w[0].x - w[1].x).abs() < 1e-9 || (w[0].y - w[1].y).abs() < 1e-9,
+                    "slanted: {:?}",
                     r.points
                 );
             }
