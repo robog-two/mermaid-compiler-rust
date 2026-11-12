@@ -260,7 +260,9 @@ impl Builder {
         if let Some(&i) = self.index.get(id) {
             return i;
         }
-        let mut n = Node::new(id, id, Shape::State);
+        // dataFetcher's `rect` with `rx`/`ry` set: nodes.ts draws it as `roundedRect`
+        // (padding 8, the CSS `rx: 5px`).
+        let mut n = Node::new(id, id, Shape::Rounded);
         n.cluster = self.stack.last().copied();
         self.nodes.push(n);
         self.index.insert(id.to_string(), self.nodes.len() - 1);
@@ -377,24 +379,38 @@ impl Builder {
         for c in &mut self.clusters {
             c.direction.get_or_insert(Direction::TopBottom);
         }
-        for (id, lines) in &self.descriptions {
+        // dataFetcher: a state's description starts as its display name (or id). The
+        // first `id : text` replaces a bare id and otherwise appends; one entry keeps
+        // the plain shape with that entry as its label, more make a `rectWithTitle`
+        // titled by the first entry over the rest, both centred.
+        for (id, descs) in &self.descriptions {
             if let Some(&i) = self.index.get(id) {
                 let n = &mut self.nodes[i];
-                if n.shape == Shape::State {
-                    n.shape = Shape::Compartments;
-                    n.sections = vec![
-                        Section {
-                            lines: vec![n.label.clone()],
-                            centered: true,
-                            bold: false,
-                        },
-                        Section {
-                            lines: lines.clone(),
-                            centered: false,
-                            bold: false,
-                        },
-                    ];
+                if n.shape != Shape::Rounded {
+                    continue;
                 }
+                let mut all = Vec::with_capacity(descs.len() + 1);
+                if n.label != n.id {
+                    all.push(n.label.clone());
+                }
+                all.extend(descs.iter().cloned());
+                if let [only] = all.as_slice() {
+                    n.label = only.clone();
+                    continue;
+                }
+                n.shape = Shape::Compartments;
+                n.sections = vec![
+                    Section {
+                        lines: vec![all[0].clone()],
+                        centered: true,
+                        bold: false,
+                    },
+                    Section {
+                        lines: all[1..].to_vec(),
+                        centered: true,
+                        bold: false,
+                    },
+                ];
             }
         }
         for (id, class) in &self.class_assignments {
@@ -486,7 +502,12 @@ mod tests {
         assert_eq!(g.clusters[0].title, "Big one");
         assert!(g.edges.iter().any(|e| matches!(e.to, Endpoint::Cluster(_))));
         assert!(g.nodes.iter().any(|n| n.shape == Shape::ForkBar));
-        assert!(g.nodes.iter().any(|n| n.shape == Shape::Compartments));
+        // A single description replaces the label of the plain shape.
+        let inner = g.nodes.iter().find(|n| n.id == "Inner").unwrap();
+        assert_eq!(
+            (inner.shape, inner.label.as_str()),
+            (Shape::Rounded, "does work")
+        );
         assert!(g.nodes.iter().any(|n| n.shape == Shape::Note));
         // Inner [*] nodes live in the cluster.
         assert!(
@@ -606,5 +627,57 @@ mod tests {
             ["multi", "line"]
         );
         assert_eq!(g.edges.len(), 1);
+    }
+
+    #[test]
+    fn descriptions_follow_the_data_fetcher() {
+        // Mirrors mermaid 12.3.0's output: the id is dropped by the first description,
+        // a display name is kept as the title, and further entries form the body.
+        let g = parse(
+            "stateDiagram-v2\nstate \"Display name\" as A\nA : one desc\nB : d1\nB : d2\nB : d3\nC --> A",
+            None,
+        )
+        .unwrap();
+        let node = |id: &str| g.nodes.iter().find(|n| n.id == id).unwrap();
+        let sections = |id: &str| -> Vec<Vec<String>> {
+            node(id).sections.iter().map(|s| s.lines.clone()).collect()
+        };
+        assert_eq!(node("A").shape, Shape::Compartments);
+        assert_eq!(sections("A"), [vec!["Display name"], vec!["one desc"]]);
+        assert_eq!(sections("B"), [vec!["d1"], vec!["d2", "d3"]]);
+        assert!(node("B").sections.iter().all(|s| s.centered));
+        assert_eq!(
+            (node("C").shape, node("C").label.as_str()),
+            (Shape::Rounded, "C")
+        );
+    }
+
+    #[test]
+    fn state_shapes_match_mermaid_sizes() {
+        // Reference SVG (mermaid 12.3.0, default config): a plain state is a
+        // roundedRect with padding 8 around its 120x21 label, 136x37; a two-entry
+        // description box is the label bbox plus 8 (title 21 + 9 + body 21 = 51);
+        // a note pads its label by 15, a fork bar is 70x10 and a choice 28x28.
+        let src = "stateDiagram-v2\n[*] --> Still\nStill --> D\nD : first\nD : second\nnote right of Still : A note here\nstate f <<fork>>\nstate c <<choice>>\nD --> f\nf --> c";
+        let g = parse(src, None).unwrap();
+        let cfg = crate::config::MermaidConfig::default().scoped("state");
+        let pal = crate::theme::palette(cfg.theme, &[]);
+        let size = |n: &Node| {
+            super::super::graph::node_size(n, DiagramKind::State, &cfg.state, &pal, false)
+        };
+        let by_id = |id: &str| size(g.nodes.iter().find(|n| n.id == id).unwrap());
+        let close = |(w, h): (f64, f64), (ew, eh): (f64, f64)| {
+            assert!(
+                (w - ew).abs() < 1e-6 && (h - eh).abs() < 1e-6,
+                "{w}x{h} vs {ew}x{eh}"
+            );
+        };
+        close(by_id("Still"), (136.0, 37.0));
+        assert!((by_id("D").1 - 59.0).abs() < 1e-6, "{:?}", by_id("D"));
+        close(by_id("f"), (70.0, 10.0));
+        close(by_id("c"), (28.0, 28.0));
+        close(by_id("root_start"), (14.0, 14.0));
+        let note = g.nodes.iter().find(|n| n.shape == Shape::Note).unwrap();
+        close(size(note), (150.0, 51.0));
     }
 }

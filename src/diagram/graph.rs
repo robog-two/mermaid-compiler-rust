@@ -238,6 +238,9 @@ pub struct Node {
     /// Width of a label that `createText` wrapped: its `div` is given the whole
     /// wrapping width, however wide the longest line is.
     pub wrapped_width: Option<f64>,
+    /// A class box's `«annotation»` (classBox draws only the first one), stacked
+    /// above the name in normal weight.
+    pub annotation: Option<String>,
 }
 
 impl Node {
@@ -252,6 +255,7 @@ impl Node {
             sections: Vec::new(),
             color_slot: None,
             wrapped_width: None,
+            annotation: None,
         }
     }
 }
@@ -487,6 +491,8 @@ struct CompartmentLayout {
 struct Measured {
     block: TextBlock,
     sections: Vec<TextBlock>,
+    /// A class box's `«annotation»` block, stacked on top of its name (section 0).
+    annotation: Option<TextBlock>,
     compartments: Option<CompartmentLayout>,
     table: Option<TableMetrics>,
     label_offset: Point,
@@ -500,6 +506,7 @@ struct Measured {
 fn compartment_layout(
     kind: DiagramKind,
     blocks: &[TextBlock],
+    annotation: Option<&TextBlock>,
     pad: f64,
 ) -> (CompartmentLayout, f64, f64) {
     let content = |b: &TextBlock| if b.is_empty() { 0.0 } else { b.height };
@@ -523,24 +530,54 @@ fn compartment_layout(
     // above and below; an empty members box is GAP/2 + 2·GAP (2·GAP for empty
     // methods), and a class with neither gets two 1.5·GAP boxes.
     let all_empty = blocks.iter().skip(1).all(|b| b.is_empty());
+    let annotation_h = annotation.map(content).unwrap_or(0.0);
     let heights: Vec<f64> = blocks
         .iter()
         .enumerate()
         .map(|(i, b)| match (i, b.is_empty()) {
-            (0, _) | (_, false) => content(b) + 2.0 * pad,
+            (0, _) => annotation_h + content(b) + 2.0 * pad,
+            (_, false) => content(b) + 2.0 * pad,
             _ if all_empty => 1.5 * pad,
             (1, true) => 2.5 * pad,
             _ => 2.0 * pad,
         })
         .collect();
     let layout = CompartmentLayout {
-        text_top: vec![pad; heights.len()],
+        // classBox moves every group by `y + PADDING` from textHelper's frame, where
+        // an HTML label's first line starts half a line above its origin: the text
+        // sits `2·PADDING - lineHeight/2` below its divider (13.5px, not 12, at
+        // 14px). SVG text keeps PADDING (its `-4` and line box cancel out).
+        text_top: blocks
+            .iter()
+            .map(|b| {
+                if b.svg || b.is_empty() {
+                    pad
+                } else {
+                    2.0 * pad - b.line_height / 2.0
+                }
+            })
+            .collect(),
         heights,
         inset: pad,
         rx: 0.0,
     };
     let h = layout.heights.iter().sum();
-    (layout, max_w + 2.0 * pad, h)
+    // textHelper centres the annotation and the name on x = 0 while members and
+    // methods start there, so the text bbox reaches half the widest centred label
+    // to the left and the farther of that half and the widest member to the right.
+    let half = blocks
+        .first()
+        .into_iter()
+        .chain(annotation)
+        .map(|b| b.width / 2.0)
+        .fold(0.0, f64::max);
+    let members = blocks.iter().skip(1).map(|b| b.width).fold(0.0, f64::max);
+    let w = if kind == DiagramKind::Class {
+        half + half.max(members)
+    } else {
+        max_w
+    };
+    (layout, w + 2.0 * pad, h)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -600,6 +637,7 @@ fn measure_node(
     };
     let metrics = ShapeMetrics::for_look(node.shape, node_pad, look).with_label(tw, th);
     let mut sections = Vec::new();
+    let mut annotation = None;
     let mut compartments = None;
     let mut table = None;
     let mut label_offset = Point::default();
@@ -627,7 +665,15 @@ fn measure_node(
                         (true, _) => TextBlock::svg(s.lines.clone(), font, s.bold),
                     })
                     .collect();
-                let (layout, w, h) = compartment_layout(kind, &sections, pad);
+                annotation = node.annotation.as_ref().map(|a| {
+                    let lines = vec![a.clone()];
+                    if svg {
+                        TextBlock::svg_stacked(lines, font, false, Some(0.0))
+                    } else {
+                        TextBlock::new(lines, font, false)
+                    }
+                });
+                let (layout, w, h) = compartment_layout(kind, &sections, annotation.as_ref(), pad);
                 compartments = Some(layout);
                 (w, h)
             }
@@ -647,6 +693,7 @@ fn measure_node(
     Measured {
         block,
         sections,
+        annotation,
         compartments,
         table,
         label_offset,
@@ -929,7 +976,11 @@ pub fn render_with(
                         .map(|b| {
                             // An SVG label's box includes its background's padding.
                             let pad = if b.svg { 2.0 * SVG_EDGE_LABEL_PAD } else { 0.0 };
-                            (b.width + pad + 8.0, b.height + pad + 4.0)
+                            if elk {
+                                (b.width + pad, b.height + pad)
+                            } else {
+                                (b.width + pad + 8.0, b.height + pad + 4.0)
+                            }
                         }),
                     from_cluster,
                     to_cluster,
@@ -1151,12 +1202,17 @@ pub fn render_with(
                 continue;
             }
         }
+        // A neo edge takes the `*-margin` markers (`useMargin`), the neo barb's
+        // pull-back, and leaves its last `markerOffsets2` px undrawn.
+        let neo = cfg.look == ConfigLook::Neo;
+        let trim = |h: Head| markers::pullback_for(h, neo) + markers::hidden_end(h, neo);
+        let (start_trim, end_trim) = (trim(e.start), trim(e.end));
         if elk {
             hop_edges.push((
                 linejump::EdgeGeom {
                     points: pts.clone(),
-                    start_offset: markers::pullback(e.start),
-                    end_offset: markers::pullback(e.end),
+                    start_offset: start_trim,
+                    end_offset: end_trim,
                     rounded: true,
                     corner_radius: EDGE_CORNER_RADIUS,
                 },
@@ -1197,7 +1253,7 @@ pub fn render_with(
             end_dir,
             colors,
             width,
-            cfg.look == ConfigLook::Neo,
+            neo,
         ));
         heads.extend(markers::elements(
             e.start,
@@ -1206,9 +1262,9 @@ pub fn render_with(
             start_dir,
             colors,
             width,
-            cfg.look == ConfigLook::Neo,
+            neo,
         ));
-        let (end_back, start_back) = (markers::pullback(e.end), markers::pullback(e.start));
+        let (end_back, start_back) = (end_trim, start_trim);
         if end_back > 0.0 && pts[last].dist(pts[last - 1]) > end_back {
             pts[last] = pts[last].minus(end_dir.scale(end_back));
         }
@@ -2405,8 +2461,15 @@ fn node_elements(
                             "divider",
                         ));
                     }
+                    let mut top = y + layout.text_top.get(i).copied().unwrap_or(0.0);
+                    if let Some(a) = m.annotation.as_ref().filter(|_| i == 0) {
+                        // shapeUtil: the annotation sits on the name, without its bold.
+                        let center = Point::new(c.x, top + a.height / 2.0);
+                        let t = a.centered_text(center, &text_color);
+                        els.push(Element::classed_text(t, "label"));
+                        top += a.height;
+                    }
                     if !block.is_empty() {
-                        let top = y + layout.text_top.get(i).copied().unwrap_or(0.0);
                         let center = Point::new(c.x, top + block.height / 2.0);
                         let mut t = block.centered_text(center, &text_color);
                         t.bold = sec.bold;
@@ -3296,6 +3359,19 @@ mod tests {
         }
         let dagre = LayoutAlgorithm::Dagre;
         assert_eq!(paths(LineHops::Arc, dagre), paths(LineHops::Off, dagre));
+    }
+
+    /// mermaid's ELK adapter hands ELK the label's own bbox (`edge.width/height`),
+    /// without the padding dagre's label node gets. Reference (mermaid 12.3.0,
+    /// default theme, classic look): A→B centres 188 apart, C→D 94.
+    #[test]
+    fn elk_edge_labels_take_their_own_size() {
+        let (g, scene) = render_flowchart("flowchart TD\nA -->|Get money| B\nC --> D");
+        let gap = |a: &str, b: &str| {
+            scene_node_center(&g, &scene, b).y - scene_node_center(&g, &scene, a).y
+        };
+        assert!((gap("A", "B") - 188.0).abs() < 1e-6, "{}", gap("A", "B"));
+        assert!((gap("C", "D") - 94.0).abs() < 1e-6, "{}", gap("C", "D"));
     }
 
     /// mermaid's ELK adapter never reads `nodeSpacing` / `rankSpacing`; dagre does.

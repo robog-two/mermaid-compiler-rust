@@ -3780,7 +3780,10 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         let last = pts.len() - 1;
         let end_dir = pts[last].minus(pts[last - 1]).norm();
         let start_dir = pts[0].minus(pts[1]).norm();
-        let mut heads = markers::elements(e.end, End::End, pts[last], end_dir, colors, width, neo);
+        // `addEdgeMarkers` uses the `*-margin` markers for neo edges that are not animated.
+        let margin = neo && !e.animated;
+        let mut heads =
+            markers::elements(e.end, End::End, pts[last], end_dir, colors, width, margin);
         heads.extend(markers::elements(
             e.start,
             End::Start,
@@ -3788,7 +3791,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             start_dir,
             colors,
             width,
-            neo,
+            margin,
         ));
         let (end_back, start_back) = (markers::pullback(e.end), markers::pullback(e.start));
         if end_back > 0.0 && pts[last].dist(pts[last - 1]) > end_back {

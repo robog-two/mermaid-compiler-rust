@@ -574,8 +574,7 @@ impl Builder {
         let mut index = HashMap::new();
         for name in &self.order {
             let info = &self.classes[name];
-            let mut header: Vec<String> =
-                info.annotations.iter().map(|a| format!("«{a}»")).collect();
+            let mut header: Vec<String> = Vec::new();
             let id = self.literals.restore(name);
             let display = info.label.clone().unwrap_or_else(|| match &info.generic {
                 Some(g) => format!("{id}<{}>", generic_text(g)),
@@ -584,6 +583,8 @@ impl Builder {
             // A label spanning lines breaks there (`first<br>second`).
             header.extend(display.split('\n').map(|l| l.trim().to_string()));
             let mut n = Node::new(id, String::new(), Shape::Compartments);
+            // classBox draws only the first annotation.
+            n.annotation = info.annotations.first().map(|a| format!("«{a}»"));
             // Only classes consume a palette slot (classDb: `classColorIndex++`); notes do not.
             n.color_slot = Some(ColorSlot(nodes.len()));
             n.cluster = info.namespace;
@@ -672,7 +673,8 @@ mod tests {
         )
         .unwrap();
         let animal = &g.nodes[0];
-        assert_eq!(animal.sections[0].lines, vec!["«abstract»", "Animal"]);
+        assert_eq!(animal.annotation.as_deref(), Some("«abstract»"));
+        assert_eq!(animal.sections[0].lines, vec!["Animal"]);
         assert_eq!(animal.sections[1].lines, vec!["+String name"]);
         assert_eq!(animal.sections[2].lines, vec!["+makeSound() void"]);
         assert_eq!(g.edges[0].start, Head::Triangle);
@@ -796,5 +798,94 @@ mod tests {
         let g = parse("classDiagram\nclass A[\"first\nsecond\"]\nA --> B", None).unwrap();
         assert_eq!(g.nodes[0].sections[0].lines, vec!["first", "second"]);
         assert_eq!(g.edges.len(), 1);
+    }
+
+    #[test]
+    fn class_box_width_follows_text_helpers_bbox() {
+        // textHelper centres the annotation and name on x = 0 while members start
+        // there: the box is half the widest centred label plus the farther of that
+        // half and the widest member, plus 2 * PADDING. Reference (mermaid 12.3.0):
+        // Animal 139.58, Duck 153.57, Shape 138.80 wide.
+        let src = "classDiagram\nAnimal <|-- Duck\nAnimal : +int age\nAnimal : +String gender\nAnimal: +isMammal()\nAnimal: +mate()\nclass Duck{\n+String beakColor\n+swim()\n+quack()\n}\nclass Shape{\n<<interface>>\n<<second>>\nnoOfVertices\ndraw()\n}";
+        let g = parse(src, None).unwrap();
+        let shape = g.nodes.iter().find(|n| n.id == "Shape").unwrap();
+        // classBox draws only the first annotation, apart from the bold name.
+        assert_eq!(shape.annotation.as_deref(), Some("«interface»"));
+        assert_eq!(shape.sections[0].lines, ["Shape"]);
+        let cfg = crate::config::MermaidConfig::default().scoped("class");
+        let pal = crate::theme::palette(cfg.theme, &[]);
+        let width = |id: &str| {
+            let n = g.nodes.iter().find(|n| n.id == id).unwrap();
+            super::super::graph::node_size(n, DiagramKind::Class, &cfg.class, &pal, false).0
+        };
+        let text =
+            |s: &str, bold: bool| crate::text::TextBlock::new(vec![s.into()], 14.0, bold).width;
+        let expect = |half: f64, widest: f64| half + half.max(widest) + 24.0;
+        let animal = expect(text("Animal", true) / 2.0, text("+String gender", false));
+        assert!((width("Animal") - animal).abs() < 1e-6);
+        assert!(
+            (width("Animal") - 139.578).abs() < 1.0,
+            "{}",
+            width("Animal")
+        );
+        assert!((width("Duck") - 153.570).abs() < 1.0, "{}", width("Duck"));
+        let shape_w = expect(
+            text("«interface»", false) / 2.0,
+            text("noOfVertices", false),
+        );
+        assert!((width("Shape") - shape_w).abs() < 1e-6);
+        assert!((width("Shape") - 138.797).abs() < 1.0, "{}", width("Shape"));
+    }
+
+    #[test]
+    fn annotation_is_drawn_in_normal_weight_above_the_bold_name() {
+        use crate::geom::PathCmd;
+        use crate::scene::{Element, Geometry, Text};
+        let g = parse(
+            "classDiagram\nclass Shape{\n<<interface>>\nnoOfVertices\n}",
+            None,
+        )
+        .unwrap();
+        let cfg = crate::config::MermaidConfig::default().scoped("class");
+        let pal = crate::theme::palette(cfg.theme, &[]);
+        let scene = super::super::graph::render(&g, &cfg.class, &pal);
+        let (mut texts, mut tops, mut dividers) = (Vec::<Text>::new(), Vec::new(), Vec::new());
+        fn walk(e: &Element, t: &mut Vec<Text>, r: &mut Vec<f64>, d: &mut Vec<f64>) {
+            match e {
+                Element::Text { text, .. } => t.push(text.clone()),
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    ..
+                } => r.push(rect.y),
+                Element::Shape {
+                    geom: Geometry::Path(p),
+                    ..
+                } => {
+                    if let [PathCmd::MoveTo(a), PathCmd::LineTo(b)] = p.as_slice() {
+                        if a.y == b.y {
+                            d.push(a.y);
+                        }
+                    }
+                }
+                Element::Group { children, .. } => children.iter().for_each(|c| walk(c, t, r, d)),
+                _ => {}
+            }
+        }
+        scene
+            .elements
+            .iter()
+            .for_each(|e| walk(e, &mut texts, &mut tops, &mut dividers));
+        let find = |s: &str| texts.iter().find(|t| t.lines == [s]).unwrap();
+        let (ann, name) = (find("«interface»"), find("Shape"));
+        assert!(!ann.bold && name.bold);
+        // One 21px line apart, the annotation's top 13.5px (2 * PADDING - 10.5)
+        // below the box: classBox's `y + PADDING` shift of textHelper's frame.
+        assert!((name.y - ann.y - 21.0).abs() < 1e-6);
+        let top = tops.iter().copied().fold(f64::INFINITY, f64::min);
+        let first_divider = dividers.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            (first_divider - top - 66.0).abs() < 1e-6,
+            "{first_divider} {top}"
+        );
     }
 }

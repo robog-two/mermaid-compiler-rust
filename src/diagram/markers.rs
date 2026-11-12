@@ -53,10 +53,13 @@ struct Def {
     parts: &'static [Part],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Scale {
     /// `markerUnits="userSpaceOnUse"` with this `markerWidth / viewBox` ratio.
     Fixed(Ratio),
+    /// `markerUnits="userSpaceOnUse"` with an explicit viewBox scale (the `-margin`
+    /// markers: `min(markerWidth / vbWidth, markerHeight / vbHeight)`).
+    Ratio(f64),
     /// Default `markerUnits="strokeWidth"`: scales with the edge stroke.
     StrokeWidth,
 }
@@ -86,6 +89,8 @@ struct Marker {
     /// `None` reuses `end` pointed into the start node.
     start: Option<Def>,
     scale: Scale,
+    /// Scale of the start definition when it differs from the end's (`pointStart-margin`).
+    start_scale: Option<f64>,
     /// How far the line is shortened (`markerOffsets`).
     pullback: f64,
     fill: Fill,
@@ -110,7 +115,169 @@ const FOOT_START: &[Seg] = &[
     Seg::Q(18.0, 36.0, 0.0, 18.0),
 ];
 
+/// The `*-margin` markers `addEdgeMarker` picks for a neo edge (`useMargin`):
+/// `markerUnits="userSpaceOnUse"`, sized by their viewBox where they have one.
+fn margin_marker(head: Head) -> Option<Marker> {
+    let def = |ref_x, ref_y, parts| Def {
+        ref_x,
+        ref_y,
+        parts,
+    };
+    const DIAMOND_PATH: &[(f64, f64)] = &[(18.0, 7.0), (9.0, 13.0), (1.0, 7.0), (9.0, 1.0)];
+    const LOLLIPOP: &[Part] = &[Part::Circle(7.0, 7.0, 6.0)];
+    Some(match head {
+        // pointEnd-margin: viewBox 11.5×14 in a 10.5×14 box (tip on the line end);
+        // pointStart-margin: viewBox 11.5×14 in 11.5×14, refX 1.
+        Head::Arrow => Marker {
+            end: def(
+                11.5,
+                7.0,
+                &[Part::Poly(&[(0.0, 0.0), (11.5, 7.0), (0.0, 14.0)])],
+            ),
+            start: Some(def(
+                1.0,
+                7.0,
+                &[Part::Poly(&[(0.0, 7.0), (11.5, 14.0), (11.5, 0.0)])],
+            )),
+            start_scale: Some(1.0),
+            scale: Scale::Ratio(10.5 / 11.5),
+            pullback: 4.0,
+            fill: Fill::Line,
+            stroke: 0.0,
+        },
+        // circleEnd-margin: viewBox 10 in 14 (×1.4), refX 12.25 / -2.
+        Head::Circle => Marker {
+            end: def(12.25, 5.0, &[Part::Circle(5.0, 5.0, 5.0)]),
+            start: Some(def(-2.0, 5.0, &[Part::Circle(5.0, 5.0, 5.0)])),
+            start_scale: None,
+            scale: Scale::Ratio(1.4),
+            pullback: 0.0,
+            fill: Fill::Line,
+            stroke: 0.0,
+        },
+        // crossEnd-margin: viewBox 15 in 12 (×0.8), refX 17.7 / -3.5, stroke 2.5.
+        Head::Cross => {
+            const X: &[Seg] = &[
+                Seg::M(1.0, 1.0),
+                Seg::L(14.0, 14.0),
+                Seg::M(1.0, 14.0),
+                Seg::L(14.0, 1.0),
+            ];
+            Marker {
+                end: def(17.7, 7.5, &[Part::Path(X)]),
+                start: Some(def(-3.5, 7.5, &[Part::Path(X)])),
+                start_scale: None,
+                scale: Scale::Ratio(0.8),
+                pullback: 0.0,
+                fill: Fill::Line,
+                stroke: 2.5,
+            }
+        }
+        // barbEnd-margin: refX 17, no stroke; the line stops `arrow_barb_neo` 5.5 short.
+        Head::Barb => Marker {
+            end: def(
+                17.0,
+                7.0,
+                &[Part::Poly(&[
+                    (19.0, 7.0),
+                    (11.0, 14.0),
+                    (13.0, 7.0),
+                    (11.0, 0.0),
+                ])],
+            ),
+            start: None,
+            start_scale: None,
+            scale: Scale::Ratio(1.0),
+            pullback: 5.5,
+            fill: Fill::Line,
+            stroke: 0.0,
+        },
+        // extension*-margin: an 8-long triangle, stroke 2, refX 18 (start) / 9 (end).
+        Head::Triangle => Marker {
+            end: def(
+                9.0,
+                7.0,
+                &[Part::Poly(&[(10.0, 1.0), (10.0, 13.0), (18.0, 7.0)])],
+            ),
+            start: Some(def(
+                18.0,
+                7.0,
+                &[Part::Poly(&[(10.0, 7.0), (18.0, 13.0), (18.0, 1.0)])],
+            )),
+            start_scale: None,
+            scale: Scale::Ratio(1.0),
+            pullback: 17.25,
+            fill: Fill::None,
+            stroke: 2.0,
+        },
+        // composition / aggregation *-margin: refX 15 (start) / 3.5 or 1 (end);
+        // composition is unstroked, aggregation stroked 2.
+        Head::DiamondFilled => Marker {
+            end: def(3.5, 7.0, &[Part::Poly(DIAMOND_PATH)]),
+            start: Some(def(15.0, 7.0, &[Part::Poly(DIAMOND_PATH)])),
+            start_scale: None,
+            scale: Scale::Ratio(1.0),
+            pullback: 17.25,
+            fill: Fill::Line,
+            stroke: 0.0,
+        },
+        Head::Diamond => Marker {
+            end: def(1.0, 7.0, &[Part::Poly(DIAMOND_PATH)]),
+            start: Some(def(15.0, 7.0, &[Part::Poly(DIAMOND_PATH)])),
+            start_scale: None,
+            scale: Scale::Ratio(1.0),
+            pullback: 17.25,
+            fill: Fill::None,
+            stroke: 2.0,
+        },
+        // dependency*-margin: refX 4 (start) / 16 (end), unstroked.
+        Head::Dependency => Marker {
+            end: def(
+                16.0,
+                7.0,
+                &[Part::Poly(&[
+                    (18.0, 7.0),
+                    (9.0, 13.0),
+                    (14.0, 7.0),
+                    (9.0, 1.0),
+                ])],
+            ),
+            start: Some(def(
+                4.0,
+                7.0,
+                &[Part::Poly(&[
+                    (5.0, 7.0),
+                    (9.0, 13.0),
+                    (1.0, 7.0),
+                    (9.0, 1.0),
+                ])],
+            )),
+            start_scale: None,
+            scale: Scale::Ratio(1.0),
+            pullback: 6.0,
+            fill: Fill::Line,
+            stroke: 0.0,
+        },
+        // lollipop*-margin: a transparent r 6 circle stroked 2, refX 13 / 1.
+        Head::Lollipop => Marker {
+            end: def(1.0, 7.0, LOLLIPOP),
+            start: Some(def(13.0, 7.0, LOLLIPOP)),
+            start_scale: None,
+            scale: Scale::Ratio(1.0),
+            pullback: 13.5,
+            fill: Fill::None,
+            stroke: 2.0,
+        },
+        _ => return None,
+    })
+}
+
 fn marker(head: Head, neo: bool) -> Option<Marker> {
+    if neo {
+        if let Some(m) = margin_marker(head) {
+            return Some(m);
+        }
+    }
     let def = |ref_x, ref_y, parts| Def {
         ref_x,
         ref_y,
@@ -130,6 +297,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                 5.0,
                 &[Part::Poly(&[(0.0, 5.0), (10.0, 10.0), (10.0, 0.0)])],
             )),
+            start_scale: None,
             scale: Scale::Fixed(Ratio::Point),
             pullback: 4.0,
             fill: Fill::Line,
@@ -139,6 +307,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
         Head::Circle => Marker {
             end: def(11.0, 5.0, &[Part::Circle(5.0, 5.0, 5.0)]),
             start: Some(def(-1.0, 5.0, &[Part::Circle(5.0, 5.0, 5.0)])),
+            start_scale: None,
             scale: Scale::Fixed(Ratio::Circle),
             pullback: 0.0,
             fill: Fill::Line,
@@ -155,6 +324,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
             Marker {
                 end: def(12.0, 5.2, &[Part::Path(X)]),
                 start: Some(def(-1.0, 5.2, &[Part::Path(X)])),
+                start_scale: None,
                 scale: Scale::Fixed(Ratio::One),
                 pullback: 0.0,
                 fill: Fill::Line,
@@ -174,6 +344,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                 ])],
             ),
             start: None,
+            start_scale: None,
             scale: Scale::Fixed(Ratio::One),
             pullback: 0.0,
             fill: Fill::Line,
@@ -191,6 +362,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                 7.0,
                 &[Part::Poly(&[(1.0, 7.0), (18.0, 13.0), (18.0, 1.0)])],
             )),
+            start_scale: None,
             scale: Scale::Fixed(Ratio::One),
             pullback: 17.25,
             fill: Fill::None,
@@ -200,6 +372,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
         Head::Diamond | Head::DiamondFilled => Marker {
             end: def(1.0, 7.0, &[Part::Poly(DIAMOND)]),
             start: Some(def(18.0, 7.0, &[Part::Poly(DIAMOND)])),
+            start_scale: None,
             scale: Scale::Fixed(Ratio::One),
             pullback: 17.25,
             fill: if head == Head::DiamondFilled {
@@ -231,6 +404,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                     (9.0, 1.0),
                 ])],
             )),
+            start_scale: None,
             scale: Scale::Fixed(Ratio::One),
             pullback: 6.0,
             fill: Fill::Line,
@@ -240,6 +414,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
         Head::Lollipop => Marker {
             end: def(1.0, 7.0, &[Part::Circle(7.0, 7.0, 6.0)]),
             start: Some(def(13.0, 7.0, &[Part::Circle(7.0, 7.0, 6.0)])),
+            start_scale: None,
             scale: Scale::Fixed(Ratio::One),
             pullback: 13.5,
             fill: Fill::Background,
@@ -267,6 +442,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                     Seg::L(15.0, 18.0),
                 ])],
             )),
+            start_scale: None,
             scale: Scale::StrokeWidth,
             pullback: 0.0,
             fill: Fill::None,
@@ -289,6 +465,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                     Part::Path(&[Seg::M(9.0, 0.0), Seg::L(9.0, 18.0)]),
                 ],
             )),
+            start_scale: None,
             scale: Scale::StrokeWidth,
             pullback: 0.0,
             fill: Fill::None,
@@ -311,6 +488,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                     Part::Path(&[Seg::M(42.0, 9.0), Seg::L(42.0, 27.0)]),
                 ],
             )),
+            start_scale: None,
             scale: Scale::StrokeWidth,
             pullback: 0.0,
             fill: Fill::None,
@@ -336,6 +514,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                     &[Part::Circle(48.0, 18.0, 6.0), Part::Path(FOOT_START)]
                 },
             )),
+            start_scale: None,
             scale: Scale::StrokeWidth,
             pullback: 0.0,
             fill: Fill::None,
@@ -353,6 +532,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                 ])],
             ),
             start: None,
+            start_scale: None,
             scale: Scale::StrokeWidth,
             pullback: 0.0,
             fill: Fill::None,
@@ -373,6 +553,7 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
                 // Only a start marker exists upstream; mirror it for the end.
                 end: def(20.0, 10.0, PARTS),
                 start: Some(def(0.0, 10.0, PARTS)),
+                start_scale: None,
                 scale: Scale::StrokeWidth,
                 pullback: 0.0,
                 fill: Fill::None,
@@ -394,6 +575,23 @@ pub fn pullback(head: Head) -> f64 {
     marker(head, false).map_or(0.0, |m| m.pullback)
 }
 
+/// [`pullback`] for an edge drawn with the neo look: state transitions use
+/// `arrow_barb_neo` (`markerOffsets` 5.5) instead of `arrow_barb` (0).
+pub fn pullback_for(head: Head, neo: bool) -> f64 {
+    marker(head, neo).map_or(0.0, |m| m.pullback)
+}
+
+/// Length of the line's end a neo edge leaves undrawn under its marker
+/// (`markerOffsets2` turned into the path's `stroke-dasharray`).
+pub fn hidden_end(head: Head, neo: bool) -> f64 {
+    match head {
+        _ if !neo => 0.0,
+        Head::Arrow => 4.0,
+        Head::Cross | Head::Circle => 12.5,
+        _ => 0.0,
+    }
+}
+
 /// Marker geometry for `head` at the node boundary point `tip`, with `dir`
 /// the unit direction pointing into the node. `width` is the edge stroke.
 /// Under the neo look the ER and requirement markers are the `*_neo` variants:
@@ -412,6 +610,13 @@ pub fn elements(
     };
     let (s, stroke) = match m.scale {
         Scale::Fixed(r) => (r.value(), m.stroke * r.value()),
+        Scale::Ratio(r) => {
+            let r = match (end, m.start_scale) {
+                (End::Start, Some(r)) => r,
+                _ => r,
+            };
+            (r, m.stroke * r)
+        }
         // requirement_arrow_neo draws its 20-unit chevron in a 25×20 viewBox: 0.8.
         Scale::StrokeWidth if neo && head == Head::OpenArrow => (0.8, width * 0.8),
         Scale::StrokeWidth if neo => (1.0, width),
@@ -595,5 +800,54 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Neo edges use the `*-margin` markers (reference SVG, mermaid 12.3.0): the
+    /// flowchart arrow is 10.5 long with its tip on the pulled-back line end, 4px
+    /// short of the node.
+    #[test]
+    fn neo_point_arrow_stops_short_of_the_node() {
+        let (x0, y0, x1, y1) = bounds(&draw_with(Head::Arrow, End::End, 2.0, true));
+        assert!((x1 - 96.0).abs() < 1e-9, "{x1}");
+        assert!((x1 - x0 - 10.5).abs() < 1e-9);
+        assert!((y1 - y0 - 14.0 * 10.5 / 11.5).abs() < 1e-9);
+        assert_eq!(pullback_for(Head::Arrow, true), 4.0);
+        assert_eq!(hidden_end(Head::Arrow, true), 4.0);
+        assert_eq!(hidden_end(Head::Arrow, false), 0.0);
+        // pointStart-margin is drawn unscaled, its tip 1 unit past the line start.
+        let (sx0, sy0, sx1, sy1) = bounds(&draw_with(Head::Arrow, End::Start, 2.0, true));
+        assert!((sx1 - 97.0).abs() < 1e-9 && (sx1 - sx0 - 11.5).abs() < 1e-9);
+        assert!((sy1 - sy0 - 14.0).abs() < 1e-9);
+    }
+
+    /// extension*-margin: an 8-long hollow triangle stroked 2. The line is pulled
+    /// back 17.25; extensionStart-margin (refX 18) spans 17.25..9.25 from the node
+    /// (reference: tip 9.25px off the class box), extensionEnd-margin (refX 9)
+    /// 16.25..8.25.
+    #[test]
+    fn neo_extension_triangle_is_8_long() {
+        for (end, near) in [(End::End, 91.75), (End::Start, 90.75)] {
+            let els = draw_with(Head::Triangle, end, 2.0, true);
+            let (x0, y0, x1, y1) = bounds(&els);
+            assert!((x1 - x0 - 8.0).abs() < 1e-9 && (y1 - y0 - 12.0).abs() < 1e-9);
+            assert!((x1 - near).abs() < 1e-9, "{end:?}: {x0} {x1}");
+            match &els[0] {
+                Element::Shape { paint, .. } => assert_eq!(paint.stroke_width, 2.0),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// State transitions under neo: `arrow_barb_neo` pulls the line back 5.5 and
+    /// barbEnd-margin puts the tip 2 past it.
+    #[test]
+    fn neo_barb_is_pulled_back() {
+        assert_eq!(pullback_for(Head::Barb, false), 0.0);
+        assert_eq!(pullback_for(Head::Barb, true), 5.5);
+        let (x0, _, x1, _) = bounds(&draw_with(Head::Barb, End::End, 2.0, true));
+        assert!(
+            (x1 - 96.5).abs() < 1e-9 && (x1 - x0 - 8.0).abs() < 1e-9,
+            "{x0} {x1}"
+        );
     }
 }
