@@ -19,6 +19,7 @@ use crate::geom::{Point, Rect};
 
 mod bk;
 pub mod boxes;
+mod elkorder;
 mod nested;
 mod ortho;
 pub use ortho::{EdgeRouting, OrthoSpacing};
@@ -185,8 +186,32 @@ pub fn layout(input: &LayoutInput) -> LayoutOutput {
     nested::layout(input)
 }
 
+/// ELK's `thoroughness` default: the number of crossing-minimisation runs.
+const ELK_THOROUGHNESS: usize = 7;
+/// ELK's `greedySwitch.activationThreshold` default: below this many nodes the
+/// greedy switch runs (where ELK runs it at all).
+const ELK_GREEDY_SWITCH_THRESHOLD: usize = 40;
+
+/// Which graph of mermaid's ELK hierarchy a layered pass lays out; under ELK it
+/// sets how crossings are minimised (see `elkorder::Options`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElkGraph {
+    /// The root graph: `considerModelOrder: NODES_AND_EDGES`, laid out
+    /// hierarchically (`INCLUDE_CHILDREN`), so no greedy switch.
+    Root,
+    /// A container's own graph: ELK's defaults (no model order), with the greedy
+    /// switch only where it is laid out on its own (`SEPARATE_CHILDREN`: mermaid
+    /// gives that to a subgraph with its own `direction`).
+    Container { separate: bool },
+}
+
 /// One layered pass over the whole input (every cluster integrated).
 fn layout_flat(input: &LayoutInput) -> LayoutOutput {
+    layout_flat_in(input, ElkGraph::Root)
+}
+
+/// `layout_flat` for one graph of the ELK hierarchy.
+fn layout_flat_in(input: &LayoutInput, graph: ElkGraph) -> LayoutOutput {
     let horizontal = input.direction.is_horizontal();
     let swap = |w: f64, h: f64| if horizontal { (h, w) } else { (w, h) };
     let n = input.nodes.len();
@@ -420,34 +445,21 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
         let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
         *layer = ctx.arrange(layer, &keys, &mut before);
     }
-    let mut best = layers.clone();
-    let mut best_cross = total_crossings(&layers, &down, nv);
-    let max_iter = if nv > 3000 { 6 } else { 24 };
-    let mut stale = 0;
-    for it in 0..max_iter {
-        if best_cross <= 0.0 {
-            break;
-        }
-        sweep(
-            &mut layers,
-            &ctx,
-            if it % 2 == 0 { &up } else { &down },
-            it % 2 == 0,
-            nv,
-        );
-        let cross = total_crossings(&layers, &down, nv);
-        if cross < best_cross {
-            best_cross = cross;
-            best = layers.clone();
-            stale = 0;
-        } else {
-            stale += 1;
-            if stale >= 4 {
-                break;
-            }
-        }
-    }
-    let layers = best;
+    let layers = if elk {
+        let border: Vec<bool> = verts
+            .iter()
+            .map(|v| matches!(v.kind, Kind::Border { .. }))
+            .collect();
+        let opts = elkorder::Options {
+            model_order: graph == ElkGraph::Root,
+            greedy_switch: graph == (ElkGraph::Container { separate: true })
+                && n < ELK_GREEDY_SWITCH_THRESHOLD,
+            thoroughness: ELK_THOROUGHNESS,
+        };
+        elk_order(layers, &verts, n, &chains, &border, &ctx, opts)
+    } else {
+        dagre_order(layers, &ctx, &up, &down, nv)
+    };
 
     // 6. Cross-axis coordinates.
     let pad = input.cluster_padding;
@@ -761,6 +773,147 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
         clusters,
         cluster_directions: vec![input.direction; nc],
     }
+}
+
+/// ELK's crossing minimisation (see `elkorder`) on ELK's own layers: the ranks of
+/// real nodes and of label-only layers. The ranks between, which hold nothing but
+/// the midpoints of edges (see `elk_ranks`), are left out, their edges joined
+/// across them, and each is then ordered after its edges' upper ends, so it adds
+/// no crossing.
+fn elk_order(
+    layers: Vec<Vec<usize>>,
+    verts: &[Vertex],
+    real: usize,
+    chains: &[Option<Chain>],
+    border: &[bool],
+    ctx: &OrderCtx,
+    opts: elkorder::Options,
+) -> Vec<Vec<usize>> {
+    let mut kept = vec![false; layers.len()];
+    for (r, k) in kept.iter_mut().enumerate() {
+        *k = r % RANK_STEP == 0;
+    }
+    for v in verts {
+        if matches!(v.kind, Kind::Dummy { labeled: true }) {
+            kept[v.rank] = true;
+        }
+    }
+    let mut segs = Vec::new();
+    let mut info = Vec::new();
+    // Per left-out vertex: its edge's ends on the kept layers above and below.
+    let mut across: Vec<Option<(usize, usize)>> = vec![None; verts.len()];
+    for (ei, (chain, _, reversed)) in chains
+        .iter()
+        .enumerate()
+        .filter_map(|(ei, c)| Some((ei, c.as_ref()?)))
+    {
+        let target = chain[chain.len() - 1];
+        let mut last = chain[0];
+        let mut skipped = Vec::new();
+        for &v in &chain[1..] {
+            if kept[verts[v].rank] {
+                segs.push((last, v));
+                info.push(elkorder::SegInfo {
+                    edge: ei,
+                    target,
+                    reversed: *reversed,
+                });
+                for &d in &skipped {
+                    across[d] = Some((last, v));
+                }
+                skipped.clear();
+                last = v;
+            } else {
+                skipped.push(v);
+            }
+        }
+    }
+    let ranks: Vec<usize> = (0..layers.len()).filter(|&r| kept[r]).collect();
+    let label: Vec<bool> = verts
+        .iter()
+        .map(|v| matches!(v.kind, Kind::Dummy { labeled: true }))
+        .collect();
+    let mut all = layers;
+    let elk_layers: Vec<Vec<usize>> = ranks.iter().map(|&r| std::mem::take(&mut all[r])).collect();
+    let ordered = elkorder::minimize(
+        elk_layers,
+        &elkorder::Graph {
+            border,
+            label: &label,
+            segs: &segs,
+            info: &info,
+            real,
+        },
+        ctx,
+        opts,
+    );
+    for (&r, layer) in ranks.iter().zip(ordered) {
+        all[r] = layer;
+    }
+    let mut pos = vec![0usize; verts.len()];
+    for &r in &ranks {
+        for (i, &v) in all[r].iter().enumerate() {
+            pos[v] = i;
+        }
+    }
+    // Sibling clusters keep the order the kept layers give them.
+    let mut before = Vec::new();
+    for &r in &ranks {
+        let keys: Vec<f64> = (0..all[r].len()).map(|i| i as f64).collect();
+        ctx.arrange(&all[r], &keys, &mut before);
+    }
+    for r in (0..all.len()).filter(|&r| !kept[r]) {
+        let layer = std::mem::take(&mut all[r]);
+        let width = (verts.len() + 1) as f64;
+        let keys: Vec<f64> = layer
+            .iter()
+            .map(|&v| match across[v] {
+                Some((a, b)) => pos[a] as f64 * width + pos[b] as f64,
+                None => 0.0,
+            })
+            .collect();
+        all[r] = ctx.arrange(&layer, &keys, &mut before);
+    }
+    all
+}
+
+/// dagre-style ordering: weighted barycentre sweeps, alternating down and up,
+/// keeping the ordering with the fewest (weighted) crossings.
+fn dagre_order(
+    mut layers: Vec<Vec<usize>>,
+    ctx: &OrderCtx,
+    up: &[Vec<(usize, f64)>],
+    down: &[Vec<(usize, f64)>],
+    nv: usize,
+) -> Vec<Vec<usize>> {
+    let mut best = layers.clone();
+    let mut best_cross = total_crossings(&layers, down, nv);
+    let max_iter = if nv > 3000 { 6 } else { 24 };
+    let mut stale = 0;
+    for it in 0..max_iter {
+        if best_cross <= 0.0 {
+            break;
+        }
+        sweep(
+            &mut layers,
+            ctx,
+            if it % 2 == 0 { up } else { down },
+            it % 2 == 0,
+            nv,
+        );
+        let cross = total_crossings(&layers, down, nv);
+        if cross < best_cross {
+            best_cross = cross;
+            best = layers.clone();
+            stale = 0;
+        } else {
+            stale += 1;
+            if stale >= 4 {
+                break;
+            }
+        }
+    }
+    best
 }
 
 fn self_loop(c: Point, node: &LayoutNode, label: Option<(f64, f64)>) -> EdgeRoute {

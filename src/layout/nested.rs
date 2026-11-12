@@ -15,8 +15,8 @@
 //! remaining ("integrated") clusters stay clusters of the parent's layered pass.
 
 use super::{
-    Direction, EdgeRoute, EdgeRouting, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode,
-    LayoutOutput, OrthoSpacing, cluster_chains, layout_flat,
+    Direction, EdgeRoute, EdgeRouting, ElkGraph, LayoutCluster, LayoutEdge, LayoutInput,
+    LayoutNode, LayoutOutput, OrthoSpacing, cluster_chains, layout_flat, layout_flat_in,
 };
 use crate::geom::{Point, Rect};
 
@@ -597,7 +597,13 @@ fn layout_level(
         routing,
         ..input.clone()
     };
-    let out = layout_flat(&flat);
+    let graph = match scope {
+        None => ElkGraph::Root,
+        Some(c) => ElkGraph::Container {
+            separate: input.clusters[c].direction.is_some(),
+        },
+    };
+    let out = layout_flat_in(&flat, graph);
     let mut bbox: Option<Rect> = None;
     let mut add = |r: Rect| {
         bbox = Some(match bbox {

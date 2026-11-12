@@ -141,12 +141,17 @@ quirks (siblings taking a composite's height, `space:N` as N slots) do not map o
   west / north side. Where two edges cross, one hops the other as upstream (`elk.lineHops`: a radius-6 arc by
   default, `gap` breaks the line, `false` turns hops off; the horizontal segment of a horizontal / vertical pair gives
   way, otherwise the later edge; hops shrink or drop near rounded corners and each other, invisible `~~~` edges take
-  part). Node placement is still the dagre-style one, so positions (and so which edges cross) can differ from ELK's;
+  part). The order within layers comes from ELK's layer sweep (model order first, port-aware barycentres, 7 seeded
+  random restarts drawn from ELK's `java.util.Random` sequence, the greedy switch only where ELK runs it); a subgraph
+  is kept contiguous within its parent's sweep rather than ordered as a nested graph of its own, and layers wider than
+  128 nodes skip ELK's transitive model-order bookkeeping, so order can still differ there. Node placement is still
+  the dagre-style one, so positions (and so which edges cross) can differ from ELK's;
   ELK's side-of-edge label placement and its edges attached to a container's frame border (ours run to a member node
   and are cut at the frame) are not reproduced. `layout: dagre` (or any other non-ELK `layout`) gives
   dagre's spacing and the configured curve. ELK's packing of disconnected parts inside a container is not
   reproduced, `@{ view: collapsed }` folds a subgraph into one node as upstream.
-- **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction and Brandes–Köpf
+- **Layout:** network-simplex ranking (as in dagre/graphviz), barycentric crossing reduction (under `layout: dagre`;
+  ELK's layer sweep otherwise, see above) and Brandes–Köpf
   coordinate assignment ported from dagre's `position/bk` (every edge gets a midpoint vertex, as with dagre's
   `makeSpaceForEdgeLabels`, which gives mermaid's curved "S" edges). Crossing reduction differs from dagre's, so
   node order can differ. Sibling subgraph frames never overlap: where a frame's sides would zig-zag over its layers
