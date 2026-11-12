@@ -869,7 +869,163 @@ impl Sweeper<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Kind, Vertex};
     use super::*;
+
+    fn verts(n: usize) -> Vec<Vertex> {
+        (0..n)
+            .map(|_| Vertex {
+                kind: Kind::Real,
+                rank: 0,
+                w: 1.0,
+                h: 1.0,
+                cluster: None,
+            })
+            .collect()
+    }
+
+    fn info(segs: &[(usize, usize)]) -> Vec<SegInfo> {
+        segs.iter()
+            .enumerate()
+            .map(|(edge, &(_, target))| SegInfo {
+                edge,
+                target,
+                reversed: false,
+            })
+            .collect()
+    }
+
+    /// Crossings of `layers` as ELK counts them (ports in segment order).
+    fn count(layers: &[Vec<usize>], segs: &[(usize, usize)]) -> usize {
+        let mut pos = vec![0; segs.iter().map(|s| s.0.max(s.1)).max().unwrap_or(0) + 1];
+        for l in layers {
+            for (i, &v) in l.iter().enumerate() {
+                pos[v] = i;
+            }
+        }
+        let mut c = 0;
+        for (i, a) in segs.iter().enumerate() {
+            for b in &segs[i + 1..] {
+                let same_layer = layers.iter().any(|l| l.contains(&a.0) && l.contains(&b.0));
+                if same_layer
+                    && (pos[a.0] as i64 - pos[b.0] as i64) * (pos[a.1] as i64 - pos[b.1] as i64) < 0
+                {
+                    c += 1;
+                }
+            }
+        }
+        c
+    }
+
+    fn run(layers: Vec<Vec<usize>>, segs: &[(usize, usize)], opts: Options) -> Vec<Vec<usize>> {
+        let n: usize = layers.iter().map(Vec::len).sum();
+        let vs = verts(n);
+        let ctx = OrderCtx {
+            verts: &vs,
+            chains: &[],
+        };
+        let border = vec![false; n];
+        let label = vec![false; n];
+        let info = info(segs);
+        let graph = Graph {
+            border: &border,
+            label: &label,
+            segs,
+            info: &info,
+            real: n,
+        };
+        minimize(layers, &graph, &ctx, opts)
+    }
+
+    const OPTS: Options = Options {
+        model_order: true,
+        greedy_switch: false,
+        thoroughness: 7,
+    };
+
+    #[test]
+    fn untangles_a_crossing() {
+        // 0 -> 3 and 1 -> 2 cross in model order.
+        let segs = [(0, 3), (1, 2)];
+        let out = run(vec![vec![0, 1], vec![2, 3]], &segs, OPTS);
+        assert_eq!(count(&out, &segs), 0);
+        let out = run(
+            vec![vec![0, 1], vec![2, 3]],
+            &segs,
+            Options {
+                model_order: false,
+                ..OPTS
+            },
+        );
+        assert_eq!(count(&out, &segs), 0);
+    }
+
+    #[test]
+    fn keeps_a_crossing_free_model_order() {
+        let segs = [(0, 2), (1, 3), (2, 4), (3, 5)];
+        let layers = vec![vec![0, 1], vec![2, 3], vec![4, 5]];
+        assert_eq!(run(layers.clone(), &segs, OPTS), layers);
+    }
+
+    #[test]
+    fn reduces_crossings_of_a_tangled_graph() {
+        // Three layers of five, every node of a layer wired to a scrambled one.
+        let mut segs = Vec::new();
+        for (i, j) in [(0, 3), (1, 0), (2, 4), (3, 1), (4, 2)] {
+            segs.push((i, 5 + j));
+            segs.push((5 + i, 10 + (j + 2) % 5));
+        }
+        let layers: Vec<Vec<usize>> = (0..3).map(|l| (l * 5..l * 5 + 5).collect()).collect();
+        let before = count(&layers, &segs);
+        for greedy_switch in [false, true] {
+            let out = run(
+                layers.clone(),
+                &segs,
+                Options {
+                    greedy_switch,
+                    ..OPTS
+                },
+            );
+            for (a, b) in out.iter().zip(&layers) {
+                let (mut a, mut b) = (a.clone(), b.clone());
+                a.sort_unstable();
+                b.sort_unstable();
+                assert_eq!(a, b, "a permutation of each layer");
+            }
+            assert!(count(&out, &segs) < before);
+        }
+    }
+
+    #[test]
+    fn model_order_sort_puts_dummies_by_their_source() {
+        // Layer 0: real 0, 1. Layer 1: real 2 (from 1), dummy 3 (from 0).
+        let segs = [(1, 2), (0, 3)];
+        let info = info(&segs);
+        let mut west = vec![Vec::new(), Vec::new(), vec![0], vec![1]];
+        let pos = [0, 1, usize::MAX, usize::MAX];
+        let port_at = [0, 0];
+        let mut layer = vec![2, 3];
+        model_order_sort(&mut layer, &west, &segs, &info, 3, &pos, &port_at);
+        assert_eq!(layer, vec![3, 2]);
+        // Real nodes keep their model order whatever their sources.
+        west[3].clear();
+        let mut layer = vec![2, 0, 1];
+        let pos = [usize::MAX, usize::MAX, usize::MAX, usize::MAX];
+        model_order_sort(&mut layer, &west, &segs, &info, 3, &pos, &port_at);
+        assert_eq!(layer, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn wide_layers_sort_like_narrow_ones_where_the_rules_agree() {
+        for n in [40, EXACT_MODEL_ORDER_SORT + 72] {
+            // Real nodes in reverse, without edges from the layer before.
+            let mut layer: Vec<usize> = (0..n).rev().collect();
+            let west = vec![Vec::new(); n];
+            let pos = vec![usize::MAX; n];
+            model_order_sort(&mut layer, &west, &[], &[], n, &pos, &[]);
+            assert_eq!(layer, (0..n).collect::<Vec<_>>());
+        }
+    }
 
     /// `new Random(1)` in Java.
     #[test]
