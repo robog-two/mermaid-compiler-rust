@@ -989,6 +989,11 @@ fn level_input(
             label: e.label.filter(|_| s.main),
             from_cluster: None,
             to_cluster: None,
+            // A terminal label stays with the segment at its node.
+            terminals: [
+                e.terminals[0].filter(|_| matches!(s.from, SegEnd::Node(_))),
+                e.terminals[1].filter(|_| matches!(s.to, SegEnd::Node(_))),
+            ],
         });
         edge_ids.push(s.edge);
         seg_of.push(Some(*s));
@@ -1022,6 +1027,10 @@ fn level_input(
             label: label_of(e.label),
             from_cluster,
             to_cluster,
+            terminals: [
+                e.terminals[0].filter(|_| from_cluster.is_none()),
+                e.terminals[1].filter(|_| to_cluster.is_none()),
+            ],
         });
         edge_ids.push(ei);
         seg_of.push(None);

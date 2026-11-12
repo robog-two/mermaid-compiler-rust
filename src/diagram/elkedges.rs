@@ -10,7 +10,7 @@
 //!   of nodes, in opposite directions, are pushed apart sideways until they
 //!   clear each other, so they end up beside their (now straight) edges.
 
-use crate::geom::Point;
+use crate::geom::{Point, Rect};
 
 /// `JOG_EPS`: below this a step is no step.
 const JOG_EPS: f64 = 0.01;
@@ -281,6 +281,237 @@ pub fn separate_opposite_edge_labels<K: PartialEq + Copy>(
     }
 }
 
+/// A terminal (end) label of an edge (a class cardinality), as mermaid hands it
+/// to ELK (`terminalElkLabels`): at its edge's start or end, beside the port of
+/// `node`, its measured size, padded past the end's marker for ELK.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Terminal {
+    pub edge: usize,
+    pub start: bool,
+    pub node: usize,
+    /// Where mermaid wants it: right of the direction of travel (`…Right`), or left.
+    pub right: bool,
+    pub width: f64,
+    pub height: f64,
+    /// Marker clearance on every side (`TERMINAL_LABEL_MARKER_CLEARANCE`, or 0).
+    pub pad: f64,
+}
+
+/// ELK's `spacing.edgeLabel` (`spacing.baseValue: 40`) plus the edge's thickness:
+/// the gap between an end label and its edge.
+const END_LABEL_EDGE_GAP: f64 = 5.0;
+/// `TERMINAL_LABEL_FRAME_CLEARANCE`.
+const TERMINAL_LABEL_FRAME_CLEARANCE: f64 = 2.0;
+
+/// The centres of the terminal labels: where ELK places them
+/// (`EndLabelPreprocessor`: off the node by the edge-label spacing, beside the
+/// port on the side `LabelSideSelector` (`SMART_DOWN`) picks), then slid off
+/// group frames (`slideTerminalLabelsOffFrames`) and mirrored across their end
+/// segment to their own side where that is free (`putTerminalLabelsOnTheirSide`).
+/// `routes` are the edges' final routes, `nodes` the boxes of the nodes, `frames`
+/// the groups' and `centre_labels` the edges' own labels.
+pub fn place_terminal_labels(
+    routes: &[Option<Vec<Point>>],
+    terms: &[Terminal],
+    nodes: &[Rect],
+    frames: &[Rect],
+    centre_labels: &[Label],
+) -> Vec<Option<Point>> {
+    // The end segment of each label: (far point, port), and its index.
+    let end_of = |t: &Terminal| -> Option<(Point, Point, usize)> {
+        let pts = routes.get(t.edge)?.as_ref()?;
+        let n = pts.len();
+        if n < 2 {
+            return None;
+        }
+        let end = if t.start {
+            (pts[1], pts[0], 0)
+        } else {
+            (pts[n - 2], pts[n - 1], n - 2)
+        };
+        (end.0.dist(end.1) > 1e-9).then_some(end)
+    };
+    // ELK: below the edge (the cross axis' positive side), off the node by the
+    // edge-label spacing; the labels on one side of a node that would overlap
+    // stack away from it (`RectangleStripOverlapRemover`, greedily in the order
+    // of their near cross borders).
+    let geometry = |t: &Terminal| {
+        let (far, port, _) = end_of(t)?;
+        let d = far.minus(port);
+        let vertical = d.y.abs() >= d.x.abs();
+        let sign = if vertical { d.y.signum() } else { d.x.signum() };
+        let (w, h) = (t.width + 2.0 * t.pad, t.height + 2.0 * t.pad);
+        let (along, across) = if vertical { (h, w) } else { (w, h) };
+        let cross_lo = if vertical { port.x } else { port.y } + END_LABEL_EDGE_GAP;
+        Some((vertical, sign, port, along, across, cross_lo))
+    };
+    let mut offset = vec![0.0f64; terms.len()];
+    let mut done = vec![false; terms.len()];
+    for i in 0..terms.len() {
+        let Some((vertical, sign, _, _, _, _)) = geometry(&terms[i]) else {
+            continue;
+        };
+        if done[i] {
+            continue;
+        }
+        let mut side: Vec<usize> = (i..terms.len())
+            .filter(|&j| {
+                terms[j].node == terms[i].node
+                    && geometry(&terms[j]).is_some_and(|g| g.0 == vertical && g.1 == sign)
+            })
+            .collect();
+        side.sort_by(|&a, &b| {
+            let lo = |k: usize| geometry(&terms[k]).map_or(0.0, |g| g.5);
+            lo(a).total_cmp(&lo(b)).then(a.cmp(&b))
+        });
+        let mut placed: Vec<usize> = Vec::new();
+        for &j in &side {
+            let Some((_, _, _, along, across, lo)) = geometry(&terms[j]) else {
+                continue;
+            };
+            let mut over: Vec<usize> = placed
+                .iter()
+                .copied()
+                .filter(|&k| {
+                    geometry(&terms[k]).is_some_and(|g| g.5 < lo + across && lo < g.5 + g.4)
+                })
+                .collect();
+            over.sort_by(|&a, &b| offset[a].total_cmp(&offset[b]));
+            let mut y = 0.0;
+            for k in over {
+                let h = geometry(&terms[k]).map_or(0.0, |g| g.3);
+                if y < offset[k] + h && y + along > offset[k] {
+                    y = offset[k] + h;
+                }
+            }
+            offset[j] = y;
+            placed.push(j);
+            done[j] = true;
+        }
+    }
+    let mut centres: Vec<Option<Point>> = terms
+        .iter()
+        .zip(&offset)
+        .map(|(t, &off)| {
+            let (vertical, sign, port, along, across, lo) = geometry(t)?;
+            let near = crate::layout::ELK_END_LABEL_SPACING + off + along / 2.0;
+            let cross = lo + across / 2.0;
+            Some(if vertical {
+                Point::new(cross, port.y + sign * near)
+            } else {
+                Point::new(port.x + sign * near, cross)
+            })
+        })
+        .collect();
+    let boxed = |c: Point, t: &Terminal| Label {
+        center: c,
+        width: t.width,
+        height: t.height,
+    };
+    let overlaps = |a: &Label, b: &Label| {
+        (a.center.x - b.center.x).abs() * 2.0 < a.width + b.width
+            && (a.center.y - b.center.y).abs() * 2.0 < a.height + b.height
+    };
+    let hits_frame = |l: &Label, clearance: f64| {
+        let l = Label {
+            width: l.width + 2.0 * clearance,
+            height: l.height + 2.0 * clearance,
+            ..*l
+        };
+        frames.iter().any(|f| {
+            let (a, b, c, d) = (
+                Point::new(f.x, f.y),
+                Point::new(f.right(), f.y),
+                Point::new(f.right(), f.bottom()),
+                Point::new(f.x, f.bottom()),
+            );
+            [(a, b), (b, c), (c, d), (d, a)]
+                .iter()
+                .any(|&(p, q)| segment_hits_box(p, q, &l))
+        })
+    };
+    let blocked =
+        |l: &Label, i: usize, segment: usize, clearance: f64, centres: &[Option<Point>]| {
+            let t = &terms[i];
+            nodes.iter().any(|n| {
+                overlaps(
+                    l,
+                    &Label {
+                        center: Point::new(n.x + n.w / 2.0, n.y + n.h / 2.0),
+                        width: n.w,
+                        height: n.h,
+                    },
+                )
+            }) || centre_labels.iter().any(|c| overlaps(l, c))
+                || hits_frame(l, clearance)
+                || routes.iter().enumerate().any(|(ei, r)| {
+                    r.as_ref().is_some_and(|pts| {
+                        pts.windows(2).enumerate().any(|(k, s)| {
+                            !(ei == t.edge && k == segment) && segment_hits_box(s[0], s[1], l)
+                        })
+                    })
+                })
+                || terms
+                    .iter()
+                    .enumerate()
+                    .any(|(j, o)| j != i && centres[j].is_some_and(|c| overlaps(l, &boxed(c, o))))
+        };
+    // Off the frames, along the end segment.
+    for (i, t) in terms.iter().enumerate() {
+        let (Some(centre), Some((far, port, segment))) = (centres[i], end_of(t)) else {
+            continue;
+        };
+        if !hits_frame(&boxed(centre, t), 0.0) {
+            continue;
+        }
+        let length = far.dist(port);
+        let dir = port.minus(far).scale(1.0 / length);
+        let half = (dir.x.abs() * t.width + dir.y.abs() * t.height) / 2.0;
+        let along = |c: Point| (c.x - port.x) * dir.x + (c.y - port.y) * dir.y;
+        let on_segment = |c: Point| along(c) + half <= 0.0 && along(c) - half >= -length;
+        let mut step = 1.0;
+        while step <= length {
+            let found = [step, -step]
+                .iter()
+                .map(|&shift| centre.plus(dir.scale(shift)))
+                .find(|&moved| {
+                    on_segment(moved)
+                        && !blocked(
+                            &boxed(moved, t),
+                            i,
+                            segment,
+                            TERMINAL_LABEL_FRAME_CLEARANCE,
+                            &centres,
+                        )
+                });
+            if let Some(moved) = found {
+                centres[i] = Some(moved);
+                break;
+            }
+            step += 1.0;
+        }
+    }
+    // Onto their own side of the end segment, where that is free.
+    for (i, t) in terms.iter().enumerate() {
+        let (Some(centre), Some((far, port, segment))) = (centres[i], end_of(t)) else {
+            continue;
+        };
+        // The segment in the direction of travel.
+        let (from, to) = if t.start { (port, far) } else { (far, port) };
+        let length = from.dist(to);
+        let normal = Point::new(-(to.y - from.y) / length, (to.x - from.x) / length);
+        let offset = (centre.x - from.x) * normal.x + (centre.y - from.y) * normal.y;
+        if offset == 0.0 || (offset > 0.0) == t.right {
+            continue;
+        }
+        let mirrored = centre.minus(normal.scale(2.0 * offset));
+        if !blocked(&boxed(mirrored, t), i, segment, 0.0, &centres) {
+            centres[i] = Some(mirrored);
+        }
+    }
+    centres
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,5 +596,66 @@ mod tests {
         let mut routes = vec![Some(small.clone()), Some(other)];
         straighten_edge_terminals(&mut routes, &mut [None, None]);
         assert_eq!(routes[0].as_ref(), Some(&small));
+    }
+
+    fn term(edge: usize, start: bool, node: usize, width: f64, pad: f64) -> Terminal {
+        Terminal {
+            edge,
+            start,
+            node,
+            right: start,
+            width,
+            height: 16.5,
+            pad,
+        }
+    }
+
+    fn close(a: Option<Point>, x: f64, y: f64) -> bool {
+        a.is_some_and(|a| (a.x - x).abs() < 0.01 && (a.y - y).abs() < 0.01)
+    }
+
+    /// `Customer "1" --> "*" Ticket` top to bottom (mermaid's numbers): ELK puts
+    /// both labels right of the edge, 4px off the nodes (the end one padded past
+    /// the arrow); mermaid then mirrors the start one (`startLabelRight`) to the
+    /// right of travel, which going down is the left.
+    #[test]
+    fn terminal_labels_beside_their_ports_on_their_side() {
+        let routes = vec![Some(vec![p(56.68, 93.0), p(56.68, 198.0)])];
+        let terms = [
+            term(0, true, 0, 6.125, 0.0),
+            term(0, false, 1, 4.28125, 6.0),
+        ];
+        let nodes = [
+            Rect::centered(p(56.68, 52.5), 89.36, 81.0),
+            Rect::centered(p(56.68, 238.5), 64.2, 81.0),
+        ];
+        let at = place_terminal_labels(&routes, &terms, &nodes, &[], &[]);
+        assert!(close(at[0], 48.6175, 105.25), "{at:?}");
+        assert!(close(at[1], 69.820625, 179.75), "{at:?}");
+        // Left to right: below the edge, the end one mirrored above it.
+        let routes = vec![Some(vec![p(101.36, 52.5), p(178.0, 52.5)])];
+        let nodes = [
+            Rect::centered(p(56.68, 52.5), 89.36, 81.0),
+            Rect::centered(p(210.1, 52.5), 64.2, 81.0),
+        ];
+        let at = place_terminal_labels(&routes, &terms, &nodes, &[], &[]);
+        assert!(close(at[0], 108.4225, 65.75), "{at:?}");
+        assert!(close(at[1], 165.859375, 33.25), "{at:?}");
+    }
+
+    /// Two start labels beside one side of a node that would overlap stack
+    /// away from it, in the order of their ports (`A "1" --> B`, `A "0..1" --> C`
+    /// from ports 4.7px apart).
+    #[test]
+    fn terminal_labels_on_one_side_stack() {
+        let routes = vec![
+            Some(vec![p(48.0, 93.0), p(48.0, 150.0), p(29.1, 150.0)]),
+            Some(vec![p(52.7, 93.0), p(52.7, 150.0), p(71.6, 150.0)]),
+        ];
+        let terms = [term(0, true, 0, 6.125, 0.0), term(1, true, 0, 18.36, 0.0)];
+        let nodes = [Rect::centered(p(50.3, 52.5), 34.1, 81.0)];
+        let at = place_terminal_labels(&routes, &terms, &nodes, &[], &[]);
+        assert!(close(at[0], 39.9375, 105.25), "{at:?}");
+        assert!(close(at[1], 38.52, 121.75), "{at:?}");
     }
 }

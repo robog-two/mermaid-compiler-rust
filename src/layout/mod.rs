@@ -72,6 +72,10 @@ pub struct LayoutEdge {
     pub from_cluster: Option<usize>,
     /// The edge enters this cluster as a whole.
     pub to_cluster: Option<usize>,
+    /// Sizes in output space (width, height) of the labels at its start and end
+    /// (class cardinalities), padded past their markers: ELK reserves room for
+    /// them beside their ports (`edgeLabels.placement: TAIL / HEAD`).
+    pub terminals: [Option<(f64, f64)>; 2],
 }
 
 impl LayoutEdge {
@@ -84,6 +88,7 @@ impl LayoutEdge {
             label,
             from_cluster: None,
             to_cluster: None,
+            terminals: [None; 2],
         }
     }
 }
@@ -232,6 +237,43 @@ struct Hierarchy {
 /// ELK's border offset of the ports it makes for edges crossing a container's
 /// border: half the container's `spacing.edgeEdge` (20, as mermaid sets it).
 const ELK_HIERARCHICAL_PORT_OFFSET: f64 = 10.0;
+
+/// ELK's `spacing.edgeLabel` as mermaid sets it (`spacing.baseValue: 40`): the
+/// gap between a node and an end label beside its port.
+pub const ELK_END_LABEL_SPACING: f64 = 4.0;
+/// The gap between an end label and its edge: the edge-label spacing plus the
+/// edge's thickness (1).
+const ELK_END_LABEL_EDGE_GAP: f64 = 5.0;
+
+/// An end label beside a node side: (cross start, cross size, depth).
+type EndLabel = (f64, f64, f64);
+
+/// How deep a strip of end labels beside one side of a node is, once those that
+/// overlap across are stacked away from the node (ELK's greedy
+/// `RectangleStripOverlapRemover`, in the order of their cross starts). Labels
+/// are (cross start, cross size, depth).
+fn strip_depth(mut labels: Vec<EndLabel>) -> f64 {
+    labels.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut placed: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let mut size = 0.0f64;
+    for (lo, across, depth) in labels {
+        let mut over: Vec<(f64, f64)> = placed
+            .iter()
+            .filter(|p| p.0 < lo + across && lo < p.0 + p.1)
+            .map(|p| (p.3, p.2))
+            .collect();
+        over.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut at = 0.0;
+        for (y, h) in over {
+            if at < y + h && at + depth > y {
+                at = y + h;
+            }
+        }
+        placed.push((lo, across, depth, at));
+        size = size.max(at + depth);
+    }
+    size
+}
 
 /// `layout_flat` for one graph of the ELK hierarchy.
 fn layout_flat_in(input: &LayoutInput, graph: ElkGraph, hier: &Hierarchy) -> LayoutOutput {
@@ -800,7 +842,59 @@ fn finish(
             0.0
         }
     };
-    let margin = |v: usize| hier.margins.get(v).copied().unwrap_or((0.0, 0.0));
+    // Margins along the rank axis: the containers' (see `Hierarchy::margins`),
+    // and under ELK the room its end labels take beside their ports
+    // (`EndLabelPreprocessor`: the edge-label spacing, then the label).
+    let mut margins: Vec<(f64, f64)> = (0..verts.len())
+        .map(|v| hier.margins.get(v).copied().unwrap_or((0.0, 0.0)))
+        .collect();
+    if let Some(p) = &plan {
+        // Per node side (node, after): the labels beside it, as (cross start,
+        // cross size, depth along the rank axis).
+        let mut sides: std::collections::BTreeMap<(usize, bool), Vec<EndLabel>> =
+            std::collections::BTreeMap::new();
+        for (ei, e) in input.edges.iter().enumerate() {
+            let Some((chain, _, _)) = &chains[ei] else {
+                continue;
+            };
+            if e.from == e.to {
+                continue;
+            }
+            let stops = &p.stops[ei];
+            let (Some(&(_, first)), Some(&(_, last))) = (stops.first(), stops.last()) else {
+                continue;
+            };
+            for (v, size) in [(e.from, e.terminals[0]), (e.to, e.terminals[1])] {
+                let Some((w, h)) = size else { continue };
+                let (across, along) = swap(w, h);
+                // The port faces the next layer where the route leaves downwards.
+                let (after, port) = if chain.first() == Some(&v) {
+                    (true, first)
+                } else if chain.last() == Some(&v) {
+                    (false, last)
+                } else {
+                    continue;
+                };
+                if v < n {
+                    sides.entry((v, after)).or_default().push((
+                        port + ELK_END_LABEL_EDGE_GAP,
+                        across,
+                        along,
+                    ));
+                }
+            }
+        }
+        for ((v, after), labels) in sides {
+            let depth = ELK_END_LABEL_SPACING + strip_depth(labels);
+            let m = &mut margins[v];
+            if after {
+                m.1 += depth;
+            } else {
+                m.0 += depth;
+            }
+        }
+    }
+    let margin = |v: usize| margins[v];
     let mut rank_h = vec![0.0f64; max_rank + 1];
     // Per layer: the largest margin before and after its nodes.
     let mut rank_margin = vec![(0.0f64, 0.0f64); max_rank + 1];
@@ -3270,6 +3364,39 @@ mod tests {
     /// at the sources (here only node 2), so it walks 2 → 3 → 1 → 0 → 4 and
     /// reverses the four edges closing a cycle on that path: the graph becomes a
     /// column (as mermaid draws it) instead of a wide layout.
+    #[test]
+    fn end_label_strip_stacks_overlapping_labels() {
+        // Two labels whose cross extents overlap stack; a third clear of both
+        // stays at the node.
+        let depth = strip_depth(vec![
+            (53.0, 6.1, 16.5),
+            (57.7, 18.4, 16.5),
+            (90.0, 5.0, 28.5),
+        ]);
+        assert!((depth - 33.0).abs() < 1e-9);
+        assert!((strip_depth(vec![(0.0, 5.0, 16.5), (10.0, 5.0, 28.5)]) - 28.5).abs() < 1e-9);
+    }
+
+    /// ELK reserves room beside a port for its edge's end labels: the layer gap
+    /// grows by the edge-label spacing and the label's depth on each side.
+    #[test]
+    fn elk_end_labels_deepen_the_layer_gap() {
+        let gap = |terminals: [Option<(f64, f64)>; 2]| {
+            let mut inp = elk(input(
+                vec![node(None), node(None)],
+                vec![edge(0, 1)],
+                vec![],
+                Direction::TopBottom,
+            ));
+            inp.edges[0].terminals = terminals;
+            let out = layout(&inp);
+            out.nodes[1].y - out.nodes[0].y
+        };
+        let plain = gap([None; 2]);
+        let labelled = gap([Some((6.0, 16.5)), Some((16.0, 28.5))]);
+        assert!((labelled - plain - (4.0 + 16.5 + 4.0 + 28.5)).abs() < 1e-9);
+    }
+
     #[test]
     fn elk_cycle_breaking_starts_at_the_sources() {
         let edges = edges_of(&[

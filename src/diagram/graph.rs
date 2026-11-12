@@ -992,6 +992,7 @@ pub fn render_with(
                         }),
                     from_cluster,
                     to_cluster,
+                    terminals: if elk { terminal_sizes(e) } else { [None; 2] },
                 }
             })
             .collect(),
@@ -1255,6 +1256,60 @@ pub fn render_with(
             }
         }
     }
+    // Under ELK the terminal labels (class cardinalities) are ELK's end labels.
+    let mut terminal_at: Vec<[Option<Point>; 2]> = vec![[None; 2]; g.edges.len()];
+    if elk {
+        let mut terms = Vec::new();
+        for (ei, e) in g.edges.iter().enumerate() {
+            let sizes = terminal_sizes(e);
+            for (k, (end, size)) in [e.from, e.to].into_iter().zip(sizes).enumerate() {
+                if let (Endpoint::Node(NodeId(node)), Some(_)) = (end, size) {
+                    let b = terminal_block(if k == 0 { &e.start_label } else { &e.end_label });
+                    terms.push(elkedges::Terminal {
+                        edge: ei,
+                        start: k == 0,
+                        node,
+                        // Class relations: `startLabelRight`, `endLabelLeft`.
+                        right: k == 0,
+                        width: b.width,
+                        height: b.height,
+                        pad: terminal_pad(if k == 0 { e.start } else { e.end }),
+                    });
+                }
+            }
+        }
+        if !terms.is_empty() {
+            let routes: Vec<Option<Vec<Point>>> = routed
+                .iter()
+                .map(|r| r.as_ref().map(|r| r.0.clone()))
+                .collect();
+            let boxes: Vec<Rect> = (0..nodes.len())
+                .map(|i| Rect::centered(out.nodes[i], measured[i].w, measured[i].h))
+                .collect();
+            let centre_labels: Vec<elkedges::Label> = routed
+                .iter()
+                .zip(&edge_labels)
+                .filter_map(|(r, b)| {
+                    let (r, b) = (r.as_ref()?, b.as_ref()?);
+                    Some(elkedges::Label {
+                        center: r.1?,
+                        width: b.width,
+                        height: b.height,
+                    })
+                })
+                .collect();
+            let placed = elkedges::place_terminal_labels(
+                &routes,
+                &terms,
+                &boxes,
+                &cluster_rects,
+                &centre_labels,
+            );
+            for (t, at) in terms.iter().zip(placed) {
+                terminal_at[t.edge][usize::from(!t.start)] = at;
+            }
+        }
+    }
     for (ei, e) in g.edges.iter().enumerate() {
         let Some((mut pts, label_at)) = routed[ei].take() else {
             continue;
@@ -1398,11 +1453,26 @@ pub fn render_with(
                 ],
             ));
         }
+        if elk {
+            for (txt, at) in [&e.start_label, &e.end_label]
+                .into_iter()
+                .zip(terminal_at[ei])
+            {
+                if let (Some(_), Some(at)) = (txt, at) {
+                    let b = terminal_block(txt);
+                    bounds.add_rect(Rect::centered(at, b.width, b.height));
+                    label_els.push(Element::classed_text(
+                        Text::centered(at, &b.lines, b.font_size, b.line_height, &text_color),
+                        "edgeTerminals",
+                    ));
+                }
+            }
+        }
         for (txt, anchor_pt, toward) in [
             (&e.start_label, pts[0], pts[1]),
             (&e.end_label, pts[last], pts[last - 1]),
         ] {
-            if let Some(t) = txt {
+            if let Some(t) = txt.as_ref().filter(|_| !elk) {
                 let dir = toward.minus(anchor_pt).norm();
                 let perp = Point::new(-dir.y, dir.x);
                 let at = anchor_pt.plus(dir.scale(16.0)).plus(perp.scale(10.0));
@@ -1511,6 +1581,34 @@ pub(crate) fn edge_routing(layout: LayoutAlgorithm) -> EdgeRouting {
 /// starts at the node's centre and is cut where the line toward the next point
 /// leaves the outline; an orthogonal (ELK) route starts at a port on the node's
 /// bounding box and is moved in along its first segment onto the outline.
+/// `.edgeTerminals { font-size: 11px }`: the size of a terminal label.
+const TERMINAL_FONT_SIZE: f64 = 11.0;
+/// `TERMINAL_LABEL_MARKER_CLEARANCE`: half the width of the relation markers,
+/// by which mermaid pads a terminal label for ELK past its end's marker.
+const TERMINAL_MARKER_CLEARANCE: f64 = 6.0;
+
+fn terminal_block(text: &Option<String>) -> TextBlock {
+    TextBlock::label(text.as_deref().unwrap_or(""), TERMINAL_FONT_SIZE)
+}
+
+fn terminal_pad(head: Head) -> f64 {
+    if head == Head::None {
+        0.0
+    } else {
+        TERMINAL_MARKER_CLEARANCE
+    }
+}
+
+/// The sizes ELK reserves for an edge's terminal labels (`terminalElkLabels`).
+fn terminal_sizes(e: &Edge) -> [Option<(f64, f64)>; 2] {
+    let size = |text: &Option<String>, head: Head| {
+        let b = terminal_block(text);
+        let pad = 2.0 * terminal_pad(head);
+        (!b.is_empty()).then_some((b.width + pad, b.height + pad))
+    };
+    [size(&e.start_label, e.start), size(&e.end_label, e.end)]
+}
+
 fn clip_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
     if elk {
         clip_along(b, pts[0], pts[1])
