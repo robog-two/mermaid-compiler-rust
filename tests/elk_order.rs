@@ -421,3 +421,55 @@ fn ports_reaching_a_container_keep_the_crossing_minimisation_order() {
     assert!((at("x2").2 - mid).abs() < 0.5, "{cs:?}");
     assert!((at("x2").1 - at("s0n1").1 - 139.0).abs() < 0.5, "{cs:?}");
 }
+
+#[test]
+fn inverted_ports_of_a_container_nest_their_in_layer_edges() {
+    // The three edges from x0 into C0 run back up: C0's ports for them stay
+    // on its top, and in-layer dummies beside C0 take them on. ELK makes the
+    // dummies in C0's port order and its port distributor nests their in-layer
+    // edges, so all three loop round on one side, three routing slots deep:
+    // x0 stands 108.6px right of c0n0 and 149px below it, as in mermaid's render.
+    let src = "flowchart TD
+  subgraph C0
+    c0n0
+  end
+  x0
+  x0 --> C0
+  C0 --> x0
+  x0 --> c0n0
+  x0 --> c0n0
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["c0n0", "x0"], false);
+    let at = |n: &str| cs.iter().find(|c| c.0 == n).expect("node");
+    assert!((at("x0").2 - at("c0n0").2 - 108.6).abs() < 0.5, "{cs:?}");
+    assert!((at("x0").1 - at("c0n0").1 - 149.0).abs() < 0.5, "{cs:?}");
+}
+
+#[test]
+fn feedback_edges_around_nested_containers_order_like_elk() {
+    // c1n0 --> x0 and x1 --> c0n0 run against the flow; with their in-layer
+    // dummies weighed in port order, x1 ends up 185.25px below x0 and 212px
+    // right of it, as in mermaid's render.
+    let src = "flowchart LR
+  subgraph C0
+    c0n0
+    subgraph C1
+      c1n0
+    end
+  end
+  x0
+  x1
+  x1 --> c0n0
+  x0 --> x1
+  c0n0 --> x1
+  c1n0 --> x0
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &["x0", "x1"], true);
+    let at = |n: &str| cs.iter().find(|c| c.0 == n).expect("node");
+    assert!((at("x1").1 - at("x0").1 - 212.0).abs() < 0.5, "{cs:?}");
+    assert!((at("x1").2 - at("x0").2 - 185.25).abs() < 0.5, "{cs:?}");
+}
