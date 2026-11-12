@@ -7,31 +7,35 @@
 use crate::geom::Point;
 use crate::scene::{Color, Text};
 
-/// Advance widths for ASCII 0x20..=0x7E in 1/1000 em (Helvetica AFM).
-const HELVETICA: [u16; 95] = [
-    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278,
-    278, // ' '..'/'
-    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, // 0-9
-    278, 278, 584, 584, 584, 556, 1015, // :..@
-    667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667,
-    611, 722, 667, 944, 667, 667, 611, // A-Z
-    278, 278, 278, 469, 556, 333, // [..`
-    556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500,
-    278, 556, 500, 722, 500, 500, 500, // a-z
-    334, 260, 334, 584, // {..~
+/// Advance widths for ASCII 0x20..=0x7E in 1/2048 em: Arial's (its `hmtx`
+/// table), which the browser renders mermaid's labels in (`"trebuchet ms",
+/// verdana, arial` falls back to it). Helvetica's AFM widths are these rounded
+/// to 1/1000 em, which drifts by a few hundredths of a pixel over a long label.
+const ARIAL: [u16; 95] = [
+    569, 569, 727, 1139, 1139, 1821, 1366, 391, 682, 682, 797, 1196, 569, 682, 569,
+    569, // ' '..'/'
+    1139, 1139, 1139, 1139, 1139, 1139, 1139, 1139, 1139, 1139, // 0-9
+    569, 569, 1196, 1196, 1196, 1139, 2079, // :..@
+    1366, 1366, 1479, 1479, 1366, 1251, 1593, 1479, 569, 1024, 1366, 1139, 1706, 1479, 1593, 1366,
+    1593, 1479, 1366, 1251, 1479, 1366, 1933, 1366, 1366, 1251, // A-Z
+    569, 569, 569, 961, 1139, 682, // [..`
+    1139, 1139, 1024, 1139, 1139, 569, 1139, 1139, 455, 455, 1024, 455, 1706, 1139, 1139, 1139,
+    1139, 682, 1024, 569, 1139, 1024, 1479, 1024, 1024, 1024, // a-z
+    684, 532, 684, 1196, // {..~
 ];
 
-/// Helvetica-Bold advance widths for ASCII 0x20..=0x7E.
-const HELVETICA_BOLD: [u16; 95] = [
-    278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278, //
-    556, 556, 556, 556, 556, 556, 556, 556, 556, 556, //
-    333, 333, 584, 584, 584, 611, 975, //
-    722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667,
-    611, 722, 667, 944, 667, 667, 611, //
-    333, 278, 333, 584, 556, 333, //
-    556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556,
-    333, 611, 556, 778, 556, 556, 500, //
-    389, 280, 389, 584,
+/// Arial Bold's advance widths for ASCII 0x20..=0x7E, in 1/2048 em.
+const ARIAL_BOLD: [u16; 95] = [
+    569, 682, 971, 1139, 1139, 1821, 1479, 487, 682, 682, 797, 1196, 569, 682, 569,
+    569, // ' '..'/'
+    1139, 1139, 1139, 1139, 1139, 1139, 1139, 1139, 1139, 1139, // 0-9
+    682, 682, 1196, 1196, 1196, 1251, 1997, // :..@
+    1479, 1479, 1479, 1479, 1366, 1251, 1593, 1479, 569, 1139, 1479, 1251, 1706, 1479, 1593, 1366,
+    1593, 1479, 1366, 1251, 1479, 1366, 1933, 1366, 1366, 1251, // A-Z
+    682, 569, 682, 1196, 1139, 682, // [..`
+    1139, 1251, 1139, 1251, 1139, 682, 1251, 1251, 569, 569, 1139, 569, 1821, 1251, 1251, 1251,
+    1251, 797, 1139, 682, 1251, 1139, 1593, 1139, 1139, 1024, // a-z
+    797, 573, 797, 1196, // {..~
 ];
 
 /// Inline emphasis inside display lines.
@@ -164,13 +168,13 @@ pub fn balance_marks(lines: Vec<String>) -> Vec<String> {
 
 /// Advance width of one character in em units (emphasis marks take none).
 pub fn char_width_em(c: char, bold: bool) -> f64 {
-    let table = if bold { &HELVETICA_BOLD } else { &HELVETICA };
+    let table = if bold { &ARIAL_BOLD } else { &ARIAL };
     let code = c as u32;
     if mark::is_mark(c) {
         return 0.0;
     }
     let units = match code {
-        0x20..=0x7E => table[(code - 0x20) as usize] as f64,
+        0x20..=0x7E => f64::from(table[(code - 0x20) as usize]) * 1000.0 / 2048.0,
         0xA0..=0x24F => 556.0,
         // CJK, Hangul, full-width forms and emoji are roughly square.
         0x1100..=0x11FF | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFF00..=0xFF60 => {
@@ -182,9 +186,9 @@ pub fn char_width_em(c: char, bold: bool) -> f64 {
     units / 1000.0
 }
 
-/// Arial's kerning pairs (its `kern` table, in 1/2048 em), which the browser
-/// applies to regular text (`font-kerning: auto`): "DEPARTMENT" is 1.3px
-/// narrower at 14px than its advance widths (`PA`, `RT`).
+/// Arial's kerning pairs (in 1/2048 em) as Chromium applies them to regular
+/// text (`font-kerning: auto`, measured in headless Chromium): "DEPARTMENT" is
+/// 1.3px narrower at 14px than its advance widths (`PA`, `RT`).
 const KERNING: &[(&str, i16)] = &[
     (" A", -113),
     (" T", -37),
@@ -214,7 +218,7 @@ const KERNING: &[(&str, i16)] = &[
     ("RT", -37),
     ("RV", -37),
     ("RW", -37),
-    ("RY", -76),
+    ("RY", -37),
     ("T ", -37),
     ("T,", -227),
     ("T-", -113),
@@ -233,7 +237,6 @@ const KERNING: &[(&str, i16)] = &[
     ("Tu", -76),
     ("Tw", -113),
     ("Ty", -113),
-    ("V ", -37),
     ("V,", -188),
     ("V-", -113),
     ("V.", -188),
@@ -264,7 +267,7 @@ const KERNING: &[(&str, i16)] = &[
     ("Y-", -188),
     ("Y.", -264),
     ("Y:", -113),
-    ("Y;", -113),
+    ("Y;", -133),
     ("YA", -152),
     ("Ya", -152),
     ("Ye", -188),
@@ -285,18 +288,117 @@ const KERNING: &[(&str, i16)] = &[
     ("y.", -152),
 ];
 
-/// The kerning between two characters of regular text, in em.
-fn kerning_em(a: char, b: char) -> f64 {
+/// Arial Bold's kerning pairs (in 1/2048 em), measured as for [`KERNING`]:
+/// bold labels (class and entity names, group titles in bold) are kerned too.
+const KERNING_BOLD: &[(&str, i16)] = &[
+    (" A", -76),
+    (" Y", -37),
+    ("11", -113),
+    ("A ", -76),
+    ("AT", -152),
+    ("AV", -152),
+    ("AW", -113),
+    ("AY", -188),
+    ("Av", -76),
+    ("Aw", -37),
+    ("Ay", -76),
+    ("F,", -227),
+    ("F.", -227),
+    ("FA", -113),
+    ("L ", -37),
+    ("LT", -152),
+    ("LV", -152),
+    ("LW", -113),
+    ("LY", -188),
+    ("Ly", -76),
+    ("P ", -37),
+    ("P,", -264),
+    ("P.", -264),
+    ("PA", -152),
+    ("RV", -37),
+    ("RW", -37),
+    ("RY", -76),
+    ("T,", -227),
+    ("T-", -113),
+    ("T.", -227),
+    ("T:", -227),
+    ("T;", -227),
+    ("TA", -152),
+    ("TO", -37),
+    ("Ta", -152),
+    ("Tc", -152),
+    ("Te", -152),
+    ("Ti", -37),
+    ("To", -152),
+    ("Tr", -113),
+    ("Ts", -152),
+    ("Tu", -152),
+    ("Tw", -152),
+    ("Ty", -152),
+    ("V,", -188),
+    ("V-", -113),
+    ("V.", -188),
+    ("V:", -113),
+    ("V;", -113),
+    ("VA", -152),
+    ("Va", -113),
+    ("Ve", -113),
+    ("Vi", -37),
+    ("Vo", -152),
+    ("Vr", -113),
+    ("Vu", -76),
+    ("Vy", -76),
+    ("W,", -113),
+    ("W-", -41),
+    ("W.", -113),
+    ("W:", -37),
+    ("W;", -37),
+    ("WA", -113),
+    ("Wa", -76),
+    ("We", -37),
+    ("Wi", -18),
+    ("Wo", -37),
+    ("Wr", -37),
+    ("Wu", -37),
+    ("Wy", -37),
+    ("Y ", -37),
+    ("Y,", -227),
+    ("Y-", -113),
+    ("Y.", -227),
+    ("Y:", -152),
+    ("Y;", -152),
+    ("YA", -188),
+    ("Ya", -113),
+    ("Ye", -113),
+    ("Yi", -76),
+    ("Yo", -152),
+    ("Yp", -113),
+    ("Yq", -152),
+    ("Yu", -113),
+    ("Yv", -113),
+    ("r,", -113),
+    ("r.", -113),
+    ("v,", -152),
+    ("v.", -152),
+    ("w,", -76),
+    ("w.", -76),
+    ("y,", -152),
+    ("y.", -152),
+];
+
+/// The kerning between two characters, in em.
+fn kerning_em(a: char, b: char, bold: bool) -> f64 {
     if !a.is_ascii() || !b.is_ascii() {
         return 0.0;
     }
-    KERNING
+    let table = if bold { KERNING_BOLD } else { KERNING };
+    table
         .iter()
         .find(|(p, _)| p.as_bytes() == [a as u8, b as u8])
         .map_or(0.0, |&(_, k)| f64::from(k) / 2048.0)
 }
 
-/// Width of a single line in pixels (regular text kerned as Arial is).
+/// Width of a single line in pixels (kerned as Arial and Arial Bold are).
 pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
     let mut st = Emphasis::default();
     let mut prev: Option<char> = None;
@@ -309,8 +411,8 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
             }
             let b = bold || st.bold > 0;
             let kern = match prev {
-                Some(p) if !b => kerning_em(p, c),
-                _ => 0.0,
+                Some(p) => kerning_em(p, c, b),
+                None => 0.0,
             };
             prev = Some(c);
             char_width_em(c, b) + kern
@@ -1093,11 +1195,19 @@ mod tests {
         let w = line_width("Hello", 16.0, false);
         // Kerned as the browser does (mermaid: "DEPARTMENT" 95.16px at 14px).
         assert!((line_width("DEPARTMENT", 14.0, false) - 95.16).abs() < 0.05);
-        // Only regular text is kerned here.
+        // Bold text is kerned with Arial Bold's pairs ("Te": -152, not -227).
         let unkerned = (char_width_em('T', true) + char_width_em('e', true)) * 14.0;
-        assert!((line_width("Te", 14.0, true) - unkerned).abs() < 1e-9);
+        let kerned = unkerned - 152.0 / 2048.0 * 14.0;
+        assert!((line_width("Te", 14.0, true) - kerned).abs() < 1e-9);
         assert!(line_width("Te", 14.0, false) < line_width("Tn", 14.0, false));
-        assert!((w - 16.0 * (0.722 + 0.556 + 0.222 + 0.222 + 0.556)).abs() < 1e-9);
+        // Chromium (exact, before its layout rounds up to 1/64px): 210.5879px
+        // bold, and the 52-character namespace title 405.1729px regular.
+        assert!((line_width("DELIVERY-ADDRESS Type Year", 14.0, true) - 210.5879).abs() < 1e-3);
+        let ns = "AVeryLongNamespaceNameThatGoesOnAndOnForeverAndEver";
+        assert!((line_width(ns, 14.0, false) - 405.1729).abs() < 1e-3);
+        // Advance widths in Arial's 1/2048 em.
+        let units = 1479.0 + 1139.0 + 455.0 + 455.0 + 1139.0;
+        assert!((w - 16.0 * units / 2048.0).abs() < 1e-9);
         let b = TextBlock::label("a<br>bb", 16.0);
         assert_eq!(b.lines.len(), 2);
         assert_eq!(b.height, 48.0);
