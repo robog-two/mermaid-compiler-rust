@@ -24,6 +24,7 @@ pub(super) enum NodeType {
     Normal,
     LongEdge,
     Label,
+    ExternalPort,
 }
 
 /// One vertex of the layered graph.
@@ -53,6 +54,7 @@ pub(super) struct Spacing {
     pub node_node: f64,
     pub edge_node: f64,
     pub edge_edge: f64,
+    pub port_port: f64,
 }
 
 impl Spacing {
@@ -61,6 +63,8 @@ impl Spacing {
         match (a, b) {
             (Normal, Normal) | (Normal, Label) | (Label, Normal) => self.node_node,
             (LongEdge, LongEdge) | (Label, Label) => self.edge_edge,
+            (ExternalPort, ExternalPort) => self.port_port,
+            (ExternalPort, LongEdge) | (LongEdge, ExternalPort) => self.edge_edge,
             _ => self.edge_node,
         }
     }
@@ -879,6 +883,7 @@ mod tests {
         node_node: 40.0,
         edge_node: 20.0,
         edge_edge: 20.0,
+        port_port: 20.0,
     };
 
     fn node(size: f64) -> Node {

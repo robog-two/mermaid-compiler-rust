@@ -15,10 +15,11 @@
 //! remaining ("integrated") clusters stay clusters of the parent's layered pass.
 
 use super::{
-    Direction, EdgeRoute, EdgeRouting, ElkGraph, LayoutCluster, LayoutEdge, LayoutInput,
+    Direction, EdgeRoute, EdgeRouting, ElkGraph, Hierarchy, LayoutCluster, LayoutEdge, LayoutInput,
     LayoutNode, LayoutOutput, OrthoSpacing, cluster_chains, layout_flat, layout_flat_in,
 };
 use crate::geom::{Point, Rect};
+use std::collections::HashMap;
 
 /// Something with a parent in the cluster tree: a node or a cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +34,34 @@ enum Item {
     Node(usize),
     /// A separate cluster, already laid out, placed as one box.
     Box(usize),
+    /// The external port of this level's container where edge `.0` crosses its
+    /// border (ELK: an external port dummy).
+    Ext(usize),
+}
+
+/// A level and what stands for an edge end there.
+type LevelEnd = (Option<usize>, SegEnd);
+
+/// One end of an edge segment at one level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegEnd {
+    Node(usize),
+    Box(usize),
+    /// The level's own border.
+    Ext,
+}
+
+/// The part of an edge laid out at one level (ELK splits an edge crossing
+/// container borders into one segment per graph of its hierarchy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Seg {
+    edge: usize,
+    scope: Option<usize>,
+    from: SegEnd,
+    to: SegEnd,
+    /// The segment between the two ends' common ancestor's children, which holds
+    /// the label.
+    main: bool,
 }
 
 /// What an edge end attaches to at one level.
@@ -51,6 +80,9 @@ struct Tree<'a> {
     chains: Vec<Vec<usize>>,
     parent: Vec<Option<usize>>,
     separate: Vec<bool>,
+    /// Under ELK every populated cluster is laid out as a graph of its own; one an
+    /// edge crosses (`INCLUDE_CHILDREN`) takes its parent's direction.
+    crossed: Vec<bool>,
 }
 
 impl Tree<'_> {
@@ -146,6 +178,9 @@ impl Tree<'_> {
         let Some(c) = scope else {
             return self.input.direction;
         };
+        if self.crossed[c] {
+            return self.direction(self.owner_of_cluster(c));
+        }
         if let Some(d) = self.input.clusters[c].direction {
             return d;
         }
@@ -169,6 +204,8 @@ struct Level {
     flat_clusters: Vec<usize>,
     /// Edges routed at this level (input indices), in flat order.
     edge_ids: Vec<usize>,
+    /// Under ELK, per routed edge: the segment it is.
+    segs: Vec<Option<Seg>>,
     bbox: Rect,
 }
 
@@ -325,7 +362,8 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
         input,
         chains,
         parent,
-        separate: populated,
+        separate: populated.clone(),
+        crossed: vec![false; nc],
     };
     let ends: Vec<(Member, Member)> = input
         .edges
@@ -344,9 +382,18 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             tree.integrate(b, anc);
         }
     }
+    // Under ELK every cluster is a graph of its own (see `segments`).
+    let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
+    if elk {
+        for (c, &p) in populated.iter().enumerate() {
+            tree.crossed[c] = p && !tree.separate[c];
+        }
+        tree.separate = populated;
+    }
     if !tree.separate.iter().any(|&s| s) {
         return layout_flat(input);
     }
+    let segs = elk.then(|| segments(&tree, &ends));
 
     // Deepest separate clusters first, the root last.
     let mut scopes: Vec<Option<usize>> = (0..nc).filter(|&c| tree.separate[c]).map(Some).collect();
@@ -357,14 +404,32 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     let mut box_size: Vec<(f64, f64)> = vec![(0.0, 0.0); nc];
     let mut levels: Vec<Option<Level>> = (0..=nc).map(|_| None).collect();
     let slot = |s: Option<usize>| s.unwrap_or(nc);
+    // Per (container, edge): the cross-axis offset of the edge's external port on
+    // the container's box from the box's centre.
+    let mut ext_off: HashMap<(usize, usize), f64> = HashMap::new();
     for &scope in &scopes {
-        let level = layout_level(&tree, &ends, scope, &box_size);
+        let level = layout_level(&tree, &ends, scope, &box_size, segs.as_deref(), &ext_off);
         if let Some(c) = scope {
             let cl = &input.clusters[c];
-            box_size[c] = (
+            let (w, h) = (
                 (level.bbox.w + 2.0 * pad).max(cl.min_width),
                 level.bbox.h + 2.0 * pad + cl.title_height,
             );
+            box_size[c] = (w, h);
+            // Where the composition below puts the contents in the box.
+            let bb = level.bbox;
+            let horizontal = tree.direction(scope).is_horizontal();
+            for (i, it) in level.items.iter().enumerate() {
+                if let Item::Ext(ei) = *it {
+                    let p = level.out.nodes[i];
+                    let off = if horizontal {
+                        p.y - bb.y + pad + cl.title_height - h / 2.0
+                    } else {
+                        p.x - bb.x + pad + (w - 2.0 * pad - bb.w) / 2.0 - w / 2.0
+                    };
+                    ext_off.insert((c, ei), off);
+                }
+            }
         }
         levels[slot(scope)] = Some(level);
     }
@@ -373,6 +438,8 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     let n = input.nodes.len();
     let mut nodes = vec![Point::new(0.0, 0.0); n];
     let mut routes: Vec<Option<EdgeRoute>> = vec![None; input.edges.len()];
+    // Under ELK: per edge, its segments' routes.
+    let mut pieces: Vec<Vec<(Seg, EdgeRoute)>> = vec![Vec::new(); input.edges.len()];
     let mut clusters = vec![Rect::default(); nc];
     let mut stack: Vec<(Option<usize>, Point)> = vec![(None, Point::new(0.0, 0.0))];
     while let Some((scope, off)) = stack.pop() {
@@ -383,6 +450,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             let p = level.out.nodes[i].plus(off);
             match *it {
                 Item::Node(v) => nodes[v] = p,
+                Item::Ext(_) => {}
                 Item::Box(b) => {
                     let (w, h) = box_size[b];
                     let r = Rect::centered(p, w, h);
@@ -404,11 +472,68 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
         }
         for (k, &ei) in level.edge_ids.iter().enumerate() {
             let r = &level.out.edges[k];
-            routes[ei] = Some(EdgeRoute {
+            let mut route = EdgeRoute {
                 points: r.points.iter().map(|p| p.plus(off)).collect(),
                 label: r.label.map(|p| p.plus(off)),
-            });
+            };
+            match level.segs.get(k).copied().flatten() {
+                Some(seg) => {
+                    // An external port sits on the container's border.
+                    if let (Some(c), Some(first), Some(last)) = (
+                        scope,
+                        route.points.first().copied(),
+                        route.points.last().copied(),
+                    ) {
+                        let r = clusters[c];
+                        let dir = tree.direction(scope);
+                        let snap = |p: Point, entering: bool| -> Point {
+                            let low = entering
+                                != matches!(dir, Direction::BottomTop | Direction::RightLeft);
+                            match (dir.is_horizontal(), low) {
+                                (false, true) => Point::new(p.x, r.y),
+                                (false, false) => Point::new(p.x, r.bottom()),
+                                (true, true) => Point::new(r.x, p.y),
+                                (true, false) => Point::new(r.right(), p.y),
+                            }
+                        };
+                        if seg.from == SegEnd::Ext {
+                            route.points[0] = snap(first, true);
+                        }
+                        if seg.to == SegEnd::Ext {
+                            let at = route.points.len() - 1;
+                            route.points[at] = snap(last, false);
+                        }
+                    }
+                    pieces[ei].push((seg, route));
+                }
+                None => routes[ei] = Some(route),
+            }
         }
+    }
+    // An edge crossing container borders: its segments from its source outwards,
+    // then inwards to its target.
+    for (ei, mut segs) in pieces.into_iter().enumerate() {
+        if segs.is_empty() {
+            continue;
+        }
+        let depth = |s: &Seg| s.scope.map_or(0, |c| tree.chains[c].len()) as i64;
+        segs.sort_by_key(|(s, _)| match (s.main, s.to == SegEnd::Ext) {
+            (true, _) => (1, 0),
+            (false, true) => (0, -depth(s)),
+            (false, false) => (2, depth(s)),
+        });
+        let mut points = Vec::new();
+        let mut label = None;
+        for (s, r) in segs {
+            points.extend(r.points);
+            if s.main {
+                label = r.label;
+            }
+        }
+        routes[ei] = Some(EdgeRoute {
+            points: super::ortho::simplify(&points),
+            label,
+        });
     }
     let edges = routes
         .into_iter()
@@ -438,11 +563,83 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     }
 }
 
+/// ELK's split of every edge into one segment per graph of the hierarchy it
+/// passes (`CompoundGraphPreprocessor`): from its source to its container's
+/// border, from there to the next container's border, ..., between the
+/// children of the two ends' common ancestor, and so on inwards to its target.
+/// An edge between a cluster and one of its own members is left out.
+fn segments(tree: &Tree, ends: &[(Member, Member)]) -> Vec<Seg> {
+    let nc = tree.input.clusters.len();
+    let mut out = Vec::new();
+    for (ei, &(a, b)) in ends.iter().enumerate() {
+        let anc = tree.common_ancestor(a, b);
+        if anc.is_some_and(|c| a == Member::Cluster(c) || b == Member::Cluster(c)) {
+            continue;
+        }
+        // The levels from `m`'s up to (not including) the common ancestor's, each
+        // with what stands for `m` there; and what stands for it at the ancestor.
+        let chain = |m: Member| -> Option<(Vec<LevelEnd>, SegEnd)> {
+            let (mut scope, mut item) = match m {
+                Member::Node(v) => (tree.owner_of_node(v), SegEnd::Node(v)),
+                Member::Cluster(c) if tree.separate[c] => {
+                    (tree.owner_of_cluster(c), SegEnd::Box(c))
+                }
+                Member::Cluster(_) => return None,
+            };
+            let mut levels = Vec::new();
+            while scope != anc {
+                let c = scope?;
+                if levels.len() > nc {
+                    return None;
+                }
+                levels.push((scope, item));
+                item = SegEnd::Box(c);
+                scope = tree.owner_of_cluster(c);
+            }
+            Some((levels, item))
+        };
+        let (Some((up_a, ia)), Some((up_b, ib))) = (chain(a), chain(b)) else {
+            continue;
+        };
+        if ia == ib && matches!(ia, SegEnd::Box(_)) && a != b {
+            continue;
+        }
+        for (scope, from) in up_a {
+            out.push(Seg {
+                edge: ei,
+                scope,
+                from,
+                to: SegEnd::Ext,
+                main: false,
+            });
+        }
+        out.push(Seg {
+            edge: ei,
+            scope: anc,
+            from: ia,
+            to: ib,
+            main: true,
+        });
+        for (scope, to) in up_b {
+            out.push(Seg {
+                edge: ei,
+                scope,
+                from: SegEnd::Ext,
+                to,
+                main: false,
+            });
+        }
+    }
+    out
+}
+
 fn layout_level(
     tree: &Tree,
     ends: &[(Member, Member)],
     scope: Option<usize>,
     box_size: &[(f64, f64)],
+    all_segs: Option<&[Seg]>,
+    ext_off: &HashMap<(usize, usize), f64>,
 ) -> Level {
     let input = tree.input;
     let nc = input.clusters.len();
@@ -482,11 +679,28 @@ fn layout_level(
     items.sort_by_key(|it| match *it {
         Item::Node(v) => v,
         Item::Box(c) => first_member(c),
+        Item::Ext(_) => usize::MAX,
     });
+    // External ports after everything else, one per segment reaching the border.
+    let segs: Vec<Seg> = all_segs
+        .unwrap_or_default()
+        .iter()
+        .filter(|s| s.scope == scope)
+        .copied()
+        .collect();
+    let mut ext_item: HashMap<usize, usize> = HashMap::new();
+    for s in segs
+        .iter()
+        .filter(|s| s.from == SegEnd::Ext || s.to == SegEnd::Ext)
+    {
+        ext_item.insert(s.edge, items.len());
+        items.push(Item::Ext(s.edge));
+    }
     for (i, it) in items.iter().enumerate() {
         match *it {
             Item::Node(v) => node_item[v] = Some(i),
             Item::Box(c) => box_item[c] = Some(i),
+            Item::Ext(_) => {}
         }
     }
     let node_end = |v: usize| -> Option<usize> {
@@ -531,7 +745,49 @@ fn layout_level(
     };
     let mut edges = Vec::new();
     let mut edge_ids = Vec::new();
-    for (ei, (e, &(a, b))) in input.edges.iter().zip(ends).enumerate() {
+    let mut seg_of = Vec::new();
+    let mut hier = Hierarchy::default();
+    for s in &segs {
+        let e = &input.edges[s.edge];
+        let end = |x: SegEnd| -> Option<usize> {
+            match x {
+                SegEnd::Node(v) => node_item[v],
+                SegEnd::Box(c) => box_item[c],
+                SegEnd::Ext => ext_item.get(&s.edge).copied(),
+            }
+        };
+        let (Some(from), Some(to)) = (end(s.from), end(s.to)) else {
+            continue;
+        };
+        let port = |x: SegEnd| match x {
+            SegEnd::Box(c) => ext_off.get(&(c, s.edge)).copied(),
+            _ => None,
+        };
+        hier.ports.push((port(s.from), port(s.to)));
+        if s.from == SegEnd::Ext {
+            hier.ext.push((from, true));
+        }
+        if s.to == SegEnd::Ext {
+            hier.ext.push((to, false));
+        }
+        edges.push(LayoutEdge {
+            from,
+            to,
+            minlen: e.minlen,
+            label: e.label.filter(|_| s.main),
+            from_cluster: None,
+            to_cluster: None,
+        });
+        edge_ids.push(s.edge);
+        seg_of.push(Some(*s));
+    }
+    for (ei, (e, &(a, b))) in input
+        .edges
+        .iter()
+        .zip(ends)
+        .enumerate()
+        .filter(|_| all_segs.is_none())
+    {
         let (Some(ea), Some(eb)) = (end_of(a), end_of(b)) else {
             continue;
         };
@@ -556,6 +812,7 @@ fn layout_level(
             to_cluster,
         });
         edge_ids.push(ei);
+        seg_of.push(None);
     }
     let nodes: Vec<LayoutNode> = items
         .iter()
@@ -568,6 +825,11 @@ fn layout_level(
                 width: box_size[b].0,
                 height: box_size[b].1,
                 cluster: tree.parent[b].and_then(|p| flat_of[p]),
+            },
+            Item::Ext(_) => LayoutNode {
+                width: 0.0,
+                height: 0.0,
+                cluster: None,
             },
         })
         .collect();
@@ -600,10 +862,10 @@ fn layout_level(
     let graph = match scope {
         None => ElkGraph::Root,
         Some(c) => ElkGraph::Container {
-            separate: input.clusters[c].direction.is_some(),
+            separate: input.clusters[c].direction.is_some() && !tree.crossed[c],
         },
     };
-    let out = layout_flat_in(&flat, graph);
+    let out = layout_flat_in(&flat, graph, &hier);
     let mut bbox: Option<Rect> = None;
     let mut add = |r: Rect| {
         bbox = Some(match bbox {
@@ -620,8 +882,18 @@ fn layout_level(
             }
         });
     };
-    for (nd, p) in flat.nodes.iter().zip(&out.nodes) {
-        add(Rect::centered(*p, nd.width, nd.height));
+    for ((nd, p), it) in flat.nodes.iter().zip(&out.nodes).zip(&items) {
+        if !matches!(it, Item::Ext(_)) {
+            add(Rect::centered(*p, nd.width, nd.height));
+        }
+    }
+    // ELK sizes a graph by everything in its layers, edges included.
+    if all_segs.is_some() {
+        for route in &out.edges {
+            for p in &route.points {
+                add(Rect::new(p.x, p.y, 0.0, 0.0));
+            }
+        }
     }
     for (e, route) in flat.edges.iter().zip(&out.edges) {
         if let (Some((w, h)), Some(p)) = (e.label, route.label) {
@@ -644,6 +916,7 @@ fn layout_level(
         out,
         flat_clusters,
         edge_ids,
+        segs: seg_of,
         bbox: bbox.unwrap_or_default(),
     }
 }
@@ -937,5 +1210,54 @@ mod tests {
             c0.y < c1.bottom() && c1.y < c0.bottom(),
             "side by side: {out:?}"
         );
+    }
+
+    /// Under ELK a cluster an edge crosses is still a graph of its own: its
+    /// contents are layered on their own and the edge leaves through its border.
+    /// `c1n0 --> C0` with C1 = c1n0 → c1n1 → c1n2: C0 hangs below the whole of
+    /// C1 (merged into one layering, it would stand beside C1's last two rows),
+    /// and the route crosses C1's bottom border straight down into C0.
+    #[test]
+    fn elk_crossed_cluster_is_laid_out_as_a_graph_of_its_own() {
+        let to_c0 = LayoutEdge {
+            to_cluster: Some(0),
+            ..LayoutEdge::new(3, 0, 1, None)
+        };
+        let mut inp = input(
+            vec![
+                node(Some(0)),
+                node(Some(0)),
+                node(Some(0)),
+                node(Some(1)),
+                node(Some(1)),
+                node(Some(1)),
+            ],
+            vec![
+                LayoutEdge::new(0, 1, 1, None),
+                LayoutEdge::new(1, 2, 1, None),
+                LayoutEdge::new(3, 4, 1, None),
+                LayoutEdge::new(4, 5, 1, None),
+                to_c0,
+            ],
+            vec![with_dir(None, None), with_dir(None, None)],
+            Direction::TopBottom,
+        );
+        inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+        let out = layout(&inp);
+        let (c0, c1) = (out.clusters[0], out.clusters[1]);
+        assert!(c0.y > c1.bottom(), "{out:?}");
+        // Inside C1 its rows keep the container's own layer spacing.
+        assert!((out.nodes[4].y - out.nodes[3].y) < 120.0, "{out:?}");
+        let pts = &out.edges[4].points;
+        let crossing = pts
+            .windows(2)
+            .find(|w| w[0].y < c1.bottom() && w[1].y > c1.bottom())
+            .expect("crosses C1's bottom");
+        assert!((crossing[0].x - crossing[1].x).abs() < 1e-6, "{pts:?}");
+        assert!(
+            crossing[0].x > c1.x && crossing[0].x < c1.right(),
+            "{pts:?}"
+        );
+        assert!((pts[pts.len() - 1].y - c0.y).abs() < 1e-6, "{pts:?}");
     }
 }
