@@ -181,3 +181,130 @@ fn git_graph_tags_follow_get_bbox() {
         1e-2,
     );
 }
+
+/// An example's source with `layout: dagre` added to its front matter.
+fn under_dagre(src: &str) -> String {
+    match src.strip_prefix("---\n") {
+        Some(rest) => format!("---\nconfig:\n  layout: dagre\n{rest}"),
+        None => format!("{DAGRE}{src}"),
+    }
+}
+
+#[test]
+fn gallery_examples_under_dagre_match_mermaid() {
+    // mermaid 12.3.0 in Chromium, the examples with `layout: dagre`.
+    let cases: [(&str, [f64; 4]); 5] = [
+        (
+            include_str!("../examples/diagrams/subgraphs.mmd"),
+            [0.0, 0.0, 1674.26220703125, 304.75],
+        ),
+        (
+            include_str!("../examples/diagrams/flowchart.mmd"),
+            [0.0, -49.0, 533.64453125, 825.66015625],
+        ),
+        (
+            include_str!("../examples/diagrams/shapes.mmd"),
+            [0.0, -49.0, 1344.2384033203125, 1889.31005859375],
+        ),
+        (
+            include_str!("../examples/diagrams/agentflow.mmd"),
+            [0.0, 0.0, 483.1999816894531, 881.9920043945312],
+        ),
+        (
+            include_str!("../examples/diagrams/subgraph-collapse.mmd"),
+            [0.0, 0.0, 1178.26220703125, 287.398681640625],
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_view_box(&under_dagre(src), expected, 2e-2);
+    }
+}
+
+/// The centres of the edge labels' background boxes, in drawing order.
+fn edge_label_centres(src: &str) -> Vec<(f64, f64)> {
+    let r = render::render(src, &MermaidConfig::default()).expect("diagram renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let attr = |s: &str, k: &str| -> f64 {
+        let at = s.find(&format!(" {k}=\"")).expect("attribute") + k.len() + 3;
+        s[at..at + s[at..].find('"').unwrap()].parse().unwrap()
+    };
+    svg.split("<g class=\"edgeLabel\"><rect")
+        .skip(1)
+        .map(|s| {
+            let s = &s[..s.find('>').unwrap()];
+            (
+                attr(s, "x") + attr(s, "width") / 2.0,
+                attr(s, "y") + attr(s, "height") / 2.0,
+            )
+        })
+        .collect()
+}
+
+#[track_caller]
+fn assert_label_at(src: &str, expected: (f64, f64), tolerance: f64) {
+    let got = edge_label_centres(src);
+    assert!(
+        got.iter().any(|p| (p.0 - expected.0).abs() <= tolerance
+            && (p.1 - expected.1).abs() <= tolerance),
+        "{got:?} has no label at {expected:?}"
+    );
+}
+
+#[test]
+fn dagre_labels_move_with_their_cut_routes() {
+    let d = |s: &str| format!("{DAGRE}{s}");
+    // `positionEdgeLabel`: the route's middle point is not in the drawn path,
+    // so the label moves as far as clipping moved the route's midpoint.
+    let flat = d(
+        "flowchart LR\n  n0[[\"Decision?\"]]\n  n1>\"Process data\"]\n  n2[\"End\"]\n  \
+         n3(\"ok\")\n  n4([\"A much longer node text here\"])\n  n6 -.-> n2\n  n2 ==>|yes| n4\n  \
+         n7 -.->|yes| n2\n  n2 ==> n8\n  n5 --> n2\n  n5 ==> n0\n  n7 ==> n8\n  n5 ---|no| n6\n  \
+         n1 ==> n4\n  n6 --> n3\n  n7 ==> n0\n  n5 --> n8\n",
+    );
+    // (The text widths differ from Chromium's by a few hundredths.)
+    assert_label_at(&flat, (660.7725875, 19.54185), 0.1);
+    assert_view_box(
+        &flat,
+        [0.0, 1.041849136352539, 878.887939453125, 418.2081604003906],
+        5e-2,
+    );
+    // From a cluster: the route leaves the frame where the line from its
+    // centre to the first bend does, and a route cut at a frame always counts
+    // as moved.
+    assert_label_at(
+        &d(
+            "flowchart TD\n  subgraph C0\n    c0n0\n  end\n  x0\n  x1\n  C0 -->|x| x1\n  \
+            c0n0 --> x1\n  C0 --> x0\n  C0 --> x1\n",
+        ),
+        (107.5, 123.31887),
+        1e-3,
+    );
+    // Between a cluster and one inside it: routed (not a loop), and cut down
+    // to a single point.
+    let nested = d(
+        "flowchart LR\n  subgraph C0\n    c0n0\n    c0n1\n    c0n0 --> c0n1\n  end\n  \
+         subgraph C1\n    c1n0\n    subgraph C2\n      c2n0\n    end\n  end\n  subgraph C3\n    \
+         c3n0\n    c3n1\n    c3n2\n    c3n0 --> c3n1\n    c3n1 --> c3n2\n  end\n  x0\n  \
+         C1 -->|a label| C2\n  c3n1 --> c1n0\n  C2 -->|x| C3\n",
+    );
+    assert_label_at(&nested, (271.12814249999997, 88.08064516129032), 1e-2);
+    assert_label_at(&nested, (275.69647, 117.75), 1e-2);
+    assert_view_box(&nested, [0.0, 0.0, 967.265625, 576.0], 1e-2);
+}
+
+#[test]
+fn dagre_routes_leave_cylinders_as_mermaid_clips_them() {
+    // `cylinder.ts`'s intersect moves the box's crossing by the cap, even on a
+    // side: the edge from `n3` starts 13.38 below where the box would put it.
+    let r = render::render(
+        &format!(
+            "{DAGRE}flowchart LR\n  n1{{{{\"Decision?\"}}}}\n  n2{{{{\"A much longer node text here\"}}}}\n  \
+             n3[(\"Load\")]\n  n1 --> n3\n  n3 --- n0\n  n3 -.-> n1\n  n0 --> n0\n  n2 --> n0\n  \
+             n3 ==> n0\n  n0 --> n3\n"
+        ),
+        &MermaidConfig::default(),
+    )
+    .expect("diagram renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    assert!(svg.contains("d=\"M442,191.155L452.167,184.011"), "{svg}");
+}

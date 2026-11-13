@@ -19,6 +19,7 @@ use crate::geom::{Point, Rect};
 
 mod bk;
 pub mod boxes;
+pub mod dagre;
 mod elkbk;
 mod elkns;
 mod elkorder;
@@ -139,6 +140,9 @@ pub struct LayoutInput {
     /// a rank along the flow, half a node and an edge gap across) with no band
     /// for its title. `inner_*` and `cluster_padding` do not apply to it.
     pub dagre_groups: bool,
+    /// With spline routing: lay out with the port of mermaid's own dagre
+    /// renderer (see `dagre`), keyed by these ids and in this node order.
+    pub dagre: Option<dagre::DagreModel>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +202,9 @@ struct Oriented {
 /// (with their own direction and spacing, as mermaid's ELK layout does), the
 /// rest in one layered pass with their parent (see `nested`).
 pub fn layout(input: &LayoutInput) -> LayoutOutput {
+    if let (Some(model), EdgeRouting::Splines) = (&input.dagre, input.routing) {
+        return dagre::layout(input, model);
+    }
     nested::layout(input)
 }
 
@@ -3736,6 +3743,7 @@ mod tests {
             inner_rank_sep: 24.0,
             routing: EdgeRouting::Splines,
             dagre_groups: false,
+            dagre: None,
         }
     }
 

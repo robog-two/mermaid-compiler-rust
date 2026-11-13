@@ -1567,11 +1567,18 @@ pub fn to_graph(af: &Agentflow, opts: &ConvertOptions) -> GraphDiagram {
     // then vertices in first-mention order.
     let mut nodes = Vec::new();
     let mut node_ix: HashMap<String, usize> = HashMap::new();
+    // (getData pushes containers in that one walk, expanded ones as groups.)
+    let mut groups = 0;
     for f in af.flows.iter().rev() {
-        if hidden.contains(&f.id) || !f.collapsed() {
+        if hidden.contains(&f.id) {
+            continue;
+        }
+        if !f.collapsed() {
+            groups += 1;
             continue;
         }
         let mut n = Node::new(f.id.clone(), f.title.clone(), Shape::CollapsedGroup);
+        n.group_seq = Some(groups);
         n.cluster = cluster_parent(&f.id);
         n.style = f.style.clone();
         n.color_slot = Some(container_slot(&f.id));
