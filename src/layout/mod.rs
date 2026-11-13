@@ -268,6 +268,8 @@ struct Hierarchy {
     /// constraints `FIXED_SIDE`), so that an edge reversed by cycle breaking
     /// meets it on its original side (see [`InLayer`]).
     side_fixed: Vec<bool>,
+    /// Per node: whether it is a laid out container.
+    boxes: Vec<bool>,
     /// Per edge (empty: by the edge order): where its ports at its source and
     /// at its target were made among their node's ports, as keys to sort by. A
     /// laid out container makes its ports for edges to it as ELK imports
@@ -1581,18 +1583,11 @@ fn finish_rng(
                 ins[l.node] += 1;
             }
         }
-        // A loop on a container whose ports keep their sides has its edge
-        // taken off its ports while ELK places the layers' nodes
-        // (`SelfLoopPreProcessor` until `SelfLoopPostProcessor`).
-        for (ei, e) in input
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.from == e.to)
-        {
-            let fixed = hier.side_fixed.get(e.from).copied().unwrap_or(false)
-                && matches!(hier.ports.get(ei), Some((Some(_), Some(_))));
-            if !fixed {
+        // A loop on a container has its edge taken off its ports while ELK
+        // places the layers' nodes (`SelfLoopPreProcessor` until
+        // `SelfLoopPostProcessor`); one on any other node counts.
+        for e in input.edges.iter().filter(|e| e.from == e.to) {
+            if !hier.boxes.get(e.from).copied().unwrap_or(false) {
                 outs[e.from] += 1;
                 ins[e.from] += 1;
             }

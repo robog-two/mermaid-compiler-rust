@@ -1691,6 +1691,7 @@ fn level_input(
     hier.ext.extend(stub_ext);
     // A container with external port dummies keeps its ports' sides
     // (`CompoundGraphPreprocessor` makes it `FIXED_SIDE`).
+    hier.boxes = items.iter().map(|it| matches!(it, Item::Box(_))).collect();
     hier.side_fixed = items
         .iter()
         .map(|it| match *it {
@@ -1975,8 +1976,8 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
             let r = Rect::centered(p, w, h);
             // Across a horizontal layout ELK's label dummy is the edge's
             // thickness taller than its label, which sits at the dummy's top
-            // (`LabelDummyInserter`).
-            if elk && flat.direction.is_horizontal() {
+            // (`LabelDummyInserter`); a loop's label has no dummy.
+            if elk && flat.direction.is_horizontal() && e.from != e.to {
                 add(Rect::new(r.x, r.y, w, h + super::ELK_EDGE_THICKNESS));
             } else {
                 add(r);
@@ -2236,6 +2237,10 @@ fn layout_components(tree: &Tree, scope: Option<usize>, li: &LevelInput) -> Opti
                 side_fixed: nodes
                     .iter()
                     .map(|&i| li.hier.side_fixed.get(i).copied().unwrap_or(false))
+                    .collect(),
+                boxes: nodes
+                    .iter()
+                    .map(|&i| li.hier.boxes.get(i).copied().unwrap_or(false))
                     .collect(),
                 ..Hierarchy::default()
             };

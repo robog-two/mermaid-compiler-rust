@@ -1943,3 +1943,65 @@ swimlane-beta LR
     assert!((p[0].0 - p[1].0).abs() < 0.01, "{p:?}");
     assert!((p[0].1 - p[1].1).abs() > 5.0, "{p:?}");
 }
+
+#[test]
+fn a_loop_on_a_container_does_not_count_for_its_alignment_in_the_layer() {
+    // C0AA and C0AB share a layer, which C0AB's port for `c0abn0 --> C0`
+    // widens. C0AA's only edge leaves it, so ELK aligns it to the side its
+    // edges leave from (`placeNodesHorizontally`); its loop, taken off its
+    // ports while the layer is placed, does not count, and C0AA lines up
+    // with C0AB (mermaid 12.3.0) instead of a third of the way back.
+    let src = "flowchart BT
+  subgraph C0
+    c0n0
+    subgraph C0A
+      c0an0
+      subgraph C0AA
+        c0aan0
+        c0aan1
+      end
+      subgraph C0AB
+        c0abn0
+        c0abn1
+      end
+    end
+  end
+  x0
+  C0AA --> C0
+  c0abn0 --> C0
+  C0AA -->|lab1| C0AA
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let (_, a, _, _) = frame_of(&svg, "C0AA");
+    let (_, b, _, _) = frame_of(&svg, "C0AB");
+    assert!((a - b).abs() < 0.01, "{a} {b}");
+}
+
+#[test]
+fn a_loops_label_across_a_horizontal_layout_is_no_thicker_than_itself() {
+    // C0A's loop goes round its high side with its label on its leg; the
+    // label is the last thing in C0, which ends there. A label dummy is the
+    // edge's thickness taller than its label across a horizontal layout,
+    // but a loop's label has none (mermaid 12.3.0 draws C0's frame 262.5
+    // high).
+    let (_, _, _, h) = frame(
+        "flowchart RL
+  subgraph C0
+    c0n0
+    subgraph C0A
+      c0an0
+    end
+  end
+  x0
+  C0 --> c0an0
+  x0 --> C0A
+  c0an0 --> x0
+  c0n0 --> c0an0
+  C0A -->|lab1| C0A
+  C0 --> C0
+",
+        "C0",
+    );
+    assert!((h - 262.5).abs() < 0.01, "{h}");
+}
