@@ -32,7 +32,9 @@ struct Builder {
     /// as the ancestor segment of a dotted name.
     ns_explicit: Vec<bool>,
     relations: Vec<(String, String, Edge)>,
-    notes: Vec<(Option<String>, String)>,
+    /// Per note: the class it is for, its text, and the namespace it is
+    /// written in (classDb's `note.parent`).
+    notes: Vec<(Option<String>, String, Option<ClusterId>)>,
     class_defs: HashMap<String, StyleOverrides>,
     css_classes: Vec<(String, String)>,
     styles: Vec<(String, StyleOverrides)>,
@@ -263,11 +265,14 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
             if name.is_empty() {
                 return Err(Error::parse(line, "Expecting a class name"));
             }
+            // classDb.addClass: a class already added keeps the type it was
+            // added with (none, if a relation or member came first).
+            let known = b.classes.contains_key(&name);
             let info = b.class(&name);
             if label.is_some() {
                 info.label = label;
             }
-            if generic.is_some() {
+            if generic.is_some() && !known {
                 info.generic = generic;
             }
             if let Some(c) = css {
@@ -303,11 +308,13 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
             } else {
                 (None, rest.trim_matches('"').to_string())
             };
-            // The note text (a STR token) is mandatory.
+            // The note text (a STR token) is mandatory; a `\n` in it stays as
+            // written (the markdown label does not break there).
             if text.is_empty() {
                 return Err(Error::parse(line, format!("{s}\nExpecting the note text")));
             }
-            b.notes.push((target, text.replace("\\n", "\n")));
+            let ns = b.ns_stack.last().copied();
+            b.notes.push((target, text, ns));
             continue;
         }
         if let Some(rest) = s.strip_prefix("classDef ") {
@@ -679,19 +686,12 @@ impl Builder {
             index.insert(name.clone(), nodes.len());
             nodes.push(n);
         }
-        let mut edges: Vec<Edge> = self
-            .relations
-            .into_iter()
-            .map(|(a, b, mut e)| {
-                e.from = Endpoint::Node(NodeId(index[&a]));
-                e.to = Endpoint::Node(NodeId(index[&b]));
-                e
-            })
-            .collect();
-        for (i, (target, text)) in self.notes.into_iter().enumerate() {
+        // classDb's `getData`: the notes' edges, then the relations.
+        let mut edges: Vec<Edge> = Vec::new();
+        for (i, (target, text, ns)) in self.notes.into_iter().enumerate() {
             let mut n = Node::new(format!("note{i}"), text, Shape::Note);
+            n.cluster = ns;
             if let Some(t) = target.as_ref().and_then(|t| index.get(t)) {
-                n.cluster = nodes[*t].cluster;
                 let mut e = Edge::new(
                     Endpoint::Node(NodeId(nodes.len())),
                     Endpoint::Node(NodeId(*t)),
@@ -702,6 +702,11 @@ impl Builder {
             }
             nodes.push(n);
         }
+        edges.extend(self.relations.into_iter().map(|(a, b, mut e)| {
+            e.from = Endpoint::Node(NodeId(index[&a]));
+            e.to = Endpoint::Node(NodeId(index[&b]));
+            e
+        }));
         for (id, class) in &self.css_classes {
             if let (Some(&i), Some(def)) = (index.get(id), self.class_defs.get(class)) {
                 nodes[i].style = nodes[i].style.merged(def);
@@ -713,12 +718,20 @@ impl Builder {
                 nodes[i].style = nodes[i].style.merged(st);
             }
         }
+        // classDb's `getData`: the namespaces, then the classes, then the notes.
+        let mut clusters = self.clusters;
+        for (k, c) in clusters.iter_mut().enumerate() {
+            c.model_seq = Some(k);
+        }
+        for (k, n) in nodes.iter_mut().enumerate() {
+            n.model_seq = Some(clusters.len() + k);
+        }
         GraphDiagram {
             kind: DiagramKind::Class,
             direction,
             nodes,
             edges,
-            clusters: self.clusters,
+            clusters,
             title,
         }
     }
@@ -883,8 +896,9 @@ mod tests {
         assert_eq!(g.nodes[1].sections[0].lines, ["Car Class<T>"]);
         // Backticks inside a string are left alone.
         assert_eq!(g.nodes[2].sections[0].lines, ["`md` label"]);
+        // classDb's `getData`: the note's edge before the relations.
         assert_eq!(g.edges.len(), 2);
-        assert_eq!(g.edges[0].label.as_deref(), Some("drives"));
+        assert_eq!(g.edges[1].label.as_deref(), Some("drives"));
     }
 
     #[test]
@@ -984,5 +998,75 @@ mod tests {
             (first_divider - top - 66.0).abs() < 1e-6,
             "{first_divider} {top}"
         );
+    }
+
+    /// classDb: a note belongs to the namespace it is written in (not its
+    /// class's), its `\n` stays as written, and `getData` hands the layout
+    /// the notes' edges before the relations.
+    #[test]
+    fn notes_keep_their_own_namespace_and_come_first() {
+        let d = parse(
+            "classDiagram\nnamespace N {\n  class A\n  note for A \"inside\"\n}\n\
+             A --> B\nnote for A \"one\\ntwo\"",
+            None,
+        )
+        .unwrap();
+        let note = |id: &str| d.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(note("note0").cluster, Some(ClusterId(0)));
+        assert_eq!(note("note1").cluster, None);
+        assert_eq!(note("note1").label, "one\\ntwo");
+        assert_eq!(d.edges.len(), 3);
+        assert_eq!(d.edges[2].line, LineKind::Solid);
+        assert!(d.edges[..2].iter().all(|e| e.line == LineKind::Dotted));
+    }
+
+    /// classDb.addClass: a class already added keeps the type it had.
+    #[test]
+    fn a_later_generic_declaration_is_ignored() {
+        let d = parse("classDiagram\nA --> B\nclass B~T~\nclass C~U~", None).unwrap();
+        let header =
+            |id: &str| d.nodes.iter().find(|n| n.id == id).unwrap().sections[0].lines[0].clone();
+        assert_eq!(header("B"), "B");
+        assert_eq!(header("C"), "C<U>");
+    }
+
+    /// mermaid 12.3.0 under dagre: a namespace pads by `class.padding ?? 16`,
+    /// by which the drawing it holds is offset (`diff`).
+    #[test]
+    fn dagre_namespaces_pad_by_sixteen() {
+        let src = "---\nconfig:\n  layout: dagre\n---\nclassDiagram\n  direction LR\n  \
+                   namespace NS0 {\n    class C0\n  }\n  C1 : +int age\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .expect("renders")
+            .scene;
+        let centre = |id: &str| -> crate::geom::Point {
+            use crate::scene::{Element, Geometry};
+            fn find(e: &Element, id: &str) -> Option<crate::geom::Rect> {
+                match e {
+                    Element::Group {
+                        id: Some(i),
+                        children,
+                        ..
+                    } if i.starts_with(id) => children.iter().find_map(|c| match c {
+                        Element::Shape {
+                            geom: Geometry::Rect { rect, .. },
+                            class,
+                            ..
+                        } if class.as_deref() != Some("drop-shadow") => Some(*rect),
+                        _ => None,
+                    }),
+                    Element::Group { children, .. } => children.iter().find_map(|c| find(c, id)),
+                    _ => None,
+                }
+            }
+            scene
+                .elements
+                .iter()
+                .find_map(|e| find(e, id))
+                .expect(id)
+                .center()
+        };
+        // mermaid: C0 at 55.953125 (in its namespace), C1 at 63.953125.
+        assert!((centre("classId-C1-").x - centre("classId-C0-").x - 8.0).abs() < 1e-6);
     }
 }

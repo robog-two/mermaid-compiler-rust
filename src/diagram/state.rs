@@ -33,6 +33,10 @@ struct Builder {
     class_defs: HashMap<String, StyleOverrides>,
     class_assignments: Vec<(String, String)>,
     notes: usize,
+    /// Node and cluster ids in the order dataFetcher first inserts them
+    /// (`insertOrUpdateNode`): the order mermaid hands them to the layout.
+    seq: Vec<String>,
+    seq_seen: HashSet<String>,
 }
 
 /// Parse a state diagram body.
@@ -71,8 +75,11 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
         if let Some(d) = s.strip_prefix("direction ") {
             let d = Direction::parse(d.trim())
                 .ok_or_else(|| Error::parse(line, format!("Invalid direction '{}'", d.trim())))?;
-            match b.composite_on_top() {
+            match b.stack.last().copied() {
                 // A composite's own `direction` (stateDb keeps it as the state's `dir`).
+                // In a composite split by `--`, the statement belongs to the region
+                // it is written in (`docTranslator` moves it there with the rest),
+                // and the composite keeps the default.
                 Some(c) => b.clusters[c.0].direction = Some(d),
                 None => direction = d,
             }
@@ -155,19 +162,33 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
                     (note_target(rest), lines.join("\n"))
                 }
             };
-            let t = b.touch(&target);
             b.notes += 1;
             // dataFetcher wraps the note in an invisible `noteGroup` at the top level,
             // whatever composite the annotated state lives in: the note sits outside
-            // it, and its edge crosses the composite's border (and the group's).
-            let id = format!("note{}", b.notes);
-            let mut group = Cluster::new(format!("{id}----parent"), text.clone(), None);
-            group.kind = ClusterKind::NoteGroup;
-            b.clusters.push(group);
+            // it, and its edge crosses the composite's border (and the group's). The
+            // group is keyed by the state alone (`<id>----parent`): a second note on
+            // it joins the first one's. Both are inserted before the state itself.
+            let count = b.edges.len();
+            let group_id = format!("{target}----parent");
+            let id = format!("{target}----note-{count}");
+            b.record(&group_id);
+            b.record(&id);
+            let group = match b.cluster_index.get(&group_id) {
+                Some(&c) => c,
+                None => {
+                    let mut group = Cluster::new(group_id.clone(), text.clone(), None);
+                    group.kind = ClusterKind::NoteGroup;
+                    b.clusters.push(group);
+                    b.cluster_index.insert(group_id, b.clusters.len() - 1);
+                    b.clusters.len() - 1
+                }
+            };
             let mut note = Node::new(id, text, Shape::Note);
-            note.cluster = Some(ClusterId(b.clusters.len() - 1));
+            note.cluster = Some(ClusterId(group));
             b.nodes.push(note);
             let n = b.nodes.len() - 1;
+            b.index.insert(b.nodes[n].id.clone(), n);
+            let t = b.touch(&target);
             let (from, to) = if rest.starts_with("left of") {
                 (n, t)
             } else {
@@ -287,6 +308,12 @@ fn state_decl_id(rest: &str) -> String {
 }
 
 impl Builder {
+    fn record(&mut self, id: &str) {
+        if self.seq_seen.insert(id.to_string()) {
+            self.seq.push(id.to_string());
+        }
+    }
+
     fn strip_class(&mut self, id: &str) -> String {
         match id.split_once(":::") {
             Some((i, c)) => {
@@ -304,6 +331,7 @@ impl Builder {
         }
         // dataFetcher's `rect` with `rx`/`ry` set: nodes.ts draws it as `roundedRect`
         // (padding 8, the CSS `rx: 5px`).
+        self.record(id);
         let mut n = Node::new(id, id, Shape::Rounded);
         n.cluster = self.stack.last().copied();
         self.nodes.push(n);
@@ -315,6 +343,7 @@ impl Builder {
         if let Some(&c) = self.cluster_index.get(id) {
             return ClusterId(c);
         }
+        self.record(id);
         let mut c = Cluster::new(id, id, self.stack.last().copied());
         c.kind = ClusterKind::Composite;
         // Composites take slots in the order dataFetcher inserts them (pre-order).
@@ -330,20 +359,13 @@ impl Builder {
     /// painted with its composite's slot.
     fn open_region(&mut self, parent: ClusterId) {
         self.dividers += 1;
-        let mut r = Cluster::new(format!("divider-id-{}", self.dividers), "", Some(parent));
+        let id = format!("divider-id-{}", self.dividers);
+        self.record(&id);
+        let mut r = Cluster::new(id, "", Some(parent));
         r.kind = ClusterKind::Region;
         r.color_slot = self.clusters[parent.0].color_slot;
         self.clusters.push(r);
         self.stack.push(ClusterId(self.clusters.len() - 1));
-    }
-
-    /// The innermost open composite (skipping the region it may be split into).
-    fn composite_on_top(&self) -> Option<ClusterId> {
-        self.stack
-            .iter()
-            .rev()
-            .copied()
-            .find(|c| self.clusters[c.0].kind == ClusterKind::Composite)
     }
 
     fn endpoint(&mut self, raw: &str, is_source: bool) -> Endpoint {
@@ -420,6 +442,18 @@ impl Builder {
         // `direction` of its own is laid out top to bottom, whatever the diagram's direction.
         for c in &mut self.clusters {
             c.direction.get_or_insert(Direction::TopBottom);
+        }
+        for (k, id) in self.seq.iter().enumerate() {
+            if let Some(&c) = self.cluster_index.get(id) {
+                self.clusters[c].model_seq = Some(k);
+            } else if let Some(&i) = self.index.get(id) {
+                self.nodes[i].model_seq = Some(k);
+            }
+        }
+        for (c, cl) in self.clusters.iter_mut().enumerate() {
+            if cl.model_seq.is_none() {
+                cl.model_seq = Some(self.seq.len() + c);
+            }
         }
         // dataFetcher: a state's description starts as its display name (or id). The
         // first `id : text` replaces a bare id and otherwise appends; one entry keeps
@@ -701,7 +735,7 @@ mod tests {
         let scene = render(
             "stateDiagram-v2\n  [*] --> A\n  A --> B\n  B --> [*]\n  note right of A : a note\n",
         );
-        assert_eq!(drawn_rect(&scene, "cluster-note1----parent"), Some(None));
+        assert_eq!(drawn_rect(&scene, "cluster-A----parent"), Some(None));
         let (a, b) = (
             drawn_rect(&scene, "state-A-").flatten().expect("A"),
             drawn_rect(&scene, "state-B-").flatten().expect("B"),
@@ -752,7 +786,9 @@ mod tests {
             .scene;
         let a = drawn_rect(&scene, "state-A-").flatten().expect("A");
         let c = drawn_rect(&scene, "state-C-").flatten().expect("C");
-        let note = drawn_rect(&scene, "state-note2-").flatten().expect("note");
+        let note = drawn_rect(&scene, "state-C----note-")
+            .flatten()
+            .expect("note");
         let start = drawn_circle(&scene, "state-root_start-").expect("start");
         let end = drawn_circle(&scene, "state-root_end-").expect("end");
         let mid = |r: crate::geom::Rect| r.y + r.h / 2.0;
@@ -918,5 +954,134 @@ mod tests {
         assert_eq!(width("-c-"), Some(1.3));
         assert_eq!(width("-note"), Some(1.3));
         assert_ne!(width("-A-"), Some(1.3));
+    }
+
+    fn render_dagre(src: &str) -> crate::scene::Scene {
+        let src = format!("---\nconfig:\n  layout: dagre\n---\n{src}");
+        crate::render::render(&src, &crate::config::MermaidConfig::default())
+            .expect("renders")
+            .scene
+    }
+
+    /// The `d` of the first path drawn in group `id…`.
+    fn drawn_path(scene: &crate::scene::Scene, id: &str) -> Option<String> {
+        use crate::scene::{Element, Geometry};
+        fn find(e: &Element, id: &str) -> Option<String> {
+            match e {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i.starts_with(id) => children.iter().find_map(|c| match c {
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => Some(crate::output::svg::path_data(cmds)),
+                    _ => None,
+                }),
+                Element::Group { children, .. } => children.iter().find_map(|c| find(c, id)),
+                _ => None,
+            }
+        }
+        scene.elements.iter().find_map(|e| find(e, id))
+    }
+
+    /// dataFetcher: a note is `<state>----note-<n>` (n counts the transitions
+    /// and notes before it) in the group `<state>----parent`, which a second
+    /// note on the state joins; the group and the note are handed to the
+    /// layout before the state when the note introduces it.
+    #[test]
+    fn notes_share_their_states_group_and_come_before_it() {
+        let d = parse(
+            "stateDiagram-v2\n  A --> B\n  note right of C : one\n  note left of C : two\n",
+            None,
+        )
+        .unwrap();
+        let idx = |id: &str| d.nodes.iter().position(|n| n.id == id).expect(id);
+        let (n1, n2, c) = (idx("C----note-1"), idx("C----note-2"), idx("C"));
+        let group = d.nodes[n1].cluster.expect("group");
+        assert_eq!(d.nodes[n2].cluster, Some(group));
+        assert_eq!(d.clusters[group.0].id, "C----parent");
+        assert_eq!(d.clusters.len(), 1);
+        let seq = |i: usize| d.nodes[i].model_seq.unwrap();
+        assert!(d.clusters[group.0].model_seq.unwrap() < seq(n1));
+        assert!(seq(n1) < seq(c) && seq(idx("B")) < seq(n1));
+    }
+
+    /// docTranslator moves a divided composite's statements into its regions:
+    /// a `direction` belongs to the region it is written in, and the
+    /// composite keeps the default (`TB`).
+    #[test]
+    fn a_direction_in_a_divided_composite_belongs_to_its_region() {
+        let d = parse(
+            "stateDiagram-v2\nstate X {\ndirection LR\na --> b\n--\nc --> d\n}",
+            None,
+        )
+        .unwrap();
+        let dir = |id: &str| d.clusters.iter().find(|c| c.id == id).unwrap().direction;
+        assert_eq!(dir("X"), Some(Direction::TopBottom));
+        let regions: Vec<_> = d
+            .clusters
+            .iter()
+            .filter(|c| c.kind == ClusterKind::Region)
+            .map(|c| c.direction)
+            .collect();
+        assert_eq!(
+            regions,
+            [Some(Direction::LeftRight), Some(Direction::TopBottom)]
+        );
+    }
+
+    /// mermaid 12.3.0 under dagre: a fork bar takes the direction of the graph
+    /// it is drawn in (a composite's own, top to bottom by default).
+    #[test]
+    fn dagre_fork_bars_turn_with_their_composite() {
+        let scene = render_dagre(
+            "stateDiagram-v2\n  direction LR\n  state C {\n    state f <<fork>>\n    \
+             [*] --> f\n    f --> a\n  }\n  x --> C\n  state j <<join>>\n  C --> j\n",
+        );
+        let f = drawn_rect(&scene, "state-f-").flatten().expect("f");
+        assert_eq!((f.w, f.h), (70.0, 10.0));
+        let j = drawn_rect(&scene, "state-j-").flatten().expect("j");
+        assert_eq!((j.w, j.h), (10.0, 70.0));
+    }
+
+    /// mermaid 12.3.0 under dagre: a composite no edge crosses is laid out on
+    /// its own (a `clusterNode`, without `intersect`), so an edge from it keeps
+    /// dagre's end on the choice's box, not the diamond.
+    #[test]
+    fn dagre_edges_from_a_composite_of_its_own_keep_dagres_ends() {
+        let scene = render_dagre(
+            "stateDiagram-v2\n  state s5 <<choice>>\n  state s9 {\n    a --> b\n  }\n  \
+             q --> s5\n  s9 --> s5 : x\n  s9 --> q\n",
+        );
+        assert_eq!(
+            drawn_path(&scene, "L-s9-s5-").as_deref(),
+            Some(
+                "M172.783,232L174.402,236.167C176.022,240.333,179.261,248.667,180.88,260.083\
+                 C182.5,271.5,182.5,286,182.5,300.5C182.5,315,182.5,329.5,176.698,340.999\
+                 C170.896,352.499,159.291,360.998,153.489,365.247L147.687,369.497"
+            )
+        );
+    }
+
+    /// mermaid 12.3.0 under ELK: a composite's title is a markdown label the
+    /// adapter measures wrapped at `state.wrappingWidth` (120), so a 132px
+    /// title reserves two lines (the frame 191 high, not 170), a 253px one
+    /// three; it is still painted on one line, the frame as wide as it.
+    #[test]
+    fn elk_composite_titles_are_measured_wrapped() {
+        let height = |title: &str| {
+            let src =
+                format!("stateDiagram-v2\n  state \"{title}\" as A {{\n    a1 --> a2\n  }}\n");
+            let scene = crate::render::render(&src, &crate::config::MermaidConfig::default())
+                .expect("renders")
+                .scene;
+            drawn_rect(&scene, "cluster-A").flatten().expect("A")
+        };
+        assert_eq!(height("Medium title x").h, 170.0);
+        assert_eq!(height("A long composite title").h, 191.0);
+        let wide = height("A much much longer composite title here");
+        assert_eq!((wide.w, wide.h), (260.90625, 212.0));
     }
 }

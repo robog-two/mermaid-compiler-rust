@@ -1754,4 +1754,43 @@ mod tests {
         let g = to_graph(&parse("erDiagram\nD {\n string id PK, FK\n}", None).unwrap());
         assert_eq!(g.nodes[0].sections[0].lines[2], "PK,FK");
     }
+
+    /// mermaid 12.3.0 under dagre: ER diagrams go through mermaid's dagre
+    /// renderer (140 between nodes, 80 between ranks).
+    #[test]
+    fn dagre_layout_matches_mermaids_renderer() {
+        let src = "---\nconfig:\n  layout: dagre\n---\nerDiagram\n  direction RL\n  \
+                   E1 {\n    date created\n    string name\n    string name\n  }\n  \
+                   E2 {\n    string name\n    string name\n    string email UK\n  }\n  \
+                   E1 }o--|| E0 : \"is part of\"\n  E3 ||--|| E1 : contains\n  \
+                   E2 }o--o{ E1 : \"is part of\"\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .expect("renders")
+            .scene;
+        fn find(e: &Element, id: &str) -> Option<String> {
+            match e {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i.starts_with(id) => children.iter().find_map(|c| match c {
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => Some(crate::output::svg::path_data(cmds)),
+                    _ => None,
+                }),
+                Element::Group { children, .. } => children.iter().find_map(|c| find(c, id)),
+                _ => None,
+            }
+        }
+        let d = scene.elements.iter().find_map(|e| find(e, "L-E1-E0-"));
+        assert_eq!(
+            d.as_deref(),
+            Some(
+                "M241.703,178.5L230.561,178.5C219.419,178.5,197.135,178.5,174.852,178.5\
+                 C152.568,178.5,130.284,178.5,119.142,178.5L108,178.5"
+            )
+        );
+    }
 }
