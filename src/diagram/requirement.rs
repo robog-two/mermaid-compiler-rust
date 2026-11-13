@@ -166,7 +166,12 @@ pub fn render(
         html_labels: true,
         html_edge_labels: true,
     };
-    Ok(graph::render(&g, &gc, pal))
+    // requirementRenderer pads the drawing by a fixed 8 (`setupViewPortForSVG`).
+    let opts = graph::RenderOptions {
+        view_padding: Some(8.0),
+        ..Default::default()
+    };
+    Ok(graph::render_with(&g, &gc, pal, &opts))
 }
 
 fn unquote(s: &str) -> String {
@@ -689,5 +694,19 @@ mod tests {
         let pal = cfg.palette();
         let s = render(SRC, None, &cfg, &pal).unwrap();
         assert_eq!(s.kind, DiagramKind::Requirement);
+    }
+
+    #[test]
+    fn view_box_pads_by_a_fixed_eight() {
+        // requirementRenderer calls `setupViewPortForSVG(svg, 8, ...)`: the
+        // padding ignores `requirement.diagramPadding`.
+        let cfg = MermaidConfig::default();
+        let a = render(SRC, None, &cfg, &cfg.palette()).unwrap().view_box;
+        let wide = cfg
+            .with_json(&crate::json::parse(r#"{"requirement": {"diagramPadding": 50}}"#).unwrap())
+            .unwrap();
+        let b = render(SRC, None, &wide, &wide.palette()).unwrap().view_box;
+        assert_eq!(a, b);
+        assert!(a.x == -8.0 || a.x == 4.0, "{a:?}");
     }
 }
