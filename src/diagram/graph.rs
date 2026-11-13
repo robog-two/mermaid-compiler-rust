@@ -1753,6 +1753,7 @@ pub fn render_with(
             width,
             neo,
         ));
+        let end_heads = heads.len();
         if !degenerate {
             heads.extend(markers::elements(
                 e.start,
@@ -1766,7 +1767,15 @@ pub fn render_with(
         }
         let (end_back, start_back) = (end_trim, start_trim);
         if dagre_engine && !degenerate {
-            pts = line_with_offset(&pts, start_back, end_back);
+            let keyed = |h: Head, back: f64| markers::has_marker_offset(h).then_some(back);
+            pts = line_with_offset(&pts, keyed(e.start, start_back), keyed(e.end, end_back));
+            // The browser stops drawing a path at its first NaN: one that starts
+            // with one is not drawn at all, nor are its markers.
+            if !pts[0].x.is_finite() {
+                heads.clear();
+            } else if !pts[last].x.is_finite() {
+                heads.drain(..end_heads);
+            }
         } else if end_back > 0.0 && pts[last].dist(pts[last - 1]) > end_back {
             pts[last] = pts[last].minus(end_dir.scale(end_back));
         }
@@ -2299,15 +2308,17 @@ fn calc_label_position(points: &[Point]) -> Point {
 /// ends are pulled back along the line by their markers' `markerOffsets`
 /// (`start` and `end`, 0 for none), and any point within a marker's height
 /// of an end, on both axes, is pushed away from it (a self-loop's ends).
-fn line_with_offset(data: &[Point], start: f64, end: f64) -> Vec<Point> {
+/// An end is `Some` when its arrow type is one of `markerOffsets`' keys: such
+/// an end on a zero-length segment gets mermaid's NaN angle, and d3 then
+/// writes `NaN` coordinates the browser does not draw.
+fn line_with_offset(data: &[Point], start: Option<f64>, end: Option<f64>) -> Vec<Point> {
     let last = data.len() - 1;
     let (first, final_) = (data[0], data[last]);
+    let (start_key, end_key) = (start.is_some(), end.is_some());
+    let (start, end) = (start.unwrap_or(0.0), end.unwrap_or(0.0));
     // `calculateDeltaAndAngle` from `a` to `b`: the offsets along the line.
     let along = |a: Point, b: Point, h: f64| {
         let (dx, dy) = (b.x - a.x, b.y - a.y);
-        if dx == 0.0 && dy == 0.0 {
-            return (0.0, 0.0);
-        }
         let angle = (dy / dx).atan();
         (
             h * angle.cos() * if dx >= 0.0 { 1.0 } else { -1.0 },
@@ -2319,9 +2330,9 @@ fn line_with_offset(data: &[Point], start: f64, end: f64) -> Vec<Point> {
     data.iter()
         .enumerate()
         .map(|(i, &d)| {
-            let (mut ox, mut oy) = if i == 0 && start > 0.0 {
+            let (mut ox, mut oy) = if i == 0 && start_key {
                 along(data[0], data[1], start)
-            } else if i == last && end > 0.0 {
+            } else if i == last && end_key {
                 along(data[last], data[last - 1], end)
             } else {
                 (0.0, 0.0)
@@ -4353,6 +4364,27 @@ mod tests {
         );
     }
 
+    /// `calculateDeltaAndAngle` on a zero-length first segment is `atan(0/0)`:
+    /// a start with a `markerOffsets` key (even `arrow_barb`'s 0) becomes NaN,
+    /// one without (`arrow_circle`) stays where it is.
+    #[test]
+    fn line_offsets_on_a_zero_length_end_segment_are_nan() {
+        let p = Point::new;
+        let data = [
+            p(10.0, 474.0),
+            p(10.0, 474.0),
+            p(10.0, 499.0),
+            p(40.0, 520.0),
+        ];
+        let out = line_with_offset(&data, Some(4.0), Some(4.0));
+        assert!(out[0].x.is_nan() && out[0].y.is_nan(), "{:?}", out[0]);
+        assert!(out[3].x.is_finite());
+        let out = line_with_offset(&data, Some(0.0), None);
+        assert!(out[0].x.is_nan());
+        let out = line_with_offset(&data, None, Some(4.0));
+        assert_eq!(out[0], data[0]);
+    }
+
     /// `getLineFunctionsWithOffset` (mermaid 12.3.0, a class self-loop with an
     /// `extension` end): the loop's first point, 16.8 above its end, is pushed
     /// up to clear the end's marker; the end is pulled back along its line.
@@ -4365,7 +4397,7 @@ mod tests {
             p(264.6156250014901, 447.0750000011176),
             p(288.6156250014901, 437.4649895735889),
         ];
-        let out = line_with_offset(&data, 0.0, 17.25);
+        let out = line_with_offset(&data, None, Some(17.25));
         assert!((out[0].y - 419.215).abs() < 1e-3, "{:?}", out[0]);
         assert_eq!(out[0].x, data[0].x);
         assert_eq!(&out[1..3], &data[1..3]);

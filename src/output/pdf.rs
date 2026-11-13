@@ -136,6 +136,18 @@ impl Ctx {
         } else {
             None
         };
+        // A browser does not draw a path whose data stops at a NaN (mermaid's
+        // edge with an arrowhead on a zero-length end segment).
+        let finite = |p: &Point| p.x.is_finite() && p.y.is_finite();
+        if let Geometry::Path(cmds) = geom
+            && !cmds.iter().all(|c| match c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => finite(p),
+                PathCmd::CubicTo(a, b, p) => finite(a) && finite(b) && finite(p),
+                PathCmd::Close => true,
+            })
+        {
+            return;
+        }
         if fill.is_none() && stroke.is_none() {
             return;
         }

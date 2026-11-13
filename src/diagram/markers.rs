@@ -581,6 +581,22 @@ pub fn pullback_for(head: Head, neo: bool) -> f64 {
     marker(head, neo).map_or(0.0, |m| m.pullback)
 }
 
+/// Whether `head`'s mermaid arrow type is a key of `markerOffsets`, so that
+/// `getLineFunctionsWithOffset` moves the end along its last segment (even by
+/// 0, which still turns a zero-length segment's NaN angle into NaN).
+pub fn has_marker_offset(head: Head) -> bool {
+    matches!(
+        head,
+        Head::Arrow
+            | Head::Barb
+            | Head::Triangle
+            | Head::Diamond
+            | Head::DiamondFilled
+            | Head::Dependency
+            | Head::Lollipop
+    )
+}
+
 /// Length of the line's end a neo edge leaves undrawn under its marker
 /// (`markerOffsets2` turned into the path's `stroke-dasharray`).
 pub fn hidden_end(head: Head, neo: bool) -> f64 {
