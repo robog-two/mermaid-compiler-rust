@@ -29,6 +29,7 @@ pub mod sankey;
 pub mod sequence;
 pub mod shapes;
 pub mod state;
+pub mod svgbbox;
 pub mod swimlane;
 pub mod timeline;
 pub mod treemap;

@@ -22,6 +22,7 @@ pub mod boxes;
 mod elkbk;
 mod elkns;
 mod elkorder;
+pub mod force;
 mod nested;
 mod ortho;
 pub use ortho::{EdgeRouting, OrthoSpacing};

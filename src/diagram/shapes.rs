@@ -1062,57 +1062,20 @@ struct Arc {
 /// SVG elliptical arc from `from` to `to` as cubics (SVG 1.1 implementation notes
 /// F.6.5/F.6.6, radii scaled up when too small).
 fn svg_arc(out: &mut Vec<PathCmd>, from: Point, a: Arc, to: Point) {
-    let (mut rx, mut ry) = (a.rx.abs(), a.ry.abs());
-    if rx == 0.0 || ry == 0.0 || from == to {
+    let Some(e) = ArcCenter::new(from, a, to) else {
         out.push(PathCmd::LineTo(to));
         return;
-    }
-    let (sp, cp) = a.phi.to_radians().sin_cos();
-    let hx = (from.x - to.x) / 2.0;
-    let hy = (from.y - to.y) / 2.0;
-    let x1 = cp * hx + sp * hy;
-    let y1 = -sp * hx + cp * hy;
-    let lambda = (x1 / rx).powi(2) + (y1 / ry).powi(2);
-    if lambda > 1.0 {
-        rx *= lambda.sqrt();
-        ry *= lambda.sqrt();
-    }
-    let num = (rx * ry).powi(2) - (rx * y1).powi(2) - (ry * x1).powi(2);
-    let den = (rx * y1).powi(2) + (ry * x1).powi(2);
-    let mut coef = (num / den).max(0.0).sqrt();
-    if a.large == a.sweep {
-        coef = -coef;
-    }
-    let cxp = coef * rx * y1 / ry;
-    let cyp = -coef * ry * x1 / rx;
-    let cx = cp * cxp - sp * cyp + (from.x + to.x) / 2.0;
-    let cy = sp * cxp + cp * cyp + (from.y + to.y) / 2.0;
-    let t1 = ((y1 - cyp) / ry).atan2((x1 - cxp) / rx);
-    let t2 = ((-y1 - cyp) / ry).atan2((-x1 - cxp) / rx);
-    let mut dt = t2 - t1;
-    if !a.sweep && dt > 0.0 {
-        dt -= 2.0 * PI;
-    } else if a.sweep && dt < 0.0 {
-        dt += 2.0 * PI;
-    }
-    let n = ((dt.abs() / (PI / 2.0)).ceil() as usize).max(1);
-    let step = dt / n as f64;
+    };
+    let n = ((e.dt.abs() / (PI / 2.0)).ceil() as usize).max(1);
+    let step = e.dt / n as f64;
     let k = 4.0 / 3.0 * (step / 4.0).tan();
-    let at = |t: f64| {
-        let (ex, ey) = (rx * t.cos(), ry * t.sin());
-        Point::new(cx + cp * ex - sp * ey, cy + sp * ex + cp * ey)
-    };
-    let d = |t: f64| {
-        let (ex, ey) = (-rx * t.sin(), ry * t.cos());
-        Point::new(cp * ex - sp * ey, sp * ex + cp * ey)
-    };
     for i in 0..n {
-        let s = t1 + step * i as f64;
-        let e = s + step;
-        let end = if i + 1 == n { to } else { at(e) };
+        let t0 = e.t1 + step * i as f64;
+        let t1 = t0 + step;
+        let end = if i + 1 == n { to } else { e.at(t1) };
         out.push(PathCmd::CubicTo(
-            at(s).plus(d(s).scale(k)),
-            at(e).minus(d(e).scale(k)),
+            e.at(t0).plus(e.tangent(t0).scale(k)),
+            e.at(t1).minus(e.tangent(t1).scale(k)),
             end,
         ));
     }
@@ -1129,6 +1092,178 @@ fn relative_arcs(start: Point, arcs: &[(Arc, f64, f64)]) -> Vec<PathCmd> {
     }
     cmds.push(PathCmd::Close);
     cmds
+}
+
+/// `bang.ts`: the outline's start and its relative arcs around the node centre.
+/// Every arc carries `x-axis-rotation` 1 (an upstream quirk, kept).
+fn bang_arcs(tw: f64, th: f64, p: f64) -> (Point, Vec<(Arc, f64, f64)>) {
+    let half = p / 2.0;
+    let base_w = tw + 10.0 * half;
+    let w = base_w.max(tw + 20.0);
+    let h = (th + 8.0 * half).max(th + 20.0);
+    let r = 0.15 * base_w;
+    let a = |rr: f64, dx: f64, dy: f64| {
+        (
+            Arc {
+                rx: rr,
+                ry: rr,
+                phi: 1.0,
+                large: false,
+                sweep: false,
+            },
+            dx,
+            dy,
+        )
+    };
+    let arcs = vec![
+        a(r, w * 0.25, -h * 0.1),
+        a(r, w * 0.25, 0.0),
+        a(r, w * 0.25, 0.0),
+        a(r, w * 0.25, h * 0.1),
+        a(r, w * 0.15, h * 0.33),
+        a(r * 0.8, 0.0, h * 0.34),
+        a(r, -w * 0.15, h * 0.33),
+        a(r, -w * 0.25, h * 0.15),
+        a(r, -w * 0.25, 0.0),
+        a(r, -w * 0.25, 0.0),
+        a(r, -w * 0.25, -h * 0.15),
+        a(r, -w * 0.1, -h * 0.33),
+        a(r * 0.8, 0.0, -h * 0.34),
+        a(r, w * 0.1, -h * 0.33),
+    ];
+    (Point::new(-w / 2.0, -h / 2.0), arcs)
+}
+
+/// `cloud.ts`: the outline's start and its relative arcs around the node centre.
+fn cloud_arcs(tw: f64, th: f64, p: f64) -> (Point, Vec<(Arc, f64, f64)>) {
+    let half = p / 2.0;
+    let (w, h) = (tw + 2.0 * half, th + 2.0 * half);
+    let (r1, r2, r3, r4) = (0.15 * w, 0.25 * w, 0.35 * w, 0.2 * w);
+    let a = |rx: f64, ry: f64, phi: f64, dx: f64, dy: f64| {
+        (
+            Arc {
+                rx,
+                ry,
+                phi,
+                large: false,
+                sweep: true,
+            },
+            dx,
+            dy,
+        )
+    };
+    let arcs = vec![
+        a(r1, r1, 0.0, w * 0.25, -w * 0.1),
+        a(r3, r3, 1.0, w * 0.4, -w * 0.1),
+        a(r2, r2, 1.0, w * 0.35, w * 0.2),
+        a(r1, r1, 1.0, w * 0.15, h * 0.35),
+        a(r4, r4, 1.0, -w * 0.15, h * 0.65),
+        a(r2, r1, 1.0, -w * 0.25, w * 0.15),
+        a(r3, r3, 1.0, -w * 0.5, 0.0),
+        a(r1, r1, 1.0, -w * 0.25, -w * 0.15),
+        a(r1, r1, 1.0, -w * 0.1, -h * 0.35),
+        a(r4, r4, 1.0, w * 0.1, -h * 0.65),
+    ];
+    (Point::new(-w / 2.0, -h / 2.0), arcs)
+}
+
+/// The outline of a `bang` or `cloud` node with `node.padding` `p` around a
+/// `tw`×`th` label, centred on the origin, and the box Chromium's `getBBox()`
+/// reports for the node (see [`super::svgbbox`]). `None` for other shapes.
+pub fn arc_outline(shape: Shape, tw: f64, th: f64, p: f64) -> Option<(Vec<PathCmd>, Rect)> {
+    let (start, arcs) = match shape {
+        Shape::Bang => bang_arcs(tw, th, p),
+        Shape::Cloud => cloud_arcs(tw, th, p),
+        _ => return None,
+    };
+    let rel: Vec<super::svgbbox::RelArc> = arcs
+        .iter()
+        .map(|&(a, dx, dy)| super::svgbbox::RelArc {
+            rx: a.rx,
+            ry: a.ry,
+            phi: a.phi,
+            large: a.large,
+            sweep: a.sweep,
+            dx,
+            dy,
+        })
+        .collect();
+    let [x, y, w, h] = super::svgbbox::chromium_box((start.x, start.y), &rel, (tw, th));
+    Some((relative_arcs(start, &arcs), Rect::new(x, y, w, h)))
+}
+
+/// Centre parameterisation of an SVG arc (SVG 1.1 implementation notes
+/// F.6.5/F.6.6, radii scaled up when too small).
+struct ArcCenter {
+    c: Point,
+    rx: f64,
+    ry: f64,
+    sin_phi: f64,
+    cos_phi: f64,
+    t1: f64,
+    dt: f64,
+}
+
+impl ArcCenter {
+    fn new(from: Point, a: Arc, to: Point) -> Option<ArcCenter> {
+        let (mut rx, mut ry) = (a.rx.abs(), a.ry.abs());
+        if rx == 0.0 || ry == 0.0 || from == to {
+            return None;
+        }
+        let (sp, cp) = a.phi.to_radians().sin_cos();
+        let hx = (from.x - to.x) / 2.0;
+        let hy = (from.y - to.y) / 2.0;
+        let x1 = cp * hx + sp * hy;
+        let y1 = -sp * hx + cp * hy;
+        let lambda = (x1 / rx).powi(2) + (y1 / ry).powi(2);
+        if lambda > 1.0 {
+            rx *= lambda.sqrt();
+            ry *= lambda.sqrt();
+        }
+        let num = (rx * ry).powi(2) - (rx * y1).powi(2) - (ry * x1).powi(2);
+        let den = (rx * y1).powi(2) + (ry * x1).powi(2);
+        let mut coef = (num / den).max(0.0).sqrt();
+        if a.large == a.sweep {
+            coef = -coef;
+        }
+        let cxp = coef * rx * y1 / ry;
+        let cyp = -coef * ry * x1 / rx;
+        let cx = cp * cxp - sp * cyp + (from.x + to.x) / 2.0;
+        let cy = sp * cxp + cp * cyp + (from.y + to.y) / 2.0;
+        let t1 = ((y1 - cyp) / ry).atan2((x1 - cxp) / rx);
+        let t2 = ((-y1 - cyp) / ry).atan2((-x1 - cxp) / rx);
+        let mut dt = t2 - t1;
+        if !a.sweep && dt > 0.0 {
+            dt -= 2.0 * PI;
+        } else if a.sweep && dt < 0.0 {
+            dt += 2.0 * PI;
+        }
+        Some(ArcCenter {
+            c: Point::new(cx, cy),
+            rx,
+            ry,
+            sin_phi: sp,
+            cos_phi: cp,
+            t1,
+            dt,
+        })
+    }
+
+    fn at(&self, t: f64) -> Point {
+        let (ex, ey) = (self.rx * t.cos(), self.ry * t.sin());
+        Point::new(
+            self.c.x + self.cos_phi * ex - self.sin_phi * ey,
+            self.c.y + self.sin_phi * ex + self.cos_phi * ey,
+        )
+    }
+
+    fn tangent(&self, t: f64) -> Point {
+        let (ex, ey) = (-self.rx * t.sin(), self.ry * t.cos());
+        Point::new(
+            self.cos_phi * ex - self.sin_phi * ey,
+            self.sin_phi * ex + self.cos_phi * ey,
+        )
+    }
 }
 
 fn part(geom: Geometry, style: PartStyle) -> Part {
@@ -1297,81 +1432,15 @@ fn local(shape: Shape, tw: f64, th: f64, m: &ShapeMetrics) -> Option<Local> {
             l.clip = clip;
             l.label = pt(0.0, body_top + body_h / 2.0);
         }
-        // bang.ts: every arc carries `x-axis-rotation` 1 (an upstream quirk, kept).
-        Shape::Bang => {
-            let half = p / 2.0;
-            let base_w = tw + 10.0 * half;
-            let w = base_w.max(tw + 20.0);
-            let h = (th + 8.0 * half).max(th + 20.0);
-            let r = 0.15 * base_w;
-            let a = |rr: f64, dx: f64, dy: f64| {
-                (
-                    Arc {
-                        rx: rr,
-                        ry: rr,
-                        phi: 1.0,
-                        large: false,
-                        sweep: false,
-                    },
-                    dx,
-                    dy,
-                )
+        // bang.ts / cloud.ts
+        Shape::Bang | Shape::Cloud => {
+            let (start, arcs) = if shape == Shape::Bang {
+                bang_arcs(tw, th, p)
+            } else {
+                cloud_arcs(tw, th, p)
             };
-            let arcs = [
-                a(r, w * 0.25, -h * 0.1),
-                a(r, w * 0.25, 0.0),
-                a(r, w * 0.25, 0.0),
-                a(r, w * 0.25, h * 0.1),
-                a(r, w * 0.15, h * 0.33),
-                a(r * 0.8, 0.0, h * 0.34),
-                a(r, -w * 0.15, h * 0.33),
-                a(r, -w * 0.25, h * 0.15),
-                a(r, -w * 0.25, 0.0),
-                a(r, -w * 0.25, 0.0),
-                a(r, -w * 0.25, -h * 0.15),
-                a(r, -w * 0.1, -h * 0.33),
-                a(r * 0.8, 0.0, -h * 0.34),
-                a(r, w * 0.1, -h * 0.33),
-            ];
-            l.parts.push(body(Geometry::Path(relative_arcs(
-                pt(-w / 2.0, -h / 2.0),
-                &arcs,
-            ))));
-        }
-        // cloud.ts
-        Shape::Cloud => {
-            let half = p / 2.0;
-            let (w, h) = (tw + 2.0 * half, th + 2.0 * half);
-            let (r1, r2, r3, r4) = (0.15 * w, 0.25 * w, 0.35 * w, 0.2 * w);
-            let a = |rx: f64, ry: f64, phi: f64, dx: f64, dy: f64| {
-                (
-                    Arc {
-                        rx,
-                        ry,
-                        phi,
-                        large: false,
-                        sweep: true,
-                    },
-                    dx,
-                    dy,
-                )
-            };
-            let arcs = [
-                a(r1, r1, 0.0, w * 0.25, -w * 0.1),
-                a(r3, r3, 1.0, w * 0.4, -w * 0.1),
-                a(r2, r2, 1.0, w * 0.35, w * 0.2),
-                a(r1, r1, 1.0, w * 0.15, h * 0.35),
-                a(r4, r4, 1.0, -w * 0.15, h * 0.65),
-                a(r2, r1, 1.0, -w * 0.25, w * 0.15),
-                a(r3, r3, 1.0, -w * 0.5, 0.0),
-                a(r1, r1, 1.0, -w * 0.25, -w * 0.15),
-                a(r1, r1, 1.0, -w * 0.1, -h * 0.35),
-                a(r4, r4, 1.0, w * 0.1, -h * 0.65),
-            ];
-            l.parts.push(body(Geometry::Path(relative_arcs(
-                pt(-w / 2.0, -h / 2.0),
-                &arcs,
-            ))));
+            l.parts
+                .push(body(Geometry::Path(relative_arcs(start, &arcs))));
         }
         // curlyBraceLeft.ts / curlyBraceRight.ts / curlyBraces.ts: open braces drawn
         // over an invisible hit polygon, the label pushed to the left.
