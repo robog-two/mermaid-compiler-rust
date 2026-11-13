@@ -1055,15 +1055,29 @@ fn finish_rng(
     }
 
     // 6. Cross-axis coordinates.
-    let pad = input.cluster_padding;
-    let title_cross_low = horizontal;
-    let pad_x_low = |c: usize| {
-        pad + if title_cross_low {
-            input.clusters[c].title_height
-        } else {
+    // Under `dagre_groups` a cluster's frame is dagre's compound border: half a
+    // node and an edge gap across, half a rank along, with its title inside
+    // that margin (no band of its own).
+    let dagre_frame = input.dagre_groups && !elk;
+    let pad = if dagre_frame {
+        (input.node_sep + input.edge_sep) / 2.0
+    } else {
+        input.cluster_padding
+    };
+    let pad_along = if dagre_frame {
+        input.rank_sep / 2.0
+    } else {
+        pad
+    };
+    let title_band = |c: usize| {
+        if dagre_frame {
             0.0
+        } else {
+            input.clusters[c].title_height
         }
     };
+    let title_cross_low = horizontal;
+    let pad_x_low = |c: usize| pad + if title_cross_low { title_band(c) } else { 0.0 };
     // Orthogonal self-loops stand off their node's low cross-axis side, each beyond
     // the ones before it (in model order) and their labels; the node keeps that much
     // room free. As ELK places them (`SelfLoopPortRestorer`, `SelfLoopRouter`): the
@@ -1229,18 +1243,20 @@ fn finish_rng(
 
     // 7. Rank-axis coordinates.
     let pad_rank_low = |c: usize| {
-        pad + if input.direction == Direction::TopBottom {
-            input.clusters[c].title_height
-        } else {
-            0.0
-        }
+        pad_along
+            + if input.direction == Direction::TopBottom {
+                title_band(c)
+            } else {
+                0.0
+            }
     };
     let pad_rank_high = |c: usize| {
-        pad + if input.direction == Direction::BottomTop {
-            input.clusters[c].title_height
-        } else {
-            0.0
-        }
+        pad_along
+            + if input.direction == Direction::BottomTop {
+                title_band(c)
+            } else {
+                0.0
+            }
     };
     // Margins along the rank axis: the containers' (see `Hierarchy::margins`),
     // and under ELK the room its end labels take beside their ports

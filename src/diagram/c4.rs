@@ -129,6 +129,9 @@ pub struct Boundary {
     pub descr: Option<String>,
     pub children: Vec<Item>,
     pub style: Style,
+    /// Has a `$sprite`: `drawInsideBoundary` reserves a 48×48 image above the
+    /// label, though `drawBoundary` draws none.
+    pub sprite: bool,
 }
 
 /// Relationship flavours. Directional variants are accepted for compatibility;
@@ -580,9 +583,17 @@ pub fn parse(body: &str, title: Option<String>) -> Result<C4Diagram> {
                         BoundaryKind::Container => Some("CONTAINER"),
                         _ => None,
                     };
-                    let type_text = match fixed {
-                        Some(t) => args.named("type").unwrap_or(t).to_string(),
-                        None => args.get(2, "type").unwrap_or_else(|| {
+                    // A named attribute in the type slot sets its own field, and
+                    // the type keeps no default; an empty one shows no type.
+                    let type_text = match (fixed, args.0.get(2)) {
+                        (Some(t), _) => args.named("type").unwrap_or(t).to_string(),
+                        (None, Some(Arg::Named(..))) => {
+                            args.named("type").unwrap_or_default().to_string()
+                        }
+                        (None, Some(Arg::Pos(t))) if t.is_empty() => {
+                            args.named("type").unwrap_or_default().to_string()
+                        }
+                        (None, _) => args.get(2, "type").unwrap_or_else(|| {
                             if kind == BoundaryKind::Node {
                                 "node".into()
                             } else {
@@ -603,6 +614,9 @@ pub fn parse(body: &str, title: Option<String>) -> Result<C4Diagram> {
                         descr,
                         children: Vec::new(),
                         style: Style::default(),
+                        // Only as a named attribute: `addDeploymentNode` drops a
+                        // positional sprite.
+                        sprite: args.named("sprite").is_some(),
                     };
                     let idx = p.boundaries.len();
                     p.boundaries.push(b);
@@ -688,6 +702,9 @@ pub fn parse(body: &str, title: Option<String>) -> Result<C4Diagram> {
                                 p.boundaries.iter_mut().find(|b| b.alias == target)
                             {
                                 merge(&mut b.style);
+                                if args.get(6, "sprite").is_some() {
+                                    b.sprite = true;
+                                }
                             }
                         }
                         "UpdateRelStyle" => {
@@ -1309,12 +1326,14 @@ fn measure_boundary(
     label: &str,
     type_text: &str,
     descr: Option<&str>,
+    sprite: bool,
     conf: &LayoutConf,
     width_limit: f64,
 ) -> (BoundaryText, f64) {
     let wrap_to = conf.wrap.then_some(width_limit);
     let mut label = calc_text_wh(label, conf.boundary_font + 2.0, true, wrap_to);
-    label.y = 8.0;
+    // A sprite's 48px image comes first (not drawn).
+    label.y = if sprite { 48.0 } else { 0.0 } + 8.0;
     let mut y = label.y + label.height;
     let kind = (!type_text.is_empty()).then(|| {
         let mut t = calc_text_wh(
@@ -1459,15 +1478,20 @@ impl LayoutState<'_> {
             ..RowBounds::default()
         };
         for (i, &c) in list.iter().enumerate() {
-            let (label, type_text, descr) = match c {
-                Container::Global => ("global", "global", None),
+            let (label, type_text, descr, sprite) = match c {
+                Container::Global => ("global", "global", None, false),
                 Container::Declared(b) => {
                     let b = &self.d.boundaries[b];
-                    (b.label.as_str(), b.type_text.as_str(), b.descr.as_deref())
+                    (
+                        b.label.as_str(),
+                        b.type_text.as_str(),
+                        b.descr.as_deref(),
+                        b.sprite,
+                    )
                 }
             };
             let (title, y_off) =
-                measure_boundary(label, type_text, descr, self.conf, cur.width_limit);
+                measure_boundary(label, type_text, descr, sprite, self.conf, cur.width_limit);
             if i % per_row == 0 {
                 let x = parent.data.startx + mx;
                 let y = parent.data.stopy + my + y_off;
@@ -1998,7 +2022,13 @@ pub fn draw(
         ));
         if let Some(t) = rel.techn.as_ref().filter(|t| !t.is_empty()) {
             let tw = calc_text_wh(t, font, false, None);
-            let lines = text::split_lines(&format!("[{t}]"));
+            // Drawn `font-style="italic"` (measured upright, as `calculateTextWidth`
+            // does).
+            let lines = text::balance_marks(text::split_lines(&format!(
+                "{}[{t}]{}",
+                text::mark::ITALIC_ON,
+                text::mark::ITALIC_OFF
+            )));
             rel_els.push(tspan_lines(
                 &lines,
                 x + lw.width.max(tw.width) / 2.0,
@@ -2445,6 +2475,49 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
             && (a.h - b.3).abs() < 0.01
     }
 
+    /// A boundary's `$sprite` reserves 48px above its label (nothing is drawn); a
+    /// named attribute in the type slot leaves the type unset, a positional
+    /// sprite is dropped. View boxes from mermaid 12.3.0.
+    #[test]
+    fn boundary_sprites_reserve_room_above_the_label() {
+        let vb = |src: &str| scene(src).view_box;
+        let node = |args: &str| {
+            vb(&format!(
+                "C4Deployment\nDeployment_Node({args}) {{\n  Container(a, \"A\", \"Rust\")\n}}"
+            ))
+        };
+        let system =
+            "C4Context\nSystem_Boundary(b, \"Bound\", $sprite=\"users\") {\n  System(a, \"A\")\n}";
+        assert!(
+            close(vb(system), (0.0, -10.0, 616.0, 503.0)),
+            "{:?}",
+            vb(system)
+        );
+        let plain = "C4Context\nSystem_Boundary(b, \"Bound\") {\n  System(a, \"A\")\n}";
+        assert!(close(vb(plain), (0.0, -10.0, 616.0, 455.0)));
+        let positional = node("n, \"Node\", \"Ubuntu\", \"desc\", \"ubuntu\"");
+        assert!(
+            close(positional, (0.0, -10.0, 616.0, 489.0)),
+            "{positional:?}"
+        );
+        let in_type_slot = node("n, \"Node\", $sprite=\"ubuntu\"");
+        assert!(
+            close(in_type_slot, (0.0, -10.0, 616.0, 482.0)),
+            "{in_type_slot:?}"
+        );
+        let typed = node("n, \"Node\", \"Ubuntu\", $sprite=\"ubuntu\"");
+        assert!(close(typed, (0.0, -10.0, 616.0, 503.0)), "{typed:?}");
+        let empty_type = vb("C4Context\nBoundary(b, \"Bound\", \"\") {\n  System(a, \"A\")\n}");
+        assert!(
+            close(empty_type, (0.0, -10.0, 616.0, 434.0)),
+            "{empty_type:?}"
+        );
+        let updated = vb(
+            "C4Context\nBoundary(b, \"Bound\") {\n  System(a, \"A\")\n}\nUpdateElementStyle(b, $sprite=\"x\")",
+        );
+        assert!(close(updated, (0.0, -10.0, 616.0, 503.0)), "{updated:?}");
+    }
+
     #[test]
     fn gallery_diagrams_match_mermaids_view_box() {
         // mermaid 12.3 in mmdc's 800px-wide headless screen.
@@ -2478,8 +2551,20 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         );
         let t = texts(&s);
         let label = t.iter().find(|t| t.lines == ["HHHH"]).unwrap();
-        let techn = t.iter().find(|t| t.lines == ["[HHHH]"]).unwrap();
+        let techn = t
+            .iter()
+            .find(|t| t.lines.iter().map(|l| text::plain(l)).eq(["[HHHH]"]))
+            .unwrap();
         assert_eq!((label.y, techn.y), (295.0, 312.0));
+        // The technology is italic.
+        assert_eq!(
+            text::styled_runs(&techn.lines[0], false),
+            [text::StyledRun {
+                text: "[HHHH]".into(),
+                bold: false,
+                italic: true
+            }]
+        );
         assert!((label.x - techn.x).abs() < 1e-9 && label.x > 258.0);
         // Boundary title: bold label at Y = 8, type 5px under its 17px box.
         let s = scene("C4Context\nBoundary(b, \"HHHH\", \"HHHH\") {\n  System(a, \"A\")\n}");

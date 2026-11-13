@@ -421,6 +421,133 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
         * font_size
 }
 
+/// Horizontal ink extents (`xMin`, `xMax`) of ASCII 0x21..=0x7E in 1/2048 em:
+/// Liberation Sans' (`glyf`), the metric-compatible Arial the browser falls back
+/// to. Advance widths are [`ARIAL`]'s.
+const ARIAL_INK: [(i16, i16); 94] = [
+    (185, 383),
+    (87, 640),
+    (9, 1129),
+    (22, 1106),
+    (73, 1748),
+    (72, 1334),
+    (104, 288),
+    (127, 670),
+    (12, 555),
+    (33, 765),
+    (100, 1095),
+    (184, 385),
+    (91, 591),
+    (187, 382),
+    (0, 569),
+    (80, 1059),
+    (156, 1039),
+    (103, 1036),
+    (78, 1049),
+    (47, 1079),
+    (82, 1053),
+    (104, 1049),
+    (105, 1036),
+    (89, 1050),
+    (96, 1042),
+    (187, 382),
+    (184, 385),
+    (101, 1096),
+    (100, 1095),
+    (101, 1096),
+    (84, 1063),
+    (161, 1902),
+    (4, 1362),
+    (168, 1258),
+    (104, 1401),
+    (168, 1381),
+    (168, 1278),
+    (168, 1169),
+    (103, 1440),
+    (168, 1312),
+    (189, 380),
+    (32, 872),
+    (168, 1343),
+    (168, 1071),
+    (168, 1538),
+    (168, 1312),
+    (97, 1495),
+    (168, 1258),
+    (97, 1495),
+    (168, 1384),
+    (93, 1272),
+    (46, 1204),
+    (158, 1321),
+    (9, 1357),
+    (9, 1926),
+    (46, 1323),
+    (45, 1321),
+    (65, 1187),
+    (146, 553),
+    (0, 569),
+    (16, 423),
+    (10, 951),
+    (-31, 1162),
+    (106, 530),
+    (87, 1139),
+    (132, 1053),
+    (87, 970),
+    (86, 1007),
+    (87, 1048),
+    (29, 572),
+    (86, 1007),
+    (142, 1006),
+    (137, 317),
+    (-50, 317),
+    (138, 1027),
+    (138, 318),
+    (136, 1571),
+    (136, 1006),
+    (86, 1053),
+    (132, 1053),
+    (86, 1008),
+    (136, 648),
+    (57, 950),
+    (31, 554),
+    (133, 1003),
+    (7, 1017),
+    (-3, 1484),
+    (23, 1002),
+    (5, 1020),
+    (83, 922),
+    (34, 648),
+    (183, 349),
+    (34, 647),
+    (92, 1104),
+];
+
+/// Width of an SVG `<text>`'s `getBBox()` in Chromium (regular weight): the run's
+/// advance (kerned, rounded up to 1/64 px) united with each glyph's ink box,
+/// which Skia rounds out to whole pixels from the glyph's origin. So a label
+/// usually ends on its last glyph's ink rounded up (`e` at 16px: 9, not its
+/// 8.898 advance). White space collapses as SVG's does, and none takes room at
+/// either end. Characters outside ASCII count by their advance alone.
+pub fn svg_bbox_width(text: &str, font_size: f64) -> f64 {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut x = 0.0f64;
+    let (mut left, mut right) = (0.0f64, 0.0f64);
+    let mut prev: Option<char> = None;
+    for c in text.chars().filter(|&c| !mark::is_mark(c)) {
+        if let Some(p) = prev {
+            x += kerning_em(p, c, false) * font_size;
+        }
+        if let 0x21..=0x7E = c as u32 {
+            let (lo, hi) = ARIAL_INK[(c as u32 - 0x21) as usize];
+            let ink = |u: i16| f64::from(u) / 2048.0 * font_size;
+            left = left.min(x + (ink(lo) + 0.005).floor());
+            right = right.max(x + (ink(hi) - 0.005).ceil());
+        }
+        x += char_width_em(c, false) * font_size;
+        prev = Some(c);
+    }
+    right.max(layout_unit_ceil(x)) - left
+}
+
 /// `w` rounded up to Chromium's layout unit (1/64 px), as an HTML box's
 /// width from its text is (a hair of float error is not rounded up).
 pub fn layout_unit_ceil(w: f64) -> f64 {
@@ -1169,6 +1296,35 @@ mod tests {
         // SVG text is measured as is.
         let svg = TextBlock::svg(vec!["some edge".into()], 14.0, false);
         assert!(svg.width < 69.28125);
+    }
+
+    #[test]
+    fn svg_bbox_width_follows_chromium_get_bbox() {
+        // Chromium 16px arial `getBBox().width`.
+        for (t, w) in [
+            ("true", 27.671875),
+            ("false", 33.8984375),
+            ("element", 57.4765625),
+            ("member", 59.3515625),
+            ("{", 6.0),
+            (",", 4.453125),
+            ("e ", 9.0),
+            ("  a  b", 22.34375),
+            ("AVx", 28.15625),
+            ("Tox", 24.90625),
+            ("WW", 31.1015625),
+            ("u", 8.90625),
+        ] {
+            assert!(
+                (svg_bbox_width(t, 16.0) - w).abs() < 1e-6,
+                "{t}: {}",
+                svg_bbox_width(t, 16.0)
+            );
+        }
+        // Other sizes: a glyph's ink is rounded out at its own size.
+        assert!((svg_bbox_width("F", 14.0) - 8.5625).abs() < 1e-9);
+        assert!((svg_bbox_width("W", 18.0) - 17.0).abs() < 1e-9);
+        assert!((svg_bbox_width("/", 18.0) - 5.015625).abs() < 1e-9);
     }
 
     #[test]
