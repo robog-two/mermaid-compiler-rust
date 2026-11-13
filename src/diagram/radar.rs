@@ -8,7 +8,6 @@ use crate::diagram::xychart::{
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::TextBlock;
 use crate::theme::Palette;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,14 +324,9 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let curve_opacity = 0.5;
 
     let total_w = width + ml + mr;
-    let has_title = radar.title.as_ref().is_some_and(|t| !t.is_empty());
-    let title_band = if has_title {
-        pal.font_size * 1.5 + 10.0
-    } else {
-        0.0
-    };
-    let total_h = height + mt + mb + title_band;
-    let center = Point::new(ml + width / 2.0, mt + title_band + height / 2.0);
+    // The title takes no room: mermaid puts it on the chart's top edge.
+    let total_h = height + mt + mb;
+    let center = Point::new(ml + width / 2.0, mt + height / 2.0);
     let radius = width.min(height) / 2.0;
     let n = radar.axes.len();
     let angle = |i: usize| -> f64 {
@@ -477,16 +471,21 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
 
     // Title.
     if let Some(t) = radar.title.as_ref().filter(|t| !t.is_empty()) {
-        let tb = TextBlock::new(vec![t.clone()], pal.font_size, false);
-        let txt = Text::centered(
-            Point::new(center.x, mt / 2.0 + tb.height / 2.0),
-            &tb.lines,
-            pal.font_size,
-            tb.line_height,
+        // radarRenderer: at (0, -totalHeight / 2) from the centre, i.e. on the
+        // svg's top edge, `dominant-baseline: hanging`; the viewBox does not grow
+        // for it, so its accents reach the edge as in mermaid.
+        let fs = pal.font_size;
+        let txt = Text {
+            x: center.x,
+            y: center.y - total_h / 2.0 + 0.72 * fs,
+            lines: vec![t.clone()],
+            line_height: fs * 1.5,
+            font_size: fs,
+            bold: false,
+            anchor: crate::scene::Anchor::Middle,
             // `.radarTitle` sets only `color`; the SVG text inherits `fill: textColor`.
-            &pal.text_color,
-        );
-        bounds.add_rect(text_bounds(&txt));
+            fill: pal.text_color.clone(),
+        };
         els.push(Element::classed_text(txt, "radarTitle"));
     }
 
@@ -565,5 +564,17 @@ mod tests {
         let pal = cfg.palette();
         let s = render("radar-beta\naxis a,b,c\ncurve x{1,2,3}", None, &cfg, &pal).unwrap();
         assert_eq!(s.kind, DiagramKind::Radar);
+    }
+
+    #[test]
+    fn title_takes_no_room() {
+        // mermaid 12.3.0: the title sits on the top edge of the fixed-size chart
+        // (`dominant-baseline: hanging` at y 0); the drawing does not move.
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let src = "radar-beta\naxis a,b,c\ncurve x{1,2,3}";
+        let plain = render(src, None, &cfg, &pal).unwrap();
+        let titled = render(src, Some("Grades".into()), &cfg, &pal).unwrap();
+        assert_eq!(plain.view_box, titled.view_box);
     }
 }
