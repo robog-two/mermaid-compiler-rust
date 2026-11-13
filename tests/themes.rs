@@ -256,7 +256,7 @@ fn rounded_node_radius_follows_the_theme() {
 fn er_table_lines_take_the_neo_stroke_width() {
     // `[data-look="neo"].node path { stroke-width: strokeWidth }` reaches the
     // rows' and columns' lines as well as the outline (2px in mermaid 12.3.0's
-    // default theme); the classic look keeps them at 1px.
+    // default theme); in the classic look they keep erBox's rough.js 1.3px.
     let src = "erDiagram\n  CUSTOMER {\n    string id PK\n    string name\n  }\n";
     let widths = |src: &str| {
         let r = render::render(src, &MermaidConfig::default()).expect("renders");
@@ -272,7 +272,7 @@ fn er_table_lines_take_the_neo_stroke_width() {
     let neo = widths(src);
     assert!(!neo.is_empty() && neo.iter().all(|w| w == "2"), "{neo:?}");
     let classic = widths(&format!("---\nconfig:\n  look: classic\n---\n{src}"));
-    assert!(classic.iter().all(|w| w == "1"), "{classic:?}");
+    assert!(classic.iter().all(|w| w == "1.3"), "{classic:?}");
 }
 
 #[test]

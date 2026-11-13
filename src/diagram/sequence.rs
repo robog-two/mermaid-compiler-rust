@@ -3,9 +3,9 @@
 use crate::color;
 use crate::config::{Look, SequenceConfig};
 use crate::error::{Error, Result};
-use crate::geom::{self, Bounds, PathCmd, Point, Rect};
+use crate::geom::{self, PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::TextBlock;
+use crate::text::{label_lines, svg_line_box};
 use crate::theme::{ColorSlot, Palette, SlotColors};
 use std::collections::HashMap;
 
@@ -432,617 +432,976 @@ fn parse_message(s: &str, b: &mut Builder) -> Option<Message> {
 }
 
 // ---------------------------------------------------------------------------
-// Layout + render
+// Layout + render: a port of mermaid's `sequenceRenderer.ts` / `svgDraw.js` /
+// `actorBands.ts` (12.3.0) for the constructs this parser supports.
 // ---------------------------------------------------------------------------
 
-struct Frame {
+/// `activationWidth`.
+const ACTIVATION_W: f64 = 10.0;
+/// `labelBoxHeight` (sequence config default).
+const LABEL_BOX_H: f64 = 20.0;
+/// `labelBoxWidth` (sequence config default).
+const LABEL_BOX_W: f64 = 50.0;
+/// `bottomMarginAdj`.
+const BOTTOM_MARGIN_ADJ: f64 = 1.0;
+/// actorBands.ts: the glyph band (a 22 unit icon plus its underline), and the air
+/// between glyph and label and between label and lifeline datum.
+const GLYPH_BAND_H: f64 = 44.0;
+const GLYPH_LABEL_GAP: f64 = 6.0;
+const LABEL_LIFELINE_GAP: f64 = 6.0;
+/// svgDraw.js: the stick figure spans `ACTOR_GLYPH_TOP..ACTOR_GLYPH_BOTTOM` below
+/// its classic box top, its arms `ACTOR_TYPE_WIDTH` wide.
+const ACTOR_GLYPH_TOP: f64 = -5.0;
+const ACTOR_GLYPH_BOTTOM: f64 = 60.0;
+const ACTOR_TYPE_W: f64 = 36.0;
+/// The autonumber marker's circle radius, before the marker's `strokeWidth`
+/// scaling (the stylesheet's bare `line { stroke-width: 2px }` doubles it).
+const SEQ_NUM_R: f64 = 6.0;
+/// Alphabetic-baseline offsets (in em) of `dominant-baseline: middle` (half the
+/// x-height) and `central` (the em box centre).
+const BASELINE_MIDDLE: f64 = 0.27;
+const BASELINE_CENTRAL: f64 = 0.35;
+
+/// JavaScript's `Math.round` (halves round up, also below zero).
+fn js_round(x: f64) -> f64 {
+    (x + 0.5).floor()
+}
+
+/// `utils.calculateTextDimensions`: the widest line's rounded width and the sum
+/// of each line's rounded bounding-box height.
+fn text_dims(lines: &[String], font_size: f64) -> (f64, f64) {
+    if lines.iter().all(|l| l.is_empty()) && lines.len() <= 1 {
+        return (0.0, 0.0);
+    }
+    let w = lines
+        .iter()
+        .map(|l| js_round(crate::text::line_width(l, font_size, false)))
+        .fold(0.0, f64::max);
+    let h = lines.iter().map(|l| svg_line_box(font_size, l)).sum();
+    (w, h)
+}
+
+/// One `<text>` line with `text-anchor: middle`, its attribute `y` turned into
+/// the alphabetic baseline by `shift` em.
+fn line_text(x: f64, y: f64, shift: f64, line: &str, font_size: f64, fill: &Color) -> Text {
+    Text {
+        x,
+        y: y + shift * font_size,
+        lines: vec![line.to_string()],
+        line_height: font_size,
+        font_size,
+        bold: false,
+        anchor: Anchor::Middle,
+        fill: fill.clone(),
+    }
+}
+
+/// svgDraw `drawText` with `valign: center` and a positive `textMargin`: one
+/// `<text>` per line at `round(y + (2·above + margin) / 2)`, where `above` is the
+/// height of the lines before it. `dy1em` adds the `dy="1em"` notes and messages
+/// carry; `shift` is the line's dominant-baseline offset.
+#[allow(clippy::too_many_arguments)]
+fn draw_text_lines(
+    out: &mut Vec<Element>,
+    class: &str,
+    x: f64,
+    y: f64,
+    margin: f64,
+    lines: &[String],
+    font_size: f64,
+    fill: &Color,
+    dy1em: bool,
+    shift: f64,
+) {
+    let mut above = 0.0;
+    for line in lines {
+        let ty = js_round(y + (2.0 * above + margin) / 2.0) + if dy1em { font_size } else { 0.0 };
+        out.push(Element::classed_text(
+            line_text(x, ty, shift, line, font_size, fill),
+            class,
+        ));
+        above += svg_line_box(font_size, line);
+    }
+}
+
+/// `byTspan`: lines centred on `cy` (`dominant-baseline: central`), 1em apart.
+fn tspan_lines(cx: f64, cy: f64, lines: &[String], font_size: f64, fill: &Color) -> Vec<Text> {
+    let n = lines.len() as f64;
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let dy = i as f64 * font_size - font_size * (n - 1.0) / 2.0;
+            line_text(cx, cy + dy, BASELINE_CENTRAL, l, font_size, fill)
+        })
+        .collect()
+}
+
+/// A participant as the layout sees it (`actor.x`, `width`, `height`, `margin`).
+struct ActorBox {
+    x: f64,
+    width: f64,
+    height: f64,
+    margin: Option<f64>,
+    lines: Vec<String>,
+    text_h: f64,
+}
+
+impl ActorBox {
+    fn center(&self) -> f64 {
+        self.x + self.width / 2.0
+    }
+}
+
+/// One entry of mermaid's message list, the `+`/`-` shorthands expanded.
+#[derive(Clone, Copy)]
+enum Op<'a> {
+    Msg(&'a Message),
+    ActStart(usize),
+    ActEnd(usize),
+    Note(NotePlacement, &'a str),
+    LoopStart(BlockKind, &'a str),
+    Section(&'a str),
+    LoopEnd(BlockKind),
+    Autonumber(bool, Option<u32>, Option<u32>),
+}
+
+fn ops_of(d: &SequenceDiagram) -> Vec<Op<'_>> {
+    let mut ops = Vec::new();
+    let mut open = Vec::new();
+    for ev in &d.events {
+        match ev {
+            Event::Message(m) => {
+                ops.push(Op::Msg(m));
+                match m.activation {
+                    Some(true) => ops.push(Op::ActStart(m.to)),
+                    Some(false) => ops.push(Op::ActEnd(m.from)),
+                    None => {}
+                }
+            }
+            Event::Note { placement, text } => ops.push(Op::Note(*placement, text)),
+            Event::Activate(a) => ops.push(Op::ActStart(*a)),
+            Event::Deactivate(a) => ops.push(Op::ActEnd(*a)),
+            Event::BlockStart { kind, label } => {
+                open.push(*kind);
+                ops.push(Op::LoopStart(*kind, label));
+            }
+            Event::BlockSection { label } => ops.push(Op::Section(label)),
+            Event::BlockEnd => ops.push(Op::LoopEnd(open.pop().unwrap_or(BlockKind::Loop))),
+            Event::Autonumber { on, start, step } => ops.push(Op::Autonumber(*on, *start, *step)),
+        }
+    }
+    ops
+}
+
+/// `buildMessageModel`.
+#[derive(Clone)]
+struct MsgModel {
+    startx: f64,
+    stopx: f64,
+    width: f64,
+    from_bounds: f64,
+    to_bounds: f64,
+}
+
+/// `buildNoteModel`.
+#[derive(Clone)]
+struct NoteModel {
+    startx: f64,
+    width: f64,
+    lines: Vec<String>,
+}
+
+/// An activation bar: `bounds.activations` entries.
+struct Activation {
+    actor: usize,
+    startx: f64,
+    stopx: f64,
+    starty: f64,
+    /// Index of its (initially empty) anchor group in the drawing.
+    slot: usize,
+}
+
+/// A frame (`loop`, `alt`, ..., `rect`) being laid out: `bounds.sequenceItems`.
+struct LoopModel {
     kind: BlockKind,
-    label: String,
-    top: f64,
-    sections: Vec<(f64, String)>,
-    min_x: f64,
-    max_x: f64,
-    color: Option<String>,
+    startx: Option<f64>,
+    starty: f64,
+    stopx: Option<f64>,
+    stopy: Option<f64>,
+    title: Vec<String>,
+    sections: Vec<(f64, Vec<String>)>,
+    fill: Option<String>,
+}
+
+/// `bounds`: the running vertical position and the extents of the drawing, of
+/// the open frames and of the open activations.
+struct Bounds {
+    startx: Option<f64>,
+    starty: Option<f64>,
+    stopx: Option<f64>,
+    stopy: Option<f64>,
+    vpos: f64,
+    items: Vec<LoopModel>,
+    acts: Vec<Activation>,
+    box_margin: f64,
+}
+
+fn upd(slot: &mut Option<f64>, v: f64, f: fn(f64, f64) -> f64) {
+    *slot = Some(slot.map_or(v, |o| f(v, o)));
+}
+
+impl Bounds {
+    fn bump(&mut self, v: f64) {
+        self.vpos += v;
+        upd(&mut self.stopy, self.vpos, f64::max);
+    }
+
+    /// `bounds.insert`, with `updateBounds`' quirk: frame `i` of `n` open ones grows
+    /// by `(n - i)·boxMargin`, activation `j` by `-j·boxMargin`.
+    fn insert(&mut self, x1: f64, y1: f64, x2: f64, y2: f64) {
+        let (sx, ex) = (x1.min(x2), x1.max(x2));
+        let (sy, ey) = (y1.min(y2), y1.max(y2));
+        upd(&mut self.startx, sx, f64::min);
+        upd(&mut self.starty, sy, f64::min);
+        upd(&mut self.stopx, ex, f64::max);
+        upd(&mut self.stopy, ey, f64::max);
+        let bm = self.box_margin;
+        let len = self.items.len() as f64;
+        let mut cnt = 0.0;
+        for item in self.items.iter_mut() {
+            cnt += 1.0;
+            let n = len - cnt + 1.0;
+            item.starty = item.starty.min(sy - n * bm);
+            upd(&mut item.stopy, ey + n * bm, f64::max);
+            upd(&mut self.startx, sx - n * bm, f64::min);
+            upd(&mut self.stopx, ex + n * bm, f64::max);
+            upd(&mut item.startx, sx - n * bm, f64::min);
+            upd(&mut item.stopx, ex + n * bm, f64::max);
+            upd(&mut self.starty, sy - n * bm, f64::min);
+            upd(&mut self.stopy, ey + n * bm, f64::max);
+        }
+        for act in self.acts.iter_mut() {
+            cnt += 1.0;
+            let n = len - cnt + 1.0;
+            act.starty = act.starty.min(sy - n * bm);
+            upd(&mut self.startx, sx - n * bm, f64::min);
+            upd(&mut self.stopx, ex + n * bm, f64::max);
+        }
+    }
+}
+
+/// `activationBounds`: the actor's centre ±1, widened by its open activations.
+fn activation_bounds(a: usize, actors: &[ActorBox], acts: &[(usize, f64, f64)]) -> (f64, f64) {
+    let c = actors[a].center();
+    acts.iter()
+        .filter(|x| x.0 == a)
+        .fold((c - 1.0, c + 1.0), |(l, r), x| (l.min(x.1), r.max(x.2)))
+}
+
+/// Where a new activation of `a` starts horizontally (`newActivation`).
+fn activation_x(a: usize, actors: &[ActorBox], stacked: usize) -> f64 {
+    actors[a].center() + (stacked as f64 - 1.0) * ACTIVATION_W / 2.0
+}
+
+fn build_message_model(
+    m: &Message,
+    actors: &[ActorBox],
+    acts: &[(usize, f64, f64)],
+    cfg: &SequenceConfig,
+) -> MsgModel {
+    let (from_l, from_r) = activation_bounds(m.from, actors, acts);
+    let (to_l, to_r) = activation_bounds(m.to, actors, acts);
+    let right = from_l <= to_l;
+    let mut startx = if right { from_r } else { from_l };
+    let mut stopx = if right { to_l } else { to_r };
+    let open = m.head == MsgHead::None;
+    let adjust = |v: f64| if right { -v } else { v };
+    if cfg.look == Look::Neo {
+        if !open {
+            stopx += adjust(3.0);
+        }
+        if m.bidirectional {
+            startx -= adjust(3.0);
+        }
+    }
+    let to_activation = (to_l - to_r).abs() > 2.0;
+    if m.from == m.to {
+        stopx = startx;
+    } else {
+        if m.activation == Some(true) && !to_activation {
+            stopx += adjust(ACTIVATION_W / 2.0 - 1.0);
+        }
+        if !open {
+            stopx += adjust(3.0);
+        }
+        if m.bidirectional {
+            startx -= adjust(3.0);
+        }
+    }
+    let lines = label_lines(&m.text);
+    let (tw, _) = text_dims(&lines, cfg.message_font_size);
+    let all = [from_l, from_r, to_l, to_r];
+    MsgModel {
+        startx,
+        stopx,
+        width: (tw + 2.0 * cfg.wrap_padding)
+            .max((startx - stopx).abs() + 2.0 * cfg.wrap_padding)
+            .max(cfg.width),
+        from_bounds: all.iter().copied().fold(f64::INFINITY, f64::min),
+        to_bounds: all.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    }
+}
+
+fn build_note_model(
+    placement: NotePlacement,
+    text: &str,
+    actors: &[ActorBox],
+    cfg: &SequenceConfig,
+) -> NoteModel {
+    let lines = label_lines(text);
+    let (tw, _) = text_dims(&lines, cfg.note_font_size);
+    let (from, to) = match placement {
+        NotePlacement::LeftOf(a) | NotePlacement::RightOf(a) => (a, a),
+        NotePlacement::Over(a, b) => (a, b),
+    };
+    let (fa, ta) = (&actors[from], &actors[to]);
+    let need = tw + 2.0 * cfg.note_margin;
+    let (startx, width) = match placement {
+        NotePlacement::RightOf(_) => {
+            let w = (fa.width / 2.0 + ta.width / 2.0).max(need);
+            (fa.x + (fa.width + cfg.actor_margin) / 2.0, w)
+        }
+        NotePlacement::LeftOf(_) => {
+            let w = (fa.width / 2.0 + ta.width / 2.0).max(need);
+            (fa.x - w + (fa.width - cfg.actor_margin) / 2.0, w)
+        }
+        NotePlacement::Over(..) if from == to => {
+            let w = fa.width.max(cfg.width).max(need);
+            (fa.x + (fa.width - w) / 2.0, w)
+        }
+        NotePlacement::Over(..) => {
+            let w = (fa.center() - ta.center()).abs() + cfg.actor_margin;
+            let sx = if fa.x < ta.x {
+                fa.center() - cfg.actor_margin / 2.0
+            } else {
+                ta.center() - cfg.actor_margin / 2.0
+            };
+            (sx, w)
+        }
+    };
+    NoteModel {
+        startx,
+        width,
+        lines,
+    }
 }
 
 /// Render a sequence diagram.
 pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene {
+    let neo = cfg.look == Look::Neo;
     let n = d.participants.len();
-    let font = cfg.message_font_size;
-    let labels: Vec<TextBlock> = d
+    let bm = cfg.box_margin;
+    let ops = ops_of(d);
+
+    // --- calculateActorMargins -------------------------------------------
+    let mut actors: Vec<ActorBox> = d
         .participants
         .iter()
-        .map(|p| TextBlock::label(&p.label, cfg.actor_font_size))
+        .map(|p| {
+            let lines = label_lines(&p.label);
+            let (tw, th) = text_dims(&lines, cfg.actor_font_size);
+            let height = if neo {
+                (GLYPH_BAND_H + GLYPH_LABEL_GAP + th + LABEL_LIFELINE_GAP).max(cfg.height)
+            } else {
+                cfg.height
+            };
+            ActorBox {
+                x: 0.0,
+                width: cfg.width.max(tw + 2.0 * cfg.wrap_padding),
+                height,
+                margin: None,
+                lines,
+                text_h: th,
+            }
+        })
         .collect();
-    let widths: Vec<f64> = labels
-        .iter()
-        .map(|l| cfg.width.max(l.width + 2.0 * cfg.wrap_padding))
-        .collect();
-    let actor_h = labels
-        .iter()
-        .map(|l| l.height + 2.0 * cfg.box_margin)
-        .fold(cfg.height, f64::max);
+    let row_h = actors.iter().map(|a| a.height).fold(cfg.height, f64::max);
 
-    // Horizontal spacing.
-    let mut gaps: Vec<f64> = (0..n.saturating_sub(1))
-        .map(|i| widths[i] / 2.0 + cfg.actor_margin + widths[i + 1] / 2.0)
-        .collect();
-    let note_width = |text: &str| {
-        cfg.width
-            .max(TextBlock::label(text, cfg.note_font_size).width + 2.0 * cfg.note_margin)
-    };
-    let mut spans: Vec<(usize, usize, f64)> = Vec::new();
-    for ev in &d.events {
-        match ev {
-            Event::Message(m) if m.from != m.to => {
-                let mut w = TextBlock::label(&m.text, font).width + 2.0 * cfg.wrap_padding;
-                // mermaid sizes the margin between neighbours as message + actorMargin.
-                if m.from.abs_diff(m.to) == 1 {
-                    w += cfg.actor_margin;
-                }
-                spans.push((m.from.min(m.to), m.from.max(m.to), w));
+    // getMaxMessageWidthPerActor
+    let mut max_w: Vec<Option<f64>> = vec![None; n];
+    let mut widen = |i: usize, w: f64| max_w[i] = Some(max_w[i].map_or(w, |o| o.max(w)));
+    for op in &ops {
+        let (from, to, w, note) = match *op {
+            Op::Msg(m) => {
+                let (tw, _) = text_dims(&label_lines(&m.text), cfg.message_font_size);
+                (m.from, m.to, tw + 2.0 * cfg.wrap_padding, None)
             }
-            Event::Message(m) => {
-                let w = TextBlock::label(&m.text, font).width;
-                if m.from + 1 < n {
-                    spans.push((
-                        m.from,
-                        m.from + 1,
-                        w / 2.0 + 60.0 + widths[m.from + 1] / 2.0,
-                    ));
-                }
+            Op::Note(p, text) => {
+                let (tw, _) = text_dims(&label_lines(text), cfg.note_font_size);
+                let (f, t) = match p {
+                    NotePlacement::LeftOf(a) | NotePlacement::RightOf(a) => (a, a),
+                    NotePlacement::Over(a, b) => (a, b),
+                };
+                (f, t, tw + 2.0 * cfg.wrap_padding, Some(p))
             }
-            Event::Note {
-                placement: NotePlacement::RightOf(a),
-                text,
-            } if a + 1 < n => {
-                spans.push((
-                    *a,
-                    a + 1,
-                    25.0 + note_width(text) + 10.0 + widths[a + 1] / 2.0 - 0.0,
-                ));
-            }
-            Event::Note {
-                placement: NotePlacement::LeftOf(a),
-                text,
-            } if *a > 0 => {
-                spans.push((
-                    a - 1,
-                    *a,
-                    25.0 + note_width(text) + 10.0 + widths[a - 1] / 2.0,
-                ));
-            }
-            Event::Note {
-                placement: NotePlacement::Over(a, b),
-                text,
-            } if a != b => {
-                spans.push(((*a).min(*b), (*a).max(*b), note_width(text) - 50.0));
-            }
+            _ => continue,
+        };
+        let prev = to.checked_sub(1);
+        let next = (to + 1 < n).then_some(to + 1);
+        match note {
+            Some(NotePlacement::LeftOf(_)) if prev.is_none() => continue,
+            Some(NotePlacement::RightOf(_)) if next.is_none() => continue,
             _ => {}
         }
-    }
-    spans.sort_by_key(|s| s.1 - s.0);
-    for (lo, hi, need) in spans {
-        let have: f64 = gaps[lo..hi].iter().sum();
-        if have < need {
-            gaps[hi - 1] += need - have;
+        if note.is_none() && Some(from) == next {
+            widen(to, w);
+        } else if note.is_none() && Some(from) == prev {
+            widen(from, w);
+        } else if note.is_none() && from == to {
+            widen(from, w / 2.0);
+        } else if let Some(NotePlacement::RightOf(_)) = note {
+            widen(from, w);
+        } else if let Some(NotePlacement::LeftOf(_)) = note {
+            if let Some(p) = prev {
+                widen(p, w);
+            }
+        } else if let Some(NotePlacement::Over(..)) = note {
+            if let Some(p) = prev {
+                widen(p, w / 2.0);
+            }
+            if next.is_some() {
+                widen(from, w / 2.0);
+            }
         }
     }
+    for i in 0..n {
+        let Some(w) = max_w[i] else { continue };
+        let next_half = if i + 1 < n {
+            actors[i + 1].width / 2.0
+        } else {
+            0.0
+        };
+        actors[i].margin =
+            Some((w + cfg.actor_margin - actors[i].width / 2.0 - next_half).max(cfg.actor_margin));
+    }
 
-    // Participant boxes (`box ... end`), as in mermaid's `calculateActorMargins`
-    // and `addActorRenderingData`: each box gets an inner `margin`
-    // (`boxTextMargin`, more if its title is wider than its members) on both
-    // sides, and `boxMargin` more separates it from what follows.
+    // Boxes: an inner margin (`boxTextMargin`, more for a wide title).
     let box_of: Vec<Option<usize>> = (0..n)
         .map(|i| d.boxes.iter().position(|b| b.members.contains(&i)))
         .collect();
-    let box_title_h = d
+    let box_lines: Vec<Vec<String>> = d.boxes.iter().map(|b| label_lines(&b.label)).collect();
+    let box_text_max_h = box_lines
+        .iter()
+        .map(|l| text_dims(l, cfg.message_font_size).1)
+        .fold(0.0, f64::max);
+    let box_margins: Vec<f64> = d
         .boxes
         .iter()
-        .filter(|b| !b.label.is_empty())
-        .map(|b| TextBlock::label(&b.label, font).height)
-        .fold(0.0f64, f64::max);
-    let box_inner: Vec<f64> = d
-        .boxes
-        .iter()
-        .map(|b| {
-            let total: f64 = b
+        .zip(&box_lines)
+        .map(|(b, lines)| {
+            let total = b
                 .members
                 .iter()
-                .map(|&m| {
-                    let margin = if m + 1 < n {
-                        gaps[m] - widths[m] / 2.0 - widths[m + 1] / 2.0
-                    } else {
-                        cfg.actor_margin
-                    };
-                    widths[m] + margin
-                })
+                .map(|&m| actors[m].width + actors[m].margin.unwrap_or(0.0))
                 .sum::<f64>()
-                + 8.0 * cfg.box_margin
+                + 8.0 * bm
                 - 2.0 * cfg.box_text_margin;
-            let title_w = if b.label.is_empty() {
-                0.0
-            } else {
-                TextBlock::label(&b.label, font).width
-            };
-            let min_w = total.max(title_w + 2.0 * cfg.wrap_padding);
-            cfg.box_text_margin + (min_w - total).max(0.0) / 2.0
+            let (tw, _) = text_dims(lines, cfg.message_font_size);
+            let min_w = total.max(tw + 2.0 * cfg.wrap_padding);
+            cfg.box_text_margin
+                + if total < min_w {
+                    (min_w - total) / 2.0
+                } else {
+                    0.0
+                }
         })
         .collect();
-    for i in 0..n.saturating_sub(1) {
-        if box_of[i] != box_of[i + 1] {
-            if let Some(b) = box_of[i] {
-                gaps[i] += cfg.box_margin + box_inner[b];
-            }
-            if let Some(c) = box_of[i + 1] {
-                gaps[i] += box_inner[c];
-            }
+
+    let mut b = Bounds {
+        startx: None,
+        starty: None,
+        stopx: None,
+        stopy: None,
+        vpos: 0.0,
+        items: Vec::new(),
+        acts: Vec::new(),
+        box_margin: bm,
+    };
+    if !d.boxes.is_empty() {
+        b.bump(bm);
+        if d.boxes.iter().any(|x| !x.label.is_empty()) {
+            b.bump(box_text_max_h);
         }
     }
-    let lead = box_of
-        .first()
-        .copied()
-        .flatten()
-        .map_or(0.0, |b| box_inner[b]);
-    let has_box_labels = d.boxes.iter().any(|b| !b.label.is_empty());
-    let title_band = if d.title.as_ref().is_some_and(|t| !t.is_empty()) {
-        40.0
-    } else {
-        0.0
-    };
-    // Boxes start `boxMargin / 2` above the diagram top; actors follow after
-    // `boxMargin` plus the tallest box title.
-    let box_band = if d.boxes.is_empty() {
-        0.0
-    } else if has_box_labels {
-        1.5 * cfg.box_margin + box_title_h
-    } else {
-        1.5 * cfg.box_margin
-    };
-    let top = cfg.diagram_margin_y + title_band + box_band;
-    let mut xs = Vec::with_capacity(n);
-    let mut x = cfg.diagram_margin_x + lead + widths.first().copied().unwrap_or(0.0) / 2.0;
+
+    // --- addActorRenderingData ------------------------------------------
+    let mut box_x = vec![0.0; d.boxes.len()];
+    let mut box_w = vec![0.0; d.boxes.len()];
+    let (mut prev_width, mut prev_margin) = (0.0, 0.0);
+    let mut prev_box: Option<usize> = None;
+    let actor_top = b.vpos;
     for i in 0..n {
-        if i > 0 {
-            x += gaps[i - 1];
+        let bx = box_of[i];
+        if let Some(p) = prev_box.filter(|&p| Some(p) != bx) {
+            prev_margin += bm + box_margins[p];
         }
-        xs.push(x);
+        if let Some(c) = bx.filter(|&c| Some(c) != prev_box) {
+            box_x[c] = prev_width + prev_margin;
+            prev_margin += box_margins[c];
+        }
+        actors[i].height = row_h;
+        let margin = actors[i].margin.unwrap_or(cfg.actor_margin);
+        actors[i].x = prev_width + prev_margin;
+        b.insert(
+            actors[i].x,
+            0.0,
+            actors[i].x + actors[i].width,
+            actors[i].height,
+        );
+        prev_width += actors[i].width + prev_margin;
+        if let Some(c) = bx {
+            box_w[c] = prev_width + box_margins[c] - box_x[c];
+        }
+        prev_margin = margin;
+        prev_box = bx;
+    }
+    if n > 0 {
+        b.bump(row_h);
     }
 
-    let mut bounds = Bounds::default();
-    let mut background = Vec::new();
-    let mut activations_el = Vec::new();
-    let mut frames_el = Vec::new();
-    let mut messages_el = Vec::new();
-    let mut notes_el = Vec::new();
-    let mut frames: Vec<Frame> = Vec::new();
-    let mut active: Vec<Vec<f64>> = vec![Vec::new(); n];
-    let mut autonumber: Option<(u32, u32)> = None;
-    let mut cursor = top + actor_h;
-
-    let extend_frames = |frames: &mut Vec<Frame>, lo: f64, hi: f64| {
-        for f in frames.iter_mut() {
-            f.min_x = f.min_x.min(lo);
-            f.max_x = f.max_x.max(hi);
+    // --- calculateLoopBounds: message models and frame title widths -------
+    let mut msg_models: Vec<Option<MsgModel>> = vec![None; ops.len()];
+    let mut note_models: Vec<Option<NoteModel>> = vec![None; ops.len()];
+    let mut loop_widths: Vec<Option<f64>> = vec![None; ops.len()];
+    {
+        struct LoopW {
+            from: f64,
+            to: f64,
+            width: f64,
+            ops: Vec<usize>,
         }
-    };
-    let act_offset = |stack: &Vec<f64>| {
-        if stack.is_empty() {
-            0.0
-        } else {
-            5.0 + (stack.len() - 1) as f64 * 5.0
-        }
-    };
-
-    let push_activation =
-        |els: &mut Vec<Element>, a: usize, depth: usize, y0: f64, y1: f64, xs: &[f64]| {
-            let r = Rect::new(
-                xs[a] - 5.0 + depth as f64 * 5.0,
-                y0,
-                10.0,
-                (y1 - y0).max(4.0),
-            );
-            // Colour themes paint an activation in its actor's slot, falling back to
-            // `mainBkg` for the fill (svgDraw.js `drawActivation`).
-            let paint = match actor_slot(pal, a) {
-                Some(sc) => Paint::both(sc.fill.as_ref().unwrap_or(&pal.main_bkg), &sc.border, 1.0),
-                None => Paint::both(&pal.activation_bkg, &pal.activation_border, 1.0),
-            };
-            els.push(Element::classed_shape(
-                Geometry::Rect { rect: r, rx: 0.0 },
-                paint,
-                format!("activation{}", depth % 3),
-            ));
-        };
-
-    for ev in &d.events {
-        match ev {
-            Event::Autonumber { on, start, step } => {
-                autonumber = if *on {
-                    Some((start.unwrap_or(1), step.unwrap_or(1)))
-                } else {
-                    None
-                };
+        let mut all: Vec<LoopW> = Vec::new();
+        let mut stack: Vec<usize> = Vec::new();
+        let mut acts: Vec<(usize, f64, f64)> = Vec::new();
+        for (oi, op) in ops.iter().enumerate() {
+            match *op {
+                Op::LoopStart(k, _) if k != BlockKind::Rect => {
+                    all.push(LoopW {
+                        from: f64::MAX,
+                        to: f64::MIN,
+                        width: 0.0,
+                        ops: vec![oi],
+                    });
+                    stack.push(all.len() - 1);
+                }
+                Op::Section(label) if !label.is_empty() => {
+                    if let Some(&top) = stack.last() {
+                        all[top].ops.push(oi);
+                    }
+                }
+                Op::LoopEnd(k) if k != BlockKind::Rect => {
+                    stack.pop();
+                }
+                Op::ActStart(a) => {
+                    let stacked = acts.iter().filter(|x| x.0 == a).count();
+                    let x = activation_x(a, &actors, stacked);
+                    acts.push((a, x, x + ACTIVATION_W));
+                }
+                Op::ActEnd(a) => {
+                    if let Some(p) = acts.iter().rposition(|x| x.0 == a) {
+                        acts.remove(p);
+                    }
+                }
+                _ => {}
             }
-            Event::Activate(a) => active[*a].push(cursor),
-            Event::Deactivate(a) => {
-                if let Some(y0) = active[*a].pop() {
-                    push_activation(&mut activations_el, *a, active[*a].len(), y0, cursor, &xs);
-                }
-            }
-            Event::Message(m) => {
-                let block = TextBlock::label(&m.text, font);
-                let line_y = cursor + block.height + 18.0;
-                let (x1, x2) = (xs[m.from], xs[m.to]);
-                let paint = {
-                    let p = Paint::stroke(&pal.signal_color, 1.5);
-                    if m.dotted {
-                        p.dashed(vec![3.0, 3.0])
-                    } else {
-                        p
+            match *op {
+                Op::Note(p, text) => {
+                    let nm = build_note_model(p, text, &actors, cfg);
+                    for &s in &stack {
+                        let c = &mut all[s];
+                        c.from = c.from.min(nm.startx);
+                        c.to = c.to.max(nm.startx + nm.width);
+                        c.width = c.width.max((c.from - c.to).abs()) - LABEL_BOX_W;
                     }
-                };
-                let mut els = Vec::new();
-                if m.from == m.to {
-                    let xa = x1 + act_offset(&active[m.from]);
-                    let cmds = vec![
-                        PathCmd::MoveTo(Point::new(xa, line_y)),
-                        PathCmd::CubicTo(
-                            Point::new(xa + 60.0, line_y - 10.0),
-                            Point::new(xa + 60.0, line_y + 40.0),
-                            Point::new(xa, line_y + 30.0),
-                        ),
-                    ];
-                    els.push(Element::classed_shape(
-                        Geometry::Path(cmds),
-                        paint,
-                        "messageLine0",
-                    ));
-                    els.extend(msg_head(
-                        m.head,
-                        Point::new(xa, line_y + 30.0),
-                        Point::new(-1.0, 0.0),
-                        &pal.signal_color,
-                    ));
-                    let tx = xa + 30.0;
-                    els.push(Element::classed_text(
-                        Text::centered(
-                            Point::new(tx, line_y - 6.0 - block.height / 2.0),
-                            &block.lines,
-                            font,
-                            block.line_height,
-                            &pal.signal_text,
-                        ),
-                        "messageText",
-                    ));
-                    extend_frames(
-                        &mut frames,
-                        x1 - 10.0,
-                        tx.max(xa + 60.0) + block.width / 2.0,
-                    );
-                    bounds.add_rect(Rect::new(
-                        tx - block.width / 2.0,
-                        line_y - 6.0 - block.height,
-                        block.width,
-                        block.height,
-                    ));
-                    bounds.add_point(Point::new(xa + 60.0, line_y + 30.0));
-                    cursor = line_y + 30.0 + 2.0;
-                } else {
-                    let dir = if x2 > x1 { 1.0 } else { -1.0 };
-                    let from_x = x1 + dir * act_offset(&active[m.from]);
-                    // Activating the target this message: the arrow lands on the new bar.
-                    let target_depth = active[m.to].len() + usize::from(m.activation == Some(true));
-                    let to_off = if target_depth == 0 {
-                        0.0
-                    } else {
-                        5.0 + (target_depth - 1) as f64 * 5.0
-                    };
-                    let to_x = x2 - dir * to_off;
-                    let tip = Point::new(to_x, line_y);
-                    let back = Point::new(from_x, line_y);
-                    let d_vec = Point::new(dir, 0.0);
-                    let end_pull = if m.head == MsgHead::Filled { 8.0 } else { 0.0 };
-                    let start_pull = if m.bidirectional { 8.0 } else { 0.0 };
-                    els.push(Element::classed_shape(
-                        Geometry::Path(vec![
-                            PathCmd::MoveTo(back.plus(d_vec.scale(start_pull))),
-                            PathCmd::LineTo(tip.minus(d_vec.scale(end_pull))),
-                        ]),
-                        paint,
-                        if m.dotted {
-                            "messageLine1"
-                        } else {
-                            "messageLine0"
-                        },
-                    ));
-                    els.extend(msg_head(m.head, tip, d_vec, &pal.signal_color));
-                    if m.bidirectional {
-                        els.extend(msg_head(m.head, back, d_vec.scale(-1.0), &pal.signal_color));
-                    }
-                    let mid = (from_x + to_x) / 2.0;
-                    if !block.is_empty() {
-                        els.push(Element::classed_text(
-                            Text::centered(
-                                Point::new(mid, line_y - 6.0 - block.height / 2.0),
-                                &block.lines,
-                                font,
-                                block.line_height,
-                                &pal.signal_text,
-                            ),
-                            "messageText",
-                        ));
-                        bounds.add_rect(Rect::new(
-                            mid - block.width / 2.0,
-                            line_y - 6.0 - block.height,
-                            block.width,
-                            block.height,
-                        ));
-                    }
-                    extend_frames(&mut frames, x1.min(x2), x1.max(x2));
-                    cursor = line_y + 2.0;
+                    note_models[oi] = Some(nm);
                 }
-                if let Some((num, step)) = autonumber.as_mut() {
-                    let c = Point::new(xs[m.from], line_y);
-                    els.push(Element::classed_shape(
-                        Geometry::Circle { c, r: 9.0 },
-                        Paint::both(&pal.signal_color, &pal.signal_color, 1.0),
-                        "sequenceNumber",
-                    ));
-                    els.push(Element::text(Text::centered(
-                        c,
-                        &[num.to_string()],
-                        12.0,
-                        12.0,
-                        &pal.sequence_number,
-                    )));
-                    *num += *step;
-                }
-                messages_el.push(Element::group("message", els));
-                match m.activation {
-                    Some(true) => active[m.to].push(line_y),
-                    Some(false) => {
-                        if let Some(y0) = active[m.from].pop() {
-                            push_activation(
-                                &mut activations_el,
-                                m.from,
-                                active[m.from].len(),
-                                y0,
-                                line_y,
-                                &xs,
-                            );
+                Op::Msg(m) => {
+                    let mm = build_message_model(m, &actors, &acts, cfg);
+                    if mm.startx != 0.0 && mm.stopx != 0.0 {
+                        for &s in &stack {
+                            let c = &mut all[s];
+                            if mm.startx == mm.stopx {
+                                let (fa, ta) = (&actors[m.from], &actors[m.to]);
+                                c.from = (fa.x - mm.width / 2.0)
+                                    .min(fa.x - fa.width / 2.0)
+                                    .min(c.from);
+                                c.to = (ta.x + mm.width / 2.0).max(ta.x + fa.width / 2.0).max(c.to);
+                                c.width = c.width.max((c.to - c.from).abs()) - LABEL_BOX_W;
+                            } else {
+                                c.from = mm.startx.min(c.from);
+                                c.to = mm.stopx.max(c.to);
+                                c.width = c.width.max(mm.width) - LABEL_BOX_W;
+                            }
                         }
                     }
-                    None => {}
+                    msg_models[oi] = Some(mm);
                 }
-            }
-            Event::Note { placement, text } => {
-                let block = TextBlock::label(text, cfg.note_font_size);
-                let w = note_width(text);
-                let h = block.height + 2.0 * cfg.note_margin;
-                let y = cursor + 10.0;
-                let x0 = match *placement {
-                    NotePlacement::RightOf(a) => xs[a] + 25.0,
-                    NotePlacement::LeftOf(a) => xs[a] - 25.0 - w,
-                    NotePlacement::Over(a, b) if a == b => xs[a] - w / 2.0,
-                    NotePlacement::Over(a, b) => {
-                        let (l, r) = (xs[a].min(xs[b]) - 25.0, xs[a].max(xs[b]) + 25.0);
-                        let ww = (r - l).max(w);
-                        (l + r) / 2.0 - ww / 2.0
-                    }
-                };
-                let w = match *placement {
-                    NotePlacement::Over(a, b) if a != b => ((xs[a] - xs[b]).abs() + 50.0).max(w),
-                    _ => w,
-                };
-                let r = Rect::new(x0, y, w, h);
-                bounds.add_rect(r);
-                extend_frames(&mut frames, r.x, r.right());
-                notes_el.push(Element::group(
-                    "note",
-                    vec![
-                        Element::classed_shape(
-                            Geometry::Rect { rect: r, rx: 0.0 },
-                            Paint::both(&pal.note_bkg, &pal.note_border, 1.0),
-                            "note",
-                        ),
-                        Element::classed_text(
-                            Text::centered(
-                                r.center(),
-                                &block.lines,
-                                cfg.note_font_size,
-                                block.line_height,
-                                &pal.note_text,
-                            ),
-                            "noteText",
-                        ),
-                    ],
-                ));
-                cursor = y + h;
-            }
-            Event::BlockStart { kind, label } => {
-                let block = TextBlock::label(label, font);
-                let has_title = !label.is_empty();
-                let top_y = cursor + cfg.box_margin;
-                let (color, label) = if *kind == BlockKind::Rect {
-                    (Some(label.clone()), String::new())
-                } else {
-                    (None, label.clone())
-                };
-                frames.push(Frame {
-                    kind: *kind,
-                    label,
-                    top: top_y,
-                    sections: Vec::new(),
-                    min_x: f64::INFINITY,
-                    max_x: f64::NEG_INFINITY,
-                    color,
-                });
-                // mermaid `adjustLoopHeightForWrap`: after the frame top come
-                // `boxMargin + boxTextMargin` plus the title (at least
-                // `labelBoxHeight`); a `rect` only gets `boxMargin`.
-                cursor = top_y
-                    + if *kind == BlockKind::Rect {
-                        cfg.box_margin
-                    } else if !has_title {
-                        cfg.box_margin + cfg.box_text_margin
-                    } else {
-                        cfg.box_margin + cfg.box_text_margin + block.height.max(LABEL_BOX_H)
-                    };
-            }
-            Event::BlockSection { label } => {
-                let block = TextBlock::label(label, font);
-                // Sections: `boxMargin + boxTextMargin` before the divider,
-                // `boxMargin` plus the (non-empty) title after it.
-                let y = cursor + cfg.box_margin + cfg.box_text_margin;
-                if let Some(f) = frames.last_mut() {
-                    f.sections.push((y, label.clone()));
-                }
-                cursor = y
-                    + cfg.box_margin
-                    + if label.is_empty() {
-                        0.0
-                    } else {
-                        block.height.max(LABEL_BOX_H)
-                    };
-            }
-            Event::BlockEnd => {
-                cursor += 10.0;
-                let Some(mut f) = frames.pop() else { continue };
-                if !f.min_x.is_finite() {
-                    f.min_x = xs.first().copied().unwrap_or(0.0) - 50.0;
-                    f.max_x = xs.last().copied().unwrap_or(0.0) + 50.0;
-                }
-                let label_w = TextBlock::label(&f.label, font).width;
-                let mut left = f.min_x - 11.0;
-                let mut right = f.max_x + 11.0;
-                let need = 50.0 + label_w + 30.0;
-                if right - left < need {
-                    let c = (left + right) / 2.0;
-                    left = c - need / 2.0;
-                    right = c + need / 2.0;
-                }
-                let r = Rect::new(left, f.top, right - left, cursor - f.top);
-                bounds.add_rect(r);
-                // Frames sit 11px outside their content and each enclosing
-                // level adds `boxMargin` (10) more, as in mermaid's nested loops.
-                for parent in frames.iter_mut() {
-                    parent.min_x = parent.min_x.min(left + 11.0 - cfg.box_margin);
-                    parent.max_x = parent.max_x.max(right - 11.0 + cfg.box_margin);
-                }
-                if f.kind == BlockKind::Rect {
-                    let fill =
-                        Color::new(f.color.clone().unwrap_or_else(|| "rgba(0,0,0,0.1)".into()));
-                    // mermaid lowers each finished rect below the earlier ones, so
-                    // an enclosing rect (which ends later) stays behind nested ones.
-                    background.insert(
-                        0,
-                        Element::classed_shape(
-                            Geometry::Rect { rect: r, rx: 0.0 },
-                            Paint::fill(&fill),
-                            "rect",
-                        ),
-                    );
-                } else {
-                    frames_el.push(frame_elements(&f, r, pal, font, cfg.look == Look::Neo));
-                }
-                cursor += 2.0;
+                _ => {}
             }
         }
-    }
-    cursor += 10.0;
-    for (a, stack) in active.iter_mut().enumerate() {
-        while let Some(y0) = stack.pop() {
-            push_activation(&mut activations_el, a, stack.len(), y0, cursor - 10.0, &xs);
+        for l in &all {
+            for &oi in &l.ops {
+                loop_widths[oi] = Some(l.width);
+            }
         }
     }
 
-    // Actors, lifelines and boxes.
-    let bottom_top = cursor;
-    let mut actors_el = Vec::new();
-    let mut lifelines = Vec::new();
-    for (i, p) in d.participants.iter().enumerate() {
-        let r_top = Rect::new(xs[i] - widths[i] / 2.0, top, widths[i], actor_h);
-        bounds.add_rect(r_top);
-        lifelines.push(Element::classed_shape(
-            Geometry::Path(vec![
-                PathCmd::MoveTo(Point::new(xs[i], top + actor_h)),
-                PathCmd::LineTo(Point::new(xs[i], bottom_top)),
-            ]),
-            // `stroke-width="0.5px"`, but the stylesheet's `.actor-man circle, line`
-            // (a bare `line`: every line) makes it 2px.
-            Paint::stroke(&pal.actor_line, 2.0),
-            "actor-line",
-        ));
-        actors_el.push(actor_elements(p, i, r_top, &labels[i], pal, cfg));
-        if cfg.mirror_actors {
-            let r_bot = Rect::new(r_top.x, bottom_top, widths[i], actor_h);
-            bounds.add_rect(r_bot);
-            actors_el.push(actor_elements(p, i, r_bot, &labels[i], pal, cfg));
+    // --- The main pass: vertical layout, drawing in mermaid's order. ------
+    let mf = cfg.message_font_size;
+    let mut lowered: Vec<Element> = Vec::new(); // in lowering order
+    let mut body: Vec<Element> = Vec::new();
+    let mut backgrounds: Vec<LoopModel> = Vec::new();
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut seq_index = 1.0f64;
+    let mut seq_step = 1.0f64;
+    let mut numbering = cfg.show_sequence_numbers;
+    let frame_title = |label: &str, oi: usize| -> Vec<String> {
+        let Some(w) = loop_widths[oi].filter(|_| !label.is_empty()) else {
+            return Vec::new();
+        };
+        let lines = label_lines(&format!("[{label}]"));
+        crate::text::wrap_lines(
+            &lines,
+            w - 2.0 * cfg.wrap_padding,
+            mf,
+            false,
+            crate::text::BreakRule::Spaces,
+        )
+    };
+    for (oi, op) in ops.iter().enumerate() {
+        match *op {
+            Op::Autonumber(on, start, step) => {
+                if let Some(s) = start {
+                    seq_index = s as f64;
+                }
+                if let Some(s) = step {
+                    seq_step = s as f64;
+                }
+                numbering = on;
+            }
+            Op::ActStart(a) => {
+                let stacked = b.acts.iter().filter(|x| x.actor == a).count();
+                let x = activation_x(a, &actors, stacked);
+                body.push(Element::group("activation", Vec::new()));
+                b.acts.push(Activation {
+                    actor: a,
+                    startx: x,
+                    stopx: x + ACTIVATION_W,
+                    starty: b.vpos + 2.0,
+                    slot: body.len() - 1,
+                });
+            }
+            Op::ActEnd(a) => {
+                let Some(p) = b.acts.iter().rposition(|x| x.actor == a) else {
+                    continue;
+                };
+                let act = b.acts.remove(p);
+                let mut vpos = b.vpos;
+                let mut starty = act.starty;
+                if starty + 18.0 > vpos {
+                    starty = vpos - 6.0;
+                    vpos += 12.0;
+                }
+                let depth = b.acts.iter().filter(|x| x.actor == a).count();
+                let r = Rect::new(act.startx, starty, act.stopx - act.startx, vpos - starty);
+                // Colour themes paint an activation in its actor's slot, falling back
+                // to `mainBkg` for the fill (svgDraw.js `drawActivation`).
+                let paint = match actor_slot(pal, a) {
+                    Some(sc) => {
+                        Paint::both(sc.fill.as_ref().unwrap_or(&pal.main_bkg), &sc.border, 1.0)
+                    }
+                    None => Paint::both(&pal.activation_bkg, &pal.activation_border, 1.0),
+                };
+                body[act.slot] = Element::group(
+                    "activation",
+                    vec![Element::classed_shape(
+                        Geometry::Rect { rect: r, rx: 0.0 },
+                        paint,
+                        format!("activation{}", depth % 3),
+                    )],
+                );
+                b.insert(act.startx, vpos - 10.0, act.stopx, vpos);
+            }
+            Op::Note(..) => {
+                let Some(nm) = note_models[oi].clone() else {
+                    continue;
+                };
+                b.bump(bm);
+                let starty = b.vpos;
+                let text_h: f64 = nm
+                    .lines
+                    .iter()
+                    .map(|l| svg_line_box(cfg.note_font_size, l))
+                    .sum();
+                let h = js_round(text_h) + 2.0 * cfg.note_margin;
+                let r = Rect::new(nm.startx, starty, nm.width, h);
+                let mut els = vec![Element::classed_shape(
+                    Geometry::Rect { rect: r, rx: 0.0 },
+                    Paint::both(&pal.note_bkg, &pal.note_border, 1.0),
+                    "note",
+                )];
+                draw_text_lines(
+                    &mut els,
+                    "noteText",
+                    js_round(nm.startx + nm.width / 2.0),
+                    starty,
+                    cfg.note_margin,
+                    &nm.lines,
+                    cfg.note_font_size,
+                    &pal.note_text,
+                    true,
+                    BASELINE_MIDDLE,
+                );
+                body.push(Element::group("note", els));
+                b.bump(h);
+                b.insert(nm.startx, starty, nm.startx + nm.width, starty + h);
+            }
+            Op::LoopStart(kind, label) => {
+                b.bump(bm);
+                if kind == BlockKind::Rect {
+                    b.items.push(LoopModel {
+                        kind,
+                        startx: None,
+                        starty: b.vpos,
+                        stopx: None,
+                        stopy: None,
+                        title: Vec::new(),
+                        sections: Vec::new(),
+                        fill: Some(label.to_string()),
+                    });
+                    b.bump(bm);
+                    continue;
+                }
+                let title = frame_title(label, oi);
+                let post = bm
+                    + cfg.box_text_margin
+                    + if title.is_empty() {
+                        0.0
+                    } else {
+                        text_dims(&title, mf).1.max(LABEL_BOX_H)
+                    };
+                b.items.push(LoopModel {
+                    kind,
+                    startx: None,
+                    starty: b.vpos,
+                    stopx: None,
+                    stopy: None,
+                    title,
+                    sections: Vec::new(),
+                    fill: None,
+                });
+                b.bump(post);
+            }
+            Op::Section(label) => {
+                b.bump(bm + cfg.box_text_margin);
+                let title = frame_title(label, oi);
+                let post = bm
+                    + if title.is_empty() {
+                        0.0
+                    } else {
+                        text_dims(&title, mf).1.max(LABEL_BOX_H)
+                    };
+                let y = b.vpos;
+                if let Some(l) = b.items.last_mut() {
+                    l.sections.push((y, title));
+                }
+                b.bump(post);
+            }
+            Op::LoopEnd(_) => {
+                let Some(l) = b.items.pop() else { continue };
+                let stopy = l.stopy.unwrap_or(b.vpos);
+                if l.kind == BlockKind::Rect {
+                    backgrounds.push(l);
+                } else {
+                    body.push(frame_elements(&l, pal, cfg));
+                }
+                let dv = stopy - b.vpos;
+                b.bump(dv);
+            }
+            Op::Msg(m) => {
+                let Some(model) = msg_models[oi].clone() else {
+                    continue;
+                };
+                // boundMessage
+                let starty = b.vpos;
+                b.bump(10.0);
+                let lines = label_lines(&m.text);
+                let (tw, th) = text_dims(&lines, mf);
+                let line_h = th / lines.len().max(1) as f64;
+                b.bump(line_h);
+                let mut total = th - 10.0;
+                let line_y;
+                if model.startx == model.stopx {
+                    total += bm;
+                    line_y = b.vpos + total;
+                    total += 30.0;
+                    let dx = (tw / 2.0).max(cfg.width / 2.0);
+                    b.insert(
+                        model.startx - dx,
+                        b.vpos - 10.0 + total,
+                        model.stopx + dx,
+                        b.vpos + 30.0 + total,
+                    );
+                } else {
+                    total += bm;
+                    line_y = b.vpos + total;
+                    b.insert(model.startx, line_y - 10.0, model.stopx, line_y);
+                }
+                b.bump(total);
+                let stopy = starty + line_h + total;
+                b.insert(model.from_bounds, starty, model.to_bounds, stopy);
+                pending.push(Pending {
+                    model,
+                    msg: m.clone(),
+                    line_y,
+                    starty,
+                    number: numbering.then_some(seq_index),
+                });
+                seq_index = ((seq_index + seq_step) * 100.0).round() / 100.0;
+            }
         }
     }
-    let mut boxes_el = Vec::new();
-    let content_bottom = if cfg.mirror_actors {
-        bottom_top + actor_h
-    } else {
-        bottom_top
-    };
+
+    // --- Actors, messages, footer -----------------------------------------
+    let shadow = neo.then(|| {
+        // insertDropShadow: a hard 4px offset at 6%, black only for redux / redux-color.
+        let black = pal
+            .drop_shadow
+            .as_ref()
+            .is_some_and(|s| s.dx == 4.0 && s.color.css().eq_ignore_ascii_case("#000000"));
+        Color::new(if black { "#000000" } else { "#FFFFFF" })
+    });
+    let footer_y = b.vpos + 2.0 * bm;
+    let lifeline_end = if cfg.mirror_actors { footer_y } else { 2000.0 };
+    for (i, p) in d.participants.iter().enumerate() {
+        let (lowered_el, figure) = actor_elements(
+            p,
+            i,
+            &actors[i],
+            actor_top,
+            false,
+            Some(lifeline_end),
+            shadow.as_ref(),
+            pal,
+            cfg,
+        );
+        lowered.push(lowered_el);
+        body.extend(figure);
+    }
+    for pm in &pending {
+        body.push(message_elements(pm, pal, cfg));
+    }
+    if cfg.mirror_actors {
+        b.bump(2.0 * bm);
+        for (i, p) in d.participants.iter().enumerate() {
+            let (lowered_el, figure) = actor_elements(
+                p,
+                i,
+                &actors[i],
+                footer_y,
+                true,
+                None,
+                shadow.as_ref(),
+                pal,
+                cfg,
+            );
+            lowered.push(lowered_el);
+            body.extend(figure);
+        }
+        if n > 0 {
+            b.bump(row_h + bm);
+        }
+    }
+    for l in &backgrounds {
+        let (Some(sx), Some(ex)) = (l.startx, l.stopx) else {
+            continue;
+        };
+        let fill = l
+            .fill
+            .as_deref()
+            .filter(|f| !f.is_empty())
+            .map_or_else(|| pal.actor_bkg.clone(), Color::new);
+        let stopy = l.stopy.unwrap_or(l.starty);
+        lowered.push(Element::classed_shape(
+            Geometry::Rect {
+                rect: Rect::new(sx, l.starty, ex - sx, stopy - l.starty),
+                rx: 0.0,
+            },
+            Paint::fill(&fill),
+            "rect",
+        ));
+    }
     for (bi, bx) in d.boxes.iter().enumerate() {
         if bx.members.is_empty() {
             continue;
         }
-        // mermaid pads the box by `2 * boxMargin` beyond its inner margin.
-        let pad = box_inner[bi] + 2.0 * cfg.box_margin;
-        let l = bx
-            .members
-            .iter()
-            .map(|&m| xs[m] - widths[m] / 2.0)
-            .fold(f64::INFINITY, f64::min)
-            - pad;
-        let r = bx
-            .members
-            .iter()
-            .map(|&m| xs[m] + widths[m] / 2.0)
-            .fold(f64::NEG_INFINITY, f64::max)
-            + pad;
+        let height = b.vpos;
+        b.insert(box_x[bi], 0.0, box_x[bi] + box_w[bi], height);
+        let pad = 2.0 * bm;
         let rect = Rect::new(
-            l,
-            top - box_band,
-            r - l,
-            content_bottom - top + box_band + 2.0 * cfg.box_margin,
+            box_x[bi] - pad,
+            -pad * 0.25,
+            box_w[bi] + 2.0 * pad,
+            height + pad * 0.75,
         );
-        bounds.add_rect(rect);
         let fill = Color::new(bx.color.clone().unwrap_or_else(|| "none".into()));
-        let mut els = vec![Element::shape(
+        // `g rect.rect { stroke: nodeBorder }` outranks the box's own stroke.
+        let mut els = vec![Element::classed_shape(
             Geometry::Rect { rect, rx: 0.0 },
-            Paint::both(&fill, &Color::new("rgba(0,0,0,0.5)"), 1.0),
+            Paint::both(&fill, &pal.node_border, 1.0),
+            "rect",
         )];
-        if !bx.label.is_empty() {
-            let t = TextBlock::label(&bx.label, font);
-            els.push(Element::text(Text::centered(
-                Point::new(
-                    rect.center().x,
-                    rect.y + 0.5 * cfg.box_margin + cfg.box_text_margin + box_title_h / 2.0,
-                ),
-                &t.lines,
-                font,
-                t.line_height,
-                &pal.text_color,
-            )));
+        let cy = cfg.box_text_margin + box_text_max_h / 2.0;
+        for t in tspan_lines(
+            box_x[bi] + box_w[bi] / 2.0,
+            cy,
+            &box_lines[bi],
+            mf,
+            &pal.text_color,
+        ) {
+            els.push(Element::text(t));
         }
-        boxes_el.push(Element::group("box", els));
+        lowered.push(Element::group("box", els));
+    }
+    if !d.boxes.is_empty() {
+        b.bump(bm);
     }
 
+    let (sx, sy) = (b.startx.unwrap_or(0.0), b.starty.unwrap_or(0.0));
+    let (ex, ey) = (b.stopx.unwrap_or(0.0), b.stopy.unwrap_or(0.0));
+    let mut height = ey - sy + 2.0 * cfg.diagram_margin_y;
+    if cfg.mirror_actors {
+        height = height - bm + BOTTOM_MARGIN_ADJ;
+    }
+    let width = ex - sx + 2.0 * cfg.diagram_margin_x;
+    let title = d.title.as_ref().filter(|t| !t.is_empty());
+    let title_band = if title.is_some() { 40.0 } else { 0.0 };
+    let neo_band = if neo && n > 0 { 30.0 } else { 0.0 };
+    let view_box = Rect::new(
+        sx - cfg.diagram_margin_x,
+        -(cfg.diagram_margin_y + title_band),
+        width,
+        height + title_band + neo_band,
+    );
+
     let mut title_el = Vec::new();
-    if let Some(t) = d.title.as_ref().filter(|t| !t.is_empty()) {
-        // sequenceRenderer: a plain `<text>` (the diagram's font, start-anchored)
-        // at x = width / 2 - 2·diagramMarginX and y = -25 from the diagram's
-        // origin, in the 40px the viewBox adds above it.
-        let content = bounds.rect();
-        let origin_y = cfg.diagram_margin_y + title_band;
+    if let Some(t) = title {
+        // A plain `<text>` (the diagram's font, start-anchored) at
+        // x = width / 2 - 2·diagramMarginX and y = -25.
         title_el.push(Element::text(Text {
-            x: content.x + content.w / 2.0 - 2.0 * cfg.diagram_margin_x,
-            y: origin_y - 25.0,
+            x: (ex - sx) / 2.0 - 2.0 * cfg.diagram_margin_x,
+            y: -25.0,
             lines: vec![t.clone()],
             line_height: pal.font_size * 1.5,
             font_size: pal.font_size,
@@ -1050,25 +1409,12 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
             anchor: Anchor::Start,
             fill: pal.text_color.clone(),
         }));
-        bounds.add_point(Point::new(content.x, cfg.diagram_margin_y));
     }
 
-    let content = bounds.rect();
-    let view_box = Rect::new(
-        content.x - cfg.diagram_margin_x,
-        content.y - cfg.diagram_margin_y,
-        content.w + 2.0 * cfg.diagram_margin_x,
-        content.h + 2.0 * cfg.diagram_margin_y,
-    );
+    lowered.reverse();
     let elements = vec![
-        Element::group("boxes", boxes_el),
-        Element::group("rects", background),
-        Element::group("lifelines", lifelines),
-        Element::group("activations", activations_el),
-        Element::group("frames", frames_el),
-        Element::group("messages", messages_el),
-        Element::group("notes", notes_el),
-        Element::group("actors", actors_el),
+        Element::group("lowered", lowered),
+        Element::group("body", body),
         Element::group("title", title_el),
     ];
     Scene {
@@ -1082,118 +1428,307 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
     }
 }
 
-fn msg_head(head: MsgHead, tip: Point, dir: Point, color: &Color) -> Vec<Element> {
+/// A message laid out by `boundMessage`, drawn after the top actors.
+struct Pending {
+    model: MsgModel,
+    msg: Message,
+    line_y: f64,
+    starty: f64,
+    number: Option<f64>,
+}
+
+/// A marker path in its own units placed at `at`, pointing along `dir`, with
+/// `refX/refY` at `at` and the marker's units scaled by `scale`.
+fn marker_points(
+    pts: &[(f64, f64)],
+    refp: (f64, f64),
+    scale: f64,
+    at: Point,
+    dir: Point,
+) -> Vec<Point> {
     let perp = Point::new(-dir.y, dir.x);
-    let at = |back: f64, side: f64| tip.minus(dir.scale(back)).plus(perp.scale(side));
-    match head {
-        MsgHead::None => vec![],
-        MsgHead::Filled => vec![Element::classed_shape(
-            Geometry::Path(geom::polygon(&[tip, at(10.0, 5.0), at(10.0, -5.0)])),
-            Paint::both(color, color, 1.0),
-            "arrowhead",
-        )],
-        MsgHead::Cross => {
-            let c = at(6.0, 0.0);
-            let p = Paint::stroke(color, 2.0);
-            vec![
-                Element::line(
-                    c.plus(Point::new(-5.0, -5.0)),
-                    c.plus(Point::new(5.0, 5.0)),
-                    p.clone(),
-                ),
-                Element::line(
-                    c.plus(Point::new(-5.0, 5.0)),
-                    c.plus(Point::new(5.0, -5.0)),
-                    p,
-                ),
-            ]
-        }
-        MsgHead::Async => vec![Element::path(
-            vec![
-                PathCmd::MoveTo(at(9.0, 5.0)),
-                PathCmd::LineTo(tip),
-                PathCmd::LineTo(at(9.0, -5.0)),
-            ],
-            Paint::stroke(color, 1.5),
-        )],
+    pts.iter()
+        .map(|&(mx, my)| {
+            at.plus(dir.scale((mx - refp.0) * scale))
+                .plus(perp.scale((my - refp.1) * scale))
+        })
+        .collect()
+}
+
+/// The `arrowhead` marker (`M -1 0 L 10 5 L 0 10 z`, `refX` 7.9, user space).
+fn arrowhead(at: Point, dir: Point, color: &Color) -> Element {
+    let pts = marker_points(
+        &[(-1.0, 0.0), (10.0, 5.0), (0.0, 10.0)],
+        (7.9, 5.0),
+        1.0,
+        at,
+        dir,
+    );
+    Element::classed_shape(
+        Geometry::Path(geom::polygon(&pts)),
+        Paint::both(color, color, 1.0),
+        "arrowhead",
+    )
+}
+
+/// JavaScript's number-to-string for the autonumber values (rounded to 0.01).
+fn js_number(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
     }
 }
 
-/// `labelBoxHeight` (sequence config default).
-const LABEL_BOX_H: f64 = 20.0;
-/// `labelBoxWidth` (sequence config default).
-const LABEL_BOX_W: f64 = 50.0;
+/// `drawMessage`: text, line (or self-loop), arrow markers and the autonumber.
+fn message_elements(pm: &Pending, pal: &Palette, cfg: &SequenceConfig) -> Element {
+    let (m, model) = (&pm.msg, &pm.model);
+    let (sx, ex, ly) = (model.startx, model.stopx, pm.line_y);
+    let mf = cfg.message_font_size;
+    let mut els = Vec::new();
+    draw_text_lines(
+        &mut els,
+        "messageText",
+        js_round(sx.min(ex) + (ex - sx).abs() / 2.0),
+        pm.starty + 10.0,
+        cfg.wrap_padding,
+        &label_lines(&m.text),
+        mf,
+        &pal.signal_text,
+        true,
+        BASELINE_MIDDLE,
+    );
+    let numbered = pm.number.is_some();
+    let paint = {
+        let p = Paint::stroke(&pal.signal_color, 1.5);
+        if m.dotted {
+            p.dashed(vec![3.0, 3.0])
+        } else {
+            p
+        }
+    };
+    let class = if m.dotted {
+        "messageLine1"
+    } else {
+        "messageLine0"
+    };
+    // (point, direction) of the end marker and of the start marker.
+    let (end, start) = if sx == ex {
+        let lsx = sx
+            + if numbered && m.bidirectional {
+                10.0
+            } else {
+                0.0
+            };
+        els.push(Element::classed_shape(
+            Geometry::Path(vec![
+                PathCmd::MoveTo(Point::new(lsx, ly)),
+                PathCmd::CubicTo(
+                    Point::new(lsx + 60.0, ly - 10.0),
+                    Point::new(sx + 60.0, ly + 30.0),
+                    Point::new(sx, ly + 20.0),
+                ),
+            ]),
+            paint,
+            class,
+        ));
+        let unit = |x: f64, y: f64| {
+            let l = x.hypot(y);
+            Point::new(x / l, y / l)
+        };
+        (
+            (Point::new(sx, ly + 20.0), unit(-60.0, -10.0)),
+            (Point::new(lsx, ly), unit(-60.0, 10.0)),
+        )
+    } else {
+        let x1 = if !numbered {
+            sx
+        } else if m.bidirectional {
+            if sx < ex {
+                sx + 2.0 * SEQ_NUM_R
+            } else {
+                sx - SEQ_NUM_R
+            }
+        } else {
+            sx + SEQ_NUM_R
+        };
+        els.push(Element::classed_shape(
+            Geometry::Path(vec![
+                PathCmd::MoveTo(Point::new(x1, ly)),
+                PathCmd::LineTo(Point::new(ex, ly)),
+            ]),
+            paint,
+            class,
+        ));
+        let dir = Point::new(if ex >= x1 { 1.0 } else { -1.0 }, 0.0);
+        (
+            (Point::new(ex, ly), dir),
+            (Point::new(x1, ly), dir.scale(-1.0)),
+        )
+    };
+    match m.head {
+        MsgHead::None => {}
+        MsgHead::Filled => {
+            els.push(arrowhead(end.0, end.1, &pal.signal_color));
+            if m.bidirectional {
+                els.push(arrowhead(start.0, start.1, &pal.signal_color));
+            }
+        }
+        MsgHead::Cross => {
+            // `crosshead`: `M 1,2 L 6,7 M 6,2 L 1,7` at 1pt, scaled by the 1.5px line.
+            let p = marker_points(
+                &[(1.0, 2.0), (6.0, 7.0), (6.0, 2.0), (1.0, 7.0)],
+                (4.0, 4.5),
+                1.5,
+                end.0,
+                end.1,
+            );
+            els.push(Element::path(
+                vec![
+                    PathCmd::MoveTo(p[0]),
+                    PathCmd::LineTo(p[1]),
+                    PathCmd::MoveTo(p[2]),
+                    PathCmd::LineTo(p[3]),
+                ],
+                Paint::stroke(&pal.signal_color, 2.0),
+            ));
+        }
+        MsgHead::Async => {
+            // `filled-head`: unstyled, so it takes the root's text-colour fill.
+            let p = marker_points(
+                &[(18.0, 7.0), (9.0, 13.0), (14.0, 7.0), (9.0, 1.0)],
+                (15.5, 7.0),
+                1.5,
+                end.0,
+                end.1,
+            );
+            els.push(Element::path(
+                geom::polygon(&p),
+                Paint::fill(&pal.text_color),
+            ));
+        }
+    }
+    if let Some(num) = pm.number {
+        // Self messages and left-to-right ones number at the source.
+        let ax = if sx <= ex {
+            model.from_bounds + 1.0
+        } else {
+            model.to_bounds - 1.0
+        };
+        els.push(Element::classed_shape(
+            Geometry::Circle {
+                c: Point::new(ax, ly),
+                r: 2.0 * SEQ_NUM_R,
+            },
+            Paint::fill(&pal.signal_color),
+            "sequenceNumber",
+        ));
+        let label = js_number(num);
+        let digits = label.len();
+        let size = if digits > 5 {
+            7.0
+        } else if digits > 3 {
+            9.0
+        } else {
+            12.0
+        };
+        els.push(Element::classed_text(
+            Text {
+                x: ax,
+                y: ly + 4.0,
+                lines: vec![label],
+                line_height: size,
+                font_size: size,
+                bold: false,
+                anchor: Anchor::Middle,
+                fill: pal.sequence_number.clone(),
+            },
+            "sequenceNumber",
+        ));
+    }
+    Element::group("message", els)
+}
 
-fn frame_elements(f: &Frame, r: Rect, pal: &Palette, font: f64, neo: bool) -> Element {
+/// svgDraw `drawLoop`: the dashed frame, its section dividers, the tag (taller in
+/// the neo look) and the bracketed titles.
+fn frame_elements(l: &LoopModel, pal: &Palette, cfg: &SequenceConfig) -> Element {
+    let (Some(sx), Some(ex)) = (l.startx, l.stopx) else {
+        return Element::group("frame", Vec::new());
+    };
+    let (sy, ey) = (l.starty, l.stopy.unwrap_or(l.starty));
+    let mf = cfg.message_font_size;
     let line = Paint::stroke(&pal.label_box_border, 2.0).dashed(vec![2.0, 2.0]);
-    let mut els = vec![Element::classed_shape(
-        Geometry::Rect { rect: r, rx: 0.0 },
-        line.clone(),
-        "loopLine",
-    )];
-    let word = f.kind.word();
-    // svgDraw `drawLabel`: a 50-wide tag (`labelBoxHeight`, +15 in the neo
-    // look) with its bottom-right corner cut by 7, label in the message font.
-    let word_w = LABEL_BOX_W.max(crate::text::line_width(word, font, false) + 10.0);
-    let tag_h = LABEL_BOX_H + if neo { 15.0 } else { 0.0 };
+    let seg = |a: (f64, f64), b: (f64, f64), p: &Paint| {
+        Element::classed_shape(
+            Geometry::Path(vec![
+                PathCmd::MoveTo(Point::new(a.0, a.1)),
+                PathCmd::LineTo(Point::new(b.0, b.1)),
+            ]),
+            p.clone(),
+            "loopLine",
+        )
+    };
+    let mut els = vec![
+        seg((sx, sy), (ex, sy), &line),
+        seg((ex, sy), (ex, ey), &line),
+        seg((sx, ey), (ex, ey), &line),
+        seg((sx, sy), (sx, ey), &line),
+    ];
+    let section_line = Paint::stroke(&pal.label_box_border, 2.0).dashed(vec![3.0, 3.0]);
+    for (y, _) in &l.sections {
+        els.push(seg((sx, *y), (ex, *y), &section_line));
+    }
+    let tag_h = LABEL_BOX_H + if cfg.look == Look::Neo { 15.0 } else { 0.0 };
     let cut = 7.0;
-    let (x, y) = (r.x, r.y);
-    let tag = geom::polygon(&[
-        Point::new(x, y),
-        Point::new(x + word_w, y),
-        Point::new(x + word_w, y + tag_h - cut),
-        Point::new(x + word_w - cut * 1.2, y + tag_h),
-        Point::new(x, y + tag_h),
-    ]);
     els.push(Element::classed_shape(
-        Geometry::Path(tag),
+        Geometry::Path(geom::polygon(&[
+            Point::new(sx, sy),
+            Point::new(sx + LABEL_BOX_W, sy),
+            Point::new(sx + LABEL_BOX_W, sy + tag_h - cut),
+            Point::new(sx + LABEL_BOX_W - cut * 1.2, sy + tag_h),
+            Point::new(sx, sy + tag_h),
+        ])),
         Paint::both(&pal.label_box_bkg, &pal.label_box_border, 1.0),
         "labelBox",
     ));
-    let lh = TextBlock::label(word, font).line_height;
-    els.push(Element::classed_text(
-        Text::centered(
-            Point::new(x + word_w / 2.0, y + tag_h / 2.0),
-            &[word.to_string()],
-            font,
-            lh,
-            &pal.label_text,
-        ),
+    draw_text_lines(
+        &mut els,
         "labelText",
-    ));
-    if !f.label.is_empty() {
-        let t = TextBlock::label(&format!("[{}]", f.label), font);
-        let cx = (r.x + word_w + r.right()) / 2.0;
-        els.push(Element::classed_text(
-            Text::centered(
-                Point::new(cx, y + 2.0 + t.height / 2.0),
-                &t.lines,
-                font,
-                t.line_height,
-                &pal.loop_text,
-            ),
-            "loopText",
-        ));
-    }
-    for (sy, label) in &f.sections {
-        els.push(Element::line(
-            Point::new(r.x, *sy),
-            Point::new(r.right(), *sy),
-            line.clone(),
-        ));
-        if !label.is_empty() {
-            let t = TextBlock::label(&format!("[{label}]"), font);
-            els.push(Element::classed_text(
-                Text::centered(
-                    Point::new(r.center().x, sy + 2.0 + t.height / 2.0),
-                    &t.lines,
-                    font,
-                    t.line_height,
-                    &pal.loop_text,
-                ),
-                "loopText",
-            ));
-        }
+        js_round(sx + LABEL_BOX_W / 2.0),
+        sy + tag_h / 2.0,
+        cfg.box_text_margin,
+        &[l.kind.word().to_string()],
+        mf,
+        &pal.label_text,
+        false,
+        BASELINE_MIDDLE,
+    );
+    let top = cfg.box_margin + cfg.box_text_margin;
+    draw_text_lines(
+        &mut els,
+        "loopText",
+        sx + LABEL_BOX_W / 2.0 + (ex - sx) / 2.0,
+        sy + top,
+        cfg.box_text_margin,
+        &l.title,
+        mf,
+        &pal.loop_text,
+        false,
+        0.0,
+    );
+    for (y, title) in &l.sections {
+        draw_text_lines(
+            &mut els,
+            "sectionTitle",
+            sx + (ex - sx) / 2.0,
+            y + top,
+            cfg.box_text_margin,
+            title,
+            mf,
+            &pal.loop_text,
+            false,
+            0.0,
+        );
     }
     Element::group("frame", els)
 }
@@ -1204,15 +1739,23 @@ fn actor_slot(pal: &Palette, index: usize) -> Option<SlotColors> {
     Some(pal.color_slots.as_ref()?.slot(ColorSlot(index)))
 }
 
+/// svgDraw `drawActor` for one participant at `y` (`starty` or, in the footer,
+/// `stopy`). Returns what mermaid lowers beneath everything (the participant box
+/// with its lifeline, or a stick figure's lifeline) and what it draws in place
+/// (the stick figure).
+#[allow(clippy::too_many_arguments)]
 fn actor_elements(
     p: &Participant,
     index: usize,
-    r: Rect,
-    label: &TextBlock,
+    a: &ActorBox,
+    y: f64,
+    footer: bool,
+    lifeline_end: Option<f64>,
+    shadow: Option<&Color>,
     pal: &Palette,
     cfg: &SequenceConfig,
-) -> Element {
-    let mut els = Vec::new();
+) -> (Element, Vec<Element>) {
+    let neo = cfg.look == Look::Neo;
     // `.actor { stroke-width: strokeWidth ?? 1 }`; an empty background palette leaves the
     // stylesheet's `actorBkg` in charge (d3 removes the inline fill).
     let slot = actor_slot(pal, index);
@@ -1221,82 +1764,128 @@ fn actor_elements(
         .as_ref()
         .and_then(|s| s.fill.as_ref())
         .unwrap_or(&pal.actor_bkg);
-    let box_width = pal.stroke_width.unwrap_or(1.0);
-    let rx = if cfg.look == Look::Neo { 6.0 } else { 3.0 };
+    let c = a.center();
+    let fs = cfg.actor_font_size;
+    let lifeline = |y1: f64| {
+        lifeline_end.map(|y2| {
+            // `stroke-width="0.5px"`, but the stylesheet's `.actor-man circle, line`
+            // (a bare `line`: every line) makes it 2px.
+            Element::classed_shape(
+                Geometry::Path(vec![
+                    PathCmd::MoveTo(Point::new(c, y1)),
+                    PathCmd::LineTo(Point::new(c, y2)),
+                ]),
+                Paint::stroke(&pal.actor_line, 2.0),
+                "actor-line",
+            )
+        })
+    };
     match p.kind {
         ParticipantKind::Participant => {
-            // The neo look gives actor boxes the theme's drop shadow.
-            if let Some(sh) = pal.drop_shadow.as_ref().filter(|_| cfg.look == Look::Neo) {
+            let mut els: Vec<Element> = lifeline(y + a.height).into_iter().collect();
+            let rx = if neo { 6.0 } else { 3.0 };
+            let r = Rect::new(a.x, y, a.width, a.height);
+            if let Some(sh) = shadow {
                 els.push(Element::classed_shape(
                     Geometry::Rect {
-                        rect: Rect::new(r.x + sh.dx, r.y + sh.dy, r.w, r.h),
+                        rect: Rect::new(r.x + 4.0, r.y + 4.0, r.w, r.h),
                         rx,
                     },
-                    Paint::fill(&sh.color).with_opacity(sh.opacity),
+                    Paint::fill(sh).with_opacity(0.06),
                     "drop-shadow",
                 ));
             }
             els.push(Element::classed_shape(
                 Geometry::Rect { rect: r, rx },
-                Paint::both(actor_bkg, actor_border, box_width),
+                Paint::both(actor_bkg, actor_border, pal.stroke_width.unwrap_or(1.0)),
                 "actor",
             ));
-            els.push(Element::classed_text(
-                Text::centered(
-                    r.center(),
-                    &label.lines,
-                    cfg.actor_font_size,
-                    label.line_height,
-                    &pal.actor_text,
-                ),
-                "actor",
-            ));
+            for t in tspan_lines(c, y + a.height / 2.0, &a.lines, fs, &pal.actor_text) {
+                els.push(Element::classed_text(t, "actor"));
+            }
+            (Element::group("actor", els), Vec::new())
         }
         ParticipantKind::Actor => {
-            let cx = r.center().x;
-            let y = r.y;
-            let stroke = Paint::both(actor_bkg, actor_border, 2.0);
+            // actorBands.ts: under neo the figure fills the glyph band above the
+            // label, both anchored at the lifeline datum; classic draws it at fixed
+            // offsets from the row top.
+            let (lifeline_y, glyph_bottom, label_y) = if !neo {
+                (
+                    y + 80.0,
+                    0.0,
+                    y + 35.0 + (ACTOR_GLYPH_BOTTOM - ACTOR_GLYPH_TOP) / 2.0,
+                )
+            } else if footer {
+                let top = y + LABEL_LIFELINE_GAP;
+                let bottom = top + GLYPH_BAND_H;
+                (0.0, bottom, bottom + GLYPH_LABEL_GAP + a.text_h / 2.0)
+            } else {
+                let datum = y + a.height;
+                (
+                    datum,
+                    datum - LABEL_LIFELINE_GAP - a.text_h - GLYPH_LABEL_GAP,
+                    datum - LABEL_LIFELINE_GAP - a.text_h / 2.0,
+                )
+            };
+            let scale = if neo {
+                GLYPH_BAND_H / (ACTOR_GLYPH_BOTTOM - ACTOR_GLYPH_TOP)
+            } else {
+                1.0
+            };
+            let gy = |o: f64| {
+                if neo {
+                    glyph_bottom - (ACTOR_GLYPH_BOTTOM - o) * scale
+                } else {
+                    y + o
+                }
+            };
+            let gx = |o: f64| c + o * scale;
             let line = Paint::stroke(actor_border, 2.0);
-            els.push(Element::shape(
-                Geometry::Circle {
-                    c: Point::new(cx, y + 8.0),
-                    r: 8.0,
+            let half = ACTOR_TYPE_W / 2.0;
+            let mut els = vec![
+                Element::line(
+                    Point::new(c, gy(25.0)),
+                    Point::new(c, gy(45.0)),
+                    line.clone(),
+                ),
+                Element::line(
+                    Point::new(gx(-half), gy(33.0)),
+                    Point::new(gx(half), gy(33.0)),
+                    line.clone(),
+                ),
+                Element::line(
+                    Point::new(gx(-half), gy(60.0)),
+                    Point::new(c, gy(45.0)),
+                    line.clone(),
+                ),
+                Element::line(
+                    Point::new(c, gy(45.0)),
+                    Point::new(gx(half - 2.0), gy(60.0)),
+                    line,
+                ),
+                // `.actor-man circle { fill: actorBkg }` outranks the group's colours.
+                Element::shape(
+                    Geometry::Circle {
+                        c: Point::new(c, gy(10.0)),
+                        r: 15.0 * scale,
+                    },
+                    Paint::both(&pal.actor_bkg, actor_border, 2.0),
+                ),
+            ];
+            for t in tspan_lines(c, label_y, &a.lines, fs, &pal.actor_text) {
+                els.push(Element::classed_text(t, "actor"));
+            }
+            let lowered = Element::group(
+                "actor-lifeline",
+                if footer {
+                    Vec::new()
+                } else {
+                    lifeline(lifeline_y).into_iter().collect()
                 },
-                stroke,
-            ));
-            els.push(Element::line(
-                Point::new(cx, y + 16.0),
-                Point::new(cx, y + 32.0),
-                line.clone(),
-            ));
-            els.push(Element::line(
-                Point::new(cx - 12.0, y + 21.0),
-                Point::new(cx + 12.0, y + 21.0),
-                line.clone(),
-            ));
-            els.push(Element::line(
-                Point::new(cx, y + 32.0),
-                Point::new(cx - 10.0, y + 44.0),
-                line.clone(),
-            ));
-            els.push(Element::line(
-                Point::new(cx, y + 32.0),
-                Point::new(cx + 10.0, y + 44.0),
-                line,
-            ));
-            let ty = y + 44.0 + (r.h - 44.0) / 2.0;
-            let mut t = Text::centered(
-                Point::new(cx, ty),
-                &label.lines,
-                cfg.actor_font_size,
-                label.line_height,
-                &pal.actor_text,
             );
-            t.anchor = Anchor::Middle;
-            els.push(Element::classed_text(t, "actor"));
+            (lowered, vec![Element::group("actor-man", els)])
         }
     }
-    Element::group("actor", els)
 }
 
 #[cfg(test)]
@@ -1373,41 +1962,56 @@ mod tests {
         assert!(parse("sequenceDiagram\nthis is not a message", None).is_err());
     }
 
-    /// Top-level group `class` of a scene, by class name.
-    fn scene_group<'a>(s: &'a Scene, class: &str) -> &'a [Element] {
-        s.elements
-            .iter()
-            .find_map(|e| match e {
-                Element::Group {
-                    class: Some(c),
-                    children,
-                    ..
-                } if c == class => Some(children.as_slice()),
-                _ => None,
-            })
-            .unwrap_or(&[])
-    }
-
-    fn first_rect(e: &Element) -> Option<Rect> {
-        match e {
-            Element::Shape {
-                geom: Geometry::Rect { rect, .. },
-                ..
-            } => Some(*rect),
-            Element::Group { children, .. } => children.iter().find_map(first_rect),
-            _ => None,
+    /// Every element of the scene, depth first.
+    fn walk<'a>(e: &'a Element, out: &mut Vec<&'a Element>) {
+        out.push(e);
+        if let Element::Group { children, .. } = e {
+            for c in children {
+                walk(c, out);
+            }
         }
     }
 
-    fn lifeline_xs(s: &Scene) -> Vec<f64> {
-        scene_group(s, "lifelines")
-            .iter()
+    fn all(s: &Scene) -> Vec<&Element> {
+        let mut out = Vec::new();
+        for e in &s.elements {
+            walk(e, &mut out);
+        }
+        out
+    }
+
+    /// Shapes with CSS class `class`.
+    fn shapes<'a>(s: &'a Scene, class: &str) -> Vec<&'a Geometry> {
+        all(s)
+            .into_iter()
             .filter_map(|e| match e {
                 Element::Shape {
-                    geom: Geometry::Path(cmds),
+                    geom,
+                    class: Some(c),
                     ..
-                } => match cmds.first() {
-                    Some(PathCmd::MoveTo(p)) => Some(p.x),
+                } if c == class => Some(geom),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rects(s: &Scene, class: &str) -> Vec<Rect> {
+        shapes(s, class)
+            .into_iter()
+            .filter_map(|g| match g {
+                Geometry::Rect { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Start points of the shapes with class `class` drawn as paths.
+    fn path_starts(s: &Scene, class: &str) -> Vec<(Point, Point)> {
+        shapes(s, class)
+            .into_iter()
+            .filter_map(|g| match g {
+                Geometry::Path(cmds) => match (cmds.first(), cmds.last()) {
+                    (Some(PathCmd::MoveTo(a)), Some(PathCmd::LineTo(b))) => Some((*a, *b)),
                     _ => None,
                 },
                 _ => None,
@@ -1415,121 +2019,216 @@ mod tests {
             .collect()
     }
 
+    fn lifeline_xs(s: &Scene) -> Vec<f64> {
+        let mut xs: Vec<f64> = path_starts(s, "actor-line")
+            .iter()
+            .map(|(a, _)| a.x)
+            .collect();
+        xs.sort_by(f64::total_cmp);
+        xs
+    }
+
+    fn texts(s: &Scene) -> Vec<&Text> {
+        all(s)
+            .into_iter()
+            .filter_map(|e| match e {
+                Element::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn pal() -> Palette {
+        crate::theme::palette(crate::theme::ThemeName::Default, &[])
+    }
+
+    fn cfg(look: Look) -> SequenceConfig {
+        SequenceConfig {
+            look,
+            ..SequenceConfig::default()
+        }
+    }
+
+    fn draw(src: &str, look: Look) -> Scene {
+        render(&parse(src, None).unwrap(), &cfg(look), &pal())
+    }
+
     #[test]
     fn title_and_lifelines_as_mermaid_draws_them() {
         // mermaid 12.3.0, the gallery's sequence: lifelines 2px (the stylesheet's
-        // bare `line` rule), the title a plain start-anchored text 25px above
-        // the actors, at half the drawing's width less 2·diagramMarginX.
-        let d = parse("sequenceDiagram\ntitle Hi\nA->>B: x", None).unwrap();
-        let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
-        let cfg = SequenceConfig::default();
-        let s = render(&d, &cfg, &p);
-        for e in scene_group(&s, "lifelines") {
-            if let Element::Shape { paint, .. } = e {
-                assert_eq!(paint.stroke_width, 2.0);
+        // bare `line` rule), the title a plain start-anchored text at y = -25, at
+        // half the drawing's width less 2·diagramMarginX, in 40px the viewBox adds.
+        let s = draw("sequenceDiagram\ntitle Hi\nA->>B: x", Look::Classic);
+        let plain = draw("sequenceDiagram\nA->>B: x", Look::Classic);
+        for e in all(&s) {
+            if let Element::Shape {
+                paint,
+                class: Some(c),
+                ..
+            } = e
+            {
+                if c == "actor-line" {
+                    assert_eq!(paint.stroke_width, 2.0);
+                }
             }
         }
-        let title = match scene_group(&s, "title") {
-            [Element::Text { text, .. }] => text.clone(),
-            other => panic!("{other:?}"),
-        };
-        let actors: Vec<Rect> = scene_group(&s, "actors")
-            .iter()
-            .filter_map(first_rect)
-            .collect();
-        let (left, right) = (actors[0].x, actors[actors.len() - 1].right());
+        let title = texts(&s)
+            .into_iter()
+            .find(|t| t.lines == ["Hi"])
+            .unwrap()
+            .clone();
         assert_eq!(title.anchor, Anchor::Start);
         assert!(!title.bold);
-        assert!((title.x - ((left + right) / 2.0 - 2.0 * cfg.diagram_margin_x)).abs() < 1e-6);
-        assert!(
-            (title.y - (actors[0].y - 25.0)).abs() < 1e-6,
-            "{title:?} {actors:?}"
+        // Two 150-wide actors 50 apart: 350 wide.
+        assert_eq!((title.x, title.y), (350.0 / 2.0 - 100.0, -25.0));
+        assert_eq!(s.view_box.y, plain.view_box.y - 40.0);
+        assert_eq!(s.view_box.h, plain.view_box.h + 40.0);
+    }
+
+    #[test]
+    fn classic_and_neo_heights_follow_mermaid() {
+        // mermaid 12.3.0: `participant A / participant B / A->>B: hello /
+        // B-->>A: hi there` is 259 tall in the classic look and 305 under neo
+        // (73px actor rows from the band model, plus neo's 30px).
+        let src = "sequenceDiagram\nparticipant A\nparticipant B\nA->>B: hello\nB-->>A: hi there";
+        let classic = draw(src, Look::Classic);
+        let neo = draw(src, Look::Neo);
+        assert_eq!(
+            (
+                classic.view_box.x,
+                classic.view_box.y,
+                classic.view_box.w,
+                classic.view_box.h
+            ),
+            (-50.0, -10.0, 450.0, 259.0)
         );
+        assert_eq!((neo.view_box.w, neo.view_box.h), (450.0, 305.0));
+        let heights = |s: &Scene| rects(s, "actor").iter().map(|r| r.h).collect::<Vec<_>>();
+        assert_eq!(heights(&classic), [65.0; 4]);
+        assert_eq!(heights(&neo), [73.0; 4]);
+        // Messages: 10 + text + (text - 10) + boxMargin below the row; the arrow
+        // stops 3px short (6px under neo) of the target's lifeline edge.
+        let lines = path_starts(&neo, "messageLine0");
+        assert_eq!(lines[0].0, Point::new(76.0, 73.0 + 44.0));
+        assert_eq!(lines[0].1, Point::new(268.0, 117.0));
+        let lines = path_starts(&classic, "messageLine0");
+        assert_eq!(lines[0].1, Point::new(271.0, 65.0 + 44.0));
+    }
+
+    #[test]
+    fn neo_stick_figure_fills_the_glyph_band() {
+        // actorBands.ts: the figure is scaled by 44/65 with its feet 6px above the
+        // label, whose centre sits 6px + half its height above the lifeline datum.
+        let s = draw("sequenceDiagram\nactor U as User\nU->>U: x", Look::Neo);
+        let circle = all(&s)
+            .into_iter()
+            .filter_map(|e| match e {
+                Element::Shape { geom, .. } => Some(geom),
+                _ => None,
+            })
+            .find_map(|g| match g {
+                Geometry::Circle { c, r } => Some((*c, *r)),
+                _ => None,
+            })
+            .unwrap();
+        let k = 44.0 / 65.0;
+        let glyph_bottom = 73.0 - 6.0 - 17.0 - 6.0;
+        assert!((circle.1 - 15.0 * k).abs() < 1e-9);
+        assert!((circle.0.y - (glyph_bottom - 50.0 * k)).abs() < 1e-9);
+        let label = texts(&s).into_iter().find(|t| t.lines == ["User"]).unwrap();
+        assert!((label.y - (73.0 - 6.0 - 8.5 + 0.35 * 16.0)).abs() < 1e-9);
+        // The lifeline starts at the datum (classic: 80px below the row top).
+        assert_eq!(path_starts(&s, "actor-line")[0].0.y, 73.0);
+        let classic = draw("sequenceDiagram\nactor U as User\nU->>U: x", Look::Classic);
+        assert_eq!(path_starts(&classic, "actor-line")[0].0.y, 80.0);
+    }
+
+    #[test]
+    fn autonumbers_and_notes_as_mermaid_sizes_them() {
+        let s = draw(
+            "sequenceDiagram\nautonumber\nA->>B: x\nNote over A,B: TLS everywhere",
+            Look::Neo,
+        );
+        // The marker's r=6 circle doubled by the bare `line` rule's 2px.
+        let r = shapes(&s, "sequenceNumber")
+            .into_iter()
+            .find_map(|g| match g {
+                Geometry::Circle { r, .. } => Some(*r),
+                _ => None,
+            });
+        assert_eq!(r, Some(12.0));
+        // Note: its text's bounding box (18) plus 2 * noteMargin, over both
+        // lifelines plus actorMargin.
+        let note = rects(&s, "note")[0];
+        assert_eq!((note.x, note.w, note.h), (50.0, 250.0, 38.0));
     }
 
     #[test]
     fn participant_boxes_follow_mermaid_margins() {
-        let d = parse(
+        let s = draw(
             "sequenceDiagram\nbox Aqua One\nparticipant A\nend\nbox Two\nparticipant B\nend\nparticipant C",
-            None,
-        )
-        .unwrap();
-        let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
-        let cfg = SequenceConfig::default();
-        let s = render(&d, &cfg, &p);
-        let xs = lifeline_xs(&s);
-        let boxes: Vec<Rect> = scene_group(&s, "boxes")
-            .iter()
-            .filter_map(first_rect)
-            .collect();
-        assert_eq!(boxes.len(), 2);
-        // Box = actor (150) + boxTextMargin (5) + 2 * boxMargin (20) on each side.
-        assert!(
-            (boxes[0].x - (xs[0] - 100.0)).abs() < 1e-6,
-            "{boxes:?} {xs:?}"
+            Look::Classic,
         );
-        assert!((boxes[0].right() - (xs[0] + 100.0)).abs() < 1e-6);
-        // Neighbouring boxes: actorMargin + boxMargin + 2 * boxTextMargin - 2 * 25 apart.
-        assert!((boxes[1].x - boxes[0].right() - 20.0).abs() < 1e-6);
+        let xs = lifeline_xs(&s);
+        let boxes = rects(&s, "rect");
+        assert_eq!(boxes.len(), 2);
+        let (one, two) = if boxes[0].x < boxes[1].x {
+            (boxes[0], boxes[1])
+        } else {
+            (boxes[1], boxes[0])
+        };
+        // Box = actor (150) + boxTextMargin (5) + 2 * boxMargin (20) on each side.
+        assert_eq!(one.x, xs[0] - 100.0);
+        assert_eq!(one.right(), xs[0] + 100.0);
+        // Neighbouring boxes: actorMargin + boxMargin + 2 * boxTextMargin - 2 * 20 apart.
+        assert_eq!(two.x - one.right(), 20.0);
         // The participant after a box is pushed out by boxMargin + boxTextMargin.
-        assert!((xs[2] - xs[1] - (150.0 + 50.0 + 15.0)).abs() < 1e-6);
-        // Both boxes start `boxMargin / 2` above the band holding the titles.
-        assert!((boxes[0].y - boxes[1].y).abs() < 1e-6);
-        assert!((boxes[0].y - cfg.diagram_margin_y).abs() < 1e-6);
+        assert_eq!(xs[2] - xs[1], 150.0 + 50.0 + 15.0);
+        // Both boxes start `boxMargin / 2` above the top.
+        assert_eq!((one.y, two.y), (-5.0, -5.0));
     }
 
     #[test]
     fn nested_rects_paint_inner_on_top() {
-        let d = parse(
+        let s = draw(
             "sequenceDiagram\nA->>B: x\nrect rgb(1, 2, 3)\nA->>B: y\nrect rgb(4, 5, 6)\nA->>B: z\nend\nend",
-            None,
-        )
-        .unwrap();
-        let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
-        let s = render(&d, &SequenceConfig::default(), &p);
-        let rects: Vec<(Rect, String)> = scene_group(&s, "rects")
-            .iter()
+            Look::Classic,
+        );
+        let rects: Vec<(Rect, String)> = all(&s)
+            .into_iter()
             .filter_map(|e| match e {
                 Element::Shape {
                     geom: Geometry::Rect { rect, .. },
                     paint,
-                    ..
-                } => Some((*rect, paint.fill.0.clone())),
+                    class: Some(c),
+                } if c == "rect" => Some((*rect, paint.fill.0.clone())),
                 _ => None,
             })
             .collect();
         assert_eq!(rects.len(), 2);
         // Outer first (painted below), inner inset by boxMargin on each side.
         assert_eq!(rects[0].1, "rgb(1, 2, 3)");
-        assert!((rects[1].0.x - rects[0].0.x - 10.0).abs() < 1e-6);
+        assert_eq!(rects[1].0.x - rects[0].0.x, 10.0);
         assert!(rects[1].0.y > rects[0].0.y && rects[1].0.bottom() < rects[0].0.bottom());
     }
 
     #[test]
     fn frame_spacing_follows_mermaid() {
         // loop title: boxMargin before the frame, boxMargin + boxTextMargin + max(text, 20) after.
-        let d = parse("sequenceDiagram\nA->>B: x\nloop L\nA->>B: y\nend", None).unwrap();
-        let d2 = parse("sequenceDiagram\nA->>B: x\nloop\nA->>B: y\nend", None).unwrap();
-        let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
-        let cfg = SequenceConfig::default();
-        let h = |d: &SequenceDiagram| render(d, &cfg, &p).view_box.h;
-        let title_h = TextBlock::label("[L]", cfg.message_font_size)
-            .height
-            .max(LABEL_BOX_H);
-        assert!((h(&d) - h(&d2) - title_h).abs() < 1e-6);
+        let h = |src: &str| draw(src, Look::Classic).view_box.h;
+        let titled = h("sequenceDiagram\nA->>B: x\nloop L\nA->>B: y\nend");
+        let bare = h("sequenceDiagram\nA->>B: x\nloop\nA->>B: y\nend");
+        assert_eq!(titled - bare, LABEL_BOX_H);
     }
 
     #[test]
     fn long_messages_widen_gaps() {
-        let short = parse("sequenceDiagram\nA->>B: hi", None).unwrap();
-        let long = parse(
+        let short = draw("sequenceDiagram\nA->>B: hi", Look::Classic);
+        let long = draw(
             "sequenceDiagram\nA->>B: a very very very very very very very long message text",
-            None,
-        )
-        .unwrap();
-        let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
-        let cfg = SequenceConfig::default();
-        assert!(render(&long, &cfg, &p).view_box.w > render(&short, &cfg, &p).view_box.w);
+            Look::Classic,
+        );
+        assert!(long.view_box.w > short.view_box.w);
     }
 
     #[test]

@@ -1,19 +1,17 @@
 //! `timeline` diagrams.
 //!
-//! Layout mirrors mermaid's `timelineRenderer`: optional section headers on top,
-//! one column per time period (150px wide), a horizontal arrow axis under the
-//! periods and the period's events stacked below it, joined by a dashed line.
-//! Columns, headers and event stacks are placed with Taffy ([`crate::layout::boxes`]).
+//! Layout is a port of mermaid's horizontal `timelineRenderer`: optional section
+//! headers on top, one 190px column every 200px per time period, a horizontal
+//! arrow axis under the periods and the period's events stacked below it,
+//! crossed by a dashed drop line.
 
 use crate::color;
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
-use crate::layout::boxes::{self, BoxNode, Placed};
 use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::{self, BreakRule, line_width};
 use crate::theme::Palette;
-use boxes::taffy::prelude::*;
 
 /// Wrap a raw label (`<br>` respected) to `max_width` pixels the way the browser
 /// lays out an HTML label (spaces, hyphens, CJK); see [`BreakRule::Browser`].
@@ -178,239 +176,221 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Timeline> {
     Ok(tl)
 }
 
-const PERIOD_W: f64 = 150.0;
-const PAD: f64 = 10.0;
-const GAP: f64 = 10.0;
-const AXIS_GAP: f64 = 50.0;
-const FONT: f64 = 14.0;
-const HEADER_FONT: f64 = 16.0;
+/// Width a node's text wraps at (`node.width`), before its padding.
+const NODE_W: f64 = 150.0;
+/// `node.padding`.
+const NODE_PAD: f64 = 20.0;
 
-fn auto_width_fixed_height(h: f64, min_w: f64) -> Style {
-    Style {
-        size: Size {
-            width: auto(),
-            height: length(h as f32),
-        },
-        min_size: Size {
-            width: length(min_w as f32),
-            height: auto(),
-        },
-        flex_shrink: 0.0,
-        ..Default::default()
-    }
+/// A node's text: the timeline renderer's SVG `wrap` (greedy, at spaces and
+/// `<br>`), lines 1.1em apart.
+fn node_lines(raw: &str, width: f64, font: f64) -> Vec<String> {
+    wrap_words(raw, width, font, false)
 }
 
-struct Measured {
-    header: Option<Vec<String>>,
-    periods: Vec<(Vec<String>, Vec<Vec<String>>)>,
+/// `getVirtualNodeHeight` / `drawNode`: the text's bounding box plus half a line
+/// and the padding.
+fn node_height(lines: &[String], font: f64) -> f64 {
+    text::TextBlock::svg(lines.to_vec(), font, false).height + font * 1.1 * 0.5 + NODE_PAD
 }
 
-/// Lay out and draw a parsed timeline.
+/// Lay out and draw a parsed timeline: a port of `timelineRenderer.ts` (the
+/// horizontal layout) and `svgDraw.js`'s `drawNode`.
 pub fn draw(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let multicolor = !cfg.section_bool("timeline", "disableMulticolor", false);
-    let text_w = PERIOD_W - 2.0 * PAD;
-    let lh = FONT * 1.3;
-    let sections: Vec<Measured> = tl
-        .sections
+    let left_margin = cfg.section_f64("timeline", "leftMargin", 150.0);
+    let padding = cfg.section_f64("timeline", "padding", 50.0);
+    let font = pal.font_size;
+    let redux = matches!(
+        cfg.theme,
+        crate::theme::ThemeName::Redux
+            | crate::theme::ThemeName::ReduxDark
+            | crate::theme::ThemeName::ReduxColor
+            | crate::theme::ThemeName::ReduxDarkColor
+    );
+    let has_sections = tl.has_sections();
+    let sections: Vec<&Section> = if has_sections {
+        tl.sections.iter().filter(|s| s.name.is_some()).collect()
+    } else {
+        tl.sections.iter().collect()
+    };
+    let periods = || sections.iter().flat_map(|s| s.periods.iter());
+
+    // The pre-pass: tallest section, tallest period, tallest event stack.
+    let max_section_h = sections
         .iter()
-        .map(|s| Measured {
-            header: s
-                .name
-                .as_ref()
-                .map(|n| wrap_words(n, f64::INFINITY, HEADER_FONT, true)),
-            periods: s
-                .periods
-                .iter()
-                .map(|p| {
-                    (
-                        wrap_words(&p.label, text_w, FONT, true),
-                        p.events
-                            .iter()
-                            .map(|e| wrap_words(e, text_w, FONT, false))
-                            .collect(),
-                    )
-                })
-                .collect(),
-        })
-        .collect();
-    let box_h = |n: usize| n as f64 * lh + 2.0 * PAD;
-    let period_h = sections
-        .iter()
-        .flat_map(|s| &s.periods)
-        .map(|(l, _)| box_h(l.len()))
-        .fold(box_h(1), f64::max);
-    let header_h = sections
-        .iter()
-        .filter_map(|s| s.header.as_ref())
-        .map(|l| l.len() as f64 * HEADER_FONT * 1.3 + 2.0 * PAD)
+        .filter_map(|s| s.name.as_ref())
+        .map(|n| node_height(&node_lines(n, NODE_W, font), font) + 20.0)
         .fold(0.0, f64::max);
-
-    // Box tree: row of sections → [header, row of periods → column(period, axis gap, events)].
-    let section_nodes: Vec<BoxNode> = sections
-        .iter()
-        .map(|s| {
-            let periods = s
-                .periods
+    let max_task_h = periods()
+        .map(|p| node_height(&node_lines(&p.label, NODE_W, font), font) + 20.0)
+        .fold(0.0, f64::max);
+    let max_event_len = periods()
+        .map(|p| {
+            let n = p.events.len() as f64;
+            p.events
                 .iter()
-                .map(|(_, events)| {
-                    let mut kids = vec![
-                        BoxNode::leaf(PERIOD_W, period_h),
-                        BoxNode::leaf(PERIOD_W, AXIS_GAP),
-                    ];
-                    kids.extend(
-                        events
-                            .iter()
-                            .map(|e| BoxNode::leaf(PERIOD_W, box_h(e.len()))),
-                    );
-                    BoxNode::new(boxes::column(GAP), kids)
-                })
-                .collect();
-            let mut prow = boxes::row(GAP);
-            prow.justify_content = JustifyContent::CENTER;
-            let mut kids = Vec::new();
-            if let Some(h) = &s.header {
-                let w = h
-                    .iter()
-                    .map(|l| line_width(l, HEADER_FONT, true))
-                    .fold(0.0, f64::max)
-                    + 2.0 * PAD;
-                kids.push(BoxNode::new(auto_width_fixed_height(header_h, w), vec![]));
-            } else if header_h > 0.0 {
-                kids.push(BoxNode::new(auto_width_fixed_height(header_h, 0.0), vec![]));
-            }
-            kids.push(BoxNode::new(prow, periods));
-            BoxNode::new(boxes::stretched(boxes::column(GAP * 2.0)), kids)
+                .map(|e| node_height(&node_lines(e, NODE_W, font), font))
+                .sum::<f64>()
+                + if n > 0.0 { (n - 1.0) * 10.0 } else { 0.0 }
         })
-        .collect();
-    let body = BoxNode::new(boxes::row(GAP * 2.0), section_nodes);
-    let placed = boxes::compute(&body);
-
-    let title_h = tl
-        .title
-        .as_ref()
-        .filter(|t| !t.trim().is_empty())
-        .map_or(0.0, |_| 50.0);
-    let off = Point::new(20.0, 20.0 + title_h);
-    let shift = |r: Rect| Rect::new(r.x + off.x, r.y + off.y, r.w, r.h);
+        .fold(0.0, f64::max);
 
     let mut bounds = Bounds::default();
     let mut back = Vec::new();
     let mut nodes = Vec::new();
-    let has_sections = tl.has_sections();
-    let mut period_index = 0usize;
-    let mut axis_y: Option<f64> = None;
-    let body_rect = shift(placed.rect);
-    bounds.add_rect(body_rect);
+    let line_color = pal.scale_text_color(11).clone();
+    let black = Color::new("#000000");
 
-    for (si, (sec, sp)) in sections.iter().zip(&placed.children).enumerate() {
-        let has_header = header_h > 0.0;
-        if let (Some(lines), true) = (&sec.header, has_header) {
-            let r = shift(sp.children[0].rect);
-            nodes.push(node_box(r, si, pal, 1.0));
-            nodes.push(Element::classed_text(
-                Text::centered(
-                    r.center(),
-                    lines,
-                    HEADER_FONT,
-                    HEADER_FONT * 1.3,
-                    pal.scale_text_color(si),
-                )
-                .bold(),
-                "sectionTitle",
-            ));
+    // drawNode at (x, y): `width` wraps the text, the box is 2·padding wider.
+    let mut node = |x: f64, y: f64, raw: &str, width: f64, min_h: f64, ci: usize, event: bool| {
+        let lines = node_lines(raw, width, font);
+        let h = node_height(&lines, font).max(min_h);
+        let w = width + 2.0 * NODE_PAD;
+        let r = Rect::new(x, y, w, h);
+        let light = if event { EVENT_BRIGHTNESS } else { 1.0 };
+        nodes.push(node_box(r, ci, pal, light, redux));
+        let tfill = brightness(pal.scale_text_color(ci), light);
+        // The text group sits at (w / 2, padding / 2) (redux: further down), the
+        // lines `middle`-aligned from 1em, 1.1em apart.
+        let ty = y + if redux {
+            if event {
+                NODE_PAD / 2.0 + 3.0
+            } else {
+                NODE_PAD
+            }
+        } else {
+            NODE_PAD / 2.0
+        };
+        let mut t = Text::centered(
+            Point::new(x + w / 2.0, 0.0),
+            &lines,
+            font,
+            1.1 * font,
+            &tfill,
+        );
+        t.y = ty + font + 0.27 * font;
+        nodes.push(Element::classed_text(
+            t,
+            if event { "eventText" } else { "nodeText" },
+        ));
+        (h, r)
+    };
+
+    let mut master_x = 50.0 + left_margin;
+    let section_y = 50.0;
+    let mut color = 0usize;
+    for (si, sec) in sections.iter().enumerate() {
+        let mut master_y = 50.0;
+        let n = sec.periods.len().max(1) as f64;
+        if let Some(name) = sec.name.as_ref().filter(|_| has_sections) {
+            let (_, r) = node(
+                master_x,
+                section_y,
+                name,
+                200.0 * n - 50.0,
+                max_section_h,
+                si,
+                false,
+            );
+            bounds.add_rect(r);
+            master_y += max_section_h + 50.0;
         }
-        let prow: &Placed = &sp.children[usize::from(has_header)];
-        for ((label, events), pp) in sec.periods.iter().zip(&prow.children) {
-            let ci = if has_sections {
-                si
-            } else if multicolor {
-                period_index
-            } else {
-                0
-            };
-            period_index += 1;
-            let tfill = pal.scale_text_color(ci);
-            let pr = shift(pp.children[0].rect);
-            let gap_r = shift(pp.children[1].rect);
-            axis_y = Some(gap_r.y + gap_r.h / 2.0);
-            nodes.push(node_box(pr, ci, pal, 1.0));
-            nodes.push(Element::classed_text(
-                Text::centered(pr.center(), label, FONT, lh, tfill).bold(),
-                "periodText",
-            ));
-            let last = pp.children.last().map_or(pr, |c| shift(c.rect));
-            let bottom = if events.is_empty() {
-                gap_r.bottom()
-            } else {
-                last.bottom()
-            };
+        let mut x = master_x;
+        for p in &sec.periods {
+            let ci = if has_sections { si } else { color };
+            let (th, r) = node(x, master_y, &p.label, NODE_W, max_task_h, ci, false);
+            bounds.add_rect(r);
+            let task_h = max_task_h.max(th);
+            if !p.events.is_empty() {
+                let mut ey = master_y + 200.0;
+                for e in &p.events {
+                    let (eh, r) = node(x, ey, e, NODE_W, 50.0, ci, true);
+                    bounds.add_rect(r);
+                    ey += 10.0 + eh;
+                }
+            }
+            // The dashed drop line with its arrowhead (marker scaled by 2).
+            let lx = x + 190.0 / 2.0;
+            let y1 = master_y + task_h;
+            let y2 = y1 + 100.0 + max_event_len + 100.0;
             back.push(Element::classed_shape(
                 Geometry::Path(vec![
-                    PathCmd::MoveTo(Point::new(pr.center().x, pr.bottom())),
-                    PathCmd::LineTo(Point::new(pr.center().x, bottom)),
+                    PathCmd::MoveTo(Point::new(lx, y1)),
+                    PathCmd::LineTo(Point::new(lx, y2)),
                 ]),
-                Paint::stroke(&pal.line_color, 2.0).dashed(vec![5.0, 5.0]),
+                Paint::stroke(&line_color, 2.0).dashed(vec![5.0, 5.0]),
                 "eventLine",
             ));
-            for (lines, ep) in events.iter().zip(pp.children.iter().skip(2)) {
-                let er = shift(ep.rect);
-                // `.eventWrapper { filter: brightness(120%) }`.
-                nodes.push(node_box(er, ci, pal, EVENT_BRIGHTNESS));
-                nodes.push(Element::classed_text(
-                    Text::centered(
-                        er.center(),
-                        lines,
-                        FONT,
-                        lh,
-                        &brightness(tfill, EVENT_BRIGHTNESS),
-                    ),
-                    "eventText",
-                ));
+            back.push(Element::path(
+                geom::polygon(&[
+                    Point::new(lx - 4.0, y2 - 8.0),
+                    Point::new(lx, y2 + 2.0),
+                    Point::new(lx + 4.0, y2 - 8.0),
+                ]),
+                Paint::fill(&black),
+            ));
+            bounds.add_rect(Rect::new(lx - 1.0, y1, 2.0, y2 - y1));
+            x += 200.0;
+            if !has_sections && multicolor {
+                color += 1;
             }
         }
+        master_x += 200.0 * n;
     }
 
-    if let Some(y) = axis_y {
-        let x0 = body_rect.x - 10.0;
-        let x1 = body_rect.right() + 20.0;
-        back.push(Element::classed_shape(
-            Geometry::Path(vec![
-                PathCmd::MoveTo(Point::new(x0, y)),
-                PathCmd::LineTo(Point::new(x1 - 8.0, y)),
-            ]),
-            Paint::stroke(&pal.line_color, 4.0),
-            "axis",
-        ));
-        back.push(Element::classed_shape(
-            Geometry::Path(geom::polygon(&[
-                Point::new(x1 - 12.0, y - 8.0),
-                Point::new(x1 + 4.0, y),
-                Point::new(x1 - 12.0, y + 8.0),
-            ])),
-            Paint::fill(&pal.line_color),
-            "arrowhead",
-        ));
-        bounds.add_rect(Rect::new(x0, y - 8.0, x1 + 4.0 - x0, 16.0));
-    }
+    // The axis: 4px from leftMargin to the drawing's width + 3·leftMargin, its
+    // marker scaled by 4.
+    let content = bounds.rect();
+    let depth_y = if has_sections {
+        max_section_h + max_task_h + 150.0
+    } else {
+        max_task_h + 100.0
+    };
+    let x2 = content.w + 3.0 * left_margin;
+    back.push(Element::classed_shape(
+        Geometry::Path(vec![
+            PathCmd::MoveTo(Point::new(left_margin, depth_y)),
+            PathCmd::LineTo(Point::new(x2, depth_y)),
+        ]),
+        Paint::stroke(&line_color, 4.0),
+        "axis",
+    ));
+    back.push(Element::path(
+        geom::polygon(&[
+            Point::new(x2 - 20.0, depth_y - 8.0),
+            Point::new(x2 + 4.0, depth_y),
+            Point::new(x2 - 20.0, depth_y + 8.0),
+        ]),
+        Paint::fill(&black),
+    ));
+    bounds.add_rect(Rect::new(left_margin, depth_y - 2.0, x2 - left_margin, 4.0));
 
     if let Some(t) = tl.title.as_ref().filter(|t| !t.trim().is_empty()) {
-        let lines = crate::text::label_lines(t);
-        let w = lines
-            .iter()
-            .map(|l| line_width(l, 24.0, true))
-            .fold(0.0, f64::max);
-        let cx = body_rect.x + body_rect.w.max(w) / 2.0;
-        let c = Point::new(cx, 20.0 + title_h / 2.0 - 5.0);
-        bounds.add_rect(Rect::centered(c, w, 30.0));
+        // A bold `4ex` text at (width / 2 - leftMargin, 20).
+        let size = 4.0 * 0.52 * font;
+        let line = crate::text::label_lines(t).join(" ");
+        let x = content.w / 2.0 - left_margin;
+        let w = line_width(&line, size, true);
+        bounds.add_rect(Rect::new(x, 20.0 - 0.905 * size, w, 1.117 * size));
         nodes.push(Element::classed_text(
-            Text::centered(c, &lines, 24.0, 30.0, &pal.title_color).bold(),
+            Text {
+                x,
+                y: 20.0,
+                lines: vec![line],
+                line_height: size,
+                font_size: size,
+                bold: true,
+                anchor: crate::scene::Anchor::Start,
+                fill: pal.title_color.clone(),
+            },
             "titleText",
         ));
     }
 
     Scene {
         kind: DiagramKind::Timeline,
-        view_box: bounds.rect().pad(15.0),
+        // setupGraphViewbox with `timeline.padding`.
+        view_box: bounds.rect().pad(padding),
         elements: vec![
             Element::group("lines", back),
             Element::group("nodes", nodes),
@@ -422,24 +402,57 @@ pub fn draw(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
 }
 
-/// mermaid's timeline node: rounded box with a darker rule along its bottom edge.
-/// A node of section colour `ci`: `cScale` fill with a `cScaleInv` underline
-/// (`.section-N rect` / `.section-N line`).
-/// `light` is a CSS `brightness()` factor applied to the whole node.
-fn node_box(r: Rect, ci: usize, pal: &Palette, light: f64) -> Element {
+/// A quadratic Bézier from `a` via `c` to `b` as a cubic.
+fn quad(a: Point, c: Point, b: Point) -> PathCmd {
+    let k = 2.0 / 3.0;
+    PathCmd::CubicTo(
+        Point::new(a.x + k * (c.x - a.x), a.y + k * (c.y - a.y)),
+        Point::new(b.x + k * (c.x - b.x), b.y + k * (c.y - b.y)),
+        b,
+    )
+}
+
+/// `drawNode`'s background: a box with rounded top corners (square under the
+/// redux themes) and, outside redux, a `cScaleInv` rule along its bottom
+/// (`.section-N path` / `.section-N line`). `light` is a CSS `brightness()`
+/// factor applied to the whole node.
+fn node_box(r: Rect, ci: usize, pal: &Palette, light: f64, redux: bool) -> Element {
     let fill = brightness(pal.scale_color(ci), light);
     let edge = brightness(pal.scale_inv_color(ci), light);
-    Element::group(
-        "node",
-        vec![
-            Element::rect(r, 6.0, Paint::fill(&fill)),
-            Element::line(
-                Point::new(r.x + 3.0, r.bottom()),
-                Point::new(r.right() - 3.0, r.bottom()),
-                Paint::stroke(&edge, 3.0),
-            ),
-        ],
-    )
+    let rr = if redux { 0.0 } else { 5.0 };
+    let (x0, y0, x1, y1) = (r.x, r.y, r.right(), r.bottom());
+    let mut d = vec![PathCmd::MoveTo(Point::new(x0, y1))];
+    d.push(PathCmd::LineTo(Point::new(x0, y0 + rr)));
+    if rr > 0.0 {
+        d.push(quad(
+            Point::new(x0, y0 + rr),
+            Point::new(x0, y0),
+            Point::new(x0 + rr, y0),
+        ));
+    }
+    d.push(PathCmd::LineTo(Point::new(x1 - rr, y0)));
+    if rr > 0.0 {
+        d.push(quad(
+            Point::new(x1 - rr, y0),
+            Point::new(x1, y0),
+            Point::new(x1, y0 + rr),
+        ));
+    }
+    d.push(PathCmd::LineTo(Point::new(x1, y1)));
+    d.push(PathCmd::Close);
+    let mut els = vec![Element::classed_shape(
+        Geometry::Path(d),
+        Paint::fill(&fill),
+        "node-bkg",
+    )];
+    if !redux {
+        els.push(Element::line(
+            Point::new(x0, y1),
+            Point::new(x1, y1),
+            Paint::stroke(&edge, 3.0),
+        ));
+    }
+    Element::group("node", els)
 }
 
 /// timeline/styles.js: `.eventWrapper { filter: brightness(120%) }`.
@@ -546,7 +559,7 @@ mod tests {
         let pal = cfg.palette();
         let a = render(SRC, None, &cfg, &pal).unwrap();
         assert_eq!(a, render(SRC, None, &cfg, &pal).unwrap());
-        assert!(a.view_box.w > 4.0 * PERIOD_W);
+        assert!(a.view_box.w > 4.0 * NODE_W);
     }
 
     #[test]
@@ -555,5 +568,35 @@ mod tests {
         let c = brightness(&Color::new("#d7ff86"), EVENT_BRIGHTNESS);
         assert_eq!(c.css(), "#ffffa1");
         assert_eq!(brightness(&Color::new("#000000"), 1.2).css(), "#000000");
+    }
+
+    #[test]
+    fn layout_follows_the_horizontal_renderer() {
+        // mermaid 12.3.0, the gallery's timeline: viewBox `100 -61 1390 722.6`
+        // (the title's box differs by a fraction), sections 66.8 tall at y 50,
+        // periods at y 166.8, events from y 366.8, the axis at y 283.6.
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let src = include_str!("../../examples/diagrams/timeline.mmd");
+        let s = render(src, None, &cfg, &pal).unwrap();
+        let v = s.view_box;
+        assert_eq!((v.x, v.w), (100.0, 1390.0));
+        assert!((v.bottom() - 661.6).abs() < 0.1, "{v:?}");
+        let Element::Group { children, .. } = &s.elements[0] else {
+            panic!()
+        };
+        let axis = children
+            .iter()
+            .find_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Path(c),
+                    paint,
+                    ..
+                } if paint.stroke_width == 4.0 => Some(c.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(axis[0], PathCmd::MoveTo(Point::new(150.0, 283.6)));
+        assert_eq!(axis[1], PathCmd::LineTo(Point::new(1440.0, 283.6)));
     }
 }

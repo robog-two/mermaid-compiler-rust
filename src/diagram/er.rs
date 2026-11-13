@@ -1643,6 +1643,44 @@ mod tests {
         assert_eq!(circles, vec![cfg.palette().main_bkg.css().to_string()]);
     }
 
+    /// erBox's row and column dividers are rough.js polygons stroked at 1.3px;
+    /// under neo the `.node path` rule gives them the node stroke width.
+    #[test]
+    fn table_dividers_are_rough_width_in_classic() {
+        let src = "erDiagram\nCUSTOMER {\n string name PK\n string email\n}";
+        let widths = |json: &str| {
+            fn walk(els: &[Element], out: &mut Vec<f64>) {
+                for el in els {
+                    match el {
+                        Element::Group { children, .. } => walk(children, out),
+                        Element::Shape {
+                            geom: Geometry::Path(_),
+                            paint,
+                            class: None,
+                        } if paint.fill.is_none() => out.push(paint.stroke_width),
+                        _ => {}
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&render_with_cfg(src, json).elements, &mut out);
+            out
+        };
+        let classic = widths(r#"{"look": "classic"}"#);
+        assert!(!classic.is_empty());
+        assert!(classic.iter().all(|w| *w == 1.3), "{classic:?}");
+        let json = r#"{"look": "neo"}"#;
+        let node = MermaidConfig::default()
+            .with_json(&crate::json::parse(json).unwrap())
+            .unwrap()
+            .palette()
+            .stroke_width
+            .unwrap_or(1.0);
+        let neo = widths(json);
+        assert!(!neo.is_empty());
+        assert!(neo.iter().all(|w| *w == node), "{neo:?}");
+    }
+
     /// `erBox` scales `diagramPadding` (20) and `entityPadding` (15) by 1.25 unless
     /// the root `htmlLabels` is set: mermaid 12.3's `CUSTOMER { string name }` is
     /// 129.86 x 79.5 (name 79.86 wide, rows 21 + 18.75 high). A plain entity's

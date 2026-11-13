@@ -494,7 +494,8 @@ impl Default for GitConfig {
 
 const LABEL_FONT: f64 = 10.0;
 const TAG_FONT: f64 = 10.0;
-const BRANCH_FONT: f64 = 14.0;
+/// Branch labels are SVG text in the root font (no stylesheet rule sizes them).
+const BRANCH_FONT: f64 = 16.0;
 
 /// Abstract layout: `along` = commit axis, `across` = lane axis.
 #[derive(Debug, Clone, PartialEq)]
@@ -883,7 +884,8 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 }),
                 format!("branch branch{}", st.branch_index(lay.lane_index[b])),
             ));
-            let tb = TextBlock::new(vec![br.name.clone()], BRANCH_FONT, false);
+            // The label's SVG text box (`getBBox`) plus 18 x 4.
+            let tb = TextBlock::svg(vec![br.name.clone()], BRANCH_FONT, false);
             let (w, h) = (tb.width + 18.0, tb.height + 4.0);
             // mermaid's `drawBranches`: LR labels move 30px further left when
             // commit labels are rotated (they lean towards the branch label).
@@ -1222,12 +1224,23 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
         Element::group("commit-labels", label_els),
     ];
     if let Some(t) = g.title.as_ref().filter(|t| !t.is_empty()) {
+        // utils `insertTitle`: centred on the drawing, its baseline at
+        // y = -titleTopMargin (not above the drawing's top).
         let r = bounds.rect();
-        let c = Point::new(r.center().x, r.y - gc.title_top_margin);
+        let (x, y) = (r.center().x, -gc.title_top_margin);
         let w = line_width(t, 18.0, false);
-        bounds.add_rect(Rect::centered(c, w, 22.0));
+        bounds.add_rect(Rect::new(x - w / 2.0, y - 0.905 * 18.0, w, 1.117 * 18.0));
         els.push(Element::classed_text(
-            Text::centered(c, std::slice::from_ref(t), 18.0, 22.0, &pal.text_color),
+            Text {
+                x,
+                y,
+                lines: vec![t.clone()],
+                line_height: 22.0,
+                font_size: 18.0,
+                bold: false,
+                anchor: Anchor::Middle,
+                fill: pal.text_color.clone(),
+            },
             "gitTitleText",
         ));
     }
@@ -1474,5 +1487,46 @@ mod tests {
         assert_eq!(st.arrow_width(), 2.0);
         assert!(st.dark && st.redux);
         assert_eq!(css(&st.label_box(1).0), "#111113"); // dark: mainBkg fill
+    }
+
+    #[test]
+    fn branch_labels_and_title_follow_mermaid() {
+        // mermaid 12.3.0: `main`'s label box is its 16px text box (34.69 x 17)
+        // plus 18 x 4, its left edge 53px further left; the title's baseline
+        // sits at y = -titleTopMargin.
+        let src = "gitGraph\n  commit id: \"a\"";
+        let g = parse(src, Some("T".into()), &ParseOptions::default()).unwrap();
+        let gc = GitConfig::default();
+        let s = draw(
+            &g,
+            &layout(&g, &gc),
+            &gc,
+            &crate::theme::palette(crate::theme::ThemeName::Default, &[]),
+        );
+        let mut rect = None;
+        let mut title = None;
+        fn walk<'a>(els: &'a [Element], r: &mut Option<Rect>, t: &mut Option<&'a Text>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, r, t),
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        class: Some(c),
+                        ..
+                    } if c.starts_with("branchLabelBkg") => *r = Some(*rect),
+                    Element::Text {
+                        text,
+                        class: Some(c),
+                    } if c == "gitTitleText" => *t = Some(text),
+                    _ => {}
+                }
+            }
+        }
+        walk(&s.elements, &mut rect, &mut title);
+        let r = rect.unwrap();
+        let tw = line_width("main", 16.0, false);
+        assert!((r.w - (tw + 18.0)).abs() < 1e-9 && r.h == 21.0, "{r:?}");
+        assert!((r.x - (-tw - 53.0)).abs() < 1e-9, "{r:?}");
+        assert_eq!(title.unwrap().y, -25.0);
     }
 }
