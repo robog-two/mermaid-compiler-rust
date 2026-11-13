@@ -1998,7 +1998,13 @@ pub fn draw(
         ));
         if let Some(t) = rel.techn.as_ref().filter(|t| !t.is_empty()) {
             let tw = calc_text_wh(t, font, false, None);
-            let lines = text::split_lines(&format!("[{t}]"));
+            // Drawn `font-style="italic"` (measured upright, as `calculateTextWidth`
+            // does).
+            let lines = text::balance_marks(text::split_lines(&format!(
+                "{}[{t}]{}",
+                text::mark::ITALIC_ON,
+                text::mark::ITALIC_OFF
+            )));
             rel_els.push(tspan_lines(
                 &lines,
                 x + lw.width.max(tw.width) / 2.0,
@@ -2478,8 +2484,20 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         );
         let t = texts(&s);
         let label = t.iter().find(|t| t.lines == ["HHHH"]).unwrap();
-        let techn = t.iter().find(|t| t.lines == ["[HHHH]"]).unwrap();
+        let techn = t
+            .iter()
+            .find(|t| t.lines.iter().map(|l| text::plain(l)).eq(["[HHHH]"]))
+            .unwrap();
         assert_eq!((label.y, techn.y), (295.0, 312.0));
+        // The technology is italic.
+        assert_eq!(
+            text::styled_runs(&techn.lines[0], false),
+            [text::StyledRun {
+                text: "[HHHH]".into(),
+                bold: false,
+                italic: true
+            }]
+        );
         assert!((label.x - techn.x).abs() < 1e-9 && label.x > 258.0);
         // Boundary title: bold label at Y = 8, type 5px under its 17px box.
         let s = scene("C4Context\nBoundary(b, \"HHHH\", \"HHHH\") {\n  System(a, \"A\")\n}");

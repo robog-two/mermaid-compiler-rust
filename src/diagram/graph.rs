@@ -151,6 +151,8 @@ pub struct StyleOverrides {
     pub dash: Option<Vec<f64>>,
     pub color: Option<Color>,
     pub bold: Option<bool>,
+    /// `font-style: italic` / `oblique`.
+    pub italic: Option<bool>,
 }
 
 impl StyleOverrides {
@@ -178,6 +180,7 @@ impl StyleOverrides {
                     st.bold =
                         Some(v == "bold" || v.parse::<u32>().map(|w| w >= 600).unwrap_or(false))
                 }
+                "font-style" => st.italic = Some(matches!(v, "italic" | "oblique")),
                 _ => {}
             }
         }
@@ -193,6 +196,7 @@ impl StyleOverrides {
             dash: other.dash.clone().or_else(|| self.dash.clone()),
             color: other.color.clone().or_else(|| self.color.clone()),
             bold: other.bold.or(self.bold),
+            italic: other.italic.or(self.italic),
         }
     }
 }
@@ -631,6 +635,14 @@ fn measure_node(
         block = TextBlock::new(wrap_lines(&block.lines, wrap_width, font, bold), font, bold).html();
     } else if bold {
         block = TextBlock::new(block.lines, font, true).html();
+    }
+    // An HTML label takes the node's `font-style`; an SVG one does not (its
+    // inner tspans set `font-style="normal"`). Emphasis marks take no width.
+    if !svg && node.style.italic == Some(true) {
+        use crate::text::mark::{ITALIC_OFF, ITALIC_ON};
+        for l in block.lines.iter_mut().filter(|l| !l.is_empty()) {
+            *l = format!("{ITALIC_ON}{l}{ITALIC_OFF}");
+        }
     }
     // labelHelper: `minWidth` widens non-empty labels; circles and collapsed
     // containers size without it.
@@ -3961,6 +3973,39 @@ mod tests {
         };
         assert!((gap("A", "B") - 188.0).abs() < 1e-6, "{}", gap("A", "B"));
         assert!((gap("C", "D") - 94.0).abs() < 1e-6, "{}", gap("C", "D"));
+    }
+
+    /// `font-style: italic` (classDef / style) italicises an HTML node label.
+    #[test]
+    fn italic_font_style_italicises_html_labels() {
+        assert_eq!(
+            StyleOverrides::parse("font-style:italic").italic,
+            Some(true)
+        );
+        assert_eq!(
+            StyleOverrides::parse("font-style: normal").italic,
+            Some(false)
+        );
+        let (_, scene) = render_flowchart(
+            "flowchart LR\nA[Slanted]:::it\nB[Upright]\nclassDef it font-style:italic",
+        );
+        fn lines(els: &[Element], out: &mut Vec<String>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => lines(children, out),
+                    Element::Text { text, .. } => out.extend(text.lines.iter().cloned()),
+                    _ => {}
+                }
+            }
+        }
+        let mut all = Vec::new();
+        lines(&scene.elements, &mut all);
+        let runs = |s: &str| {
+            let l = all.iter().find(|l| crate::text::plain(l) == s).unwrap();
+            crate::text::styled_runs(l, false)
+        };
+        assert!(runs("Slanted").iter().all(|r| r.italic));
+        assert!(runs("Upright").iter().all(|r| !r.italic));
     }
 
     /// mermaid's ELK adapter never reads `nodeSpacing` / `rankSpacing`; dagre does.
