@@ -441,10 +441,20 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
                 let keys: Vec<f64> = (0..layer.len()).map(|i| i as f64).collect();
                 *layer = ctx.arrange(layer, &keys, &mut Vec::new());
             }
-            // A node's ports in the order they were made, edge by edge; ELK lists
-            // them clockwise, so its west side runs bottom to top.
-            for w in west.iter_mut() {
-                w.sort_by_key(|&s| std::cmp::Reverse((info[s].edge, s)));
+            // A node's ports in the order they were made, edge by edge (a
+            // container's: see `container_port_order`); ELK lists them
+            // clockwise, so its west side runs bottom to top.
+            let made = |v: usize, s: usize| {
+                port_made[gi]
+                    .iter()
+                    .find(|m| m.0 == v && m.1 == seg_key[s])
+                    .map_or((0, info[s].edge), |m| m.2)
+            };
+            for (v, e) in east.iter_mut().enumerate() {
+                e.sort_by_key(|&s| (made(v, s), s));
+            }
+            for (v, w) in west.iter_mut().enumerate() {
+                w.sort_by_key(|&s| std::cmp::Reverse((made(v, s), s)));
                 port_list_sorter_west(w);
             }
         }

@@ -778,3 +778,182 @@ fn a_moved_labels_layer_next_to_a_port_layer_keeps_its_room() {
         ],
     );
 }
+
+#[test]
+fn a_container_laid_out_on_its_own_packs_its_components() {
+    // An LR subgraph (`SEPARATE_CHILDREN`) is laid out by ELK one connected
+    // component at a time, packed in rows smallest first: the lone c1 and the
+    // b chain share the first row, the a chain and the d tree follow, 24px
+    // (`spacing.componentComponent`) apart (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph S
+    direction LR
+    a1 --> a2 --> a3
+    b1[a longer label] --> b2
+    c1
+    d1 --> d2
+    d1 --> d3
+  end
+",
+        &[
+            ("a1", 0.0, 69.0),
+            ("a2", 176.0, 69.0),
+            ("a3", 352.0, 69.0),
+            ("b1", 176.0, 0.0),
+            ("b2", 352.0, 0.0),
+            ("c1", 0.0, 0.0),
+            ("d1", 0.0, 185.5),
+            ("d2", 212.0, 138.0),
+            ("d3", 212.0, 233.0),
+        ],
+    );
+}
+
+#[test]
+fn a_containers_ports_start_in_the_order_elk_makes_them() {
+    // C3's port for `C3 --> c0n0` (an edge to C3 itself, which mermaid turns
+    // round) is made as ELK imports the edge, before the one for
+    // `c1n0 --> c3n0` that `CompoundGraphPreprocessor` adds: listed clockwise,
+    // the west side then has the crossing one on top, so C2's initial order is
+    // free of crossings and kept (C3 left of c2n0) (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+    subgraph C1
+      c1n0
+    end
+  end
+  subgraph C2
+    c2n0
+    subgraph C3
+      c3n0
+    end
+  end
+  x0
+  c1n0 --> C2
+  C3 --> c0n0
+  c2n0 --> x0
+  c1n0 --> c3n0
+",
+        &[
+            ("c0n0", 226.0, 24.0),
+            ("c1n0", 0.0, 0.0),
+            ("c2n0", 226.0, 313.0),
+            ("c3n0", 0.0, 289.0),
+            ("x0", 226.0, 432.0),
+        ],
+    );
+}
+
+#[test]
+fn a_containers_unconnected_ports_are_made_breadth_first() {
+    // C6's ports are all for edges to C6 itself, made as ELK imports the
+    // edges, those of the root graph (`c2n0 --> C6`) before those of C5
+    // (`c5n1 --> C6`, twice) (mermaid 12.3.0).
+    expect_centres(
+        "flowchart LR
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C1
+      c1n0
+      c1n1
+      c1n2
+      c1n0 --> c1n1
+    end
+  end
+  subgraph C2
+    c2n0
+    subgraph C3
+      c3n0
+      subgraph C4
+        c4n0
+        c4n1
+        c4n0 --> c4n1
+      end
+    end
+  end
+  subgraph C5
+    c5n0
+    c5n1
+    subgraph C6
+      c6n0
+      subgraph C7
+        c7n0
+      end
+    end
+    c5n0 --> c5n1
+  end
+  x0
+  C4 --> c5n0
+  c5n1 --> C6
+  c2n0 --> C6
+  c5n1 --> C6
+",
+        &[
+            ("c0n0", 98.0, 800.0),
+            ("c0n1", 98.0, 443.0),
+            ("c1n0", 10.0, 681.0),
+            ("c1n1", 186.0, 681.0),
+            ("c1n2", 10.0, 586.0),
+            ("c2n0", 224.0, 286.0),
+            ("c3n0", 88.0, 0.0),
+            ("c4n0", 0.0, 143.0),
+            ("c4n1", 176.0, 143.0),
+            ("c5n0", 494.0, 144.85),
+            ("c5n1", 670.0, 144.85),
+            ("c6n0", 930.0, 302.05),
+            ("c7n0", 930.0, 183.05),
+            ("x0", 98.0, 909.0),
+        ],
+    );
+}
+
+#[test]
+fn a_containers_east_ports_start_in_the_order_elk_makes_them() {
+    // The east side of a container's port list, too, starts in the order ELK
+    // makes the ports (not edge by edge) (mermaid 12.3.0).
+    expect_centres(
+        "flowchart BT
+  subgraph C0
+    c0n0
+    subgraph C1
+      c1n0
+      subgraph C2
+        c2n0
+        c2n1
+      end
+    end
+  end
+  subgraph C3
+    c3n0
+    subgraph C4
+      c4n0
+    end
+  end
+  subgraph C5
+    c5n0
+  end
+  x0
+  x1
+  c0n0 -->|x| c5n0
+  x1 --> C2
+  c1n0 --> C3
+  c1n0 --> x0
+  C2 --> C3
+",
+        &[
+            ("c0n0", 893.17, 436.0),
+            ("c1n0", 667.17, 484.0),
+            ("c2n0", 239.17, 532.0),
+            ("c2n1", 441.17, 532.0),
+            ("c3n0", 393.5, 203.0),
+            ("c4n0", 167.5, 215.0),
+            ("c5n0", 0.0, 0.0),
+            ("x0", 688.9, 263.0),
+            ("x1", 340.17, 709.0),
+        ],
+    );
+}

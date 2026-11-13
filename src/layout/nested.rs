@@ -606,6 +606,14 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 }
             }
         }
+        // In the order the container's ports were made: as ELK imports the
+        // edges, breadth-first by the graph containing each (the two ends'
+        // common ancestor), an edge from further out first.
+        stubs.sort_by_key(|&(ei, _, _)| {
+            let (a, b) = ends[ei];
+            tree.common_ancestor(a, b)
+                .map_or(0, |c| tree.chains[c].len())
+        });
     }
 
     // Deepest separate clusters first, the root last.
