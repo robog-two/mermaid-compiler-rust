@@ -171,3 +171,13 @@ fn dagre_clusters_take_dagre_frames() {
         1e-2,
     );
 }
+
+#[test]
+fn git_graph_tags_follow_get_bbox() {
+    // The top tag's box is 15px tall (getBBox 11 + 2 * 2), not 16.
+    assert_view_box(
+        include_str!("../examples/diagrams/gitgraph.mmd"),
+        [-149.0625, -56.7, 807.0625, 294.1277770996094],
+        1e-2,
+    );
+}
