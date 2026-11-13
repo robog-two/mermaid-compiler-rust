@@ -13,6 +13,7 @@ use crate::linejump;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
 use crate::theme::{ColorSlot, DropShadow, Palette, SlotColors};
+use std::collections::HashMap;
 
 /// Index into `GraphDiagram::nodes`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1224,6 +1225,8 @@ pub fn render_with(
     // index in `edge_els` of its drawn group (none for an invisible edge, which still
     // takes part: upstream paints it with an invisible stroke).
     let mut hop_edges: Vec<(linejump::EdgeGeom, Option<usize>)> = Vec::new();
+    // Per drawn edge (by its element's index) with one: its neo inline pattern.
+    let mut neo_dashes: HashMap<usize, Vec<f64>> = HashMap::new();
     // Every edge's clipped route and label position first: under ELK mermaid then
     // straightens the routes' terminal steps and separates opposite labels.
     let mut routed: Vec<Option<(Vec<Point>, Option<Point>)>> = vec![None; g.edges.len()];
@@ -1415,11 +1418,16 @@ pub fn render_with(
         let Some((mut pts, label_at)) = routed[ei].take() else {
             continue;
         };
-        // A neo edge takes the `*-margin` markers (`useMargin`), the neo barb's
-        // pull-back, and leaves its last `markerOffsets2` px undrawn.
+        // A neo edge takes the `*-margin` markers (`useMargin`) and the neo
+        // barb's pull-back, and leaves its first and last `markerOffsets2` px
+        // undrawn by a dash pattern (see `neo_dash`), not by a shorter line.
         let neo = cfg.look == ConfigLook::Neo;
-        let trim = |h: Head| markers::pullback_for(h, neo) + markers::hidden_end(h, neo);
+        let trim = |h: Head| markers::pullback_for(h, neo);
         let (start_trim, end_trim) = (trim(e.start), trim(e.end));
+        let hidden = (
+            markers::hidden_end(e.start, neo),
+            markers::hidden_end(e.end, neo),
+        );
         if elk {
             hop_edges.push((
                 linejump::EdgeGeom {
@@ -1495,10 +1503,17 @@ pub fn render_with(
             Curve::Step => geom::polyline(&step_points(&pts, horizontal)),
         };
         let mut paint = Paint::stroke(&stroke, width);
-        paint.dash = e.style.dash.clone().or_else(|| match e.line {
-            // A neo edge writes its pattern inline (`generateDashArray`): 2px
-            // dashes and gaps, dotted or dashed, outranking the stylesheet's.
-            LineKind::Dotted | LineKind::Dashed if neo => Some(NEO_DASH.to_vec()),
+        // A neo edge writes its pattern inline, outranking the stylesheet's
+        // (an edge's own style comes after it).
+        let patterned = matches!(e.line, LineKind::Dotted | LineKind::Dashed);
+        let inline = neo
+            .then(|| neo_dash(geom::path_length(&cmds), hidden, patterned))
+            .flatten();
+        if let Some(d) = &inline {
+            neo_dashes.insert(edge_els.len(), d.clone());
+        }
+        paint.dash = e.style.dash.clone().or(inline).or_else(|| match e.line {
+            _ if neo => None,
             LineKind::Dotted => Some(lk.dotted_dash.clone()),
             LineKind::Dashed => Some(lk.dashed_dash.clone()),
             _ => None,
@@ -1602,7 +1617,11 @@ pub fn render_with(
         let hopped = linejump::line_hops(&geoms, linejump::ELK_JUMP_RADIUS, cfg.line_hops);
         for (cmds, slot) in hopped.into_iter().zip(slots) {
             if let (Some(cmds), Some(k)) = (cmds, slot) {
+                let len = geom::path_length(&cmds);
                 set_edge_path(&mut edge_els[k], cmds);
+                if let Some(d) = neo_dashes.get(&k) {
+                    redash_hopped(&mut edge_els[k], d, len);
+                }
             }
         }
     }
@@ -1690,6 +1709,46 @@ pub fn render_with(
 }
 
 /// Replace the path of an `edgePath` group (its first child) with `cmds`.
+/// mermaid's inline `stroke-dasharray` of a neo edge `len` long whose first
+/// and last `hidden` px are left undrawn (`markerOffsets2`): `0 s len-s-e e`,
+/// or for a dotted or dashed one 2px dashes and gaps between
+/// (`generateDashArray`: `0 s 2 2 … 2 2 e`, the pattern repeating after). A
+/// solid one hiding nothing draws as it would without; one too short for its
+/// ends has a negative length, which makes the browser ignore the pattern.
+fn neo_dash(len: f64, (s, e): (f64, f64), patterned: bool) -> Option<Vec<f64>> {
+    let middle = len - s - e;
+    if patterned {
+        let pairs = if middle.is_finite() {
+            (middle / 4.0).floor().max(0.0) as usize
+        } else {
+            0
+        };
+        let mut out = vec![0.0, s];
+        for _ in 0..pairs {
+            out.extend(NEO_DASH);
+        }
+        out.push(e);
+        Some(out)
+    } else if (s > 0.0 || e > 0.0) && middle >= 0.0 {
+        Some(vec![0.0, s, middle, e])
+    } else {
+        None
+    }
+}
+
+/// After a neo edge's path is rewritten with line hops (now `len` long),
+/// mermaid recomputes its inline pattern (`applyLineJumpsToSvg`): of its
+/// first four numbers `0 a b c` it keeps `a` and `c`, makes `b` the rest of
+/// the length, and puts that in place of every pattern the edge has.
+fn redash_hopped(group: &mut Element, inline: &[f64], len: f64) {
+    if let Element::Group { children, .. } = group
+        && let Some(Element::Shape { paint, .. }) = children.first_mut()
+        && let [0.0, a, _, c, ..] = *inline
+    {
+        paint.dash = Some(vec![0.0, a, (len - a - c).max(0.0), c]);
+    }
+}
+
 pub(crate) fn set_edge_path(group: &mut Element, cmds: Vec<PathCmd>) {
     if let Element::Group { children, .. } = group
         && let Some(Element::Shape { geom, .. }) = children.first_mut()
@@ -3403,6 +3462,115 @@ mod tests {
                 PathCmd::Close => None,
             })
             .collect()
+    }
+
+    /// The dash pattern of an edge's line.
+    fn edge_dash(scene: &Scene, id: &str) -> Option<Vec<f64>> {
+        let Element::Group { children, .. } = &scene.elements[1] else {
+            panic!("edgePaths second");
+        };
+        children
+            .iter()
+            .find_map(|c| match c {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i == id => match children.first() {
+                    Some(Element::Shape { paint, .. }) => Some(paint.dash.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no edge {id}"))
+    }
+
+    #[test]
+    fn neo_edges_hide_their_ends_under_the_markers_by_a_pattern() {
+        // mermaid 12.3.0: A --> B ends 4 short of B (`markerOffsets`) and hides
+        // 4 more (`markerOffsets2`): `0 0 185.67 4` along its rounded path;
+        // A --o C ends on C and hides 12.5 (`0 0 27.5 12.5`); the dotted
+        // A -.-> D hides 4 after its 2px dashes and gaps.
+        let src = "flowchart TD\n  A --> B\n  A --o C\n  A -.-> D\n";
+        let scene_of = |src: &str| {
+            crate::render::render(src, &crate::config::MermaidConfig::default())
+                .expect("renders")
+                .scene
+        };
+        let scene = scene_of(src);
+        let ab = edge_points(&scene, "L-A-B-0");
+        let ac = edge_points(&scene, "L-A-C-1");
+        let (b_end, c_end) = (*ab.last().unwrap(), *ac.last().unwrap());
+        assert!((c_end.y - b_end.y - 4.0).abs() < 1e-6, "{ab:?} {ac:?}");
+        assert!((c_end.y - ac[0].y - 40.0).abs() < 1e-6, "{ac:?}");
+        let d = edge_dash(&scene, "L-A-B-0").expect("pattern");
+        assert_eq!((d.len(), d[0], d[1], d[3]), (4, 0.0, 0.0, 4.0), "{d:?}");
+        assert!((d[2] - 185.67).abs() < 0.01, "{d:?}");
+        assert_eq!(
+            edge_dash(&scene, "L-A-C-1"),
+            Some(vec![0.0, 0.0, 27.5, 12.5])
+        );
+        let d = edge_dash(&scene, "L-A-D-2").expect("pattern");
+        let n = d.len();
+        assert_eq!((d[0], d[1], d[n - 1]), (0.0, 0.0, 4.0), "{d:?}");
+        assert!(d[2..n - 1].iter().all(|&x| x == 2.0), "{d:?}");
+        // As many 2 + 2 pairs as fit in its 185.67 between the ends (46).
+        assert_eq!((n - 3) / 2, 46, "{d:?}");
+        // The classic look ends its line at the same pull-back, all drawn.
+        let classic = format!("---\nconfig:\n  look: classic\n---\n{src}");
+        let scene = scene_of(&classic);
+        let classic_ab = edge_points(&scene, "L-A-B-0");
+        let end = *classic_ab.last().unwrap();
+        assert!((end.y - classic_ab[0].y - (b_end.y - ab[0].y)).abs() < 1e-6);
+        assert_eq!(edge_dash(&scene, "L-A-B-0"), None);
+    }
+
+    #[test]
+    fn neo_dash_patterns_follow_generate_dash_array() {
+        assert_eq!(neo_dash(100.0, (0.0, 0.0), false), None);
+        assert_eq!(
+            neo_dash(100.0, (0.0, 4.0), false),
+            Some(vec![0.0, 0.0, 96.0, 4.0])
+        );
+        // Too short for its ends: the browser ignores the negative pattern.
+        assert_eq!(neo_dash(10.0, (12.5, 12.5), false), None);
+        assert_eq!(
+            neo_dash(13.0, (0.0, 4.0), true),
+            Some(vec![0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 4.0])
+        );
+        assert_eq!(neo_dash(3.0, (0.0, 4.0), true), Some(vec![0.0, 0.0, 4.0]));
+    }
+
+    #[test]
+    fn a_hopped_neo_edge_is_dashed_again_for_its_new_length() {
+        // `applyLineJumpsToSvg`: `0 a b c …` becomes `0 a (len - a - c) c`,
+        // in place of whatever pattern the edge had; a pattern of fewer than
+        // four numbers is left alone.
+        let edge = |dash: Option<Vec<f64>>| {
+            let mut paint = Paint::stroke(&Color::new("#000"), 2.0);
+            paint.dash = dash;
+            Element::Group {
+                id: None,
+                class: None,
+                children: vec![Element::shape(Geometry::Path(Vec::new()), paint)],
+            }
+        };
+        let dash = |el: &Element| match el {
+            Element::Group { children, .. } => match &children[0] {
+                Element::Shape { paint, .. } => paint.dash.clone(),
+                _ => None,
+            },
+            _ => None,
+        };
+        let mut el = edge(Some(vec![0.0, 0.0, 90.0, 4.0]));
+        redash_hopped(&mut el, &[0.0, 0.0, 90.0, 4.0], 106.0);
+        assert_eq!(dash(&el), Some(vec![0.0, 0.0, 102.0, 4.0]));
+        let mut el = edge(Some(vec![5.0, 5.0]));
+        redash_hopped(&mut el, &[0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 4.0], 50.0);
+        assert_eq!(dash(&el), Some(vec![0.0, 0.0, 48.0, 2.0]));
+        let mut el = edge(None);
+        redash_hopped(&mut el, &[0.0, 0.0, 4.0], 50.0);
+        assert_eq!(dash(&el), None);
     }
 
     #[test]

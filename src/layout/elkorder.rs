@@ -258,6 +258,7 @@ pub(super) fn minimize(
         layers: Vec::new(),
         port_rank: Vec::new(),
         rng: JavaRandom::new(1),
+        ports_set: [false; 2],
     })
 }
 
@@ -292,6 +293,12 @@ pub(super) struct RunOrder {
     /// The graph's random generator as crossing minimisation leaves it, which
     /// ELK's edge router draws from next (`HyperEdgeCycleDetector`).
     pub rng: JavaRandom,
+    /// Whether the port list of the graph's container on its side towards the
+    /// next layer (`[0]`) and towards the previous one (`[1]`) was ordered
+    /// after its port dummies here (`sortPortsByDummyPositionsInLastLayer`, or
+    /// the parent's sweeps, which order its dummies by its ports): where not,
+    /// the container keeps its ports as they were made (`PortListSorter`).
+    pub ports_set: [bool; 2],
 }
 
 /// ELK's `hierarchicalSweepiness` default: a container whose paths lead
@@ -536,6 +543,8 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
         extra,
         into,
         seed,
+        ports_set: vec![[false; 2]; ng],
+        port_made,
     };
     // Bottom-up graphs (and the root) in the reverse of a breadth-first walk
     // that finds a graph's children in its layers' order
@@ -600,7 +609,8 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
         .into_iter()
         .zip(ghosts)
         .zip(reals)
-        .map(|((s, gs), real)| {
+        .zip(run.ports_set)
+        .map(|(((s, gs), real), ports_set)| {
             let mut port_rank = vec![(None, None); s.segs.len()];
             for u in 0..real.min(s.east.len()) {
                 for (i, &k) in s.east[u].iter().enumerate() {
@@ -627,6 +637,7 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
                 layers,
                 port_rank,
                 rng: s.rng,
+                ports_set,
             }
         })
         .collect()
@@ -713,6 +724,11 @@ struct Run<'a> {
     /// Per graph: ordered within its parent's sweeps.
     into: Vec<bool>,
     seed: i64,
+    /// Per graph: see `RunOrder::ports_set`.
+    ports_set: Vec<[bool; 2]>,
+    /// Per graph: for each container in it (by vertex), the order ELK makes
+    /// its ports in, by edge key (see `container_port_order`).
+    port_made: Vec<Vec<(usize, usize, Made)>>,
 }
 
 impl Run<'_> {
@@ -727,6 +743,7 @@ impl Run<'_> {
         if layer.first().is_none_or(|&u| !self.sw[g].ext[u]) {
             return;
         }
+        self.ports_set[g][usize::from(!east)] = true;
         let keys: Vec<usize> = layer.iter().filter_map(|&u| self.extra[g].1[u]).collect();
         let seg_key = &self.extra[pg].2;
         let rank_of = |key: usize| keys.iter().position(|&k| k == key).unwrap_or(usize::MAX);
@@ -772,16 +789,37 @@ impl Run<'_> {
             })
             .collect();
         // A dummy whose port has no edge outside (the container's own port for
-        // an edge to something inside it): without connections the port
-        // distributor sorts it to the front of its side's clockwise list
-        // (barycentre 0), which is the top of the east side but the bottom of
-        // the west.
+        // an edge to something inside it, or for a loop on it): without
+        // connections the port distributor sorts it to the front of its side's
+        // clockwise list (barycentre 0), which is the top of the east side but
+        // the bottom of the west, keeping such ports in the order they had,
+        // as `PortListSorter` left them: as they were made, the west side
+        // reversed but for its last port (see `port_list_sorter_west`).
         let ext_key = &self.extra[g].1;
+        let made = |k: usize| {
+            self.port_made[pg]
+                .iter()
+                .find(|m| m.0 == v && m.1 == k)
+                .map_or((usize::MAX, k), |m| m.2)
+        };
+        let mut side: Vec<usize> = self.sw[g].layers[li]
+            .iter()
+            .filter_map(|&u| ext_key[u])
+            .collect();
+        side.sort_by_key(|&k| (made(k), k));
+        if west {
+            // Top to bottom: ELK's list reversed.
+            side.reverse();
+            port_list_sorter_west(&mut side);
+        }
         let unconnected = if west { usize::MAX } else { 0 };
         let rank = |u: usize| {
-            ext_key[u]
-                .and_then(|k| keys.iter().position(|&x| x == k))
-                .map_or(unconnected, |p| p + 1)
+            ext_key[u].map_or((unconnected, 0), |k| {
+                keys.iter().position(|&x| x == k).map_or_else(
+                    || (unconnected, side.iter().position(|&x| x == k).unwrap_or(0)),
+                    |p| (p + 1, 0),
+                )
+            })
         };
         self.sw[g].layers[li].sort_by_key(|&u| rank(u));
     }
@@ -933,6 +971,8 @@ impl Run<'_> {
                 .first()
                 .is_some_and(|&u| self.sw[c].ext[u]);
             if first_is_port {
+                // The port distributor has just ordered that side's ports.
+                self.ports_set[c][usize::from(forward)] = true;
                 self.dummies_from_ports(c, start, g, v, forward);
             } else {
                 self.sw[c].set_first_layer_order(forward);

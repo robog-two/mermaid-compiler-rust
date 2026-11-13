@@ -665,7 +665,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     let slot = |s: Option<usize>| s.unwrap_or(nc);
     // Per (container, edge): the cross-axis offset of the edge's external port on
     // the container's box from the box's centre.
-    let mut ext_off: HashMap<(usize, usize), f64> = HashMap::new();
+    let mut ext_off: ExtPorts = HashMap::new();
     // Under ELK the graphs of one run are ordered together (see `order_runs`)
     // before any is placed.
     let mut ordered: Vec<Option<RunLevel>> = (0..=nc).map(|_| None).collect();
@@ -688,8 +688,12 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             ordered[slot(scope)] = Some(done);
         }
     }
+    let ports_set: Vec<[bool; 2]> = (0..nc)
+        .map(|c| ordered[c].as_ref().map_or([false; 2], |o| o.4))
+        .collect();
+    let import = tree.import_order();
     for &scope in &scopes {
-        let li = level_input(
+        let mut li = level_input(
             &tree,
             &ends,
             scope,
@@ -698,6 +702,17 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             &stubs,
             &ext_off,
         );
+        if elk {
+            li.hier.loop_high = loop_sides(
+                &tree,
+                &ends,
+                segs.as_deref().unwrap_or_default(),
+                &li,
+                &ext_off,
+                &ports_set,
+                &import,
+            );
+        }
         // A container whose run holds no other graph may be split.
         let alone = !scopes
             .iter()
@@ -709,7 +724,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
         };
         let out = match (packed, ordered[slot(scope)].take()) {
             (Some(out), _) => out,
-            (None, Some((prep, layers, port_rank, rng))) => {
+            (None, Some((prep, layers, port_rank, rng, _))) => {
                 let hier = Hierarchy {
                     port_rank,
                     route_rng: rng,
@@ -753,7 +768,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                     } else {
                         p.x - bb.x + pad + (w - 2.0 * pad - bb.w) / 2.0 - w / 2.0
                     };
-                    ext_off.insert((c, ei), off);
+                    ext_off.insert((c, ei), (off, !entering));
                 }
             }
             // Ports all unconnected inside: no ELK nodes there (the container
@@ -1076,6 +1091,138 @@ fn ext_order(
     keyed.into_iter().map(|k| k.3).collect()
 }
 
+/// Per (container, port key): where the port's dummy stands inside, as the
+/// cross-axis offset of the port from the container's centre, and whether it
+/// is on the container's side towards the next layer.
+type ExtPorts = HashMap<(usize, usize), (f64, bool)>;
+
+/// ELK's port penalties of a self-loop passing a container's port
+/// (`RoutingDirector`): one with edges, one without.
+const CONNECTED_PORT_PENALTY: usize = 3;
+const UNCONNECTED_PORT_PENALTY: usize = 1;
+
+/// A container's port as a loop on it passes it (see [`loop_sides`]).
+struct LoopPort {
+    /// The port's key (see [`port_key`]).
+    key: usize,
+    /// Its dummy's cross-axis offset from the container's centre.
+    off: f64,
+    /// `CONNECTED_PORT_PENALTY` or `UNCONNECTED_PORT_PENALTY`.
+    cost: usize,
+    /// When ELK made it.
+    made: (usize, usize),
+}
+
+/// Per edge of a level: whether it is a loop on a container whose ports keep
+/// their sides that goes round the container's high cross-axis side.
+///
+/// Such a loop leaves on the side towards the next layer and comes back on the
+/// other, round either end; ELK's `RoutingDirector` takes the way passing the
+/// fewer ports (weighed by `CONNECTED_PORT_PENALTY` and
+/// `UNCONNECTED_PORT_PENALTY`, the loop's own and the ports of edges to the
+/// container from inside it being without edges there), and on a tie the
+/// clockwise one: from the next layer's side round the high end. It counts
+/// the ports in the container's port list as it stands then: on a side its
+/// contents ordered (see `elkorder::RunOrder::ports_set`) as their dummies
+/// stand inside, else as they were made (`PortListSorter`: those of edges to
+/// the container itself as ELK imports the edges, then those of edges crossing
+/// its border by their dummies, the side towards the previous layer
+/// clockwise and then reversed but for its last port).
+fn loop_sides(
+    tree: &Tree,
+    ends: &[(Member, Member)],
+    all: &[Seg],
+    li: &LevelInput,
+    ext_off: &ExtPorts,
+    ports_set: &[[bool; 2]],
+    import: &[usize],
+) -> Vec<bool> {
+    let ne = ends.len();
+    let within = |m: Member, c: usize| match m {
+        Member::Node(v) => tree.input.nodes[v]
+            .cluster
+            .is_some_and(|nc| tree.chains[nc].contains(&c)),
+        Member::Cluster(d) => tree.chains[d].contains(&c),
+    };
+    let mut high = vec![false; li.seg_of.len()];
+    for (k, seg) in li.seg_of.iter().enumerate() {
+        let Some(s) = seg else { continue };
+        let SegEnd::Box(c) = s.from else { continue };
+        if s.to != s.from {
+            continue;
+        }
+        let fixed = li
+            .items
+            .iter()
+            .position(|&it| it == Item::Box(c))
+            .is_some_and(|v| li.hier.side_fixed.get(v).copied().unwrap_or(false));
+        if !fixed {
+            continue;
+        }
+        let inner = ext_order(tree, ends, all, Some(c));
+        let mut sides: [Vec<LoopPort>; 2] = [Vec::new(), Vec::new()];
+        for (&(cc, key), &(off, east)) in ext_off {
+            if cc != c {
+                continue;
+            }
+            let ei = key % ne;
+            let (a, b) = ends[ei];
+            let outside = |m: Member| m != Member::Cluster(c) && !within(m, c);
+            let cost = if a != b && (outside(a) || outside(b)) {
+                CONNECTED_PORT_PENALTY
+            } else {
+                UNCONNECTED_PORT_PENALTY
+            };
+            let made = if a == Member::Cluster(c) || b == Member::Cluster(c) {
+                (0, import.get(ei).copied().unwrap_or(ei))
+            } else {
+                (1, inner.iter().position(|&e| e == ei).unwrap_or(usize::MAX))
+            };
+            sides[usize::from(!east)].push(LoopPort {
+                key,
+                off,
+                cost,
+                made,
+            });
+        }
+        let set = ports_set.get(c).copied().unwrap_or_default();
+        let [mut east, mut west] = sides;
+        // ELK's list runs clockwise: the east side top down, the west bottom up.
+        if set[0] {
+            east.sort_by(|p, q| p.off.total_cmp(&q.off).then(p.key.cmp(&q.key)));
+        } else {
+            east.sort_by_key(|p| (p.made, p.key));
+        }
+        if set[1] {
+            west.sort_by(|p, q| q.off.total_cmp(&p.off).then(p.key.cmp(&q.key)));
+        } else {
+            west.sort_by_key(|p| (p.made, p.key));
+            let n = west.len();
+            if n >= 4 {
+                west[..n - 1].reverse();
+            }
+        }
+        let list: Vec<(usize, usize)> = east.iter().chain(&west).map(|p| (p.key, p.cost)).collect();
+        let at = |key: usize| list.iter().position(|p| p.0 == key);
+        let (Some(a), Some(b)) = (at(s.edge), at(s.edge + ne)) else {
+            continue;
+        };
+        let (e, w) = if a < east.len() { (a, b) } else { (b, a) };
+        // The penalty of going clockwise from the port at `l` to the one at
+        // `r`, past the ports between them.
+        let n = list.len();
+        let pen = |l: usize, r: usize| -> usize {
+            (1..n)
+                .map(|d| (l + d) % n)
+                .take_while(|&i| i != r)
+                .map(|i| list[i].1)
+                .sum()
+        };
+        high[k] = pen(e, w) <= pen(w, e);
+    }
+    high
+}
+
 /// The key of an edge's port on a container: the edge, but for the port
 /// where a loop on the container comes back in (a loop has two ports there).
 fn port_key(ends: &[(Member, Member)], ei: usize, entering: bool) -> usize {
@@ -1109,7 +1256,7 @@ fn level_input(
     box_size: &[(f64, f64)],
     all_segs: Option<&[Seg]>,
     stubs: &[(usize, usize, bool)],
-    ext_off: &HashMap<(usize, usize), f64>,
+    ext_off: &ExtPorts,
 ) -> LevelInput {
     let input = tree.input;
     let nc = input.clusters.len();
@@ -1273,7 +1420,9 @@ fn level_input(
             continue;
         };
         let port = |x: SegEnd, entering: bool| match x {
-            SegEnd::Box(c) => ext_off.get(&(c, port_key(ends, s.edge, entering))).copied(),
+            SegEnd::Box(c) => ext_off
+                .get(&(c, port_key(ends, s.edge, entering)))
+                .map(|p| p.0),
             _ => None,
         };
         let ports = (port(s.from, false), port(s.to, true));
@@ -1340,10 +1489,15 @@ fn level_input(
     }
     // The loop's legs stand off the ports on either side, those of edges
     // crossing the border included.
+    let loop_ext = super::self_loop_ext(if scope.is_none() {
+        ElkGraph::Root
+    } else {
+        ElkGraph::Container { separate: false }
+    });
     for v in looped {
         hier.margins.resize(items.len(), (0.0, 0.0));
         let m = &mut hier.margins[v];
-        *m = (m.0 + super::SELF_LOOP_EXT, m.1 + super::SELF_LOOP_EXT);
+        *m = (m.0 + loop_ext, m.1 + loop_ext);
     }
     for (ei, (e, &(a, b))) in input
         .edges
@@ -1728,7 +1882,7 @@ fn layout_components(tree: &Tree, scope: Option<usize>, li: &LevelInput) -> Opti
     let mut rng = elkorder::JavaRandom::new(1);
     let mut levels = Vec::with_capacity(subs.len());
     for sub in subs {
-        let (prep, layers, port_rank, ordered) =
+        let (prep, layers, port_rank, ordered, _) =
             order_runs(tree, &[scope], std::slice::from_ref(&sub), Some(&rng))
                 .pop()
                 .expect("one level");
@@ -1866,14 +2020,20 @@ fn order_runs(
             ordered[i] = Some(o);
         }
     }
-    let complete: Vec<(Vec<Vec<usize>>, PortRanks, Option<elkorder::JavaRandom>)> = setups
+    #[allow(clippy::type_complexity)]
+    let complete: Vec<(
+        Vec<Vec<usize>>,
+        PortRanks,
+        Option<elkorder::JavaRandom>,
+        [bool; 2],
+    )> = setups
         .into_iter()
         .zip(ordered)
         .enumerate()
         .map(|(i, (setup, o))| {
-            let (layers, seg_rank, rng) = match o {
-                Some(o) => (o.layers, o.port_rank, Some(o.rng)),
-                None => (Vec::new(), Vec::new(), None),
+            let (layers, seg_rank, rng, ports_set) = match o {
+                Some(o) => (o.layers, o.port_rank, Some(o.rng), o.ports_set),
+                None => (Vec::new(), Vec::new(), None, [false; 2]),
             };
             // Per edge of the level: the ranks at its real ends.
             let mut rank: PortRanks = Vec::new();
@@ -1885,14 +2045,14 @@ fn order_runs(
                 rank[e].1 = rank[e].1.or(r.1);
             }
             let layers = setup.complete(layers, &preps[i].verts, &ctxs[i]);
-            (layers, rank, rng)
+            (layers, rank, rng, ports_set)
         })
         .collect();
     drop(ctxs);
     preps
         .into_iter()
         .zip(complete)
-        .map(|(p, (l, r, g))| (p, l, r, g))
+        .map(|(p, (l, r, g, s))| (p, l, r, g, s))
         .collect()
 }
 
@@ -1900,13 +2060,15 @@ fn order_runs(
 /// `elkorder::RunOrder::port_rank`).
 type PortRanks = Vec<(Option<usize>, Option<usize>)>;
 
-/// One level of an ELK run, ordered: its prepared pass, its layers and its
-/// port ranks.
+/// One level of an ELK run, ordered: its prepared pass, its layers, its
+/// port ranks, its random generator and which sides of its container's port
+/// list follow its port dummies (`elkorder::RunOrder::ports_set`).
 type RunLevel = (
     Prepared,
     Vec<Vec<usize>>,
     PortRanks,
     Option<elkorder::JavaRandom>,
+    [bool; 2],
 );
 
 #[cfg(test)]

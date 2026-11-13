@@ -241,6 +241,61 @@ pub fn rounded_path(points: &[Point], radius: f64) -> Vec<PathCmd> {
     out
 }
 
+/// The length of a path (`SVGPathElement.getTotalLength`): its lines, and its
+/// cubics by Gauss–Legendre quadrature over a few pieces each.
+pub fn path_length(cmds: &[PathCmd]) -> f64 {
+    // 5-point Gauss–Legendre nodes and weights on [-1, 1].
+    const GL: [(f64, f64); 5] = [
+        (0.0, 0.568_888_888_888_888_9),
+        (-0.538_469_310_105_683, 0.478_628_670_499_366_5),
+        (0.538_469_310_105_683, 0.478_628_670_499_366_5),
+        (-0.906_179_845_938_664, 0.236_926_885_056_189_08),
+        (0.906_179_845_938_664, 0.236_926_885_056_189_08),
+    ];
+    const PIECES: usize = 8;
+    let mut total = 0.0;
+    let (mut cur, mut start) = (Point::default(), Point::default());
+    for c in cmds {
+        match *c {
+            PathCmd::MoveTo(p) => {
+                cur = p;
+                start = p;
+            }
+            PathCmd::LineTo(p) => {
+                total += cur.dist(p);
+                cur = p;
+            }
+            PathCmd::CubicTo(c1, c2, p) => {
+                // |B'(t)| = 3 |(1-t)² (c1 - p0) + 2 (1-t) t (c2 - c1) + t² (p - c2)|
+                let (a, b, d) = (c1.minus(cur), c2.minus(c1), p.minus(c2));
+                let speed = |t: f64| {
+                    let u = 1.0 - t;
+                    a.scale(3.0 * u * u)
+                        .plus(b.scale(6.0 * u * t))
+                        .plus(d.scale(3.0 * t * t))
+                        .len()
+                };
+                let h = 1.0 / PIECES as f64;
+                for k in 0..PIECES {
+                    let mid = (k as f64 + 0.5) * h;
+                    total += GL
+                        .iter()
+                        .map(|&(x, w)| w * speed(mid + x * h / 2.0))
+                        .sum::<f64>()
+                        * h
+                        / 2.0;
+                }
+                cur = p;
+            }
+            PathCmd::Close => {
+                total += cur.dist(start);
+                cur = start;
+            }
+        }
+    }
+    total
+}
+
 /// mermaid's `fixCorners` (`edges.js`), applied to every edge not drawn `rounded`:
 /// each exact right-angle bend whose legs are both longer than 5 is replaced by
 /// the points 5 before and after it, with (when the neighbours are far enough
@@ -405,6 +460,30 @@ pub fn clip_polygon(c: Point, poly: &[Point], toward: Point) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_length_of_lines_and_rounded_corners() {
+        let pts = [
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 50.0),
+            Point::new(30.0, 50.0),
+        ];
+        assert!((path_length(&polyline(&pts)) - 80.0).abs() < 1e-9);
+        // A right-angle bend cut 5√2 back on each leg, joined by the quadratic
+        // with the bend as control: (√2 + asinh(1)) · 5 long.
+        let cut = 5.0 * std::f64::consts::SQRT_2;
+        let quad = 5.0 * (std::f64::consts::SQRT_2 + 1f64.asinh());
+        let want = 80.0 - 2.0 * cut + quad;
+        assert!((path_length(&rounded_path(&pts, 5.0)) - want).abs() < 1e-9);
+        // A closed square.
+        let sq = polygon(&[
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+            Point::new(0.0, 10.0),
+        ]);
+        assert!((path_length(&sq) - 40.0).abs() < 1e-9);
+    }
 
     #[test]
     fn rect_clipping_hits_border() {
