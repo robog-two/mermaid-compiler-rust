@@ -1064,4 +1064,24 @@ mod tests {
             )
         );
     }
+
+    /// mermaid 12.3.0 under ELK: a composite's title is a markdown label the
+    /// adapter measures wrapped at `state.wrappingWidth` (120), so a 132px
+    /// title reserves two lines (the frame 191 high, not 170), a 253px one
+    /// three; it is still painted on one line, the frame as wide as it.
+    #[test]
+    fn elk_composite_titles_are_measured_wrapped() {
+        let height = |title: &str| {
+            let src =
+                format!("stateDiagram-v2\n  state \"{title}\" as A {{\n    a1 --> a2\n  }}\n");
+            let scene = crate::render::render(&src, &crate::config::MermaidConfig::default())
+                .expect("renders")
+                .scene;
+            drawn_rect(&scene, "cluster-A").flatten().expect("A")
+        };
+        assert_eq!(height("Medium title x").h, 170.0);
+        assert_eq!(height("A long composite title").h, 191.0);
+        let wide = height("A much much longer composite title here");
+        assert_eq!((wide.w, wide.h), (260.90625, 212.0));
+    }
 }

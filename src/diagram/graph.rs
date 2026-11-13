@@ -1138,6 +1138,21 @@ pub fn render_with(
     // at the frame's width when painting (below); under dagre a probe layout gives
     // the width to wrap at before the real one.
     let er_groups = g.kind == DiagramKind::Er;
+    // A composite state's title is a markdown label, which the ELK adapter
+    // measures wrapped at the state's `wrappingWidth` (it paints it unwrapped).
+    if elk && g.kind == DiagramKind::State {
+        for (ci, c) in g.clusters.iter().enumerate() {
+            if c.kind != ClusterKind::Composite
+                || empty_of[ci].is_some()
+                || cluster_titles[ci].is_empty()
+            {
+                continue;
+            }
+            let t = wrapped_group_title(&c.title, cfg.wrapping_width, font);
+            input.clusters[ci].title_height = cluster_title_height(c.kind, &t, elk);
+            input.clusters[ci].min_width = t.width + title_pad;
+        }
+    }
     if er_groups && elk {
         for (ci, c) in g.clusters.iter().enumerate() {
             if empty_of[ci].is_some() || cluster_titles[ci].is_empty() {
