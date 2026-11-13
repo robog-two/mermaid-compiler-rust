@@ -1881,11 +1881,22 @@ fn elk_port_inset(graph: ElkGraph) -> f64 {
 }
 
 /// Offsets from a side's start of `n` ports spread over a side of length `len`
-/// (`inset` from either end, see [`elk_port_inset`]).
+/// (`inset` from either end, see [`elk_port_inset`]), as ELK's
+/// `PortPlacementCalculator` places free ports: distributed over the side less
+/// the insets, and on a side shorter than the two insets crammed into that
+/// (negative) span all the same, so they come out in reverse past its middle.
+/// A lone port is centred, but on such a side it stays at the inset (the cram
+/// divides by `n - 1`, which leaves it at the start): a 14px start state's
+/// edge leaves 10 from its top.
 fn elk_port_offsets(n: usize, len: f64, inset: f64) -> impl Iterator<Item = f64> {
-    let inset = inset.min(len / 2.0);
     let free = len - 2.0 * inset;
-    (0..n).map(move |i| inset + free * (i + 1) as f64 / (n + 1) as f64)
+    (0..n).map(move |i| {
+        if n == 1 && free < 0.0 {
+            inset
+        } else {
+            inset + free * (i + 1) as f64 / (n + 1) as f64
+        }
+    })
 }
 
 /// The spacings between the vertices of one ELK layer. The root graph derives
@@ -2048,7 +2059,13 @@ fn elk_place(
                 }
                 None => true,
             });
-            let offs = elk_port_offsets(side.len(), verts[v].w, port_inset);
+            // An external port dummy has no size for ELK: its ports are its middle.
+            let inset = if is_ext.get(v).copied().unwrap_or(false) {
+                verts[v].w / 2.0
+            } else {
+                port_inset
+            };
+            let offs = elk_port_offsets(side.len(), verts[v].w, inset);
             for (&(_, _, _, ei), off) in side.iter().zip(offs) {
                 port[ei] = off;
             }
@@ -4986,6 +5003,27 @@ mod tests {
     /// ELK spreads a node's ports over its side less 10 at each end, and its node
     /// placement lines ports up, not centres: `0 → 1`, `0 → 2`, `3 → 2` in TB puts
     /// node 1 straight under node 0's first port.
+    /// ELK's free port placement (mermaid's runs): a lone port is centred, but
+    /// stays 10 from the start of a side shorter than 20; several ports cram
+    /// into the (negative) span between the insets, in reverse past the middle:
+    /// on a 14px start state 8 and 6, or 8.5, 7 and 5.5; in a container (inset
+    /// 10.8) 8.267 and 5.733.
+    #[test]
+    fn elk_port_offsets_on_short_sides() {
+        let offs = |n: usize, len: f64, inset: f64| -> Vec<f64> {
+            elk_port_offsets(n, len, inset).collect()
+        };
+        let close = |a: Vec<f64>, b: &[f64]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3)
+        };
+        assert!(close(offs(1, 37.0, 10.0), &[18.5]));
+        assert!(close(offs(1, 14.0, 10.0), &[10.0]));
+        assert!(close(offs(2, 14.0, 10.0), &[8.0, 6.0]));
+        assert!(close(offs(3, 14.0, 10.0), &[8.5, 7.0, 5.5]));
+        assert!(close(offs(2, 14.0, 10.8), &[8.267, 5.733]));
+        assert!(close(offs(2, 37.0, 10.0), &[15.667, 21.333]));
+    }
+
     #[test]
     fn elk_aligns_ports_spread_over_the_side() {
         let edges = edges_of(&[(0, 1), (0, 2), (3, 2)]);

@@ -713,6 +713,55 @@ mod tests {
         assert!((a.y - m.y - 48.0).abs() < 1e-6, "{m:?} {a:?}");
     }
 
+    /// The centre of the first (non-shadow) circle drawn in group `id…`.
+    fn drawn_circle(scene: &crate::scene::Scene, id: &str) -> Option<crate::geom::Point> {
+        use crate::scene::{Element, Geometry};
+        fn find(e: &Element, id: &str) -> Option<crate::geom::Point> {
+            match e {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i.starts_with(id) => children.iter().find_map(|c| match c {
+                    Element::Shape {
+                        geom: Geometry::Circle { c, .. },
+                        class,
+                        ..
+                    } if class.as_deref() != Some("drop-shadow") => Some(*c),
+                    _ => None,
+                }),
+                Element::Group { children, .. } => children.iter().find_map(|c| find(c, id)),
+                _ => None,
+            }
+        }
+        scene.elements.iter().find_map(|e| find(e, id))
+    }
+
+    /// mermaid 12.3.0 under ELK (left to right): ELK keeps a port 10 from the
+    /// ends of its side, so a 14px start or end state's edge leaves 10 from its
+    /// top, and the node is laid out around that; mermaid then centres the node
+    /// on the edge (`alignDegenerateNodeToAnchor`). The end state, below its
+    /// note's group, comes 49.75 below C (we had it 3 short), and everything
+    /// else 1.5 lower than we had it, as the balanced placement averages it.
+    #[test]
+    fn elk_start_and_end_states_stand_on_their_ports() {
+        let src = "stateDiagram-v2\n  direction LR\n  [*] --> A\n  A --> B\n  B --> C\n  \
+                   note left of B : left note\n  note right of C : right\n  C --> [*]\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .expect("renders")
+            .scene;
+        let a = drawn_rect(&scene, "state-A-").flatten().expect("A");
+        let c = drawn_rect(&scene, "state-C-").flatten().expect("C");
+        let note = drawn_rect(&scene, "state-note2-").flatten().expect("note");
+        let start = drawn_circle(&scene, "state-root_start-").expect("start");
+        let end = drawn_circle(&scene, "state-root_end-").expect("end");
+        let mid = |r: crate::geom::Rect| r.y + r.h / 2.0;
+        assert!((start.y - mid(a)).abs() < 1e-6, "{start:?} {a:?}");
+        assert!((end.y - mid(c) - 49.75).abs() < 1e-6, "{end:?} {c:?}");
+        // mermaid: A at 69.25, the right note at 85.5.
+        assert!((mid(note) - mid(a) - 16.25).abs() < 1e-6, "{note:?} {a:?}");
+    }
+
     /// stateRenderer-v3-unified: `rankSpacing: conf?.rankSpacing || 50` (the
     /// state schema has no default), which dagre takes.
     #[test]

@@ -1118,10 +1118,28 @@ pub fn render_with(
         );
     }
     let raw = layout::layout(&input);
-    let out = layout::LayoutOutput {
+    let mut out = layout::LayoutOutput {
         nodes: (0..nodes.len()).map(|i| raw.nodes[pos_of[i]]).collect(),
         ..raw
     };
+    if elk {
+        let sizes: Vec<(f64, f64)> = measured.iter().map(|m| (m.w, m.h)).collect();
+        let anchors: Vec<(usize, Point)> = g
+            .edges
+            .iter()
+            .zip(&out.edges)
+            .enumerate()
+            .filter(|(ei, (_, r))| nested[*ei].is_none() && r.points.len() >= 2)
+            .flat_map(|(_, (e, r))| {
+                let ends = [(e.from, r.points[0]), (e.to, r.points[r.points.len() - 1])];
+                ends.into_iter().filter_map(|(end, p)| match end {
+                    Endpoint::Node(NodeId(i)) => Some((i, p)),
+                    Endpoint::Cluster(_) => None,
+                })
+            })
+            .collect();
+        align_degenerate_nodes(&mut out.nodes, &sizes, &anchors);
+    }
 
     let mut bounds = Bounds::default();
     let mut cluster_els = Vec::new();
@@ -1842,6 +1860,33 @@ fn terminal_sizes(e: &Edge) -> [Option<(f64, f64)>; 2] {
         (!b.is_empty()).then_some((b.width + pad, b.height + pad))
     };
     [size(&e.start_label, e.start), size(&e.end_label, e.end)]
+}
+
+/// mermaid's `alignDegenerateNodeToAnchor` (ELK): ELK keeps a port 10 from
+/// either end of its node's side, so on a side shorter than twice
+/// `PORTS_SURROUNDING_MARGIN` (a 14px start state's) the edge leaves off the
+/// node's middle, and the node, laid out around that port, stands off the
+/// edge's line. mermaid moves such a node along the side until its centre is
+/// on the anchor of its first edge (in edge order, an edge's start before its
+/// end), leaving the edges as routed. `anchors` are the edges' ends at their
+/// nodes, in that order.
+fn align_degenerate_nodes(centers: &mut [Point], sizes: &[(f64, f64)], anchors: &[(usize, Point)]) {
+    const PORTS_SURROUNDING_MARGIN: f64 = 12.0;
+    let mut aligned = vec![false; centers.len()];
+    for &(i, anchor) in anchors {
+        let ((w, h), c) = (sizes[i], centers[i]);
+        let (top, bottom) = (c.y - h / 2.0, c.y + h / 2.0);
+        let along_width = (anchor.y - top).abs() <= 0.5 || (anchor.y - bottom).abs() <= 0.5;
+        if (if along_width { w } else { h }) >= 2.0 * PORTS_SURROUNDING_MARGIN || aligned[i] {
+            continue;
+        }
+        aligned[i] = true;
+        if along_width {
+            centers[i].x = anchor.x;
+        } else {
+            centers[i].y = anchor.y;
+        }
+    }
 }
 
 fn clip_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
