@@ -703,6 +703,13 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             &ext_off,
         );
         if elk {
+            // The loops draw on the graph's random generator after its
+            // crossing minimisation, before its edges are routed.
+            let run = ordered[slot(scope)].as_mut();
+            let (layers, rng) = match run {
+                Some((_, layers, _, Some(rng), _)) => (Some(&layers[..]), rng),
+                _ => (None, &mut elkorder::JavaRandom::new(1)),
+            };
             (li.hier.loop_high, li.hier.loop_slot) = loop_sides(
                 &tree,
                 &ends,
@@ -711,6 +718,8 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 &ext_off,
                 &ports_set,
                 &import,
+                rng,
+                layers,
             );
             // Loops going round opposite sides of a container nest apart, so
             // its margins hold the legs of the side with the most of them (one
@@ -1176,6 +1185,7 @@ struct LoopPort {
 /// the container itself as ELK imports the edges, then those of edges crossing
 /// its border by their dummies, the side towards the previous layer
 /// clockwise and then reversed but for its last port).
+#[allow(clippy::too_many_arguments)]
 fn loop_sides(
     tree: &Tree,
     ends: &[(Member, Member)],
@@ -1184,6 +1194,8 @@ fn loop_sides(
     ext_off: &ExtPorts,
     ports_set: &[[bool; 2]],
     import: &[usize],
+    rng: &mut elkorder::JavaRandom,
+    layers: Option<&[Vec<usize>]>,
 ) -> (Vec<bool>, Vec<usize>) {
     let ne = ends.len();
     // Per container: its loops (level edge, their span in its port list:
@@ -1277,9 +1289,22 @@ fn loop_sides(
             None => spans.push((c, vec![entry])),
         }
     }
+    // ELK's `SelfLoopRouter` takes the containers layer by layer, each top
+    // down.
+    if let Some(layers) = layers {
+        let at = |c: usize| {
+            let v = li.items.iter().position(|&it| it == Item::Box(c));
+            layers
+                .iter()
+                .enumerate()
+                .find_map(|(r, l)| Some((r, l.iter().position(|&u| Some(u) == v)?)))
+                .unwrap_or((usize::MAX, usize::MAX))
+        };
+        spans.sort_by_key(|(c, _)| at(*c));
+    }
     let mut slot = vec![0usize; li.seg_of.len()];
     for (_, loops) in &spans {
-        for (k, s) in routing_slots(loops) {
+        for (k, s) in routing_slots(loops, rng) {
             slot[k] = s;
         }
     }
@@ -1294,11 +1319,12 @@ type LoopSpan = (usize, usize, usize, usize);
 /// level edge, the first and last index of its span clockwise in the port
 /// list, the list's length): a loop goes outside another where that crosses
 /// fewer of their ports (a loop crosses those of the other's within its own
-/// span); slots count up from the node, each loop one beyond the loops it must
-/// stay outside of. Where it is a tie with crossings either way ELK breaks the
-/// cycle at random (`breakNonCriticalCycles`); here the earlier loop stays
-/// inside, which is how mermaid's runs came out.
-fn routing_slots(loops: &[LoopSpan]) -> Vec<(usize, usize)> {
+/// span), by the difference; a tie with crossings either way makes a
+/// two-cycle of no weight. ELK breaks the cycles as its orthogonal router does
+/// (`breakNonCriticalCycles`, drawing on the graph's random generator `rng`);
+/// slots count up from the node, each loop one beyond the loops it must stay
+/// outside of.
+fn routing_slots(loops: &[LoopSpan], rng: &mut elkorder::JavaRandom) -> Vec<(usize, usize)> {
     let active = |l: &LoopSpan, i: usize| {
         let (_, a, b, n) = *l;
         (i + n - a) % n <= (b + n - a) % n
@@ -1309,17 +1335,28 @@ fn routing_slots(loops: &[LoopSpan]) -> Vec<(usize, usize)> {
         usize::from(active(&loops[l], loops[u].1)) + usize::from(active(&loops[l], loops[u].2))
     };
     let m = loops.len();
-    // `outside[i]`: the loops loop `i` must stay outside of.
-    let mut outside: Vec<Vec<usize>> = vec![Vec::new(); m];
+    // Dependencies (outer loop, inner loop, weight), in the order ELK makes them.
+    let mut deps: Vec<(usize, usize, usize)> = Vec::new();
     for i in 0..m {
         for j in i + 1..m {
             let (ij, ji) = (crossings(i, j), crossings(j, i));
             if ij < ji {
-                outside[i].push(j);
-            } else if ji < ij || ij > 0 {
-                // Cheaper, or a tie with crossings: the earlier stays inside.
-                outside[j].push(i);
+                deps.push((i, j, ji - ij));
+            } else if ji < ij {
+                deps.push((j, i, ij - ji));
+            } else if ij > 0 {
+                deps.push((i, j, 0));
+                deps.push((j, i, 0));
             }
+        }
+    }
+    let cyclic = cycle_dependencies(m, &deps, rng);
+    let mut outside: Vec<Vec<usize>> = vec![Vec::new(); m];
+    for (d, &(a, b, w)) in deps.iter().enumerate() {
+        match (cyclic.contains(&d), w) {
+            (false, _) => outside[a].push(b),
+            (true, 0) => {}
+            (true, _) => outside[b].push(a),
         }
     }
     let mut slot = vec![None; m];
@@ -1327,6 +1364,8 @@ fn routing_slots(loops: &[LoopSpan]) -> Vec<(usize, usize)> {
         if let Some(s) = slot[i] {
             return s;
         }
+        // A cycle left over (none should be) counts no further.
+        slot[i] = Some(0);
         let s = outside[i]
             .iter()
             .map(|&j| level(j, outside, slot) + 1)
@@ -1337,6 +1376,113 @@ fn routing_slots(loops: &[LoopSpan]) -> Vec<(usize, usize)> {
     }
     (0..m)
         .map(|i| (loops[i].0, level(i, &outside, &mut slot)))
+        .collect()
+}
+
+/// ELK's `HyperEdgeCycleDetector.detectCycles` (all dependencies, not only
+/// critical ones) over `m` segments and their dependencies (source, target,
+/// weight): Eades' greedy linear ordering, sinks and sources first, else the
+/// segment of the greatest outflow (a random one of several). The indices of
+/// the dependencies that run against the ordering.
+fn cycle_dependencies(
+    m: usize,
+    deps: &[(usize, usize, usize)],
+    rng: &mut elkorder::JavaRandom,
+) -> Vec<usize> {
+    let w = |d: usize| deps[d].2 as i64;
+    let outgoing: Vec<Vec<usize>> = (0..m)
+        .map(|s| (0..deps.len()).filter(|&d| deps[d].0 == s).collect())
+        .collect();
+    let incoming: Vec<Vec<usize>> = (0..m)
+        .map(|s| (0..deps.len()).filter(|&d| deps[d].1 == s).collect())
+        .collect();
+    let mut mark: Vec<i64> = (0..m).map(|s| -(s as i64) - 1).collect();
+    let mut in_w: Vec<i64> = (0..m)
+        .map(|s| incoming[s].iter().map(|&d| w(d)).sum())
+        .collect();
+    let mut out_w: Vec<i64> = (0..m)
+        .map(|s| outgoing[s].iter().map(|&d| w(d)).sum())
+        .collect();
+    let mut sinks = std::collections::VecDeque::new();
+    let mut sources = std::collections::VecDeque::new();
+    for s in 0..m {
+        if out_w[s] == 0 {
+            sinks.push_back(s);
+        } else if in_w[s] == 0 {
+            sources.push_back(s);
+        }
+    }
+    // The unprocessed segments, in the order of their (initial) marks: the
+    // last segment first.
+    let mut unprocessed: Vec<usize> = (0..m).rev().collect();
+    let base = m as i64;
+    let (mut next_sink, mut next_source) = (base - 1, base + 1);
+    let update = |s: usize,
+                  mark: &[i64],
+                  in_w: &mut [i64],
+                  out_w: &mut [i64],
+                  sources: &mut std::collections::VecDeque<usize>,
+                  sinks: &mut std::collections::VecDeque<usize>| {
+        for &d in &outgoing[s] {
+            let t = deps[d].1;
+            if mark[t] < 0 && w(d) > 0 {
+                in_w[t] -= w(d);
+                if in_w[t] <= 0 && out_w[t] > 0 {
+                    sources.push_back(t);
+                }
+            }
+        }
+        for &d in &incoming[s] {
+            let t = deps[d].0;
+            if mark[t] < 0 && w(d) > 0 {
+                out_w[t] -= w(d);
+                if out_w[t] <= 0 && in_w[t] > 0 {
+                    sinks.push_back(t);
+                }
+            }
+        }
+    };
+    while !unprocessed.is_empty() {
+        while let Some(s) = sinks.pop_front() {
+            unprocessed.retain(|&u| u != s);
+            mark[s] = next_sink;
+            next_sink -= 1;
+            update(s, &mark, &mut in_w, &mut out_w, &mut sources, &mut sinks);
+        }
+        while let Some(s) = sources.pop_front() {
+            unprocessed.retain(|&u| u != s);
+            mark[s] = next_source;
+            next_source += 1;
+            update(s, &mark, &mut in_w, &mut out_w, &mut sources, &mut sinks);
+        }
+        let mut best: Vec<usize> = Vec::new();
+        let mut max_outflow = i64::MIN;
+        for &u in &unprocessed {
+            let outflow = out_w[u] - in_w[u];
+            if outflow >= max_outflow {
+                if outflow > max_outflow {
+                    best.clear();
+                    max_outflow = outflow;
+                }
+                best.push(u);
+            }
+        }
+        if !best.is_empty() {
+            let s = best[rng.next_int(best.len() as i32) as usize];
+            unprocessed.retain(|&u| u != s);
+            mark[s] = next_source;
+            next_source += 1;
+            update(s, &mark, &mut in_w, &mut out_w, &mut sources, &mut sinks);
+        }
+    }
+    for mk in &mut mark {
+        if *mk < base {
+            *mk += base + 1;
+        }
+    }
+    (0..m)
+        .flat_map(|s| outgoing[s].iter().copied())
+        .filter(|&d| mark[deps[d].0] > mark[deps[d].1])
         .collect()
 }
 
@@ -2327,25 +2473,52 @@ mod tests {
     /// the earlier stays inside.
     #[test]
     fn routing_slots_nest_loops_by_their_spans() {
+        let mut rng = elkorder::JavaRandom::new(1);
         // Port list of 6: loop 7 spans 0..=5, loop 8 spans 1..=4.
         assert_eq!(
-            crate::layout::nested::routing_slots(&[(7, 0, 5, 6), (8, 1, 4, 6)]),
+            crate::layout::nested::routing_slots(&[(7, 0, 5, 6), (8, 1, 4, 6)], &mut rng),
             vec![(7, 1), (8, 0)]
         );
         assert_eq!(
-            crate::layout::nested::routing_slots(&[(8, 1, 4, 6), (7, 0, 5, 6)]),
+            crate::layout::nested::routing_slots(&[(8, 1, 4, 6), (7, 0, 5, 6)], &mut rng),
             vec![(8, 0), (7, 1)]
         );
         // Interleaved: 0..=2 and 1..=3.
         assert_eq!(
-            crate::layout::nested::routing_slots(&[(1, 0, 2, 4), (2, 1, 3, 4)]),
+            crate::layout::nested::routing_slots(&[(1, 0, 2, 4), (2, 1, 3, 4)], &mut rng),
             vec![(1, 0), (2, 1)]
         );
         // Apart: no crossings, both next to the node.
         assert_eq!(
-            crate::layout::nested::routing_slots(&[(1, 0, 1, 4), (2, 2, 3, 4)]),
+            crate::layout::nested::routing_slots(&[(1, 0, 1, 4), (2, 2, 3, 4)], &mut rng),
             vec![(1, 0), (2, 0)]
         );
+        // Four loops on a port list of 9: loop 2 must stay outside loop 1, and
+        // loop 4 ties with each of the others. ELK orders the sinks (1, 3, 4)
+        // after the source (2): loop 4 goes outside 1 and 3, inside 2.
+        assert_eq!(
+            crate::layout::nested::routing_slots(
+                &[(1, 7, 0, 9), (2, 6, 1, 9), (3, 2, 5, 9), (4, 8, 3, 9)],
+                &mut rng
+            ),
+            vec![(1, 0), (2, 2), (3, 0), (4, 1)]
+        );
+    }
+
+    #[test]
+    fn cycle_breaking_draws_on_the_random_generator() {
+        // A three-cycle of equal weights: no sink or source, so ELK starts at
+        // a random one of them (the generator's first `nextInt(3)`); the
+        // dependency into it runs against the ordering.
+        let deps = [(0, 1, 1), (1, 2, 1), (2, 0, 1)];
+        let mut rng = elkorder::JavaRandom::new(1);
+        let first = [2, 1, 0][elkorder::JavaRandom::new(1).next_int(3) as usize];
+        let into = (0..3).find(|&d| deps[d].1 == first).unwrap();
+        assert_eq!(super::cycle_dependencies(3, &deps, &mut rng), vec![into]);
+        // The generator moved on by that draw.
+        let mut after = elkorder::JavaRandom::new(1);
+        after.next_int(3);
+        assert_eq!(rng.next_long(), after.next_long());
     }
 
     #[test]
