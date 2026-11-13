@@ -969,7 +969,9 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
                 PathCmd::MoveTo(Point::new(xs[i], top + actor_h)),
                 PathCmd::LineTo(Point::new(xs[i], bottom_top)),
             ]),
-            Paint::stroke(&pal.actor_line, 0.5),
+            // `stroke-width="0.5px"`, but the stylesheet's `.actor-man circle, line`
+            // (a bare `line`: every line) makes it 2px.
+            Paint::stroke(&pal.actor_line, 2.0),
             "actor-line",
         ));
         actors_el.push(actor_elements(p, i, r_top, &labels[i], pal, cfg));
@@ -1033,14 +1035,22 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
 
     let mut title_el = Vec::new();
     if let Some(t) = d.title.as_ref().filter(|t| !t.is_empty()) {
+        // sequenceRenderer: a plain `<text>` (the diagram's font, start-anchored)
+        // at x = width / 2 - 2·diagramMarginX and y = -25 from the diagram's
+        // origin, in the 40px the viewBox adds above it.
         let content = bounds.rect();
-        let tb = TextBlock::new(vec![t.clone()], 18.0, true);
-        let c = Point::new(content.x + content.w / 2.0, cfg.diagram_margin_y + 14.0);
-        bounds.add_rect(Rect::centered(c, tb.width, tb.height));
-        title_el.push(Element::classed_text(
-            Text::centered(c, &tb.lines, 18.0, 27.0, &pal.text_color).bold(),
-            "titleText",
-        ));
+        let origin_y = cfg.diagram_margin_y + title_band;
+        title_el.push(Element::text(Text {
+            x: content.x + content.w / 2.0 - 2.0 * cfg.diagram_margin_x,
+            y: origin_y - 25.0,
+            lines: vec![t.clone()],
+            line_height: pal.font_size * 1.5,
+            font_size: pal.font_size,
+            bold: false,
+            anchor: Anchor::Start,
+            fill: pal.text_color.clone(),
+        }));
+        bounds.add_point(Point::new(content.x, cfg.diagram_margin_y));
     }
 
     let content = bounds.rect();
@@ -1403,6 +1413,38 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn title_and_lifelines_as_mermaid_draws_them() {
+        // mermaid 12.3.0, the gallery's sequence: lifelines 2px (the stylesheet's
+        // bare `line` rule), the title a plain start-anchored text 25px above
+        // the actors, at half the drawing's width less 2·diagramMarginX.
+        let d = parse("sequenceDiagram\ntitle Hi\nA->>B: x", None).unwrap();
+        let p = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        let cfg = SequenceConfig::default();
+        let s = render(&d, &cfg, &p);
+        for e in scene_group(&s, "lifelines") {
+            if let Element::Shape { paint, .. } = e {
+                assert_eq!(paint.stroke_width, 2.0);
+            }
+        }
+        let title = match scene_group(&s, "title") {
+            [Element::Text { text, .. }] => text.clone(),
+            other => panic!("{other:?}"),
+        };
+        let actors: Vec<Rect> = scene_group(&s, "actors")
+            .iter()
+            .filter_map(first_rect)
+            .collect();
+        let (left, right) = (actors[0].x, actors[actors.len() - 1].right());
+        assert_eq!(title.anchor, Anchor::Start);
+        assert!(!title.bold);
+        assert!((title.x - ((left + right) / 2.0 - 2.0 * cfg.diagram_margin_x)).abs() < 1e-6);
+        assert!(
+            (title.y - (actors[0].y - 25.0)).abs() < 1e-6,
+            "{title:?} {actors:?}"
+        );
     }
 
     #[test]
