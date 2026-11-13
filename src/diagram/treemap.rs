@@ -516,12 +516,26 @@ pub fn draw(
     let mut bounds = Bounds::default();
     let mut els = Vec::new();
     if let Some(t) = tm.title.as_ref().filter(|t| !t.is_empty()) {
-        let c = Point::new(width / 2.0, title_h / 2.0);
-        bounds.add_rect(Rect::centered(c, line_width(t, 14.0, false), 20.0));
-        els.push(Element::classed_text(
-            Text::centered(c, std::slice::from_ref(t), 14.0, 21.0, &pal.title_color),
-            "treemapTitle",
+        // A 14px text at y = 15 with `dominant-baseline: middle`: its baseline
+        // 0.27em lower, its box the rounded ascent and descent.
+        let tw = line_width(t, 14.0, false);
+        let baseline = title_h / 2.0 + 0.27 * 14.0;
+        let top = baseline - 0.905 * 14.0;
+        bounds.add_rect(Rect::new(
+            width / 2.0 - tw / 2.0,
+            top,
+            tw,
+            crate::text::svg_line_box(14.0, t),
         ));
+        let mut text = Text::centered(
+            Point::new(width / 2.0, 0.0),
+            std::slice::from_ref(t),
+            14.0,
+            21.0,
+            &pal.title_color,
+        );
+        text.y = baseline;
+        els.push(Element::classed_text(text, "treemapTitle"));
     }
     let class_style = |c: &Option<String>| {
         c.as_ref()
@@ -821,5 +835,20 @@ mod tests {
         assert_eq!(format_value(1234.5, "$,.2f"), "$1,234.50");
         assert_eq!(format_value(0.25, ".0%"), "25%");
         assert_eq!(format_value(42.0, "$0,0"), "$42");
+    }
+
+    #[test]
+    fn title_box_follows_its_middle_baseline() {
+        // mermaid 12.3 (the gallery treemap): the title's text box starts at
+        // y = 6.2, so the viewBox top is 6.2 - 8 = -1.8.
+        let cfg = MermaidConfig::default();
+        let s = render(
+            "treemap-beta\ntitle Annual Budget\n\"A\": 10\n\"B\": 20",
+            None,
+            &cfg,
+            &cfg.palette(),
+        )
+        .unwrap();
+        assert!((s.view_box.y + 1.81).abs() < 0.1, "{:?}", s.view_box);
     }
 }

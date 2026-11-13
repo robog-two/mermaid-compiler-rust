@@ -834,6 +834,21 @@ fn rounded(points: &[Point], r: f64) -> Vec<PathCmd> {
     cmds
 }
 
+/// Left-to-right spines (and their commits) sit off the branch position:
+/// 2px up, or under the redux themes half their 12px label padding plus one
+/// down (`drawBranches`' `spineY`, `getCommitPosition`).
+fn shift_lanes(lay: &mut Layout, pal: &Palette) {
+    use crate::theme::ThemeName as T;
+    let redux = matches!(
+        pal.theme,
+        T::Redux | T::ReduxDark | T::ReduxColor | T::ReduxDarkColor
+    );
+    let dy = if redux { 12.0 / 2.0 + 1.0 } else { -2.0 };
+    for l in &mut lay.lane {
+        *l += dy;
+    }
+}
+
 /// Render a gitGraph.
 pub fn render(
     body: &str,
@@ -851,7 +866,10 @@ pub fn render(
     };
     let g = parse(body, title, &opts)?;
     let gc = GitConfig::from_config(cfg);
-    let lay = layout(&g, &gc);
+    let mut lay = layout(&g, &gc);
+    if g.orientation == Orientation::LR {
+        shift_lanes(&mut lay, pal);
+    }
     Ok(draw(&g, &lay, &gc, pal))
 }
 
@@ -885,17 +903,25 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 format!("branch branch{}", st.branch_index(lay.lane_index[b])),
             ));
             // The label's SVG text box (`getBBox`) plus 18 x 4.
+            // The redux themes pad the label box by 16 x 12, shifting it off
+            // the axis start in TB / BT.
             let tb = TextBlock::svg(vec![br.name.clone()], BRANCH_FONT, false);
-            let (w, h) = (tb.width + 18.0, tb.height + 4.0);
+            let (pad_x, pad_y) = if st.redux { (16.0, 12.0) } else { (0.0, 0.0) };
+            let (w, h) = (tb.width + 18.0 + pad_x, tb.height + 4.0 + pad_y);
             // mermaid's `drawBranches`: LR labels move 30px further left when
             // commit labels are rotated (they lean towards the branch label).
             let rot_shift = if gc.rotate_commit_label { 30.0 } else { 0.0 };
+            let (dx, dy) = if st.redux {
+                (-pad_x / 2.0 - 3.0, pad_y + 10.0)
+            } else {
+                (0.0, 0.0)
+            };
             let rect = match o {
                 Orientation::LR => {
                     Rect::new(-tb.width - 4.0 - rot_shift - 19.0, across - h / 2.0, w, h)
                 }
-                Orientation::TB => Rect::new(across - tb.width / 2.0 - 10.0, 0.0, w, h),
-                Orientation::BT => Rect::new(across - tb.width / 2.0 - 10.0, hi, w, h),
+                Orientation::TB => Rect::new(across - tb.width / 2.0 - 10.0 + dx, -dy, w, h),
+                Orientation::BT => Rect::new(across - tb.width / 2.0 - 10.0 + dx, hi + dy, w, h),
             };
             bounds.add_rect(rect);
             let k = st.branch_index(lay.lane_index[b]);
@@ -1528,5 +1554,50 @@ mod tests {
         assert!((r.w - (tw + 18.0)).abs() < 1e-9 && r.h == 21.0, "{r:?}");
         assert!((r.x - (-tw - 53.0)).abs() < 1e-9, "{r:?}");
         assert_eq!(title.unwrap().y, -25.0);
+    }
+
+    #[test]
+    fn left_to_right_spines_sit_off_the_branch_position() {
+        // mermaid 12.3: `spineY = pos - 2` (redux: pos + 12 / 2 + 1), and the
+        // commits follow. Branch lines and bullets of `main` / `develop`:
+        let spines = |theme: &str| {
+            let cfg = MermaidConfig::default()
+                .with_json(&crate::json::parse(&format!("{{\"theme\": \"{theme}\"}}")).unwrap())
+                .unwrap();
+            let src = "gitGraph\n  commit\n  branch develop\n  commit";
+            let s = render(src, None, &cfg, &cfg.palette()).unwrap();
+            let mut ys = Vec::new();
+            fn walk(els: &[Element], ys: &mut Vec<(String, f64)>) {
+                for e in els {
+                    match e {
+                        Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                            walk(children, ys)
+                        }
+                        Element::Shape {
+                            geom: Geometry::Path(p),
+                            class: Some(c),
+                            ..
+                        } if c.starts_with("branch ") => {
+                            if let PathCmd::MoveTo(a) = p[0] {
+                                ys.push(("branch".into(), a.y));
+                            }
+                        }
+                        Element::Shape {
+                            geom: Geometry::Circle { c, .. },
+                            class: Some(k),
+                            ..
+                        } if k.starts_with("commit ") => ys.push(("commit".into(), c.y)),
+                        _ => {}
+                    }
+                }
+            }
+            walk(&s.elements, &mut ys);
+            ys
+        };
+        let ys = spines("default");
+        assert!(ys.contains(&("branch".into(), -2.0)) && ys.contains(&("branch".into(), 88.0)));
+        assert!(ys.contains(&("commit".into(), -2.0)) && ys.contains(&("commit".into(), 88.0)));
+        let ys = spines("redux");
+        assert!(ys.contains(&("branch".into(), 7.0)) && ys.contains(&("commit".into(), 97.0)));
     }
 }

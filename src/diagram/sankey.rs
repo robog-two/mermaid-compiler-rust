@@ -9,7 +9,6 @@ use crate::diagram::xychart::{fmt_num, keyword, text_at, text_bounds};
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene};
-use crate::text::line_width;
 use crate::theme::Palette;
 
 // ---------------------------------------------------------------------------
@@ -803,8 +802,6 @@ pub fn render(
     let mut node_els = Vec::new();
     let mut label_els = Vec::new();
     let font = 14.0;
-    let layers = lay.nodes.iter().map(|n| n.layer).max().unwrap_or(0);
-    let label_room = width / layers.max(1) as f64 - node_width - 16.0;
     for (i, nd) in lay.nodes.iter().enumerate() {
         let r = Rect::new(nd.x0, nd.y0, nd.x1 - nd.x0, (nd.y1 - nd.y0).max(0.5));
         node_els.push(Element::classed_shape(
@@ -816,30 +813,24 @@ pub fn render(
             "{prefix}{}{suffix}",
             fmt_num((nd.value * 100.0).round() / 100.0)
         );
-        let one_line = if show_values {
+        // `getText` joins name and value with a newline, which SVG text renders
+        // as a space: one line, its baseline on the node's middle (`dy="0em"`;
+        // without values `0.35em` lower).
+        let line = if show_values {
             format!("{} {value}", g.nodes[i])
         } else {
             g.nodes[i].clone()
-        };
-        // Put the value on its own line when the label would run into the next column.
-        let lines = if show_values
-            && line_width(&one_line, font, false) > label_room
-            && nd.y1 - nd.y0 >= font * 0.5
-        {
-            vec![g.nodes[i].clone(), value]
-        } else {
-            vec![one_line]
         };
         let (x, anchor) = if nd.x0 < width / 2.0 {
             (nd.x1 + 6.0, Anchor::Start)
         } else {
             (nd.x0 - 6.0, Anchor::End)
         };
-        let lh = font * 1.2;
+        let dy = if show_values { 0.0 } else { 0.35 * font };
         let t = text_at(
             x,
-            (nd.y0 + nd.y1) / 2.0 - lh * (lines.len() as f64 - 1.0) / 2.0 + font * 0.35,
-            &lines,
+            (nd.y0 + nd.y1) / 2.0 + dy,
+            &[line],
             font,
             anchor,
             &pal.text_color,
@@ -1000,5 +991,35 @@ mod tests {
         let pal = cfg.palette();
         let s = render(SRC, None, &cfg, &pal).unwrap();
         assert_eq!(s.kind, DiagramKind::Sankey);
+    }
+
+    #[test]
+    fn labels_are_one_line_on_the_node_middle() {
+        // `${id}\n${value}` renders as one SVG text line with `dy="0em"`.
+        let cfg = MermaidConfig::default();
+        let s = render(
+            "sankey-beta\nAgricultural waste,Bio-conversion,124.729",
+            None,
+            &cfg,
+            &cfg.palette(),
+        )
+        .unwrap();
+        fn labels(els: &[Element], out: &mut Vec<crate::scene::Text>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => labels(children, out),
+                    Element::Text {
+                        text,
+                        class: Some(c),
+                    } if c == "node-label" => out.push(text.clone()),
+                    _ => {}
+                }
+            }
+        }
+        let mut t = Vec::new();
+        labels(&s.elements, &mut t);
+        assert_eq!(t[0].lines, ["Agricultural waste 124.73"]);
+        // A single link fills the height: the node spans 0..400.
+        assert!((t[0].y - 200.0).abs() < 1e-9, "{}", t[0].y);
     }
 }

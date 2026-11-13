@@ -12,9 +12,9 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, Point, Rect};
 use crate::layout::boxes::{self, BoxNode, taffy};
-use crate::scene::{Anchor, DiagramKind, Element, Paint, Scene, Text};
+use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
 use crate::text::{TextBlock, decode_entities};
-use crate::theme::Palette;
+use crate::theme::{Palette, ThemeName};
 
 /// Mermaid refuses to build more than this many words.
 const MAX_ROWS: usize = 10_000;
@@ -266,8 +266,15 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
     let mut bounds = Bounds::default();
     let width = pc.bit_width * pc.bits_per_row as f64 + 2.0;
     bounds.add_rect(Rect::new(0.0, 0.0, width, pc.padding_y));
-    let fill = pal.main_bkg.clone();
-    let stroke = pal.node_border.clone();
+    // packet/styles.ts: black ink on #efefef blocks, except where a theme
+    // sets `packet` (dark: on the background, forest: on mainBkg, both in
+    // primaryTextColor).
+    let (ink, fill) = match pal.theme {
+        ThemeName::Dark => (pal.node_text.clone(), pal.background.clone()),
+        ThemeName::Forest => (pal.node_text.clone(), pal.main_bkg.clone()),
+        _ => (Color::new("black"), Color::new("#efefef")),
+    };
+    let stroke = ink.clone();
     for (row, rr) in rows.iter().zip(&rects) {
         let mut g = Vec::new();
         for (seg, r) in row.iter().zip(rr) {
@@ -280,13 +287,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
             ));
             let tb = TextBlock::new(vec![seg.label.clone()], LABEL_FONT, false);
             g.push(Element::classed_text(
-                Text::centered(
-                    rect.center(),
-                    &tb.lines,
-                    LABEL_FONT,
-                    tb.line_height,
-                    &pal.text_color,
-                ),
+                Text::centered(rect.center(), &tb.lines, LABEL_FONT, tb.line_height, &ink),
                 "packetLabel",
             ));
             if pc.show_bits {
@@ -304,7 +305,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                     } else {
                         Anchor::Start
                     },
-                    fill: pal.text_color.clone(),
+                    fill: ink.clone(),
                 };
                 bounds.add_point(Point::new(rect.x, y - BYTE_FONT));
                 g.push(Element::classed_text(start, "packetByte start"));
@@ -317,7 +318,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                         font_size: BYTE_FONT,
                         bold: false,
                         anchor: Anchor::End,
-                        fill: pal.text_color.clone(),
+                        fill: ink.clone(),
                     };
                     g.push(Element::classed_text(end, "packetByte end"));
                 }
@@ -336,7 +337,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
         let tb = TextBlock::new(vec![t.clone()], TITLE_FONT, false);
         bounds.add_rect(Rect::centered(c, tb.width, total_row));
         els.push(Element::classed_text(
-            Text::centered(c, &tb.lines, TITLE_FONT, tb.line_height, &pal.title_color),
+            Text::centered(c, &tb.lines, TITLE_FONT, tb.line_height, &ink),
             "packetTitle",
         ));
     } else {
@@ -409,5 +410,35 @@ mod tests {
         // Second-row "Flag" at bit 68 → column 4.
         assert_eq!(rects[2][1].x, 4.0 * 32.0);
         assert_eq!(rects[2][1].w, 32.0);
+    }
+
+    #[test]
+    fn blocks_use_packet_styles() {
+        let block = |theme: &str| {
+            let cfg = MermaidConfig::default()
+                .with_json(&crate::json::parse(&format!("{{\"theme\": \"{theme}\"}}")).unwrap())
+                .unwrap();
+            let s = render("packet-beta\n0-15: \"A\"", None, &cfg, &cfg.palette()).unwrap();
+            fn find(els: &[Element]) -> Option<Paint> {
+                els.iter().find_map(|e| match e {
+                    Element::Group { children, .. } => find(children),
+                    Element::Shape {
+                        paint,
+                        class: Some(c),
+                        ..
+                    } if c == "packetBlock" => Some(paint.clone()),
+                    _ => None,
+                })
+            }
+            let p = find(&s.elements).unwrap();
+            (p.fill.css().to_string(), p.stroke.css().to_string())
+        };
+        // defaultPacketStyleOptions, whatever the (non dark / forest) theme.
+        assert_eq!(block("default"), ("#efefef".into(), "black".into()));
+        assert_eq!(block("neo"), ("#efefef".into(), "black".into()));
+        // theme-dark's `packet`: the background, in primaryTextColor.
+        let (fill, stroke) = block("dark");
+        assert_ne!(fill, "#efefef");
+        assert_ne!(stroke, "black");
     }
 }

@@ -19,7 +19,7 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{TextBlock, line_width};
+use crate::text::line_width;
 use crate::theme::Palette;
 
 /// `diagramProps` of `db.ts`.
@@ -37,10 +37,17 @@ const TEXT_MAX_WIDTH: f64 = 450.0 - 2.0 * 10.0;
 const BOX_TEXT_PADDING: f64 = 10.0;
 /// Text measurement of `calculateTextProps`: 16px bold.
 const TEXT_FONT: f64 = 16.0;
-/// Height `calculateTextDimensions` gives one line of 16px bold text.
-const TEXT_LINE_HEIGHT: f64 = 17.25;
-/// Browser default `<code>` size under a 16px body.
-const CODE_FONT: f64 = 13.0;
+/// `<code>` keeps the 16px the svg root sets explicitly (the browser's 13px
+/// monospace default applies only to an unset size).
+const CODE_FONT: f64 = 16.0;
+/// Advance of the monospace `<code>` font, in em.
+const CODE_ADVANCE: f64 = 0.6;
+/// `line-height: normal` of the HTML label's name and code lines, and their
+/// baselines below each line box's top (measured in Chromium).
+const NAME_LINE_HEIGHT: f64 = 18.5;
+const NAME_BASELINE: f64 = 15.2;
+const CODE_LINE_HEIGHT: f64 = 19.0;
+const CODE_BASELINE: f64 = 15.2;
 
 /// The five entity types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,8 +411,11 @@ pub struct BoxModel {
     pub w: f64,
     pub h: f64,
     pub name: String,
-    /// Data shown under the name (already unwrapped from its delimiters).
-    pub data: Option<String>,
+    /// The name as `wrapLabel` breaks it.
+    pub name_lines: Vec<String>,
+    /// Data lines shown under the name (`wrapLabel`ed; a line may still hold
+    /// newlines, which the HTML renders as spaces).
+    pub data: Option<Vec<String>>,
 }
 
 /// The positioned model.
@@ -451,46 +461,183 @@ fn swimlane_props(frame: &Frame, lanes: &[Swimlane]) -> (u32, String) {
     }
 }
 
-/// The data text of a frame (`calculateTextProps`), without HTML.
-fn frame_data(frame: &Frame, data: &[DataBlock]) -> Option<String> {
+/// JavaScript's `Math.round`.
+fn js_round(x: f64) -> f64 {
+    (x + 0.5).floor()
+}
+
+/// Split on mermaid's `lineBreakRegex` (`<br>` variants) only; newlines stay.
+fn split_br(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if c == '<' {
+            let lower = rest.get(..3).map(str::to_ascii_lowercase);
+            if lower.as_deref() == Some("<br") {
+                if let Some(close) = rest.find('>') {
+                    let inner = rest[3..close].trim();
+                    if inner.is_empty() || inner == "/" {
+                        out.push(std::mem::take(&mut cur));
+                        rest = &rest[close + 1..];
+                        continue;
+                    }
+                }
+            }
+        }
+        cur.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out.push(cur);
+    out
+}
+
+/// Width of one line as an SVG `<text>` measures it at the 16px bold font:
+/// newlines render as spaces and runs of spaces collapse.
+fn measured_width(line: &str) -> f64 {
+    let collapsed = line
+        .split([' ', '\n'])
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lead = if line.starts_with([' ', '\n']) && !collapsed.is_empty() {
+        " "
+    } else {
+        ""
+    };
+    js_round(line_width(&format!("{lead}{collapsed}"), TEXT_FONT, true))
+}
+
+/// `calculateTextWidth` at the 16px bold measuring font: the widest line
+/// (newlines inside a line render as spaces), rounded.
+fn text_width(s: &str) -> f64 {
+    split_br(s)
+        .iter()
+        .map(|l| measured_width(l))
+        .fold(0.0, f64::max)
+}
+
+/// mermaid's `wrapLabel` with `calculateTextProps`' 16px bold font: words
+/// (split on spaces, so runs of spaces collapse) are packed into lines
+/// narrower than `max`; a word wider than `max` is broken with hyphens.
+/// Returns the lines it would join with `<br/>`.
+fn wrap_label(label: &str, max: f64) -> Vec<String> {
+    if label.is_empty() {
+        return Vec::new();
+    }
+    let parts = split_br(label);
+    if parts.len() > 1 {
+        return parts;
+    }
+    let words: Vec<&str> = label.split(' ').filter(|w| !w.is_empty()).collect();
+    let mut done: Vec<String> = Vec::new();
+    let mut next = String::new();
+    for word in &words {
+        let word_len = text_width(&format!("{word} "));
+        let next_len = text_width(&next);
+        if word_len > max {
+            // breakString: characters until the line reaches `max`.
+            done.push(std::mem::take(&mut next));
+            let chars: Vec<char> = word.chars().collect();
+            let mut cur = String::new();
+            for (i, ch) in chars.iter().enumerate() {
+                let cand = format!("{cur}{ch}");
+                if text_width(&cand) >= max {
+                    let last = i + 1 == chars.len();
+                    done.push(if last { cand } else { format!("{cand}-") });
+                    cur.clear();
+                } else {
+                    cur = cand;
+                }
+            }
+            next = cur;
+        } else if next_len + word_len >= max {
+            done.push(std::mem::replace(&mut next, (*word).to_string()));
+        } else if next.is_empty() {
+            next = (*word).to_string();
+        } else {
+            next = format!("{next} {word}");
+        }
+    }
+    if !words.is_empty() {
+        done.push(next);
+    }
+    done.retain(|l| !l.is_empty());
+    done
+}
+
+/// `s.substring(0, s.lastIndexOf('}') - 1)`: drops the `}` and the character
+/// before it (everything when there is no `}`).
+fn cut_before_close(s: &str) -> &str {
+    match s.rfind('}') {
+        Some(i) => {
+            let end = s[..i].char_indices().next_back().map_or(0, |(k, _)| k);
+            &s[..end]
+        }
+        None => "",
+    }
+}
+
+/// The data a frame shows (`calculateTextProps`' `toHtml` before the spaces
+/// become `&nbsp;`): its lines and whether it came from a data block (which
+/// appends a trailing `<br/>`).
+fn frame_data(frame: &Frame, data: &[DataBlock]) -> Option<(Vec<String>, bool)> {
     let mut out = None;
     if let Some(d) = &frame.inline_data {
-        let inner = match (d.find('{'), d.rfind('}')) {
-            (Some(a), Some(b)) if b > a => d[a + 1..b].to_string(),
-            _ => d.trim_matches(|c| c == '"' || c == '\'').to_string(),
-        };
-        out = Some(inner.trim().to_string());
+        let from = d.find('{').map_or(0, |a| a + 1);
+        let inner = cut_before_close(&d[from..]);
+        out = Some((wrap_label(inner, TEXT_MAX_WIDTH), false));
     }
     if let Some(r) = &frame.data_ref {
         if let Some(block) = data.iter().find(|b| &b.name == r) {
             let v = &block.value;
-            let a = v.find('{').map_or(0, |a| a + 1);
-            let b = v.rfind('}').unwrap_or(v.len()).max(a);
-            out = Some(v[a..b].trim_matches('\n').to_string());
+            // indexOf('{\n') + 2: from the second character when absent.
+            let from = v.find("{\n").map_or_else(
+                || v.char_indices().nth(1).map_or(v.len(), |(k, _)| k),
+                |a| a + 2,
+            );
+            let inner = cut_before_close(&v[from..]);
+            out = Some((wrap_label(inner, TEXT_MAX_WIDTH), true));
         }
     }
     out
 }
 
-/// Width and height `calculateTextDimensions` reports for the frame's HTML content.
-/// The markup is measured as literal text, and a box with data is credited a third
-/// of that width (upstream's "temporal workaround").
-fn text_dimensions(name: &str, data: Option<&str>) -> (f64, f64) {
-    let mut lines = vec![format!("<b>{name}</b>")];
-    if let Some(d) = data {
+/// Width and height `calculateTextDimensions` reports for the frame's HTML
+/// content. The markup is measured as literal text, line by line between the
+/// `<br/>`s, and a box with data is credited a third of that width (upstream's
+/// "temporal workaround").
+fn text_dimensions(name: &[String], data: Option<&(Vec<String>, bool)>) -> (f64, f64) {
+    let mut lines: Vec<String> = name.to_vec();
+    if lines.is_empty() {
         lines.push(String::new());
-        let html = d.replace(' ', "&nbsp;").replace('\n', " ");
-        lines.push(format!(
-            "<code style=\"text-align: left; display: block;max-width:{TEXT_MAX_WIDTH}px\">{html}"
-        ));
-        lines.push("</code>".into());
     }
-    let w = lines
-        .iter()
-        .map(|l| line_width(l, TEXT_FONT, true))
-        .fold(0.0, f64::max);
+    lines[0] = format!("<b>{}", lines[0]);
+    if let Some(l) = lines.last_mut() {
+        l.push_str("</b>");
+    }
+    if let Some((d, from_block)) = data {
+        lines.push(String::new());
+        let mut code: Vec<String> = d.iter().map(|l| l.replace(' ', "&nbsp;")).collect();
+        if *from_block || code.is_empty() {
+            code.push(String::new());
+        }
+        code[0] = format!(
+            "<code style=\"text-align: left; display: block;max-width:{TEXT_MAX_WIDTH}px\">{}",
+            code[0]
+        );
+        if let Some(l) = code.last_mut() {
+            l.push_str("</code>");
+        }
+        lines.extend(code);
+    }
+    let w = lines.iter().map(|l| measured_width(l)).fold(0.0, f64::max);
     let w = if data.is_some() { w / 3.0 } else { w };
-    (w, lines.len() as f64 * TEXT_LINE_HEIGHT)
+    let h = lines
+        .iter()
+        .map(|l| crate::text::svg_line_box(TEXT_FONT, l))
+        .sum();
+    (w, h)
 }
 
 /// Position frames, lanes and relations (`getState`). Pure.
@@ -504,8 +651,9 @@ pub fn position(model: &EventModel) -> State {
     let mut previous_lane: Option<u32> = None;
     for (index, frame) in model.frames.iter().enumerate() {
         let (_, name) = split_identifier(&frame.identifier);
+        let name_lines = wrap_label(name, TEXT_MAX_WIDTH);
         let data = frame_data(frame, &model.data);
-        let (tw, th) = text_dimensions(name, data.as_deref());
+        let (tw, th) = text_dimensions(&name_lines, data.as_ref());
         let (lane_index, label) = swimlane_props(frame, &st.swimlanes);
         if !st.swimlanes.iter().any(|l| l.index == lane_index) {
             st.swimlanes.push(Swimlane {
@@ -547,7 +695,8 @@ pub fn position(model: &EventModel) -> State {
             w,
             h,
             name: name.to_string(),
-            data,
+            name_lines,
+            data: data.map(|(d, _)| d),
         });
         previous_lane = Some(lane_index);
         st.swimlanes.sort_by_key(|l| l.index);
@@ -659,21 +808,32 @@ fn slot(e: EntityType) -> usize {
     }
 }
 
-/// Greedy wrap that keeps runs of spaces (data is shown with `&nbsp;`).
-fn wrap_preserving(s: &str, font: f64, max: f64) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for word in s.split_inclusive(' ') {
-        if !cur.trim().is_empty()
-            && line_width(&format!("{cur}{}", word.trim_end()), font, false) > max
-        {
-            out.push(std::mem::take(&mut cur).trim_end().to_string());
-        }
-        cur.push_str(word);
+/// Width of a run of the browser's 13px monospace `<code>` font.
+fn code_width(s: &str) -> f64 {
+    s.chars().count() as f64 * CODE_FONT * CODE_ADVANCE
+}
+
+/// Lay out one `toHtml` line in the `<code>` block: spaces are `&nbsp;`, so
+/// only the newlines (rendered as collapsible spaces) are break opportunities.
+fn wrap_code(line: &str, max: f64) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur: Option<String> = None;
+    for seg in line.split('\n') {
+        let seg = seg.replace(' ', "\u{a0}");
+        cur = Some(match cur {
+            None => seg,
+            Some(c) => {
+                let cand = format!("{c} {seg}");
+                if code_width(&cand) <= max {
+                    cand
+                } else {
+                    out.push(c);
+                    seg
+                }
+            }
+        });
     }
-    if !cur.trim().is_empty() {
-        out.push(cur.trim_end().to_string());
-    }
+    out.extend(cur);
     out
 }
 
@@ -733,47 +893,45 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
             3.0,
             Paint::both(&c.fill[k], &c.stroke[k], 1.0),
         )];
-        // The HTML content, vertically centred in the inner area.
-        let inner_w = b.w - 2.0 * BOX_PADDING;
-        let name = TextBlock::new(
-            crate::diagram::timeline::wrap_text(&b.name, TEXT_MAX_WIDTH, TEXT_FONT, true),
-            TEXT_FONT,
-            true,
-        );
+        // The HTML content, vertically centred in the inner area: the bold
+        // name, an empty line, then the `<code>` block (left-aligned, at most
+        // `textMaxWidth` wide).
+        let code_w = (b.w - 2.0 * BOX_PADDING).min(TEXT_MAX_WIDTH);
         let data_lines: Vec<String> = b
             .data
-            .as_deref()
-            .map(|d| wrap_preserving(&d.replace('\n', " "), CODE_FONT, inner_w))
-            .unwrap_or_default();
-        let name_h = name.lines.len() as f64 * TEXT_FONT * 1.2;
-        let data_h = if data_lines.is_empty() {
-            0.0
+            .iter()
+            .flatten()
+            .flat_map(|l| wrap_code(l, code_w))
+            .collect();
+        let name_h = b.name_lines.len() as f64 * NAME_LINE_HEIGHT;
+        let data_h = if b.data.is_some() {
+            NAME_LINE_HEIGHT + data_lines.len() as f64 * CODE_LINE_HEIGHT
         } else {
-            TEXT_FONT * 1.2 + data_lines.len() as f64 * CODE_FONT * 1.25
+            0.0
         };
         let top = r.y + r.h / 2.0 - (name_h + data_h) / 2.0;
-        children.push(Element::text(
-            Text::centered(
-                Point::new(r.x + r.w / 2.0, top + name_h / 2.0),
-                &name.lines,
-                TEXT_FONT,
-                TEXT_FONT * 1.2,
-                &c.box_text,
-            )
-            .bold(),
-        ));
+        children.push(Element::text(Text {
+            x: r.x + r.w / 2.0,
+            y: top + NAME_BASELINE,
+            lines: b.name_lines.clone(),
+            line_height: NAME_LINE_HEIGHT,
+            font_size: TEXT_FONT,
+            bold: true,
+            anchor: Anchor::Middle,
+            fill: c.box_text.clone(),
+        }));
         if !data_lines.is_empty() {
-            let dy = top + name_h + TEXT_FONT * 1.2;
-            let block_h = data_lines.len() as f64 * CODE_FONT * 1.25;
             children.push(Element::classed_text(
-                Text::centered(
-                    Point::new(r.x + r.w / 2.0, dy + block_h / 2.0),
-                    &data_lines,
-                    CODE_FONT,
-                    CODE_FONT * 1.25,
-                    &c.box_text,
-                )
-                .anchored(Anchor::Start, r.x + BOX_PADDING),
+                Text {
+                    x: r.x + BOX_PADDING,
+                    y: top + name_h + NAME_LINE_HEIGHT + CODE_BASELINE,
+                    lines: data_lines,
+                    line_height: CODE_LINE_HEIGHT,
+                    font_size: CODE_FONT,
+                    bold: false,
+                    anchor: Anchor::Start,
+                    fill: c.box_text.clone(),
+                },
                 "em-data",
             ));
         }
@@ -820,7 +978,8 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
-        css: String::new(),
+        // Data is HTML `<code>`: the browser's monospace font.
+        css: "text.em-data{font-family:monospace !important;}".to_string(),
     }
 }
 
@@ -861,13 +1020,46 @@ mod tests {
         assert_eq!(m.frames[0].inline_data.as_deref(), Some("{ productId: 7 }"));
         assert_eq!(m.frames[1].data_ref.as_deref(), Some("ItemAddedData"));
         assert_eq!(m.data.len(), 1);
+        // wrapLabel collapses the indentation; a block adds a trailing `<br/>`.
         assert_eq!(
-            frame_data(&m.frames[1], &m.data).as_deref(),
-            Some("  productId: 7")
+            frame_data(&m.frames[1], &m.data),
+            Some((vec!["productId: 7".to_string()], true))
+        );
+        // Inline data drops `}` and the character before it, as upstream.
+        assert_eq!(
+            frame_data(&m.frames[0], &m.data),
+            Some((vec!["productId: 7".to_string()], false))
         );
         let typed =
             parse("eventmodeling\ntf 01 rmo UserAdded `json`{ \"name\": \"foo\" }").unwrap();
         assert!(typed.frames[0].inline_data.is_some());
+    }
+
+    #[test]
+    fn boxes_are_sized_like_calculate_text_props() {
+        // Sizes from mermaid 12.3: the HTML markup is measured as literal text
+        // (a third of it with data), block newlines as spaces.
+        let m = parse(
+            "eventmodeling\ntf 01 cmd AddItem [[AddItemData]]\ntf 02 evt HHHH { HHHH: HHHH }\n\ndata AddItemData {\n  HHHH: HHHH\n  productIdentifier: string\n  quantity: number\n}",
+        )
+        .unwrap();
+        let st = position(&m);
+        let size = |i: usize| (st.boxes[i].w, st.boxes[i].h);
+        assert!((size(0).0 - 427.667).abs() < 0.01 && size(0).1 == 109.0);
+        assert!((size(1).0 - 270.333).abs() < 0.01 && size(1).1 == 100.0);
+        // Newlines are the only break opportunities in the `<code>` block.
+        assert_eq!(
+            wrap_code(
+                "HHHH: HHHH\n productIdentifier: string\n quantity: number",
+                407.0
+            ),
+            [
+                "HHHH:\u{a0}HHHH \u{a0}productIdentifier:\u{a0}string",
+                "\u{a0}quantity:\u{a0}number"
+            ]
+        );
+        let lanes: Vec<f64> = st.swimlanes.iter().map(|l| l.height).collect();
+        assert_eq!(lanes, [139.0, 130.0]);
     }
 
     #[test]
