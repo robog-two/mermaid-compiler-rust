@@ -4,9 +4,9 @@ use crate::color;
 use crate::config::{Look, SequenceConfig};
 use crate::error::{Error, Result};
 use crate::geom::{self, PathCmd, Point, Rect};
-use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
+use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Shadow, Text};
 use crate::text::{label_lines, svg_line_box};
-use crate::theme::{ColorSlot, Palette, SlotColors};
+use crate::theme::{ColorSlot, Palette, SlotColors, ThemeName};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,9 +458,10 @@ const ACTOR_TYPE_W: f64 = 36.0;
 /// scaling (the stylesheet's bare `line { stroke-width: 2px }` doubles it).
 const SEQ_NUM_R: f64 = 6.0;
 /// Alphabetic-baseline offsets (in em) of `dominant-baseline: middle` (half the
-/// x-height) and `central` (the em box centre).
+/// x-height) and `central` (the em box centre), as Chromium places them; it
+/// then snaps the baseline to a whole pixel (see `line_text`).
 const BASELINE_MIDDLE: f64 = 0.27;
-const BASELINE_CENTRAL: f64 = 0.35;
+const BASELINE_CENTRAL: f64 = 0.375;
 
 /// JavaScript's `Math.round` (halves round up, also below zero).
 fn js_round(x: f64) -> f64 {
@@ -482,11 +483,12 @@ fn text_dims(lines: &[String], font_size: f64) -> (f64, f64) {
 }
 
 /// One `<text>` line with `text-anchor: middle`, its attribute `y` turned into
-/// the alphabetic baseline by `shift` em.
+/// the alphabetic baseline by `shift` em, on the nearest whole pixel row (where
+/// Chromium draws it).
 fn line_text(x: f64, y: f64, shift: f64, line: &str, font_size: f64, fill: &Color) -> Text {
     Text {
         x,
-        y: y + shift * font_size,
+        y: js_round(y + shift * font_size),
         lines: vec![line.to_string()],
         line_height: font_size,
         font_size,
@@ -798,6 +800,35 @@ fn build_note_model(
 }
 
 /// Render a sequence diagram.
+/// The theme's `dropShadow` where it is a CSS `drop-shadow()` (the classic
+/// and neo themes): `g rect.rect`, and under the neo look `rect.note` and
+/// `.labelBox`, are drawn with it. The redux themes' `url(#drop-shadow)` names
+/// no element of the diagram (its own filter is `<id>-drop-shadow`), so
+/// nothing.
+fn css_shadow(theme: ThemeName) -> Option<Shadow> {
+    // `drop-shadow(dx dy blur color)`: the blur radius is twice the
+    // standard deviation.
+    let shadow = |dx: f64, dy: f64, color: &str| Shadow {
+        dx,
+        dy,
+        std_dev: 1.0,
+        color: Color::new(color),
+    };
+    match theme {
+        ThemeName::Default | ThemeName::Base | ThemeName::Dark | ThemeName::Neutral => {
+            Some(shadow(1.0, 2.0, "rgba(185, 185, 185, 1)"))
+        }
+        ThemeName::Forest => Some(shadow(1.0, 2.0, "rgba(185, 185, 185, 0.5)")),
+        ThemeName::Neo => Some(shadow(0.0, 1.0, "rgba(0, 0, 0, 0.25)")),
+        ThemeName::NeoDark => Some(shadow(1.0, 2.0, "rgba(185, 185, 185, 0.2)")),
+        ThemeName::Redux
+        | ThemeName::ReduxDark
+        | ThemeName::ReduxColor
+        | ThemeName::ReduxDarkColor
+        | ThemeName::Null => None,
+    }
+}
+
 pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene {
     let neo = cfg.look == Look::Neo;
     let n = d.participants.len();
@@ -1148,7 +1179,8 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
                 let r = Rect::new(nm.startx, starty, nm.width, h);
                 let mut els = vec![Element::classed_shape(
                     Geometry::Rect { rect: r, rx: 0.0 },
-                    Paint::both(&pal.note_bkg, &pal.note_border, 1.0),
+                    Paint::both(&pal.note_bkg, &pal.note_border, 1.0)
+                        .with_shadow(css_shadow(pal.theme).filter(|_| neo)),
                     "note",
                 )];
                 draw_text_lines(
@@ -1338,7 +1370,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
                 rect: Rect::new(sx, l.starty, ex - sx, stopy - l.starty),
                 rx: 0.0,
             },
-            Paint::fill(&fill),
+            Paint::fill(&fill).with_shadow(css_shadow(pal.theme)),
             "rect",
         ));
     }
@@ -1359,7 +1391,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
         // `g rect.rect { stroke: nodeBorder }` outranks the box's own stroke.
         let mut els = vec![Element::classed_shape(
             Geometry::Rect { rect, rx: 0.0 },
-            Paint::both(&fill, &pal.node_border, 1.0),
+            Paint::both(&fill, &pal.node_border, 1.0).with_shadow(css_shadow(pal.theme)),
             "rect",
         )];
         let cy = cfg.box_text_margin + box_text_max_h / 2.0;
@@ -1688,7 +1720,8 @@ fn frame_elements(l: &LoopModel, pal: &Palette, cfg: &SequenceConfig) -> Element
             Point::new(sx + LABEL_BOX_W - cut * 1.2, sy + tag_h),
             Point::new(sx, sy + tag_h),
         ])),
-        Paint::both(&pal.label_box_bkg, &pal.label_box_border, 1.0),
+        Paint::both(&pal.label_box_bkg, &pal.label_box_border, 1.0)
+            .with_shadow(css_shadow(pal.theme).filter(|_| cfg.look == Look::Neo)),
         "labelBox",
     ));
     draw_text_lines(
@@ -2054,6 +2087,54 @@ mod tests {
     }
 
     #[test]
+    fn the_themes_css_drop_shadow_falls_on_boxes_notes_and_label_boxes() {
+        // mermaid 12.3.0, theme default: `g rect.rect` (boxes, `rect` blocks) in
+        // either look, `rect.note` and `.labelBox` under neo, take
+        // `drop-shadow(1px 2px 2px rgba(185, 185, 185, 1))`.
+        let src = "sequenceDiagram\nbox Aqua Team\nparticipant A\nend\nB->>A: x\n\
+                   Note over A: n\nloop l\nA->>B: y\nend\nrect rgb(1,2,3)\nA->>B: z\nend";
+        let want = Some(Shadow {
+            dx: 1.0,
+            dy: 2.0,
+            std_dev: 1.0,
+            color: Color::new("rgba(185, 185, 185, 1)"),
+        });
+        let shadows = |look: Look| -> Vec<(String, Option<Shadow>)> {
+            let s = draw(src, look);
+            all(&s)
+                .into_iter()
+                .filter_map(|e| match e {
+                    Element::Shape {
+                        paint,
+                        class: Some(c),
+                        ..
+                    } if ["rect", "note", "labelBox"].contains(&c.as_str()) => {
+                        Some((c.clone(), paint.shadow.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let neo = shadows(Look::Neo);
+        assert_eq!(neo.len(), 4, "{neo:?}");
+        assert!(neo.iter().all(|(_, s)| *s == want), "{neo:?}");
+        for (c, s) in shadows(Look::Classic) {
+            assert_eq!(s.is_some(), c == "rect", "{c}");
+        }
+        // The redux themes' `url(#drop-shadow)` reaches no filter.
+        assert_eq!(css_shadow(ThemeName::ReduxColor), None);
+    }
+
+    #[test]
+    fn central_labels_sit_on_whole_pixels() {
+        // A participant's label is centred on its box (`central`): Chromium
+        // draws it on a whole pixel row.
+        let s = draw("sequenceDiagram\nparticipant W as Web\nW->>W: x", Look::Neo);
+        let label = texts(&s).into_iter().find(|t| t.lines == ["Web"]).unwrap();
+        assert_eq!(label.y.fract(), 0.0, "{}", label.y);
+    }
+
+    #[test]
     fn title_and_lifelines_as_mermaid_draws_them() {
         // mermaid 12.3.0, the gallery's sequence: lifelines 2px (the stylesheet's
         // bare `line` rule), the title a plain start-anchored text at y = -25, at
@@ -2136,7 +2217,8 @@ mod tests {
         assert!((circle.1 - 15.0 * k).abs() < 1e-9);
         assert!((circle.0.y - (glyph_bottom - 50.0 * k)).abs() < 1e-9);
         let label = texts(&s).into_iter().find(|t| t.lines == ["User"]).unwrap();
-        assert!((label.y - (73.0 - 6.0 - 8.5 + 0.35 * 16.0)).abs() < 1e-9);
+        // Its `central` baseline 0.375em down, snapped to the pixel grid.
+        assert!((label.y - js_round(73.0 - 6.0 - 8.5 + 0.375 * 16.0)).abs() < 1e-9);
         // The lifeline starts at the datum (classic: 80px below the row top).
         assert_eq!(path_starts(&s, "actor-line")[0].0.y, 73.0);
         let classic = draw("sequenceDiagram\nactor U as User\nU->>U: x", Look::Classic);

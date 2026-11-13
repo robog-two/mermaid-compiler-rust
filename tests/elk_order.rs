@@ -1038,3 +1038,255 @@ fn cycle_breaking_leaves_a_container_by_its_ports_in_their_made_order() {
         ],
     );
 }
+
+#[test]
+fn a_containers_port_without_edges_outside_holds_its_ports_in_their_made_order() {
+    // C0's ports, as made: `C0 --> x0`'s (imported), `c0n0 --> C0`'s (an edge
+    // from inside, so none at the root) and `c0n0 --> x0`'s (added by
+    // `CompoundGraphPreprocessor`). Sorting by model order would put the
+    // earlier edge `c0n0 --> x0` first, but the edgeless port between them
+    // compares as smaller than either and either as smaller than it, so the
+    // insertion sort leaves the list as made: `C0 --> x0`'s label goes on top
+    // and the two edges cross in the channel before the labels, which takes
+    // a second lane (mermaid 12.3.0).
+    expect_centres(
+        "flowchart LR
+  subgraph C0
+    c0n0
+  end
+  x0
+  x1
+  x0 --> x1
+  C0 -->|a label| x0
+  c0n0 --> C0
+  c0n0 -->|yes| x0
+",
+        &[("c0n0", 0.0, 0.0), ("x0", 387.27, 6.0), ("x1", 579.27, 6.0)],
+    );
+}
+
+#[test]
+fn a_node_tied_only_to_ports_where_edges_leave_goes_past_a_label_layer() {
+    // In C0, C1 meets nothing but the port where `c2n2 --> c3n0` leaves, so
+    // ELK layers it on its own and moves it to the last layer: that of the
+    // label of `c0n1 --> C0` (an edge to C0's own port, tied to c0n1 only),
+    // below c0n1 rather than beside it (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C1
+      c1n0
+      subgraph C2
+        c2n0
+        c2n1
+        c2n2
+        c2n1 --> c2n2
+      end
+    end
+    c0n0 --> c0n1
+  end
+  subgraph C3
+    c3n0
+    c3n1
+  end
+  subgraph C4
+    c4n0
+    c4n1
+    c4n0 --> c4n1
+  end
+  x0
+  x1
+  c2n2 -->|x| c3n0
+  c0n1 -->|a label| C0
+",
+        &[
+            ("c0n0", 887.0, 0.0),
+            ("c0n1", 887.0, 69.0),
+            ("c1n0", 264.0, 261.5),
+            ("c2n0", 490.0, 234.0),
+            ("c2n1", 692.0, 234.0),
+            ("c2n2", 692.0, 303.0),
+            ("c3n0", 692.0, 609.0),
+            ("c3n1", 490.0, 609.0),
+            ("c4n0", 0.0, 156.0),
+            ("c4n1", 0.0, 225.0),
+            ("x0", 1103.0, 178.5),
+            ("x1", 1295.0, 178.5),
+        ],
+    );
+}
+
+#[test]
+fn an_edgeless_port_on_a_containers_west_side_splits_its_sort() {
+    // C2's west ports, as made: `c0n0 --> C2`'s, `C2 --> C3`'s (an edge to
+    // something inside, so none at the root) and `c0n2 --> c3n1`'s. The
+    // edgeless one keeps the other two in their made order, listed up the
+    // west side, so they start crossing the edges from C0; the sweep that
+    // undoes it puts c2n0 above C3 (mermaid 12.3.0).
+    expect_centres(
+        "flowchart LR
+  subgraph C0
+    c0n0
+    c0n1
+    c0n2
+    subgraph C1
+      c1n0
+    end
+    c0n0 --> c0n1
+  end
+  subgraph C2
+    c2n0
+    subgraph C3
+      c3n0
+      c3n1
+      c3n0 --> c3n1
+    end
+  end
+  subgraph C4
+    c4n0
+    c4n1
+    subgraph C5
+      c5n0
+      subgraph C6
+        c6n0
+        c6n1
+      end
+    end
+    c4n0 --> c4n1
+  end
+  x0
+  c0n0 --> C2
+  c6n1 --> x0
+  c0n2 --> c3n1
+  C3 --> C6
+  C2 --> C3
+",
+        &[
+            ("c0n0", 24.0, 241.38),
+            ("c0n1", 236.0, 259.12),
+            ("c0n2", 236.0, 354.12),
+            ("c1n0", 0.0, 384.38),
+            ("c2n0", 631.0, 156.0),
+            ("c3n0", 530.0, 299.0),
+            ("c3n1", 742.0, 316.25),
+            ("c4n0", 1142.0, 0.0),
+            ("c4n1", 1328.0, 0.0),
+            ("c5n0", 1089.0, 143.0),
+            ("c6n0", 1084.0, 286.0),
+            ("c6n1", 1084.0, 381.0),
+            ("x0", 1554.0, 381.0),
+        ],
+    );
+}
+
+#[test]
+fn a_crossed_subgraph_inside_a_directed_one_is_a_run_of_its_own() {
+    // `b00n0 --> c00n0` makes B00 `INCLUDE_CHILDREN`, but its parent A0 has a
+    // direction of its own (`SEPARATE_CHILDREN`): ELK lays B00 out as the root
+    // of a compound run of its own, with ELK's default direction (RIGHT), not
+    // A0's BT (mermaid 12.3.0).
+    expect_centres(
+        "flowchart BT
+  subgraph A0
+    direction BT
+    subgraph B00
+      b00n0
+      subgraph C00
+        c00n0
+      end
+    end
+  end
+  b00n0 --> c00n0
+  b00n0 --> C00
+",
+        &[("b00n0", 0.0, 6.0), ("c00n0", 246.0, 0.0)],
+    );
+}
+
+#[test]
+fn a_crossed_subgraphs_own_run_is_not_split_into_components() {
+    // B00 and B10 are compound runs of their own (an edge from each one's
+    // child into its subgraph C), laid out whole (`doCompoundLayout` packs no
+    // components): b00n1 stays in B00's layering rather than packed apart
+    // (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph A0
+    direction LR
+    subgraph B00
+      b00n0
+      b00n1
+      subgraph C00
+        c00n0
+        c00n1
+        c00n0 --> c00n1
+      end
+    end
+  end
+  subgraph A1
+    direction LR
+    a1n0
+    subgraph B10
+      b10n0
+      subgraph C10
+        c10n0
+      end
+    end
+  end
+  c00n1 --> b00n0
+  b00n0 --> c00n0
+  b10n0 --> c10n0
+  b10n0 --> c10n0
+",
+        &[
+            ("a1n0", 0.0, 0.0),
+            ("b00n0", 1124.0, 172.75),
+            ("b00n1", 777.0, 22.5),
+            ("b10n0", 24.0, 165.0),
+            ("c00n0", 666.0, 172.75),
+            ("c00n1", 878.0, 190.5),
+            ("c10n0", 330.0, 165.0),
+        ],
+    );
+}
+
+#[test]
+fn a_loop_on_a_container_with_port_dummies_goes_round_it() {
+    // A has port dummies inside (`A --> a1`, `a2 --> A`), so its ports keep
+    // their sides: `A --> A` leaves at the bottom and comes back round to the
+    // top, 20 off each, which takes room in the layer gap above A (and A's
+    // ports get unconnected dummies inside, beside a1's) (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TB
+subgraph A
+a1 --> a2
+end
+start --> A
+A --> A
+A --> a1
+a2 --> A
+",
+        &[("a1", 0.0, 153.0), ("a2", 0.0, 222.0), ("start", 12.0, 0.0)],
+    );
+}
+
+#[test]
+fn a_containers_loop_stands_off_its_crossing_edges_ports() {
+    // C0's ports for `c0n0 --> x0` (crossing its border) stand 10 outside it;
+    // the loop's leg below stands 20 beyond those (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+  end
+  x0
+  C0 --> x0
+  c0n0 --> x0
+  c0n0 -->|yes| x0
+  C0 --> C0
+",
+        &[("c0n0", 21.73, 0.0), ("x0", 0.0, 220.0)],
+    );
+}

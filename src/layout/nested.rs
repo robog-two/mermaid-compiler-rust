@@ -170,7 +170,14 @@ impl Tree<'_> {
     /// (`SEPARATE_CHILDREN`: a cluster with its own direction no edge crosses, and
     /// everything inside one).
     fn hierarchical(&self, c: usize) -> bool {
-        let mut cur = Some(c);
+        // An `INCLUDE_CHILDREN` cluster (one an edge crosses) inside a
+        // `SEPARATE_CHILDREN` one is the root of a run of its own; anything
+        // else follows its nearest cluster with a policy of its own.
+        let mut cur = if self.crossed[c] {
+            self.parent[c]
+        } else {
+            Some(c)
+        };
         for _ in 0..=self.parent.len() {
             let Some(a) = cur else { return true };
             if self.crossed[a] {
@@ -182,6 +189,36 @@ impl Tree<'_> {
             cur = self.parent[a];
         }
         true
+    }
+
+    /// Per edge: when ELK imports it, breadth-first by the graph containing it
+    /// (the two ends' common ancestor), then in edge order.
+    fn import_order(&self) -> Vec<usize> {
+        let made: Vec<(usize, usize)> = self
+            .input
+            .edges
+            .iter()
+            .enumerate()
+            .map(|(e, edge)| {
+                let a = edge
+                    .from_cluster
+                    .map_or(Member::Node(edge.from), Member::Cluster);
+                let b = edge
+                    .to_cluster
+                    .map_or(Member::Node(edge.to), Member::Cluster);
+                let depth = self
+                    .common_ancestor(a, b)
+                    .map_or(0, |c| self.chains[c].len());
+                (depth, e)
+            })
+            .collect();
+        let mut by: Vec<usize> = (0..made.len()).collect();
+        by.sort_by_key(|&e| made[e]);
+        let mut rank = vec![0; made.len()];
+        for (r, e) in by.into_iter().enumerate() {
+            rank[e] = r;
+        }
+        rank
     }
 
     /// How many graphs deep a separate cluster's own graph is (the root's: 0).
@@ -234,7 +271,7 @@ impl Tree<'_> {
         let Some(c) = scope else {
             return self.input.direction;
         };
-        if self.crossed[c] {
+        if self.crossed[c] && self.hierarchical(c) {
             return self.direction(self.owner_of_cluster(c));
         }
         if let Some(d) = self.input.clusters[c].direction {
@@ -593,7 +630,8 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     let mut stubs: Vec<(usize, usize, bool)> = Vec::new();
     if elk {
         for (ei, &(a, b)) in ends.iter().enumerate() {
-            if a == b {
+            // A loop on a container has a port for each end, like any edge.
+            if a == b && !matches!(a, Member::Cluster(_)) {
                 continue;
             }
             for (m, entering) in [(a, false), (b, true)] {
@@ -707,6 +745,8 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             let horizontal = tree.direction(scope).is_horizontal();
             for (i, it) in level.items.iter().enumerate() {
                 if let Item::Ext(ei) = *it {
+                    let entering = level.ext_kinds.iter().any(|k| k.0 == i && k.1);
+                    let ei = port_key(&ends, ei, entering);
                     let p = level.out.nodes[i];
                     let off = if horizontal {
                         p.y - bb.y + pad + cl.title_height - h / 2.0
@@ -722,9 +762,9 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             // minimisation gives them: they are left free there. (With
             // others, they are dummies placed inside like the rest.)
             if level.ext_kinds.iter().all(|k| k.2) {
-                for &(i, _, _) in &level.ext_kinds {
+                for &(i, entering, _) in &level.ext_kinds {
                     if let Item::Ext(ei) = level.items[i] {
-                        ext_off.remove(&(c, ei));
+                        ext_off.remove(&(c, port_key(&ends, ei, entering)));
                     }
                 }
             }
@@ -1036,6 +1076,17 @@ fn ext_order(
     keyed.into_iter().map(|k| k.3).collect()
 }
 
+/// The key of an edge's port on a container: the edge, but for the port
+/// where a loop on the container comes back in (a loop has two ports there).
+fn port_key(ends: &[(Member, Member)], ei: usize, entering: bool) -> usize {
+    let looped = ends.get(ei).is_some_and(|(a, b)| a == b);
+    if looped && entering {
+        ei + ends.len()
+    } else {
+        ei
+    }
+}
+
 /// One level's layered pass, before it is laid out.
 struct LevelInput {
     items: Vec<Item>,
@@ -1202,6 +1253,7 @@ fn level_input(
     // ELK makes a node's ports as it imports the edges, breadth-first by the
     // graph containing each (the two ends' common ancestor): an edge from further
     // out comes first.
+    let mut looped = Vec::new();
     let mut segs = segs;
     segs.sort_by_key(|s| {
         let (a, b) = ends[s.edge];
@@ -1220,11 +1272,18 @@ fn level_input(
         let (Some(from), Some(to)) = (end(s.from), end(s.to)) else {
             continue;
         };
-        let port = |x: SegEnd| match x {
-            SegEnd::Box(c) => ext_off.get(&(c, s.edge)).copied(),
+        let port = |x: SegEnd, entering: bool| match x {
+            SegEnd::Box(c) => ext_off.get(&(c, port_key(ends, s.edge, entering))).copied(),
             _ => None,
         };
-        hier.ports.push((port(s.from), port(s.to)));
+        let ports = (port(s.from, false), port(s.to, true));
+        hier.ports.push(ports);
+        // A loop on a container with ports of fixed sides leaves it on the far
+        // side and comes back round to the near one, standing off both
+        // (`SelfLoopRouter`), which widens its layer.
+        if s.from == s.to && matches!((s.from, ports), (SegEnd::Box(_), (Some(_), Some(_)))) {
+            looped.push(from);
+        }
         // A box's port for an edge crossing its border is made after those
         // for edges to the box itself, in its dummy's order inside.
         let k = edges.len();
@@ -1278,6 +1337,13 @@ fn level_input(
         });
         edge_ids.push(s.edge);
         seg_of.push(Some(*s));
+    }
+    // The loop's legs stand off the ports on either side, those of edges
+    // crossing the border included.
+    for v in looped {
+        hier.margins.resize(items.len(), (0.0, 0.0));
+        let m = &mut hier.margins[v];
+        *m = (m.0 + super::SELF_LOOP_EXT, m.1 + super::SELF_LOOP_EXT);
     }
     for (ei, (e, &(a, b))) in input
         .edges
@@ -1367,8 +1433,11 @@ fn level_input(
     };
     let graph = match scope {
         None => ElkGraph::Root,
+        // The root of a run of its own that includes its children is laid
+        // out as a compound graph (`doCompoundLayout`) like any graph of a
+        // hierarchical run.
         Some(c) => ElkGraph::Container {
-            separate: !tree.hierarchical(c),
+            separate: !tree.hierarchical(c) && !tree.crossed[c],
         },
     };
     LevelInput {
@@ -1746,6 +1815,7 @@ fn order_runs(
             chains: &p.cluster_chain,
         })
         .collect();
+    let import = tree.import_order();
     let mut ordered: Vec<Option<elkorder::RunOrder>> = (0..k).map(|_| None).collect();
     for root in (0..k).filter(|&i| parent[i].is_none()) {
         // The run: its root first, then every level whose chain of containers
@@ -1783,6 +1853,7 @@ fn order_runs(
                     opts: elk_options(li.graph, n),
                     ext_key,
                     seg_key,
+                    import: &import,
                     parent: up,
                 }
             })

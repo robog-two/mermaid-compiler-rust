@@ -960,26 +960,9 @@ pub fn render_with(
     // the flow (its net flow): the route comes back around inside the frame.
     // A container's edge to itself is ELK's self-loop on the container's node
     // in its parent's graph: on its side across the flow, where its ports are
-    // free. (With external port dummies inside, its ports keep their sides and
-    // the loop runs around from one flow side to the other: not modelled, so
-    // drawn against the frame as before.)
-    let strictly_inside = |x: Endpoint, c: ClusterId| match x {
-        Endpoint::Node(NodeId(i)) => nodes[i]
-            .cluster
-            .is_some_and(|nc| is_within(&g.clusters, nc, c)),
-        Endpoint::Cluster(d) => d != c && is_within(&g.clusters, d, c),
-    };
-    let has_port_dummies = |c: ClusterId| {
-        g.edges
-            .iter()
-            .any(|e| strictly_inside(e.from, c) != strictly_inside(e.to, c))
-    };
-    let deep_edge = |ne: Option<NestedEdge>| {
-        elk && !member_edge(ne)
-            && ne.is_some_and(|ne| {
-                ne.inner != Endpoint::Cluster(ne.cluster) || !has_port_dummies(ne.cluster)
-            })
-    };
+    // free; with external port dummies inside, its ports keep their sides and
+    // the loop runs around from one flow side to the other.
+    let deep_edge = |ne: Option<NestedEdge>| elk && !member_edge(ne) && ne.is_some();
     let layout_ends = |ei: usize, e: &Edge| -> ((usize, Option<usize>), (usize, Option<usize>)) {
         match nested[ei] {
             None => (layout_end(e.from, true), layout_end(e.to, false)),
@@ -3491,15 +3474,28 @@ mod tests {
 
         let frame = frame_of(&scene, "A");
         let eps = 1e-6;
-        // A --> A: a loop outside the frame, from its top back to its right side.
+        // A --> A: A's ports keep their sides (it has port dummies inside), so
+        // the loop leaves at the bottom and comes back round the left to the
+        // top, 20 off each side (mermaid: 144,303 -> 144,323 -> 12,323 ->
+        // 12,97 -> 156,97 -> 156,117 around the frame at 32,117 200x186 under
+        // the neo look).
         let lp = edge_points(&scene, "L-A-A-2");
-        assert!((lp[0].y - frame.y).abs() < eps, "{lp:?} {frame:?}");
-        assert!(
-            lp.iter()
-                .any(|p| p.x > frame.right() + 10.0 && p.y < frame.y),
-            "{lp:?} {frame:?}"
+        assert!((lp[0].y - frame.bottom()).abs() < eps, "{lp:?} {frame:?}");
+        let (min_x, min_y, max_y) = lp.iter().fold(
+            (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+            |(a, b, c), p| (a.min(p.x), b.min(p.y), c.max(p.y)),
         );
-        assert!((lp.last().unwrap().x - frame.right()).abs() < 10.0);
+        assert!((min_x - (frame.x - 20.0)).abs() < 0.5, "{lp:?}");
+        assert!((min_y - (frame.y - 20.0)).abs() < 0.5, "{lp:?}");
+        assert!((max_y - (frame.bottom() + 20.0)).abs() < 0.5, "{lp:?}");
+        let end = *lp.last().unwrap();
+        // Its ports where A's unconnected port dummies stand, right of a1's:
+        // the way back in the further right.
+        let mid = frame.x + frame.w / 2.0;
+        assert!(
+            lp[0].x > mid && end.x > lp[0].x && end.y < frame.y,
+            "{lp:?}"
+        );
         // A --> a1: under ELK a port dummy in A's first layer lines up with a1:
         // straight down from the frame's top edge into a1 (mermaid: 132,117 to
         // 132,161), not between a1 and a2.

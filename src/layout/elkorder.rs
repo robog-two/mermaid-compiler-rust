@@ -251,6 +251,7 @@ pub(super) fn minimize(
         opts,
         ext_key: vec![None; nv],
         seg_key: (0..graph.segs.len()).collect(),
+        import: &[],
         parent: None,
     }];
     minimize_run(run).pop().unwrap_or(RunOrder {
@@ -273,6 +274,9 @@ pub(super) struct RunGraph<'a> {
     pub ext_key: Vec<Option<usize>>,
     /// Per segment: the key of its edge.
     pub seg_key: Vec<usize>,
+    /// Per edge key: when ELK imported the edge (empty: by key), which orders
+    /// a container's ports for edges to the container itself.
+    pub import: &'a [usize],
     /// The graph's container: (its graph's index in the run, its vertex there).
     pub parent: Option<(usize, usize)>,
 }
@@ -330,13 +334,35 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
     // Per graph: for each container in it (by vertex), the order ELK makes its
     // ports in, by edge key (see `container_port_order`).
     let mut port_made: Vec<Vec<(usize, usize, Made)>> = vec![Vec::new(); ng];
+    // Per graph, per vertex: when a container's ports without an edge in the
+    // graph (those of edges between it and something inside it) were made, and
+    // whether on its east side: `ModelOrderPortComparator` cannot order them
+    // against the others.
+    let mut edgeless: Vec<Vec<Vec<(Made, bool)>>> = graphs
+        .iter()
+        .map(|g| vec![Vec::new(); g.graph.border.len()])
+        .collect();
     for g in &graphs {
         if let Some((pg, v)) = g.parent {
-            port_made[pg].extend(
-                container_port_order(&g.ext_key, g.graph.segs)
-                    .into_iter()
-                    .map(|(key, m)| (v, key, m)),
-            );
+            let pgr = &graphs[pg];
+            let outside: Vec<usize> = pgr
+                .graph
+                .segs
+                .iter()
+                .zip(&pgr.seg_key)
+                .filter(|((a, b), _)| *a == v || *b == v)
+                .map(|(_, &k)| k)
+                .collect();
+            for (key, m, east) in
+                container_port_order(&g.ext_key, g.graph.segs, &g.layers, &outside, g.import)
+            {
+                port_made[pg].push((v, key, m));
+                if !outside.contains(&key)
+                    && let Some(e) = edgeless[pg].get_mut(v)
+                {
+                    e.push((m, east));
+                }
+            }
         }
     }
     for (gi, g) in graphs.into_iter().enumerate() {
@@ -348,6 +374,7 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
             ext_key,
             seg_key,
             parent,
+            ..
         } = g;
         let Graph {
             border,
@@ -418,6 +445,16 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
                     .map_or((0, info[s].edge), |m| m.2)
             })
             .collect();
+        let seg_made_in: Vec<(usize, usize)> = segs
+            .iter()
+            .enumerate()
+            .map(|(s, &(_, w))| {
+                port_made[gi]
+                    .iter()
+                    .find(|m| m.0 == w && m.1 == seg_key[s])
+                    .map_or((0, info[s].edge), |m| m.2)
+            })
+            .collect();
         creation_order(
             &mut layers,
             &east,
@@ -435,6 +472,7 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
                 inl,
                 &other,
                 ctx,
+                (&edgeless[gi], &seg_made, &seg_made_in),
             );
         } else {
             for layer in layers.iter_mut() {
@@ -909,6 +947,10 @@ impl Run<'_> {
 /// Where a port was made among its node's ports (see `container_port_order`).
 type Made = (usize, usize);
 
+/// Per vertex: when its ports without edges were made and whether each is on
+/// its east side; per segment: when its ports at its source and target were.
+type PortsMade<'a> = (&'a [Vec<(Made, bool)>], &'a [Made], &'a [Made]);
+
 /// The in-layer edges of inverted ports, with when each one's port was made,
 /// and when each segment's port on its source was made.
 type InvertedMade<'a> = (&'a [InLayer], &'a [Made], &'a [Made]);
@@ -924,7 +966,10 @@ type InvertedMade<'a> = (&'a [InLayer], &'a [Made], &'a [Made]);
 fn container_port_order(
     ext_key: &[Option<usize>],
     segs: &[(usize, usize)],
-) -> Vec<(usize, (usize, usize))> {
+    layers: &[Vec<usize>],
+    outside: &[usize],
+    import: &[usize],
+) -> Vec<(usize, Made, bool)> {
     let mut connected = vec![false; ext_key.len()];
     for &(a, b) in segs {
         for x in [a, b] {
@@ -933,10 +978,24 @@ fn container_port_order(
             }
         }
     }
+    let first: &[usize] = match layers {
+        [f, _, ..] => f,
+        _ => &[],
+    };
     ext_key
         .iter()
         .enumerate()
-        .filter_map(|(u, k)| Some((k.as_ref().copied()?, (usize::from(connected[u]), u))))
+        .filter_map(|(u, k)| {
+            let k = k.as_ref().copied()?;
+            // An edge with ends inside and outside crosses the border; one with
+            // an end on the container itself was imported with the others.
+            let made = if connected[u] && outside.contains(&k) {
+                (1, u)
+            } else {
+                (0, import.get(k).copied().unwrap_or(k))
+            };
+            Some((k, made, !first.contains(&u)))
+        })
         .collect()
 }
 
@@ -1075,6 +1134,7 @@ fn sort_by_model_order(
     inl: &[InLayer],
     other: &[bool],
     ctx: &OrderCtx,
+    (edgeless, seg_made, seg_made_in): PortsMade,
 ) {
     let nv = east.len();
     // An in-layer edge into a node's first port (clockwise) with an incoming
@@ -1124,8 +1184,30 @@ fn sort_by_model_order(
             &mut layer, west, segs, info, real, &pos, &port_at, ctx_fb, unsorted,
         );
         for &v in &layer {
-            // Incoming ports by where they come from (top to bottom).
-            west[v].sort_by_key(|&s| (pos[segs[s].0], port_at[s]));
+            // A port without edges (a container's, for an edge between it and
+            // something inside it) compares as smaller than any other on its
+            // side and any other as smaller than it: the insertion sort moves
+            // no port past it, so the ports on either side of it, as made, are
+            // sorted apart.
+            let walls = |east_side: bool| -> Vec<Made> {
+                edgeless.get(v).map_or_else(Vec::new, |w| {
+                    w.iter().filter(|w| w.1 == east_side).map(|w| w.0).collect()
+                })
+            };
+            let (walls_in, walls_out) = (walls(false), walls(true));
+            let part = |walls: &[Made], made: &[Made], s: usize| {
+                let m = made.get(s).copied().unwrap_or((0, s));
+                walls.iter().filter(|&&w| w < m).count()
+            };
+            // Incoming ports by where they come from (top to bottom); ELK's
+            // list runs clockwise, up the west side, so a later part is higher.
+            west[v].sort_by_key(|&s| {
+                (
+                    std::cmp::Reverse(part(&walls_in, seg_made_in, s)),
+                    pos[segs[s].0],
+                    port_at[s],
+                )
+            });
             // Outgoing ports by the model order of the node they lead to: the
             // earliest edge there, so that edges to one node stay together.
             let first_to = |t: usize| {
@@ -1142,7 +1224,7 @@ fn sort_by_model_order(
                     (first_to(info[s].target).unwrap_or(own), own, s)
                 })
                 .collect();
-            keyed.sort_unstable();
+            keyed.sort_unstable_by_key(|&(a, b, s)| (part(&walls_out, seg_made, s), a, b, s));
             east[v] = keyed.into_iter().map(|k| k.2).collect();
             for (i, &s) in east[v].iter().enumerate() {
                 port_at[s] = i;
@@ -2194,6 +2276,7 @@ mod tests {
                 opts: OPTS,
                 ext_key: vec![None],
                 seg_key: vec![],
+                import: &[],
                 parent: None,
             },
             RunGraph {
@@ -2211,6 +2294,7 @@ mod tests {
                 opts: OPTS,
                 ext_key: vec![None, None, Some(5), Some(6)],
                 seg_key: vec![3],
+                import: &[],
                 parent: Some((0, 0)),
             },
         ];
@@ -2504,6 +2588,7 @@ mod tests {
                 opts: OPTS,
                 ext_key: vec![None; 2],
                 seg_key: vec![7, 8],
+                import: &[],
                 parent: None,
             },
             RunGraph {
@@ -2524,6 +2609,7 @@ mod tests {
                 },
                 ext_key: vec![Some(8), Some(7), None, None],
                 seg_key: vec![8, 7],
+                import: &[],
                 parent: Some((0, 1)),
             },
         ];

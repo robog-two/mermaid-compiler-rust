@@ -718,6 +718,8 @@ pub struct Metrics {
     pub font: f64,
     /// `block.padding`: gap between blocks and inset of composites.
     pub pad: f64,
+    /// The neo look, whose shapes pad their labels by fixed amounts of their own.
+    pub neo: bool,
 }
 
 /// The primitive a block shape draws, around the node centre.
@@ -751,8 +753,8 @@ enum Prim {
     },
 }
 
-/// A block node as mermaid's rendering-util shape functions build it (classic
-/// look): the shape around the node centre and its HTML label box.
+/// A block node as mermaid's rendering-util shape functions build it: the shape
+/// around the node centre and its HTML label box.
 #[derive(Debug, Clone, PartialEq)]
 struct NodeGeom {
     prim: Prim,
@@ -827,30 +829,35 @@ fn cylinder_ry(w: f64) -> f64 {
 /// the block (`calculateBlockSize`: no `node.width/height`) and the laid-out
 /// size once it draws it (`insertBlockPositioned`), which some shapes fill and
 /// others ignore. `span` is the block's column span (block arrows stretch over
-/// several columns only).
+/// several columns only). `p` is `block.padding`; under the neo look (`neo`)
+/// most shapes pad their labels by fixed amounts instead.
 fn node_geom(
     shape: BlockShape,
     label: &TextBlock,
     cell: Option<(f64, f64)>,
     span: usize,
-    p: f64,
+    (p, neo): (f64, bool),
 ) -> NodeGeom {
+    // Per look: the classic value, else the neo one.
+    let pick = |classic: f64, neo_value: f64| if neo { neo_value } else { classic };
     let (nw, nh) = cell.unwrap_or((0.0, 0.0));
     // The width `labelHelper` lays the label out in (`node.width`, or no limit).
     let wrap = |w: f64| if cell.is_some() { w } else { f64::INFINITY };
     let mut label_off = Point::new(0.0, 0.0);
     let (prim, fitted) = match shape {
         BlockShape::Rect | BlockShape::Rounded => {
-            // squareRect / drawRect: labelPaddingX = 2p, labelPaddingY = p, each side.
+            // squareRect / drawRect: labelPaddingX = 2p, labelPaddingY = p (neo:
+            // 16 and 12), each side; a rounded one is `roundedRect`, p each
+            // side in either look.
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
-            let rx = if shape == BlockShape::Rounded {
-                5.0
+            let (rx, pad_x, pad_y) = if shape == BlockShape::Rounded {
+                (5.0, p, p)
             } else {
-                0.0
+                (0.0, pick(2.0 * p, 16.0), pick(p, 12.0))
             };
-            let w = (lw + 4.0 * p).max(nw);
-            let h = (lh + 2.0 * p).max(nh);
+            let w = (lw + 2.0 * pad_x).max(nw);
+            let h = (lh + 2.0 * pad_y).max(nh);
             (Prim::Rect { w, h, rx }, f)
         }
         BlockShape::Diamond => {
@@ -872,17 +879,23 @@ fn node_geom(
             (Prim::Poly(pts), f)
         }
         BlockShape::Hexagon => {
-            // hexagon (classic f = 4): a laid-out hexagon fills its cell, the label
-            // limited to what the slanted ends leave.
-            let slant = 4.0;
+            // hexagon (f = 4, neo 3.5): a laid-out hexagon fills its cell, the
+            // label limited to what the slanted ends leave. Neo pads the
+            // height by 70 and the width by 32 (`labelPaddingX` / `Y`, swapped).
+            let slant = pick(4.0, 3.5);
+            let (pad_h, pad_w) = (pick(p, 70.0), pick(p, 32.0));
             let (h, label_limit) = match cell {
-                Some((w, h)) => (h, w - 2.0 * (h / slant) - p),
-                None => (label.height + p, f64::INFINITY),
+                Some((w, h)) => (h, w - 2.0 * (h / slant) - pad_w),
+                None => (label.height + pad_h, f64::INFINITY),
             };
             let f = fit_label(label, label_limit);
             let lw = f.w;
             let m = h / slant;
-            let w = if cell.is_some() { nw } else { lw + 2.0 * m + p };
+            let w = if cell.is_some() {
+                nw
+            } else {
+                lw + 2.0 * m + pad_w
+            };
             let pts = [
                 (m, 0.0),
                 (w - m, 0.0),
@@ -909,11 +922,12 @@ fn node_geom(
         BlockShape::Asymmetric => {
             // rect_left_inv_arrow: the notch is a quarter of the height; polygon
             // and label move right by half the notch.
+            // Neo pads the label by 21 and 12 on each side.
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
-            let h = (lh + p).max(nh);
+            let h = (lh + pick(p, 24.0)).max(nh);
             let notch = h / 4.0;
-            let w = (lw + p).max(nw - notch);
+            let w = (lw + pick(p, 42.0)).max(nw - notch);
             let dx = notch / 2.0;
             let pts = vec![
                 Point::new(-w / 2.0 - notch + dx, -h / 2.0),
@@ -930,7 +944,7 @@ fn node_geom(
         | BlockShape::Trapezoid
         | BlockShape::InvTrapezoid => {
             // The slanted ends add half the height on each side; `inv_trapezoid`
-            // pads its label on both sides.
+            // pads its label on both sides. Neo pads the width twice as much.
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
             let k = if shape == BlockShape::InvTrapezoid {
@@ -939,7 +953,7 @@ fn node_geom(
                 1.0
             };
             let h = (lh + k * p).max(nh);
-            let w = (lw + k * p).max(nw - h);
+            let w = (lw + k * pick(p, 2.0 * p)).max(nw - h);
             let s = 3.0 * h / 6.0;
             let pts = match shape {
                 BlockShape::LeanRight => [(-s, 0.0), (w, 0.0), (w + s, -h), (0.0, -h)],
@@ -952,45 +966,49 @@ fn node_geom(
         BlockShape::Circle => {
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
-            (Prim::Circle(lw.hypot(lh) / 2.0 + p / 2.0), f)
+            (Prim::Circle(lw.hypot(lh) / 2.0 + pick(p / 2.0, 16.0)), f)
         }
         BlockShape::DoubleCircle => {
             // doublecircle: a laid-out one takes half the cell width as its
-            // label radius, so it outgrows its cell by the padding and gap.
+            // label radius, so it outgrows its cell by the padding and gap
+            // (neo: 16 and 12).
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
             let inner = if cell.is_some() {
                 nw / 2.0
             } else {
                 lw.hypot(lh) / 2.0
-            } + p;
-            (Prim::DoubleCircle(inner, inner + 5.0), f)
+            } + pick(p, 16.0);
+            (Prim::DoubleCircle(inner, inner + pick(5.0, 12.0)), f)
         }
         BlockShape::Stadium => {
             // stadiumDimensions: the arc is a 50-point polygon, so the caps are a
-            // hair narrower than the height.
+            // hair narrower than the height. Neo pads by 40 and 24.
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
-            let h = lh + p;
+            let (px, py) = (pick(p, 40.0), pick(p, 24.0));
+            let h = lh + py;
             let inscribed = h * (std::f64::consts::PI / (2.0 * 49.0)).cos();
             let cap = (inscribed * inscribed - lh * lh).max(0.0).sqrt();
-            let w = (lw + h / 4.0 + p)
+            let w = (lw + h / 4.0 + px)
                 .max(1.5 * h + (h - inscribed))
-                .max(lw + p + h - cap);
+                .max(lw + px + h - cap);
             (Prim::Stadium { w, h }, f)
         }
         BlockShape::Subroutine => {
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
-            let w = (lw + 2.0 * SUBROUTINE_FRAME + p).max(nw);
-            let h = (lh + p).max(nh);
+            // Neo pads by 28 and 12.
+            let w = (lw + 2.0 * SUBROUTINE_FRAME + pick(p, 28.0)).max(nw);
+            let h = (lh + pick(p, 12.0)).max(nh);
             (Prim::Subroutine { w, h }, f)
         }
         BlockShape::Cylinder => {
             // cylinder: a laid-out one gives the label its cell less the padding
-            // and three cap radii, and grows back to fill the cell.
+            // (neo: 24) and three cap radii, and grows back to fill the cell.
+            let q = pick(p, 24.0);
             let (label_limit, min_h) = match cell {
-                Some((w, h)) => ((w - p).max(8.0), (h - p - 3.0 * cylinder_ry(w)).max(8.0)),
+                Some((w, h)) => ((w - q).max(8.0), (h - q - 3.0 * cylinder_ry(w)).max(8.0)),
                 None => (f64::INFINITY, 0.0),
             };
             let f = fit_label(label, label_limit);
@@ -999,10 +1017,10 @@ fn node_geom(
                 label_limit.max(lw)
             } else {
                 lw
-            } + p;
+            } + q;
             let rx = w / 2.0;
             let ry = cylinder_ry(w);
-            let h = min_h.max(lh) + p + ry;
+            let h = min_h.max(lh) + q + ry;
             label_off = Point::new(0.0, p / 1.5);
             (Prim::Cylinder { w, h, rx, ry }, f)
         }
@@ -1189,7 +1207,7 @@ fn clip_line(line: &str, width: f64, font: f64) -> String {
 /// `calculateBlockSize`: the bounding box of the block as drawn unpositioned.
 fn node_size(label: &str, shape: BlockShape, span: usize, m: &Metrics) -> (f64, f64) {
     let tb = label_box(label, m.font);
-    let b = node_geom(shape, &tb, None, span, m.pad).bbox();
+    let b = node_geom(shape, &tb, None, span, (m.pad, m.neo)).bbox();
     (b.w, b.h)
 }
 
@@ -1561,6 +1579,7 @@ pub fn render(
     let m = Metrics {
         font: pal.font_size,
         pad: cfg.section_f64("block", "padding", 8.0),
+        neo: cfg.look == crate::config::Look::Neo,
     };
     let placed = layout(&d, &m);
     Ok(draw(&d, &placed, &m, pal))
@@ -1643,7 +1662,7 @@ fn draw_blocks(
                 // The shape built again with its laid-out size: some shapes fill
                 // their cell, others keep their natural size (or outgrow it).
                 let tb = label_box(label, m.font);
-                let g = node_geom(*shape, &tb, Some((r.w, r.h)), b.span.max(1), m.pad);
+                let g = node_geom(*shape, &tb, Some((r.w, r.h)), b.span.max(1), (m.pad, m.neo));
                 let c = r.center();
                 let bb = g.bbox();
                 bounds.add_rect(Rect::new(bb.x + c.x, bb.y + c.y, bb.w, bb.h));
@@ -1848,6 +1867,7 @@ class c hot
         Metrics {
             font: 16.0,
             pad: 8.0,
+            neo: false,
         }
     }
 
@@ -2100,6 +2120,67 @@ class c hot
     }
 
     #[test]
+    fn neo_shapes_pad_their_labels_like_mermaid() {
+        // mermaid 12.3.0 with `look: neo`: the shapes' own label paddings.
+        let neo = (8.0, true);
+        let tb = label_box("C", 16.0);
+        // circle: half the label's diagonal plus 16 (r = 29.320016950533507).
+        match node_geom(BlockShape::Circle, &tb, None, 1, neo).prim {
+            Prim::Circle(r) => assert!((r - 29.320016950533507).abs() < 1e-6, "{r}"),
+            other => panic!("{other:?}"),
+        }
+        let tb = label_box("Square", 16.0);
+        let b = node_geom(BlockShape::Rect, &tb, None, 1, neo).bbox();
+        assert!(
+            close(b.w, tb.width + 32.0) && close(b.h, tb.height + 24.0),
+            "{b:?}"
+        );
+        // hexagon: the height padded by 70, f = 3.5, the width by 32.
+        let tb = label_box("Hex", 16.0);
+        let b = node_geom(BlockShape::Hexagon, &tb, None, 1, neo).bbox();
+        let h = tb.height + 70.0;
+        assert!(
+            close(b.h, h) && close(b.w, tb.width + 2.0 * h / 3.5 + 32.0),
+            "{b:?}"
+        );
+        // doublecircle: 16 inside the inner ring, 12 between the rings.
+        match node_geom(BlockShape::DoubleCircle, &tb, None, 1, neo).prim {
+            Prim::DoubleCircle(inner, outer) => {
+                assert!(close(inner, tb.width.hypot(tb.height) / 2.0 + 16.0));
+                assert!(close(outer, inner + 12.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        // subroutine 28 x 12, rect_left_inv_arrow 42 x 24.
+        let b = node_geom(BlockShape::Subroutine, &tb, None, 1, neo).bbox();
+        assert!(close(b.w, tb.width + 16.0 + 28.0) && close(b.h, tb.height + 12.0));
+        let g = node_geom(BlockShape::Asymmetric, &tb, None, 1, neo);
+        match g.prim {
+            Prim::Poly(pts) => {
+                let ys: Vec<f64> = pts.iter().map(|p| p.y).collect();
+                let h = ys.iter().copied().fold(f64::MIN, f64::max)
+                    - ys.iter().copied().fold(f64::MAX, f64::min);
+                assert!(close(h, tb.height + 24.0), "{h}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rounded_block_pads_its_label_once_in_either_look() {
+        // `roundedRect`, not `squareRect`: p on each side (mermaid 12.3.0:
+        // "Rounded node", label 104.984375 wide, block 120.984375).
+        let tb = label_box("Rounded node", 16.0);
+        for neo in [false, true] {
+            let b = node_geom(BlockShape::Rounded, &tb, None, 1, (8.0, neo)).bbox();
+            assert!(
+                close(b.w, tb.width + 16.0) && close(b.h, tb.height + 16.0),
+                "{b:?}"
+            );
+        }
+    }
+
+    #[test]
     fn shapes_size_like_mermaid_rendering_util() {
         // mermaid 12.3.0, every block shape in a 4-column grid: the drawn bounding
         // box (the viewBox less 5px) comes out exactly as in the browser.
@@ -2128,14 +2209,14 @@ class c hot
     fn laid_out_shapes_fill_or_ignore_their_cell() {
         let tb = label_box("API Gateway", 16.0);
         let cell = Some((130.71354166666666, 103.15625));
-        let dc = node_geom(BlockShape::DoubleCircle, &tb, cell, 1, 8.0);
+        let dc = node_geom(BlockShape::DoubleCircle, &tb, cell, 1, (8.0, false));
         assert_eq!(
             dc.prim,
             Prim::DoubleCircle(65.35677083333333 + 8.0, 65.35677083333333 + 13.0)
         );
         // The hexagon fills the cell; its label gets what the ends leave, and as
         // that is off the 1/64px grid the text is cut off rather than wrapped.
-        let hx = node_geom(BlockShape::Hexagon, &tb, cell, 1, 8.0);
+        let hx = node_geom(BlockShape::Hexagon, &tb, cell, 1, (8.0, false));
         let b = hx.bbox();
         assert!(close(b.w, 130.71354166666666) && close(b.h, 103.15625));
         assert!(hx.clipped);
@@ -2146,7 +2227,7 @@ class c hot
             &label_box("Browser", 16.0),
             cell,
             1,
-            8.0,
+            (8.0, false),
         );
         match st.prim {
             Prim::Stadium { w, h } => {
