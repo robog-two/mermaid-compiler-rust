@@ -333,3 +333,36 @@ fn dagre_loop_on_a_cluster_goes_round_its_frame() {
         "{svg}"
     );
 }
+
+#[test]
+fn vertical_git_graph_labels_follow_get_bbox() {
+    // TB / BT: commit labels, branch labels and the lanes they space are
+    // sized by the texts' `getBBox()` (ink width; 11px tall at 10px, 12 with
+    // a deep descender), the title by its rounded ascent. (The example
+    // without its last, randomly named, commit.)
+    let example = include_str!("../examples/diagrams/gitgraph.mmd");
+    let body = example.trim_end().rsplit_once('\n').expect("lines").0;
+    for (dir, height) in [("TB", 717.9981689453125), ("BT", 709.0)] {
+        let src = body.replace("gitGraph\n", &format!("gitGraph {dir}:\n"));
+        assert_view_box(
+            &src,
+            [-55.619911193847656, -49.0, 341.0691223144531, height],
+            1e-2,
+        );
+    }
+    let r = render::render(
+        &body.replace("gitGraph\n", "gitGraph TB:\n"),
+        &MermaidConfig::default(),
+    )
+    .expect("diagram renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    // `init`: 7.005 of ink, 11 tall; `api`: 12 tall (its descender).
+    assert!(
+        svg.contains("x=\"-34.005\" y=\"28\" width=\"17.005\" height=\"15\""),
+        "{svg}"
+    );
+    assert!(
+        svg.contains("x=\"72.984\" y=\"128\" width=\"17.359\" height=\"16\""),
+        "{svg}"
+    );
+}
