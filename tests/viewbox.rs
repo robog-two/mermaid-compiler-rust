@@ -366,3 +366,25 @@ fn vertical_git_graph_labels_follow_get_bbox() {
         "{svg}"
     );
 }
+
+#[test]
+fn elk_state_composites_keep_their_title_band() {
+    // ELK starts a composite's children 24px under its 21px title (as for
+    // subgraphs), not 23.
+    assert_view_box(
+        include_str!("../examples/diagrams/state.mmd"),
+        [4.0, 4.0, 312.375, 718.0],
+        1e-2,
+    );
+    assert_view_box(
+        "stateDiagram-v2\n  [*] --> A\n  state A {\n    [*] --> a1\n    a1 --> a2\n  }\n  A --> B\n",
+        [4.0, 4.0, 200.0, 355.0],
+        1e-2,
+    );
+    assert_view_box(
+        "stateDiagram-v2\n  direction LR\n  [*] --> A\n  state A {\n    a1 --> a2\n    --\n    \
+         b1 --> b2\n  }\n  A --> [*]\n",
+        [4.0, 4.0, 356.01995849609375, 404.0],
+        2e-2,
+    );
+}

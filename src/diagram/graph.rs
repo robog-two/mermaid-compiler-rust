@@ -1087,7 +1087,15 @@ pub fn render_with(
             .zip(&cluster_titles)
             .map(|(c, t)| LayoutCluster {
                 parent: c.parent.map(|p| p.0),
-                title_height: cluster_title_height(c.kind, t),
+                // (ELK keeps a state composite's children 1px further down
+                // than its painted body starts: 21px of title → 24, as for
+                // subgraphs.)
+                title_height: cluster_title_height(c.kind, t)
+                    + if elk && c.kind == ClusterKind::Composite {
+                        1.0
+                    } else {
+                        0.0
+                    },
                 min_width: if t.is_empty() {
                     0.0
                 } else {
