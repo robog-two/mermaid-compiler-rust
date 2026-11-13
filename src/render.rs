@@ -89,7 +89,10 @@ fn render_source(source: &str, base: &MermaidConfig) -> Result<Rendered> {
             )
         }
         DiagramType::State => {
-            let g = diagram::state::parse(&pre.body, pre.title.clone())?;
+            let mut g = diagram::state::parse(&pre.body, pre.title.clone())?;
+            if cfg.state.layout != crate::config::LayoutAlgorithm::Elk {
+                g = diagram::state::without_note_groups(g);
+            }
             (
                 diagram::graph::render_with(&g, &cfg.state, &pal, &graph_options(&cfg)),
                 cfg.state.use_max_width,

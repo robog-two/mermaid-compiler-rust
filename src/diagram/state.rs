@@ -159,8 +159,13 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
             b.notes += 1;
             // dataFetcher wraps the note in an invisible `noteGroup` at the top level,
             // whatever composite the annotated state lives in: the note sits outside
-            // it, and its edge crosses the composite's border.
-            let note = Node::new(format!("note{}", b.notes), text, Shape::Note);
+            // it, and its edge crosses the composite's border (and the group's).
+            let id = format!("note{}", b.notes);
+            let mut group = Cluster::new(format!("{id}----parent"), text.clone(), None);
+            group.kind = ClusterKind::NoteGroup;
+            b.clusters.push(group);
+            let mut note = Node::new(id, text, Shape::Note);
+            note.cluster = Some(ClusterId(b.clusters.len() - 1));
             b.nodes.push(note);
             let n = b.nodes.len() - 1;
             let (from, to) = if rest.starts_with("left of") {
@@ -223,6 +228,43 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
         ));
     }
     Ok(b.finish(direction, title))
+}
+
+/// `g` without its note groups: their notes stand on their own (the layouts
+/// other than ELK do not model the groups yet).
+pub fn without_note_groups(mut g: GraphDiagram) -> GraphDiagram {
+    let keep: Vec<bool> = g
+        .clusters
+        .iter()
+        .map(|c| c.kind != ClusterKind::NoteGroup)
+        .collect();
+    let mut remap = vec![None; keep.len()];
+    let mut next = 0;
+    for (i, &k) in keep.iter().enumerate() {
+        if k {
+            remap[i] = Some(ClusterId(next));
+            next += 1;
+        }
+    }
+    let fix = |c: Option<ClusterId>| c.and_then(|c| remap[c.0]);
+    for n in &mut g.nodes {
+        n.cluster = fix(n.cluster);
+    }
+    let mut k = keep.iter();
+    g.clusters.retain(|_| *k.next().unwrap_or(&true));
+    for c in &mut g.clusters {
+        c.parent = fix(c.parent);
+    }
+    for e in &mut g.edges {
+        for end in [&mut e.from, &mut e.to] {
+            if let Endpoint::Cluster(c) = *end
+                && let Some(c) = remap[c.0]
+            {
+                *end = Endpoint::Cluster(c);
+            }
+        }
+    }
+    g
 }
 
 fn note_target(head: &str) -> String {
@@ -498,8 +540,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(g.direction, Direction::LeftRight);
-        assert_eq!(g.clusters.len(), 1);
+        // The composite and the note's group.
+        assert_eq!(g.clusters.len(), 2);
         assert_eq!(g.clusters[0].title, "Big one");
+        assert_eq!(g.clusters[1].kind, ClusterKind::NoteGroup);
         assert!(g.edges.iter().any(|e| matches!(e.to, Endpoint::Cluster(_))));
         assert!(g.nodes.iter().any(|n| n.shape == Shape::ForkBar));
         // A single description replaces the label of the plain shape.
@@ -598,9 +642,90 @@ mod tests {
         // dataFetcher puts the note's group at the top level, outside the composite,
         // and a `left of` note's edge runs from the note to the state.
         let note = g.nodes.iter().position(|n| n.shape == Shape::Note).unwrap();
-        assert_eq!(g.nodes[note].cluster, None);
+        let group = g.nodes[note].cluster.expect("a note group");
+        assert_eq!(g.clusters[group.0].kind, ClusterKind::NoteGroup);
+        assert_eq!(g.clusters[group.0].parent, None);
+        assert_eq!(g.clusters[group.0].title, "hi");
         let e = g.edges.last().unwrap();
         assert_eq!(e.from, Endpoint::Node(NodeId(note)));
+        // The layouts other than ELK go without the groups.
+        let flat = without_note_groups(g.clone());
+        assert_eq!(flat.clusters.len(), g.clusters.len() - 1);
+        assert!(
+            flat.clusters
+                .iter()
+                .all(|c| c.kind != ClusterKind::NoteGroup)
+        );
+        assert_eq!(flat.nodes[note].cluster, None);
+        let b = flat.nodes.iter().position(|n| n.id == "b").unwrap();
+        assert_eq!(flat.clusters[flat.nodes[b].cluster.unwrap().0].id, "B");
+    }
+
+    /// The first rect drawn in the group with id `id` (or whose id starts so),
+    /// other than a drop shadow: `Some(None)` for a group drawing none.
+    fn drawn_rect(scene: &crate::scene::Scene, id: &str) -> Option<Option<crate::geom::Rect>> {
+        use crate::scene::{Element, Geometry};
+        fn find(e: &Element, id: &str) -> Option<Option<crate::geom::Rect>> {
+            match e {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i.starts_with(id) => Some(children.iter().find_map(|c| match c {
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        class,
+                        ..
+                    } if class.as_deref() != Some("drop-shadow") => Some(*rect),
+                    _ => None,
+                })),
+                Element::Group { children, .. } => children.iter().find_map(|c| find(c, id)),
+                _ => None,
+            }
+        }
+        scene.elements.iter().find_map(|e| find(e, id))
+    }
+
+    /// mermaid 12.3.0 under ELK: a note sits in its invisible `noteGroup`,
+    /// which ELK pads (24) and tops with the note's text as its label (24),
+    /// so the state after the annotated one, beside the group, comes 125
+    /// below it (B at 205.5 from A's 80.5); a composite's children start
+    /// below its title band as a subgraph's do (24, not 23).
+    #[test]
+    fn elk_notes_stand_in_their_groups_and_composites_keep_their_title_band() {
+        let render = |src: &str| {
+            crate::render::render(src, &crate::config::MermaidConfig::default())
+                .expect("renders")
+                .scene
+        };
+        let scene = render(
+            "stateDiagram-v2\n  [*] --> A\n  A --> B\n  B --> [*]\n  note right of A : a note\n",
+        );
+        assert_eq!(drawn_rect(&scene, "cluster-note1----parent"), Some(None));
+        let (a, b) = (
+            drawn_rect(&scene, "state-A-").flatten().expect("A"),
+            drawn_rect(&scene, "state-B-").flatten().expect("B"),
+        );
+        assert!((b.y - a.y - 125.0).abs() < 1e-6, "{a:?} {b:?}");
+        let scene = render("stateDiagram-v2\n  state M {\n    a --> b\n  }\n");
+        let m = drawn_rect(&scene, "cluster-M").flatten().expect("M");
+        let a = drawn_rect(&scene, "state-a-").flatten().expect("a");
+        assert!((a.y - m.y - 48.0).abs() < 1e-6, "{m:?} {a:?}");
+    }
+
+    /// stateRenderer-v3-unified: `rankSpacing: conf?.rankSpacing || 50` (the
+    /// state schema has no default), which dagre takes.
+    #[test]
+    fn dagre_ranks_are_fifty_apart() {
+        let src = "---\nconfig:\n  layout: dagre\n---\nstateDiagram-v2\n  A --> B\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .expect("renders")
+            .scene;
+        let (a, b) = (
+            drawn_rect(&scene, "state-A-").flatten().expect("A"),
+            drawn_rect(&scene, "state-B-").flatten().expect("B"),
+        );
+        assert!((b.y - a.bottom() - 50.0).abs() < 1e-6, "{a:?} {b:?}");
     }
 
     #[test]

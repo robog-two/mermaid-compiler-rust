@@ -346,6 +346,10 @@ pub enum ClusterKind {
     Composite,
     /// `divider`: one concurrency region of a state composite (dashed, untitled).
     Region,
+    /// `noteGroup`: the invisible frame round a state's note. Its label is the
+    /// note's text, which ELK still keeps clear above the note (it is the
+    /// container's node label) though nothing paints it there.
+    NoteGroup,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1057,8 +1061,10 @@ pub fn render_with(
             .zip(&cluster_titles)
             .map(|(c, t)| LayoutCluster {
                 parent: c.parent.map(|p| p.0),
-                title_height: cluster_title_height(c.kind, t),
-                min_width: if t.is_empty() {
+                title_height: cluster_title_height(c.kind, t, elk),
+                // A note group reserves no width for its unpainted title
+                // (`groupTitleSizeOptions`).
+                min_width: if t.is_empty() || c.kind == ClusterKind::NoteGroup {
                     0.0
                 } else {
                     t.width + title_pad
@@ -1087,7 +1093,7 @@ pub fn render_with(
                 continue;
             }
             let t = wrapped_group_title(&c.title, opts.group_title_wrap, font);
-            input.clusters[ci].title_height = cluster_title_height(c.kind, &t);
+            input.clusters[ci].title_height = cluster_title_height(c.kind, &t, elk);
             input.clusters[ci].min_width = t.width + title_pad;
         }
     } else if er_groups {
@@ -1129,7 +1135,7 @@ pub fn render_with(
         if er_groups && elk && !t.is_empty() {
             *t = wrapped_group_title(&g.clusters[ci].title, r.w, font);
         }
-        let need = if t.is_empty() {
+        let need = if t.is_empty() || g.clusters[ci].kind == ClusterKind::NoteGroup {
             0.0
         } else {
             t.width + title_pad
@@ -1155,7 +1161,7 @@ pub fn render_with(
             }
             children.extend(shapes);
         }
-        if !t.is_empty() {
+        if !t.is_empty() && c.kind != ClusterKind::NoteGroup {
             let color = c
                 .style
                 .color
@@ -1258,8 +1264,11 @@ pub fn render_with(
                 Endpoint::Cluster(c) => cluster_rects[c.0],
             };
             let lw = edge_labels[ei].as_ref().map(|b| b.width + 8.0);
-            let title_h =
-                cluster_title_height(g.clusters[ne.cluster.0].kind, &cluster_titles[ne.cluster.0]);
+            let title_h = cluster_title_height(
+                g.clusters[ne.cluster.0].kind,
+                &cluster_titles[ne.cluster.0],
+                elk,
+            );
             // The flow direction inside the cluster, as the layout used it (a cluster's
             // own `direction` is dropped when an edge crosses its border).
             let dir = out
@@ -2004,7 +2013,7 @@ fn wrap_er_cluster_titles(
         let mut t = TextBlock::new(lines, font, false);
         // The wrapped `div` is given exactly the wrapping width.
         t.width = t.width.max(w);
-        input.clusters[ci].title_height = cluster_title_height(c.kind, &t);
+        input.clusters[ci].title_height = cluster_title_height(c.kind, &t, false);
         input.clusters[ci].min_width = t.width + title_pad;
         titles[ci] = t;
     }
@@ -2024,16 +2033,18 @@ fn wrapped_group_title(title: &str, width: f64, font: f64) -> TextBlock {
 }
 
 /// Height of the band reserved above a cluster's children for its title: ELK keeps
-/// the label plus its label spacing clear (21px of text → 24); a state composite's
-/// body starts 2px under its label (`roundedWithTitle`); regions have no title.
-fn cluster_title_height(kind: ClusterKind, t: &TextBlock) -> f64 {
+/// the label plus its label spacing clear (21px of text → 24), a state
+/// composite's as any other's; under dagre a composite's body starts 2px under
+/// its label (`roundedWithTitle`); regions have no title.
+fn cluster_title_height(kind: ClusterKind, t: &TextBlock, elk: bool) -> f64 {
     if t.is_empty() {
         return 0.0;
     }
     match kind {
         ClusterKind::Group => t.height + 3.0,
+        ClusterKind::Composite | ClusterKind::NoteGroup if elk => t.height + 3.0,
         ClusterKind::Composite => t.height + 2.0,
-        ClusterKind::Region => 0.0,
+        ClusterKind::Region | ClusterKind::NoteGroup => 0.0,
     }
 }
 
@@ -2121,6 +2132,8 @@ fn cluster_shapes(
                 Element::rect(inner, 0.0, inner_paint),
             ]
         }
+        // `noteGroup`: an unfilled, unstroked rect.
+        ClusterKind::NoteGroup => Vec::new(),
         ClusterKind::Region => {
             let stroke = slot
                 .as_ref()

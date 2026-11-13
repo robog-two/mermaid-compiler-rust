@@ -244,9 +244,10 @@ impl GraphConfig {
         }
     }
     fn state() -> Self {
+        // `stateRenderer-v3-unified`: `rankSpacing: conf?.rankSpacing || 50`
+        // (the state schema has no default).
         GraphConfig {
             padding: 8.0,
-            rank_spacing: 70.0,
             ..Self::flowchart()
         }
     }
