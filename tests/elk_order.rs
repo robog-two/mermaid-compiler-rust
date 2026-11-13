@@ -1890,3 +1890,56 @@ fn an_inverted_ports_dummy_block_straightens_towards_its_in_layer_edge() {
     let (_, leg) = edge_x_range(&svg, "C0", "c0an0");
     assert!((leg - (x + w) - 12.0).abs() < 0.5, "{leg} {}", x + w);
 }
+
+/// The first `n` points of the edge `L-{from}-{to}-*`'s path in our SVG.
+fn edge_start(svg: &str, from: &str, to: &str, n: usize) -> Vec<(f64, f64)> {
+    let key = format!("<g id=\"L-{from}-{to}-");
+    let at = svg.find(&key).expect("edge group");
+    let d = at + svg[at..].find(" d=\"").expect("path") + 4;
+    let end = d + svg[d..].find('"').expect("closing quote");
+    let nums: Vec<f64> = svg[d..end]
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse().expect("number"))
+        .collect();
+    nums.chunks(2).take(n).map(|p| (p[0], p[1])).collect()
+}
+
+#[test]
+fn a_shapes_port_beside_its_outline_point_lets_the_far_step_straighten() {
+    // `n10` is a stadium whose width the browser measures in single
+    // precision: ELK's port for `n10 --> n11` stands a hair off the outline
+    // mermaid clips at, so mermaid's route keeps both, and with that fifth
+    // point the step at the far end straightens (`straightenEdgeTerminals`),
+    // pulling the channel onto the target's row: the edge rises at once
+    // (mermaid 12.3.0), not after a 30px run.
+    let src = "---
+config:
+  layout: elk
+---
+swimlane-beta LR
+  subgraph L0[Lane 0]
+    n00[Approve]
+    n01{Submit build}
+  end
+  subgraph L1[Lane 1]
+    n10([Pay])
+    n11(Build check)
+    n12([Pay])
+    subgraph S1[Group 1]
+      s1[Submit]
+    end
+  end
+  s1 --> n01
+  n00 --> n01
+  n10 --> n11
+  n00 --> s1
+  n12 --> n10
+  n12 --> n11
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let p = edge_start(&svg, "n10", "n11", 2);
+    assert!((p[0].0 - p[1].0).abs() < 0.01, "{p:?}");
+    assert!((p[0].1 - p[1].1).abs() > 5.0, "{p:?}");
+}

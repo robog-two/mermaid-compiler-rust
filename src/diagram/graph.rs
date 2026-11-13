@@ -1336,6 +1336,9 @@ pub fn render_with(
     // Every edge's clipped route and label position first: under ELK mermaid then
     // straightens the routes' terminal steps and separates opposite labels.
     let mut routed: Vec<Option<(Vec<Point>, Option<Point>)>> = vec![None; g.edges.len()];
+    // Per edge: the ports mermaid's clipped route still holds after its first
+    // point and before its last, beside the outline points (see `kept_ports`).
+    let mut kept: Vec<[Option<Point>; 2]> = vec![[None; 2]; g.edges.len()];
     for (ei, (e, route)) in g.edges.iter().zip(&out.edges).enumerate() {
         let mut pts = route.points.clone();
         let mut label_at = route.label;
@@ -1490,6 +1493,7 @@ pub fn render_with(
             }
         }
         if !is_loop {
+            let ports = (pts[0], pts[pts.len() - 1]);
             // An edge to / from a whole cluster is cut where it crosses the cluster's
             // border (mermaid's `cutPathAtIntersect` for `fromCluster` / `toCluster`).
             match e.from {
@@ -1504,6 +1508,33 @@ pub fn render_with(
             pts.reverse();
             if pts.len() < 2 {
                 continue;
+            }
+            if elk {
+                let neo = cfg.look == ConfigLook::Neo;
+                let offset =
+                    |h: Head| markers::pullback_for(h, neo).max(markers::hidden_end(h, true));
+                let node = |end: Endpoint| match end {
+                    Endpoint::Node(NodeId(i)) => Some(i),
+                    Endpoint::Cluster(_) => None,
+                };
+                if let Some(i) = node(e.from) {
+                    let r = Rect::centered(out.nodes[i], measured[i].w, measured[i].h);
+                    // ELK lays the node out at its size as the browser
+                    // measured it (single precision), mermaid clips at the
+                    // outline it drew (double): a shape other than a box
+                    // meets the port a hair off it.
+                    let f32_exact = |v: f64| f64::from(v as f32) == v;
+                    let noisy =
+                        !matches!(boundaries[i], Boundary::Rect(_) | Boundary::Cylinder(..))
+                            && !(f32_exact(measured[i].w) && f32_exact(measured[i].h));
+                    let clip = if noisy { None } else { Some(pts[0]) };
+                    kept[ei][0] = kept_port(ports.0, clip, offset(e.start), r, false);
+                }
+                if let Some(i) = node(e.to) {
+                    let r = Rect::centered(out.nodes[i], measured[i].w, measured[i].h);
+                    kept[ei][1] =
+                        kept_port(ports.1, Some(pts[pts.len() - 1]), offset(e.end), r, true);
+                }
             }
         }
         routed[ei] = Some((pts, label_at));
@@ -1525,7 +1556,30 @@ pub fn render_with(
                 })
             })
             .collect();
-        elkedges::straighten_edge_terminals(&mut routes, &mut labels, ELK_ORIGIN);
+        // mermaid straightens its own routes, which hold the ports beside the
+        // outline points; a route left alone keeps ours.
+        let theirs: Vec<Option<Vec<Point>>> = routes
+            .iter()
+            .zip(&kept)
+            .map(|(r, k)| {
+                let mut r = r.clone()?;
+                if let Some(p) = k[0] {
+                    r.insert(1, p);
+                }
+                if let Some(p) = k[1] {
+                    r.insert(r.len() - 1, p);
+                }
+                Some(r)
+            })
+            .collect();
+        let mut straightened = theirs.clone();
+        elkedges::straighten_edge_terminals(&mut straightened, &mut labels, ELK_ORIGIN);
+        for (((r, before), after), k) in routes.iter_mut().zip(theirs).zip(straightened).zip(&kept)
+        {
+            if after != before {
+                *r = after.map(|a| without_kept_ports(a, *k));
+            }
+        }
         let pairs: Vec<(String, String)> = g
             .edges
             .iter()
@@ -2575,6 +2629,64 @@ pub(crate) fn clip_target_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
 
 /// `cutter2`'s shortest last segment it keeps (the tail point goes otherwise).
 const ELK_MIN_LAST_SEGMENT: f64 = 2.0;
+
+/// `MIN_END_MARKER_SEGMENT_LENGTH` of mermaid's ELK adapter.
+const ELK_MIN_MARKER_SEGMENT: f64 = 8.0;
+
+/// Whether mermaid's clipped ELK route keeps an end's port beside the point
+/// where it meets the node's outline (`clip`), and so holds both. `cutter2`
+/// replaces the node's centre by the outline point and leaves the port; a
+/// port that coincides with it (to 1e-6) goes as a duplicate, at the target
+/// (`at_end`) the outline point goes for one less than 2px from it (see
+/// [`clip_target_end`]), and one on the bounding box that leaves too short a
+/// segment for the end's marker (`offset`) goes too
+/// (`ensureStart/EndMarkerSegmentLength`). `clip`: `None` for an outline
+/// point that differs from the port only by rounding.
+fn kept_port(
+    port: Point,
+    clip: Option<Point>,
+    offset: f64,
+    bounds: Rect,
+    at_end: bool,
+) -> Option<Point> {
+    let clip = match clip {
+        Some(c) => {
+            let d = port.minus(c);
+            if d.x.abs() <= 1e-6 && d.y.abs() <= 1e-6
+                || at_end && port.dist(c) < ELK_MIN_LAST_SEGMENT
+            {
+                return None;
+            }
+            c
+        }
+        None => port,
+    };
+    let tol = 1.0;
+    let on_border = (port.x - bounds.x).abs() <= tol
+        || (port.x - bounds.right()).abs() <= tol
+        || (port.y - bounds.y).abs() <= tol
+        || (port.y - bounds.bottom()).abs() <= tol;
+    let short = port.dist(clip) < ELK_MIN_MARKER_SEGMENT.max(2.0 * offset);
+    (!(offset > 0.0 && short && on_border)).then_some(port)
+}
+
+/// A straightened route without the ports [`kept_port`] put in, where they
+/// are still where they were.
+fn without_kept_ports(mut pts: Vec<Point>, [start, end]: [Option<Point>; 2]) -> Vec<Point> {
+    if let Some(p) = end
+        && pts.len() > 2
+        && pts[pts.len() - 2] == p
+    {
+        pts.remove(pts.len() - 2);
+    }
+    if let Some(p) = start
+        && pts.len() > 2
+        && pts[1] == p
+    {
+        pts.remove(1);
+    }
+    pts
+}
 
 /// Where the line from `next` through `port` (a point on the node's bounding box)
 /// meets the node's outline, coming from outside: `port` itself for a rectangle,
@@ -5370,6 +5482,39 @@ mod tests {
         let rect = Boundary::Rect(Rect::new(-10.0, -5.0, 20.0, 10.0));
         let p = clip_along(&rect, Point::new(4.0, 5.0), Point::new(4.0, 20.0));
         assert!(p.dist(Point::new(4.0, 5.0)) < 1e-6, "{p:?}");
+    }
+
+    #[test]
+    fn elk_routes_keep_ports_beside_their_outline_points_as_mermaid_does() {
+        let bounds = Rect::new(0.0, 0.0, 100.0, 40.0);
+        let port = Point::new(100.0, 20.0);
+        // At the source a port on the outline goes as a duplicate; one off
+        // it (or off only by rounding) stays, unless a start marker needs
+        // the room.
+        assert_eq!(kept_port(port, Some(port), 0.0, bounds, false), None);
+        let inside = Point::new(95.0, 20.0);
+        assert_eq!(
+            kept_port(port, Some(inside), 0.0, bounds, false),
+            Some(port)
+        );
+        assert_eq!(kept_port(port, None, 0.0, bounds, false), Some(port));
+        assert_eq!(kept_port(port, Some(inside), 4.0, bounds, false), None);
+        // At the target an outline point within 2px goes for the port.
+        let near = Point::new(98.5, 20.0);
+        assert_eq!(kept_port(port, Some(near), 0.0, bounds, true), None);
+        assert_eq!(kept_port(port, Some(inside), 0.0, bounds, true), Some(port));
+        // Those still in place go again after straightening.
+        let pts = vec![
+            Point::new(0.0, 0.0),
+            Point::new(5.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(10.0, 10.0),
+        ];
+        let kept = [Some(pts[1]), Some(Point::new(10.0, 5.0))];
+        assert_eq!(
+            without_kept_ports(pts.clone(), kept),
+            vec![pts[0], pts[2], pts[3]]
+        );
     }
 
     #[test]
