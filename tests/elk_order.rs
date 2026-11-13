@@ -2007,6 +2007,25 @@ fn a_loops_label_across_a_horizontal_layout_is_no_thicker_than_itself() {
 }
 
 #[test]
+fn a_loop_on_a_node_does_not_count_for_its_alignment_in_the_layer() {
+    // x1 shares its layer with the taller x0. Its one edge besides its loop
+    // comes in, so ELK aligns it with the layer's top (`placeNodesHorizontally`
+    // counts the ports with edges); its loop, taken off its ports while the
+    // layer is placed, does not count (mermaid 12.3.0: x1 85 below g0n0,
+    // not a third of the way down the layer).
+    let src = "flowchart TD
+  x0{\"Check\"}
+  g0n1 --> x0
+  g0n0 --> x1
+  x1 --> x1
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let c = centres(&svg, &["g0n0", "x1"], false);
+    assert!((c[1].1 - c[0].1 - 85.0).abs() < 0.01, "{c:?}");
+}
+
+#[test]
 fn an_inverted_port_starts_where_its_node_made_it_among_the_others() {
     // In C1's graph C1A's west side holds the port of `C0A --> C1A` (an
     // edge to C1A itself, made first) and the inverted port of the reversed

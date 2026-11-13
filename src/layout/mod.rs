@@ -1583,15 +1583,9 @@ fn finish_rng(
                 ins[l.node] += 1;
             }
         }
-        // A loop on a container has its edge taken off its ports while ELK
-        // places the layers' nodes (`SelfLoopPreProcessor` until
-        // `SelfLoopPostProcessor`); one on any other node counts.
-        for e in input.edges.iter().filter(|e| e.from == e.to) {
-            if !hier.boxes.get(e.from).copied().unwrap_or(false) {
-                outs[e.from] += 1;
-                ins[e.from] += 1;
-            }
-        }
+        // A self-loop does not count: ELK has its edge taken off its ports
+        // while it places the layers' nodes (`SelfLoopPreProcessor` until
+        // `SelfLoopPostProcessor`), on a container or any other node.
         for v in 0..n {
             let total = ins[v] + outs[v];
             let ratio = if total > 0 {
