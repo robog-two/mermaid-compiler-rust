@@ -26,6 +26,7 @@ use super::markers::{self, End, MarkerColors};
 use crate::config::{Look as ConfigLook, MermaidConfig};
 use crate::error::Result;
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
+use crate::json::Json;
 use crate::layout::Direction;
 use crate::scene::{DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
@@ -82,6 +83,30 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Swimlanes> {
     let src = flowchart_source(body);
     let g = flowchart::parse(&src, title)?;
     Ok(prepare(g, &lanes_with_content(body)))
+}
+
+/// The layout a swimlane diagram is drawn with when it is not its own: mermaid
+/// resolves `layout` per diagram (`resolveAppearance`), the latest layer's
+/// `swimlane.layout` or `layout` over the schema's `swimlane` default. Any other
+/// layout draws the diagram as the flowchart it is parsed as (the lanes are its
+/// subgraphs), laid out by that algorithm.
+pub fn other_layout(cfg: &MermaidConfig) -> Option<crate::config::LayoutAlgorithm> {
+    let name = cfg.raw.iter().rev().find_map(|j| {
+        j.get("swimlane")
+            .and_then(|s| s.get("layout"))
+            .and_then(Json::as_str)
+            .or_else(|| j.get("layout").and_then(Json::as_str))
+    })?;
+    (name != "swimlane").then(|| crate::config::LayoutAlgorithm::from_name(name))
+}
+
+/// A `swimlane-beta [dir]` body parsed as the flowchart it is.
+pub fn parse_flowchart(
+    body: &str,
+    title: Option<String>,
+    opts: flowchart::ParseOptions,
+) -> Result<GraphDiagram> {
+    flowchart::parse_with(&flowchart_source(body), title, opts)
 }
 
 /// The body with its `swimlane-beta` keyword replaced by `flowchart`.
@@ -2783,5 +2808,77 @@ G2 --> E";
         assert_eq!((d[0], d[1], d[n - 1]), (0.0, 0.0, 4.0), "{d:?}");
         assert!(d[2..n - 1].iter().all(|&x| x == 2.0), "{d:?}");
         assert_eq!(edges("classic", "a -.-> b")[0].1, Some(vec![2.0]));
+    }
+
+    fn config_from(yaml: &str) -> MermaidConfig {
+        MermaidConfig::default()
+            .with_directive(&crate::config::parse_yaml_subset(yaml))
+            .unwrap()
+    }
+
+    /// mermaid's `resolveAppearance`: `swimlane.layout` or `layout`, the
+    /// latest layer first, over the schema's `swimlane` default.
+    #[test]
+    fn a_layout_other_than_swimlane_draws_a_flowchart() {
+        use crate::config::LayoutAlgorithm;
+        assert_eq!(other_layout(&MermaidConfig::default()), None);
+        assert_eq!(other_layout(&config_from("layout: swimlane")), None);
+        assert_eq!(
+            other_layout(&config_from("layout: dagre")),
+            Some(LayoutAlgorithm::Dagre)
+        );
+        assert_eq!(
+            other_layout(&config_from("layout: elk")),
+            Some(LayoutAlgorithm::Elk)
+        );
+        assert_eq!(
+            other_layout(&config_from("layout: elk\nswimlane:\n  layout: dagre")),
+            Some(LayoutAlgorithm::Dagre)
+        );
+    }
+
+    /// mermaid 12.3.0, `swimlane-beta` with `layout: dagre`: the flowchart
+    /// renderer under dagre, the lanes as subgraphs.
+    #[test]
+    fn under_dagre_the_lanes_are_subgraphs() {
+        let src = "---\nconfig:\n  layout: dagre\n---\nswimlane-beta LR\n  \
+                   subgraph Applicant\n    apply[Submit application]\n    sign[Sign agreement]\n  end\n  \
+                   subgraph Reviewer\n    screen[Screen application]\n    decide{Approved?}\n  end\n  \
+                   subgraph System\n    create[Create account]\n    notify[Send welcome email]\n  end\n  \
+                   apply -->|Application received| screen\n  screen --> decide\n  \
+                   decide -->|Approved| create --> notify --> sign\n  \
+                   decide -->|Needs changes| apply\n";
+        let scene = crate::render::render(src, &MermaidConfig::default())
+            .unwrap()
+            .scene;
+        assert_eq!(scene.kind, DiagramKind::Swimlane);
+        fn find(e: &Element, id: &str) -> Option<String> {
+            match e {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i.starts_with(id) => children.iter().find_map(|c| match c {
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => Some(crate::output::svg::path_data(cmds)),
+                    _ => None,
+                }),
+                Element::Group { children, .. } => children.iter().find_map(|c| find(c, id)),
+                _ => None,
+            }
+        }
+        let d = scene
+            .elements
+            .iter()
+            .find_map(|e| find(e, "L-screen-decide-"));
+        assert_eq!(
+            d.as_deref(),
+            Some(
+                "M537.297,128.5L541.464,128.5C545.63,128.5,553.964,128.5,561.63,128.5\
+                 C569.297,128.5,576.297,128.5,579.797,128.5L583.297,128.5"
+            )
+        );
     }
 }
