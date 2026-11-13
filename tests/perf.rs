@@ -12,7 +12,16 @@ use common::synth;
 use mmdc::config::MermaidConfig;
 use mmdc::output::{self, EncodeOptions};
 use mmdc::render;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+/// The tests time themselves, so they take turns: run in parallel they would
+/// compete for the same cores and measure each other's work.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn serial() -> MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn budget(release_ms: u64) -> Duration {
     let factor = if cfg!(debug_assertions) { 15 } else { 1 };
@@ -42,6 +51,7 @@ fn assert_within(name: &str, took: Duration, limit: Duration) {
 
 #[test]
 fn small_flowchart_is_fast() {
+    let _turn = serial();
     assert_within(
         "flowchart 10",
         time_svg(&synth::flowchart_chain(10)),
@@ -51,6 +61,7 @@ fn small_flowchart_is_fast() {
 
 #[test]
 fn flowchart_500_nodes() {
+    let _turn = serial();
     assert_within(
         "flowchart 500/750",
         time_svg(&synth::flowchart_random(500, 750, 3)),
@@ -60,6 +71,7 @@ fn flowchart_500_nodes() {
 
 #[test]
 fn flowchart_with_subgraphs() {
+    let _turn = serial();
     assert_within(
         "subgraphs 30x10",
         time_svg(&synth::flowchart_subgraphs(30, 10)),
@@ -69,6 +81,7 @@ fn flowchart_with_subgraphs() {
 
 #[test]
 fn flowchart_labelled_edges() {
+    let _turn = serial();
     assert_within(
         "labelled 300",
         time_svg(&synth::flowchart_labelled(300)),
@@ -78,6 +91,7 @@ fn flowchart_labelled_edges() {
 
 #[test]
 fn sequence_2000_messages() {
+    let _turn = serial();
     assert_within(
         "sequence 30x2000",
         time_svg(&synth::sequence(30, 2000)),
@@ -87,21 +101,25 @@ fn sequence_2000_messages() {
 
 #[test]
 fn state_300() {
+    let _turn = serial();
     assert_within("state 300", time_svg(&synth::state(300)), budget(100));
 }
 
 #[test]
 fn class_200() {
+    let _turn = serial();
     assert_within("class 200", time_svg(&synth::class(200)), budget(100));
 }
 
 #[test]
 fn pie_500_slices() {
+    let _turn = serial();
     assert_within("pie 500", time_svg(&synth::pie(500)), budget(50));
 }
 
 #[test]
 fn pdf_encoding_is_fast() {
+    let _turn = serial();
     let r = render::render(
         &synth::flowchart_random(300, 450, 5),
         &MermaidConfig::default(),
@@ -118,6 +136,7 @@ fn pdf_encoding_is_fast() {
 /// unsuitable here: their dummy-vertex count, and so the drawing, grows ~n^1.6.
 #[test]
 fn flowchart_layout_scales_subquadratically() {
+    let _turn = serial();
     let small = time_svg(&synth::flowchart_local(500, 11));
     let large = time_svg(&synth::flowchart_local(2000, 11));
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
@@ -127,6 +146,7 @@ fn flowchart_layout_scales_subquadratically() {
 
 #[test]
 fn sequence_scales_linearly() {
+    let _turn = serial();
     let small = time_svg(&synth::sequence(20, 1000));
     let large = time_svg(&synth::sequence(20, 4000));
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
@@ -137,6 +157,7 @@ fn sequence_scales_linearly() {
 #[cfg(feature = "png")]
 #[test]
 fn png_rasterisation() {
+    let _turn = serial();
     let r = render::render(
         &synth::flowchart_random(100, 150, 2),
         &MermaidConfig::default(),
@@ -153,6 +174,7 @@ fn png_rasterisation() {
 /// must render well inside an interactive budget.
 #[test]
 fn every_example_renders_quickly() {
+    let _turn = serial();
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/diagrams");
     let mut paths: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
@@ -170,6 +192,7 @@ fn every_example_renders_quickly() {
 /// Large inputs for the newer diagram families.
 #[test]
 fn large_newer_diagrams() {
+    let _turn = serial();
     use std::fmt::Write as _;
     let mut gantt = String::from("gantt\ndateFormat YYYY-MM-DD\nsection S\n");
     let _ = writeln!(gantt, "t0 :a0, 2024-01-01, 2d");
