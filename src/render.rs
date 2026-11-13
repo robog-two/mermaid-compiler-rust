@@ -89,10 +89,7 @@ fn render_source(source: &str, base: &MermaidConfig) -> Result<Rendered> {
             )
         }
         DiagramType::State => {
-            let mut g = diagram::state::parse(&pre.body, pre.title.clone())?;
-            if cfg.state.layout != crate::config::LayoutAlgorithm::Elk {
-                g = diagram::state::without_note_groups(g);
-            }
+            let g = diagram::state::parse(&pre.body, pre.title.clone())?;
             (
                 diagram::graph::render_with(&g, &cfg.state, &pal, &graph_options(&cfg)),
                 cfg.state.use_max_width,
@@ -202,10 +199,25 @@ fn render_source(source: &str, base: &MermaidConfig) -> Result<Rendered> {
             diagram::agentflow::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
             cfg.use_max_width("agentflow"),
         ),
-        DiagramType::Swimlane => (
-            diagram::swimlane::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("swimlane"),
-        ),
+        DiagramType::Swimlane => match diagram::swimlane::other_layout(&cfg) {
+            Some(layout) => {
+                let opts = diagram::flowchart::ParseOptions {
+                    inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
+                };
+                let g = diagram::swimlane::parse_flowchart(&pre.body, pre.title.clone(), opts)?;
+                let fcfg = crate::config::GraphConfig {
+                    layout,
+                    ..cfg.flowchart.clone()
+                };
+                let mut scene = diagram::graph::render_with(&g, &fcfg, &pal, &graph_options(&cfg));
+                scene.kind = crate::scene::DiagramKind::Swimlane;
+                (scene, cfg.use_max_width("swimlane"))
+            }
+            None => (
+                diagram::swimlane::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                cfg.use_max_width("swimlane"),
+            ),
+        },
         DiagramType::EventModeling => (
             diagram::eventmodeling::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
             cfg.use_max_width("eventmodeling"),

@@ -395,7 +395,8 @@ impl DiagramKind {
             DiagramKind::ZenUml => "zenuml",
             DiagramKind::Info => "info",
             DiagramKind::Agentflow => "agentflow",
-            DiagramKind::Swimlane => "swimlane",
+            // Drawn by the flowchart renderer.
+            DiagramKind::Swimlane => "flowchart",
             DiagramKind::EventModeling => "eventmodeling",
             DiagramKind::TreeView => "treeView",
             DiagramKind::Ishikawa => "ishikawa",

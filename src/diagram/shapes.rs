@@ -249,7 +249,9 @@ pub fn size(
             let w = (tw + h / 4.0 + px)
                 .max(1.5 * h + (h - inscribed))
                 .max(tw + px + h - cap);
-            at(w, h)
+            // The node is as wide as the drawn polygon (`updateNodeBounds`):
+            // its arcs' points miss their horizontal extremes by half a step.
+            at(w - (h - inscribed), h)
         }
         Shape::Subroutine => at(tw + 2.0 * FRAME + px, th + py),
         Shape::Cylinder => {

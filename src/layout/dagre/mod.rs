@@ -29,6 +29,13 @@ pub struct DagreModel {
     /// Per cluster: its `direction` was written `TD`. dagre lays that out as
     /// `TB`, but a subgraph inside takes `TB` (not `LR`) from it.
     pub cluster_td: Vec<bool>,
+    /// Per layout node: measured for the diagram's direction, it turns a
+    /// quarter for a graph laid out across the other axis (a fork bar:
+    /// `forkJoin` takes the direction of the graph it is drawn in).
+    pub turns: Vec<bool>,
+    /// Per cluster: its `padding` (by which the frame's shape pads the title
+    /// and offsets the drawing it holds); 8 when left out.
+    pub cluster_pads: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +47,8 @@ pub enum DagreItem {
 /// The size of the dummy nodes a self-loop runs through: a `labelRect` with an
 /// empty label measures as its 0.1 × 0.1 rect.
 const SELF_LOOP_DUMMY: f64 = 0.1;
-/// flowDb's subgraph `padding`, by which `insertCluster` pads the title.
+/// flowDb's subgraph `padding`, by which `insertCluster` pads the title
+/// (see [`DagreModel::cluster_pads`]).
 const CLUSTER_PAD: f64 = 8.0;
 /// dagre's `marginx` / `marginy` as mermaid sets them.
 const MARGIN: f64 = 8.0;
@@ -159,6 +167,15 @@ pub struct Extras {
     /// plus half its size is not always the same float), which mermaid cuts
     /// routes against.
     pub cluster_centres: Vec<Option<Point>>,
+    /// Per layout node: the direction of the graph it was laid out in.
+    pub node_dirs: Vec<Option<Direction>>,
+    /// Per cluster: laid out in a graph of its own (a `clusterNode`, which has
+    /// no `intersect`: mermaid then clips neither end of an edge from or to it
+    /// at a node, leaving dagre's ends on the boxes).
+    pub extracted: Vec<bool>,
+    /// Per edge: the origin of the graph it is drawn in (mermaid draws a
+    /// cluster's own graph in a translated group: its paths' `d` are local).
+    pub edge_origins: Vec<Point>,
 }
 
 /// [`layout`], with its [`Extras`].
@@ -253,6 +270,14 @@ pub fn layout_full(input: &LayoutInput, model: &DagreModel) -> (LayoutOutput, Ex
         db: Db::default(),
     };
     adjust_clusters_and_edges(&mut ctx);
+    let mut extracted = vec![false; input.clusters.len()];
+    for sub in &ctx.subs {
+        for v in sub.g.nodes() {
+            if let Some(MNode::ClusterNode { c, .. }) = sub.g.node(&v) {
+                extracted[*c] = true;
+            }
+        }
+    }
     let r = render(&mut ctx, 0, None);
 
     let mut out = LayoutOutput {
@@ -285,12 +310,23 @@ pub fn layout_full(input: &LayoutInput, model: &DagreModel) -> (LayoutOutput, Ex
     for (c, p) in r.centres {
         cluster_centres[c] = Some(p);
     }
+    let mut edge_origins = vec![Point::default(); input.edges.len()];
+    for (i, p) in r.origins {
+        edge_origins[i] = p;
+    }
+    let mut node_dirs = vec![None; input.nodes.len()];
+    for (i, d) in r.dirs {
+        node_dirs[i] = Some(d);
+    }
     (
         out,
         Extras {
             hidden: r.hidden,
             raw_points,
             cluster_centres,
+            node_dirs,
+            extracted,
+            edge_origins,
         },
     )
 }
@@ -561,6 +597,10 @@ struct Rendered {
     raw: Vec<(usize, Vec<Point>)>,
     /// Per cluster: dagre's centre (see [`Extras::cluster_centres`]).
     centres: Vec<(usize, Point)>,
+    /// Per node: its graph's direction (see [`Extras::node_dirs`]).
+    dirs: Vec<(usize, Direction)>,
+    /// Per edge: its graph's origin (see [`Extras::edge_origins`]).
+    origins: Vec<(usize, Point)>,
     /// The `diff` of the last group in the graph (`positionNode`'s offset).
     diff: f64,
 }
@@ -594,6 +634,10 @@ impl Rendered {
         }
         for (c, p) in inner.centres {
             self.centres.push((c, shift(p)));
+        }
+        self.dirs.extend(inner.dirs);
+        for (i, p) in inner.origins {
+            self.origins.push((i, shift(p)));
         }
         if let Some(b) = inner.bbox {
             self.add_box(Rect::new(b.x + dx, b.y + dy, b.w, b.h));
@@ -645,13 +689,23 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
     let sub = &ctx.subs[gi];
     let g = &sub.g;
     let input = ctx.input;
+    let f = |v: f64| f64::from(v as f32);
     let size = |v: &str| -> (f64, f64) {
-        match g.node(v) {
-            Some(MNode::Leaf { idx }) => (input.nodes[*idx].width, input.nodes[*idx].height),
+        let (a, b) = match g.node(v) {
+            Some(MNode::Leaf { idx }) => {
+                let (w, h) = (input.nodes[*idx].width, input.nodes[*idx].height);
+                let turned = sub.dir.is_horizontal() != input.direction.is_horizontal();
+                if turned && ctx.model.turns.get(*idx).copied().unwrap_or(false) {
+                    (h, w)
+                } else {
+                    (w, h)
+                }
+            }
             Some(MNode::Special) => (SELF_LOOP_DUMMY, SELF_LOOP_DUMMY),
             Some(MNode::ClusterNode { .. }) => inner.get(v).map_or((0.0, 0.0), |r| (r.1, r.2)),
             _ => (0.0, 0.0),
-        }
+        };
+        (f(a), f(b))
     };
     // dagre
     let mut dg: Graph<InNode, InEdge> = Graph::new(true, true, true);
@@ -713,11 +767,17 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
                 res.absorb(r, dx, dy);
             }
             Some(MNode::Cluster { c }) if g.has_children(&v) => {
-                let need = input.clusters[*c].min_width.max(CLUSTER_PAD);
+                let pad = ctx
+                    .model
+                    .cluster_pads
+                    .get(*c)
+                    .copied()
+                    .unwrap_or(CLUSTER_PAD);
+                let need = input.clusters[*c].min_width.max(pad);
                 let (width, diff) = if n.width <= need {
-                    (need, (need - n.width) / 2.0 - CLUSTER_PAD)
+                    (need, (need - n.width) / 2.0 - pad)
                 } else {
-                    (n.width, -CLUSTER_PAD)
+                    (n.width, -pad)
                 };
                 let rect = Rect::new(n.x - width / 2.0, n.y - n.height / 2.0, width, n.height);
                 res.add_box(rect);
@@ -727,6 +787,7 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
             }
             Some(MNode::Leaf { idx }) => {
                 res.nodes.push((*idx, Point::new(n.x, n.y)));
+                res.dirs.push((*idx, sub.dir));
                 res.add_box(Rect::centered(Point::new(n.x, n.y), n.width, n.height));
             }
             Some(MNode::Special) => {
@@ -765,6 +826,7 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
                     oe.points.iter().map(|p| Point::new(p.x, p.y)).collect(),
                 ));
                 res.edges.push((l.idx, EdgeRoute { points, label }));
+                res.origins.push((l.idx, Point::default()));
             }
             Part::Loop(k) => {
                 // Keyed by the original edge id: two loops on one node share it.
@@ -877,6 +939,7 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
         }
         res.raw.push((key, points.clone()));
         res.edges.push((key, EdgeRoute { points, label }));
+        res.origins.push((key, Point::default()));
     }
     // The last group's `diff` (`n.isGroup`).
     res.diff = diffs.last().map_or(0.0, |d| d.1);
@@ -918,6 +981,8 @@ mod tests {
             cluster_names: Vec::new(),
             order: (0..n).map(DagreItem::Node).collect(),
             cluster_td: Vec::new(),
+            turns: Vec::new(),
+            cluster_pads: Vec::new(),
         };
         (inp, model)
     }
