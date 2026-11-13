@@ -1959,9 +1959,9 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let pts = &mut drawn_routes[k];
         let last = pts.len() - 1;
         for (head, at, from) in [(e.end, last, last - 1), (e.start, 0, 1)] {
-            // The marker's pull-back and, under the neo look, the end the path
-            // leaves undrawn beneath it (as `graph` does).
-            let back = markers::pullback_for(head, neo) + markers::hidden_end(head, neo);
+            // The marker's pull-back; under the neo look the end beneath the
+            // marker is hidden by the path's pattern, not cut off (as `graph`).
+            let back = markers::pullback_for(head, neo);
             if back > 0.0 && pts[at].dist(pts[from]) > back {
                 let dir = pts[at].minus(pts[from]).norm();
                 pts[at] = pts[at].minus(dir.scale(back));
@@ -2011,7 +2011,29 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             bounds.add_point(*p);
         }
         let mut paint = Paint::stroke(&stroke, width);
-        paint.dash = e.style.dash.clone().or_else(|| match e.line {
+        let cmds = route_path(&drawn_routes, k, hops);
+        // A neo edge hides its first and last `markerOffsets2` px under its
+        // markers by an inline pattern measured along its path (`insertEdge`),
+        // 2px dashes and gaps between for a dotted or dashed one; line hops
+        // then stretch the pattern's drawn part (`applyLineJumpsToSvg`).
+        let inline = neo
+            .then(|| {
+                let plain = route_path(&drawn_routes, k, false);
+                let hidden = (
+                    markers::hidden_end(e.start, neo),
+                    markers::hidden_end(e.end, neo),
+                );
+                let patterned = matches!(e.line, LineKind::Dotted | LineKind::Dashed);
+                let d = graph::neo_dash(geom::path_length(&plain), hidden, patterned)?;
+                if plain.len() == cmds.len() {
+                    Some(d)
+                } else {
+                    graph::hopped_dash(&d, geom::path_length(&cmds)).or(Some(d))
+                }
+            })
+            .flatten();
+        paint.dash = e.style.dash.clone().or(inline).or_else(|| match e.line {
+            _ if neo => None,
             LineKind::Dotted => Some(vec![2.0]),
             LineKind::Dashed => Some(vec![3.0]),
             _ => None,
@@ -2019,7 +2041,7 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let from_id = endpoint_id(g, e.from);
         let to_id = endpoint_id(g, e.to);
         let mut children = vec![Element::classed_shape(
-            Geometry::Path(route_path(&drawn_routes, k, hops)),
+            Geometry::Path(cmds),
             paint,
             format!("flowchart-link LS-{from_id} LE-{to_id}"),
         )];
@@ -2699,37 +2721,67 @@ G2 --> E";
     }
 
     /// Under the neo look a circle or cross head leaves the last 12.5px of its
-    /// line undrawn beneath it (`markerOffsets2`), as `graph` does.
+    /// line undrawn beneath it (`markerOffsets2`), by an inline pattern along
+    /// the full line (`0 0 len-12.5 12.5`), as `graph` does; an arrow hides
+    /// 4px, and a dotted line takes 2px dashes and gaps between.
     #[test]
-    fn neo_circle_head_leaves_the_line_end_undrawn() {
-        let end = |look: &str| -> Point {
+    fn neo_heads_hide_the_line_end_by_a_pattern() {
+        type Drawn = (Vec<PathCmd>, Option<Vec<f64>>);
+        let edges = |look: &str, edge: &str| -> Vec<Drawn> {
             let src = format!(
-                "---\nconfig:\n  look: {look}\n---\nswimlane-beta\nsubgraph L\n  a\n  b\nend\na --o b"
+                "---\nconfig:\n  look: {look}\n---\nswimlane-beta\nsubgraph L\n  a\n  b\nend\n{edge}"
             );
             let r = crate::render::render(&src, &MermaidConfig::default()).expect("renders");
-            fn find(e: &Element) -> Option<Point> {
+            fn find(e: &Element, out: &mut Vec<Drawn>) {
                 match e {
                     Element::Group {
                         class: Some(c),
                         children,
                         ..
-                    } if c == "edgePath" => children.iter().find_map(|c| match c {
-                        Element::Shape {
+                    } if c == "edgePath" => {
+                        if let Some(Element::Shape {
                             geom: Geometry::Path(cmds),
+                            paint,
                             ..
-                        } => cmds.iter().rev().find_map(|c| match c {
-                            PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(*p),
-                            _ => None,
-                        }),
-                        _ => None,
-                    }),
-                    Element::Group { children, .. } => children.iter().find_map(find),
-                    _ => None,
+                        }) = children.first()
+                        {
+                            out.push((cmds.clone(), paint.dash.clone()));
+                        }
+                    }
+                    Element::Group { children, .. } => {
+                        children.iter().for_each(|c| find(c, out));
+                    }
+                    _ => {}
                 }
             }
-            r.scene.elements.iter().find_map(find).expect("edge path")
+            let mut out = Vec::new();
+            r.scene.elements.iter().for_each(|e| find(e, &mut out));
+            out
         };
-        let (classic, neo) = (end("classic"), end("neo"));
-        assert!(classic.dist(neo) >= 12.5 - 1e-6, "{classic:?} {neo:?}");
+        let last = |cmds: &[PathCmd]| {
+            cmds.iter()
+                .rev()
+                .find_map(|c| match c {
+                    PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(*p),
+                    _ => None,
+                })
+                .expect("a point")
+        };
+        let (classic, neo) = (edges("classic", "a --o b"), edges("neo", "a --o b"));
+        // A circle has no pull-back: the line ends where a plain one does.
+        let plain = edges("neo", "a --- b");
+        assert!(last(&plain[0].0).dist(last(&neo[0].0)) < 1e-6);
+        assert_eq!(classic[0].1, None);
+        let len = geom::path_length(&neo[0].0);
+        assert_eq!(neo[0].1, Some(vec![0.0, 0.0, len - 12.5, 12.5]));
+        let arrow = edges("neo", "a --> b");
+        let len = geom::path_length(&arrow[0].0);
+        assert_eq!(arrow[0].1, Some(vec![0.0, 0.0, len - 4.0, 4.0]));
+        let dotted = edges("neo", "a -.-> b");
+        let d = dotted[0].1.clone().expect("a pattern");
+        let n = d.len();
+        assert_eq!((d[0], d[1], d[n - 1]), (0.0, 0.0, 4.0), "{d:?}");
+        assert!(d[2..n - 1].iter().all(|&x| x == 2.0), "{d:?}");
+        assert_eq!(edges("classic", "a -.-> b")[0].1, Some(vec![2.0]));
     }
 }

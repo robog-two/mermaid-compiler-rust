@@ -1708,14 +1708,13 @@ pub fn render_with(
     }
 }
 
-/// Replace the path of an `edgePath` group (its first child) with `cmds`.
 /// mermaid's inline `stroke-dasharray` of a neo edge `len` long whose first
 /// and last `hidden` px are left undrawn (`markerOffsets2`): `0 s len-s-e e`,
 /// or for a dotted or dashed one 2px dashes and gaps between
 /// (`generateDashArray`: `0 s 2 2 … 2 2 e`, the pattern repeating after). A
 /// solid one hiding nothing draws as it would without; one too short for its
 /// ends has a negative length, which makes the browser ignore the pattern.
-fn neo_dash(len: f64, (s, e): (f64, f64), patterned: bool) -> Option<Vec<f64>> {
+pub(crate) fn neo_dash(len: f64, (s, e): (f64, f64), patterned: bool) -> Option<Vec<f64>> {
     let middle = len - s - e;
     if patterned {
         let pairs = if middle.is_finite() {
@@ -1743,12 +1742,22 @@ fn neo_dash(len: f64, (s, e): (f64, f64), patterned: bool) -> Option<Vec<f64>> {
 fn redash_hopped(group: &mut Element, inline: &[f64], len: f64) {
     if let Element::Group { children, .. } = group
         && let Some(Element::Shape { paint, .. }) = children.first_mut()
-        && let [0.0, a, _, c, ..] = *inline
+        && let Some(d) = hopped_dash(inline, len)
     {
-        paint.dash = Some(vec![0.0, a, (len - a - c).max(0.0), c]);
+        paint.dash = Some(d);
     }
 }
 
+/// The pattern `redash_hopped` gives an edge whose inline pattern was
+/// `inline`, now `len` long; none for a pattern of fewer than four numbers.
+pub(crate) fn hopped_dash(inline: &[f64], len: f64) -> Option<Vec<f64>> {
+    match *inline {
+        [0.0, a, _, c, ..] => Some(vec![0.0, a, (len - a - c).max(0.0), c]),
+        _ => None,
+    }
+}
+
+/// Replace the path of an `edgePath` group (its first child) with `cmds`.
 pub(crate) fn set_edge_path(group: &mut Element, cmds: Vec<PathCmd>) {
     if let Element::Group { children, .. } = group
         && let Some(Element::Shape { geom, .. }) = children.first_mut()
