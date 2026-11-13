@@ -853,6 +853,14 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                                 (true, false) => Point::new(r.right(), p.y),
                             }
                         };
+                        // A segment from a child straight to the border (its
+                        // port dummy beside the child's own port) keeps the
+                        // child's end: the run between them crosses the padding.
+                        if route.points.len() == 1
+                            && (seg.from == SegEnd::Ext) != (seg.to == SegEnd::Ext)
+                        {
+                            route.points.push(first);
+                        }
                         if seg.from == SegEnd::Ext {
                             route.points[0] = snap(first, !seg.against);
                         }
@@ -2699,10 +2707,11 @@ mod tests {
         let pts = &out.edges[2].points;
         assert!(super::super::ortho::is_orthogonal(pts), "{pts:?}");
         let (first, last) = (pts[0], pts[pts.len() - 1]);
-        // Out of C1's east side, eastwards ...
+        // From the node's port out of C1's east side, eastwards ...
+        assert!(first.x < c1.right() && pts[1].x > first.x, "{pts:?}");
         assert!(
-            (first.x - c1.right()).abs() < 1e-6 && pts[1].x > first.x,
-            "{pts:?}"
+            pts[1].x > c1.right() && first.y == pts[1].y,
+            "{pts:?} {c1:?}"
         );
         // ... round below both ...
         let low = pts.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);

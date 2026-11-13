@@ -1985,8 +1985,8 @@ fn elk_place(
         if at_end != reversed { to } else { from }
     };
     let key = |o: Option<f64>| o.map_or(i64::MIN, |o| (o * 1024.0).round() as i64);
-    let mut out_side: Vec<Vec<(usize, i64, usize)>> = vec![Vec::new(); real];
-    let mut in_side: Vec<Vec<(usize, i64, usize)>> = vec![Vec::new(); real];
+    let mut out_side: Vec<Vec<(usize, i64, usize, usize)>> = vec![Vec::new(); real];
+    let mut in_side: Vec<Vec<(usize, i64, usize, usize)>> = vec![Vec::new(); real];
     // Where crossing minimisation ordered a node's ports (ELK's port lists), a
     // port reaching a container's port stays there: the container's ports are
     // ordered by its contents' port dummies, whose placement need not follow.
@@ -2005,12 +2005,15 @@ fn elk_place(
         };
         let to_key = fixed_key(true);
         let from_key = fixed_key(false);
+        // Ports reaching one vertex keep the order crossing minimisation left
+        // them in (ELK sorts ports by barycentre, a tie keeping their order).
+        let own = |at_end: bool| own_rank(ei, at_end).unwrap_or(usize::MAX);
         // (An inverted port's dummy has no ports to spread.)
         if s[0] < real {
-            out_side[s[0]].push((index[s[1]], to_key, ei));
+            out_side[s[0]].push((index[s[1]], to_key, own(false), ei));
         }
         if s[s.len() - 1] < real {
-            in_side[s[s.len() - 1]].push((index[s[s.len() - 2]], from_key, ei));
+            in_side[s[s.len() - 1]].push((index[s[s.len() - 2]], from_key, own(true), ei));
         }
     }
     let mut out_port = vec![0.0; ne];
@@ -2022,7 +2025,7 @@ fn elk_place(
         ] {
             side.sort_unstable();
             // Ports fixed by a laid out container stay where its contents put them.
-            side.retain(|&(_, _, ei)| match fixed_end(ei, at_end) {
+            side.retain(|&(_, _, _, ei)| match fixed_end(ei, at_end) {
                 Some(off) => {
                     port[ei] = verts[v].w / 2.0 + off;
                     false
@@ -2030,7 +2033,7 @@ fn elk_place(
                 None => true,
             });
             let offs = elk_port_offsets(side.len(), verts[v].w, port_inset);
-            for (&(_, _, ei), off) in side.iter().zip(offs) {
+            for (&(_, _, _, ei), off) in side.iter().zip(offs) {
                 port[ei] = off;
             }
         }

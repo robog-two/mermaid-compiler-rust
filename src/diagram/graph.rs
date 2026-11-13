@@ -1233,8 +1233,10 @@ pub fn render_with(
     for (ei, (e, route)) in g.edges.iter().zip(&out.edges).enumerate() {
         let mut pts = route.points.clone();
         let mut label_at = route.label;
-        if let Some(ne) = nested[ei].filter(|&ne| deep_edge(Some(ne))) {
-            // The layout's own route, from (or to) the inner end's border.
+        if let Some(ne) = nested[ei].filter(|_| elk) {
+            // Under ELK the layout's own route, from (or to) the inner end's
+            // border: a member's to a port dummy of its container's in its
+            // first or last layer, which lines up with it (`CompoundGraphPreprocessor`).
             if pts.len() < 2 {
                 continue;
             }
@@ -1270,16 +1272,8 @@ pub fn render_with(
                 .filter(|&i| ne.inner != Endpoint::Node(NodeId(i)))
                 .map(|i| Rect::centered(out.nodes[i], measured[i].w, measured[i].h))
                 .collect();
-            // ELK gives a direct member's edge to or from its container a port
-            // dummy in the container's first or last layer, which lines up with
-            // the member: a straight run along the flow.
-            let straight = member_edge(Some(ne));
-            let lane = (lw, straight);
-            let (p, l) = nested_route(ne, frame, inner_rect, dir, title_h, lane, &obstacles);
+            let (p, l) = nested_route(ne, frame, inner_rect, dir, title_h, lw, &obstacles);
             pts = p;
-            if elk {
-                pts.dedup_by(|a, b| a.dist(*b) < 1e-9);
-            }
             if let Endpoint::Node(NodeId(i)) = ne.inner {
                 // Clip at the node's own outline (diamonds, circles, …).
                 let k = if ne.inner_is_target { pts.len() - 1 } else { 0 };
@@ -2481,7 +2475,7 @@ fn nested_route(
     inner: Rect,
     dir: Direction,
     title_h: f64,
-    (label_w, straight_first): (Option<f64>, bool),
+    label_w: Option<f64>,
     obstacles: &[Rect],
 ) -> (Vec<Point>, Point) {
     if ne.inner == Endpoint::Cluster(ne.cluster) {
@@ -2660,14 +2654,8 @@ fn nested_route(
             })
             .count()
     };
-    let order = if straight_first {
-        [2, 0, 1, 3, 4]
-    } else {
-        [0, 1, 2, 3, 4]
-    };
-    let pts = order
+    let pts = candidates
         .iter()
-        .map(|&k| &candidates[k])
         .min_by_key(|c| hits(c))
         .cloned()
         .unwrap_or_default();
@@ -3583,6 +3571,60 @@ mod tests {
     }
 
     #[test]
+    fn elk_edge_from_a_nested_cluster_leaves_its_own_border() {
+        // mermaid 12.3.0: C2 --> x starts on C2's bottom (177) and runs on
+        // through C1's (201), not from C1's border alone.
+        let (_, scene) = render_flowchart(
+            "flowchart TD\n  subgraph C1\n    b\n    subgraph C2\n      a\n    end\n  end\n  C2 --> x\n",
+        );
+        let (c1, c2) = (frame_of(&scene, "C1"), frame_of(&scene, "C2"));
+        let pts = edge_points(&scene, "L-C2-x-0");
+        assert!((pts[0].y - c2.bottom()).abs() < 1e-6, "{pts:?} {c2:?}");
+        assert!(pts[0].x > c2.x && pts[0].x < c2.right(), "{pts:?} {c2:?}");
+        assert!(pts.iter().any(|p| p.y > c1.bottom()), "{pts:?} {c1:?}");
+    }
+
+    #[test]
+    fn elk_member_edges_from_their_container_run_straight_from_own_ports() {
+        // mermaid 12.3.0: C --> a twice, from C's top straight down into a,
+        // each from a port of its own (the first on the right: x 133.7 and
+        // 90.3 about a's 112).
+        let (_, scene) = render_flowchart(
+            "flowchart TD\n  subgraph C\n    a --> b\n  end\n  C --> a\n  C --> a\n",
+        );
+        let frame = frame_of(&scene, "C");
+        let (p, q) = (
+            edge_points(&scene, "L-C-a-1"),
+            edge_points(&scene, "L-C-a-2"),
+        );
+        for pts in [&p, &q] {
+            assert_eq!(pts.len(), 2, "{pts:?}");
+            assert!((pts[0].y - frame.y).abs() < 1e-6, "{pts:?} {frame:?}");
+            assert!((pts[0].x - pts[1].x).abs() < 1e-6, "{pts:?}");
+        }
+        assert!(p[0].x > q[0].x + 20.0, "{p:?} {q:?}");
+    }
+
+    #[test]
+    fn elk_antiparallel_edges_take_their_ports_from_crossing_minimisation() {
+        // Between two nodes, a --> b and b --> a leave and reach the same
+        // nodes; ELK orders their ports by barycentre, a tie keeping the
+        // order its sweeps left them in. At the root (`considerModelOrder`)
+        // a --> b runs left (mermaid: x 66 and 110 about 88); inside a
+        // container, which has no model order, right (134 and 90 about 112).
+        let xs = |src: &str| {
+            let (_, scene) = render_flowchart(src);
+            let ab = edge_points(&scene, "L-a-b-0");
+            let ba = edge_points(&scene, "L-b-a-1");
+            (ab[0].x, ba[0].x)
+        };
+        let (ab, ba) = xs("flowchart TD\n  a --> b\n  b --> a\n");
+        assert!(ab + 40.0 < ba, "{ab} {ba}");
+        let (ab, ba) = xs("flowchart TD\n  subgraph C\n    a --> b\n    b --> a\n  end\n");
+        assert!(ba + 40.0 < ab, "{ab} {ba}");
+    }
+
+    #[test]
     fn elk_loop_on_a_cluster_stands_off_its_side_across_the_flow() {
         // As ELK's self-loop on the container's node (mermaid: frame 32,12
         // 200x186, loop 32,78 -> 12,78 -> 12,132 -> 28,132): ports a third of
@@ -3971,7 +4013,7 @@ mod tests {
             } else {
                 Direction::LeftRight
             };
-            let (pts, _) = nested_route(ne, frame, inner, dir, 24.0, (None, false), &obstacles);
+            let (pts, _) = nested_route(ne, frame, inner, dir, 24.0, None, &obstacles);
             for w in pts.windows(2) {
                 let (a, b) = (w[0], w[1]);
                 let seg = Rect::new(
