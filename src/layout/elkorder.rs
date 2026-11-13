@@ -359,6 +359,18 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
     for g in &graphs {
         if let Some((pg, v)) = g.parent {
             let pgr = &graphs[pg];
+            // (An edge leaving or entering through an inverted port runs to
+            // its dummy in the container's layer first.)
+            let inverted = pgr
+                .graph
+                .inl
+                .iter()
+                .filter(|l| l.node == v)
+                .filter_map(|l| {
+                    let s =
+                        (0..pgr.graph.segs.len()).find(|&s| pgr.graph.info[s].edge == l.edge)?;
+                    Some(pgr.seg_key[s])
+                });
             let outside: Vec<usize> = pgr
                 .graph
                 .segs
@@ -366,6 +378,7 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
                 .zip(&pgr.seg_key)
                 .filter(|((a, b), _)| *a == v || *b == v)
                 .map(|(_, &k)| k)
+                .chain(inverted)
                 .collect();
             for (key, m, east) in
                 container_port_order(&g.ext_key, g.graph.segs, &g.layers, &outside, g.import)

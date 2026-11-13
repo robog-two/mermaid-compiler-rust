@@ -1778,3 +1778,30 @@ fn an_inverted_ports_dummy_left_by_a_switched_label_has_no_size() {
         "{w}x{h}"
     );
 }
+
+#[test]
+fn a_containers_ports_for_inverted_edges_are_made_as_its_contents_made_them() {
+    // Both edges leave C0's port dummies backwards into C0A, through
+    // inverted ports whose dummies stand in C0A's layer. They cross C0A's
+    // border, so C0A's ports are made in the order C0A's own port dummies
+    // were (c0an0's first), not in edge order: the dummies follow them and
+    // the initial order has no crossing, which ELK keeps. Both edges come
+    // round C0A's right (mermaid 12.3.0: C0 482x241).
+    let (_, _, w, h) = frame(
+        "flowchart TD
+  subgraph C0
+    subgraph C0A
+      c0an0
+      c0an1
+    end
+  end
+  C0 --> c0an1
+  C0 --> c0an0
+",
+        "C0",
+    );
+    assert!(
+        (w - 482.0).abs() < 0.5 && (h - 241.0).abs() < 0.5,
+        "{w}x{h}"
+    );
+}
