@@ -1719,3 +1719,62 @@ fn a_label_dummy_left_by_a_hidden_port_edge_keeps_its_layer() {
         "{w}x{h}"
     );
 }
+
+#[test]
+fn a_ports_last_layer_comes_after_a_label_layer_beyond_all_nodes() {
+    // `C0 -->|lab3| cb0` runs back from CB to C0's port in its last layer,
+    // its label dummy in a layer after CB, the last of C0's nodes: the port
+    // comes after that layer, so the label stays in it, beside nothing
+    // (mermaid 12.3.0: C0 783.4x516, CB at x 559.4).
+    let (_, _, w, h) = frame(
+        "flowchart TD
+  subgraph C0
+    c0
+    subgraph CA
+      ca0
+    end
+    subgraph CB
+      cb0
+    end
+  end
+  C0 -->|lab1| ca0
+  cb0 -->|lab2| C0
+  C0 -->|lab3| cb0
+",
+        "C0",
+    );
+    assert!(
+        (w - 783.44).abs() < 0.5 && (h - 516.0).abs() < 0.5,
+        "{w}x{h}"
+    );
+}
+
+#[test]
+fn an_inverted_ports_dummy_left_by_a_switched_label_has_no_size() {
+    // `B -->|lab| ba0` leaves BA backwards; `LabelDummySwitcher` moves the
+    // label into BA's layer and the inverted port's dummy into the label's,
+    // beside BB: a long-edge dummy, which stands the edge spacing (12) off
+    // BB, not the node spacing of a label (mermaid 12.3.0: B 754x379).
+    let (_, _, w, h) = frame(
+        "flowchart LR
+  subgraph B
+    b0
+    subgraph BA
+      ba0
+    end
+    subgraph BB
+      bb0
+    end
+  end
+  x0
+  B -->|lab| ba0
+  b0 --> ba0
+  BB --> x0
+",
+        "B",
+    );
+    assert!(
+        (w - 754.0).abs() < 0.5 && (h - 379.0).abs() < 0.5,
+        "{w}x{h}"
+    );
+}

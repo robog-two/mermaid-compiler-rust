@@ -525,9 +525,12 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
             ranks[v] += shift;
             layered[v] += shift;
         }
+        // After every other layer, label layers included (a label dummy of
+        // an edge to a port of the last layer may stand beyond all nodes).
         let last = (0..n)
             .filter(|&v| !is_ext[v])
             .map(|v| ranks[v])
+            .chain(label_layer.iter().flatten().map(|&l| l + shift))
             .max()
             .unwrap_or(0)
             + 1;
@@ -2055,6 +2058,18 @@ fn elk_place(
         }
     }
     let kept = |v: usize| kept_rank(verts[v].rank);
+    // A labelled dummy holding no edge's label is what an inverted port's
+    // dummy left where `LabelDummySwitcher` took the label from: for ELK a
+    // long-edge dummy of no size (see `switch_labels`).
+    let mut stand_in: Vec<bool> = verts
+        .iter()
+        .map(|v| matches!(v.kind, Kind::Dummy { labeled: true }))
+        .collect();
+    for (_, label, _) in chains.iter().flatten() {
+        if let Some(l) = *label {
+            stand_in[l] = false;
+        }
+    }
     let mut nodes: Vec<elkbk::Node> = verts
         .iter()
         .enumerate()
@@ -2064,6 +2079,7 @@ fn elk_place(
                     (elkbk::NodeType::ExternalPort, 0.0)
                 }
                 Kind::Real => (elkbk::NodeType::Normal, vx.w),
+                _ if stand_in[v] => (elkbk::NodeType::LongEdge, 0.0),
                 Kind::Dummy { labeled: true } => (elkbk::NodeType::Label, label_across[v].0),
                 // `LongEdgeSplitter` makes its dummies as thick as their edge;
                 // `InvertedPortProcessor` makes its own of no size.
