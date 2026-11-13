@@ -751,3 +751,30 @@ fn a_containers_ports_feed_its_channel_in_port_list_order() {
         ],
     );
 }
+
+#[test]
+fn a_moved_labels_layer_next_to_a_port_layer_keeps_its_room() {
+    // `C2 -->|yes| c3n0` runs back from C2's port dummy in its last layer to
+    // C3; LabelDummySwitcher moves the label into C3's layer, and the layer
+    // it leaves between C3 and the port dummies still takes its gaps: C2 is
+    // 24px wider than without the label (mermaid 12.3.0).
+    expect_centres(
+        "flowchart LR
+  subgraph C2
+    c2n0
+    subgraph C3
+      c3n0 --> c3n1
+    end
+  end
+  x0
+  C2 -->|yes| c3n0
+  c3n1 --> x0
+",
+        &[
+            ("c2n0", 88.0, 119.0),
+            ("c3n0", 0.0, 0.0),
+            ("c3n1", 176.0, 0.0),
+            ("x0", 460.0, 0.0),
+        ],
+    );
+}

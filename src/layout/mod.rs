@@ -1272,9 +1272,17 @@ fn finish(
         }
     }
     // The layers of external ports take no room: only their edges' slots do.
+    // A label's layer between one and the next layer of nodes is a layer of
+    // its own (also when `LabelDummySwitcher` has moved the label out of it):
+    // only its side towards the ports takes no room.
+    let label_rank = |r: usize| label_gap.get(r).is_some_and(|&g| g > 0.0);
     let beside_hidden = |r: usize| {
-        hidden_layers.0.is_some_and(|h| r > h && r <= h + RANK_STEP)
-            || hidden_layers.1.is_some_and(|h| r <= h && r + RANK_STEP > h)
+        hidden_layers
+            .0
+            .is_some_and(|h| r > h && r <= h + RANK_STEP && !(r > h + 1 && label_rank(r - 1)))
+            || hidden_layers
+                .1
+                .is_some_and(|h| r <= h && r + RANK_STEP > h && !(r < h && label_rank(r)))
     };
     let gap_before = |r: usize| {
         if beside_hidden(r) {
