@@ -2005,3 +2005,51 @@ fn a_loops_label_across_a_horizontal_layout_is_no_thicker_than_itself() {
     );
     assert!((h - 262.5).abs() < 0.01, "{h}");
 }
+
+#[test]
+fn an_inverted_port_starts_where_its_node_made_it_among_the_others() {
+    // In C1's graph C1A's west side holds the port of `C0A --> C1A` (an
+    // edge to C1A itself, made first) and the inverted port of the reversed
+    // `C1 --> c1abn0` (crossing C1A's border, made after): ELK's list runs
+    // bottom up there, so the inverted port starts on top and its in-layer
+    // edge crosses the other's. The initial order has a crossing, ELK
+    // sweeps, and C1's and C1A's layers turn round (mermaid 12.3.0).
+    let src = "flowchart BT
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C0A
+      c0an0
+      c0an1
+    end
+  end
+  subgraph C1
+    c1n0
+    c1n1
+    subgraph C1A
+      c1an0
+      c1an1
+      subgraph C1AA
+        c1aan0
+      end
+      subgraph C1AB
+        c1abn0
+        c1abn1
+      end
+    end
+  end
+  x0
+  C1 -->|lab2| c1abn0
+  C0A --> C1A
+  C1 --> C1
+";
+    let order = [
+        "c1n1", "c1n0", "c1an1", "c1an0", "c1aan0", "c1abn1", "c1abn0",
+    ];
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let cs = centres(&svg, &order, false);
+    for w in cs.windows(2) {
+        assert!(w[0].2 < w[1].2, "{cs:?}");
+    }
+}

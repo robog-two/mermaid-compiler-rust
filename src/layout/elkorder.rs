@@ -138,6 +138,10 @@ struct Sweeper<'a> {
     inl_ord: Vec<Option<(bool, usize)>>,
     /// Per in-layer edge: the key of its edge (see `RunGraph::seg_key`).
     inl_key: Vec<usize>,
+    /// Where nodes' ports start as they were made (not by model order): per
+    /// in-layer edge, when its port on its node was made, and per segment,
+    /// when its ports at its source and its target were.
+    made: Option<(Vec<Made>, Vec<[Made; 2]>)>,
     /// Per container vertex, per side (east, west): the keys of its ports top
     /// to bottom as its contents last ordered them
     /// (`sortPortsByDummyPositionsInLastLayer`); the ports without an edge in
@@ -554,6 +558,10 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
             inl_ord: vec![None; inl.len()],
             inl_key,
             port_list: vec![[Vec::new(), Vec::new()]; nv],
+            made: (!opts.model_order).then(|| {
+                let segs = seg_made.iter().zip(&seg_made_in).map(|(&a, &b)| [a, b]);
+                (inl_made.clone(), segs.collect())
+            }),
         });
         extra.push((opts, ext_key, seg_key, parent));
     }
@@ -2056,6 +2064,28 @@ impl Sweeper<'_> {
         put.sort_by_key(|p| p.0);
         for (i, ((at, _), port)) in put.into_iter().enumerate() {
             out.insert((at + i).min(out.len()), port);
+        }
+        // A side whose ports nothing has ordered yet holds them all as they
+        // were made, the in-layer edges' too: ELK's list (an east side top
+        // down, a west side bottom up, see `port_list_sorter_west`).
+        if let Some((inl_made, seg_made)) = &self.made
+            && above.is_empty()
+            && below.is_empty()
+            && !last.is_empty()
+            && out.len() == segs.len()
+        {
+            let made = |p: &Port| match *p {
+                Port::East(s) => (seg_made[s][0], 0),
+                Port::West(s) => (seg_made[s][1], 0),
+                Port::InLayer(k, _) => (inl_made[k], 1),
+            };
+            let mut all: Vec<Port> = out.into_iter().chain(last).collect();
+            all.sort_by_key(|p| made(p));
+            if !east {
+                all.reverse();
+                port_list_sorter_west(&mut all);
+            }
+            return all;
         }
         // Unplaced, they stand as their dummies were made (ELK makes them in
         // port order): an east side top down, a west side bottom up.
