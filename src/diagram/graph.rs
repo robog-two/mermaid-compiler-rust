@@ -1428,7 +1428,15 @@ pub fn render_with(
                 .copied()
                 .flatten()
                 .unwrap_or_else(|| r.center());
-            (centre, r.w, r.h)
+            // The shape leaves the node its drawn rect's `getBBox()` height (a
+            // subgraph's `rect` its width too): an `SVGRect`, of floats.
+            let bbox = |v: f64| f64::from(v as f32);
+            let w = if g.clusters[c].kind == ClusterKind::Group {
+                bbox(r.w)
+            } else {
+                r.w
+            };
+            (centre, w, bbox(r.h))
         };
         let to_cluster = matches!(e.to, Endpoint::Cluster(_));
         let from_cluster = matches!(e.from, Endpoint::Cluster(_));
@@ -4035,6 +4043,87 @@ mod tests {
         assert_eq!(mid, p(10.0, 0.0));
         let mid = calc_label_position(&[p(0.0, 0.0), p(0.0, 0.0), p(0.0, 10.0)]);
         assert_eq!(mid, p(0.0, 0.0), "a zero-length step returns its start");
+    }
+
+    fn render_dagre(body: &str) -> crate::scene::Scene {
+        let src = format!("---\nconfig:\n  layout: dagre\n---\n{body}");
+        crate::render::render(&src, &crate::config::MermaidConfig::default())
+            .unwrap()
+            .scene
+    }
+
+    fn walk<'a>(e: &'a Element, out: &mut Vec<&'a Element>) {
+        out.push(e);
+        if let Element::Group { children, .. } = e {
+            children.iter().for_each(|c| walk(c, out));
+        }
+    }
+
+    /// mermaid 12.3.0: a route's points on a frame's border fall inside or
+    /// outside it by the float32 sizes `getBBox()` hands back: the nodes'
+    /// sizes dagre lays out, and the frame's own. Here the route's third point
+    /// lies on C1's top: inside the float32 frame, so the route is cut at its
+    /// second (and drawn ending in mid-air).
+    #[test]
+    fn dagre_frames_and_nodes_are_float32_boxes() {
+        let scene = render_dagre(
+            "flowchart TD\n  subgraph C0\n    C0_0\n  end\n  subgraph C1\n    C1_0\n    C1_1\n  \
+             end\n  x0[[\"A much longer node text here\"]]\n  x0 -->|longer edge label| C1\n  \
+             C1 --o|no| C1_0\n  C1_0 -->|no| C1_0\n  x0 --o|yes| C1_0\n",
+        );
+        let mut all = Vec::new();
+        scene.elements.iter().for_each(|e| walk(e, &mut all));
+        let d = all.iter().find_map(|e| match e {
+            Element::Group {
+                id: Some(i),
+                children,
+                ..
+            } if i.starts_with("L-x0-C1-") => children.iter().find_map(|c| match c {
+                Element::Shape {
+                    geom: Geometry::Path(cmds),
+                    ..
+                } => Some(crate::output::svg::path_data(cmds)),
+                _ => None,
+            }),
+            _ => None,
+        });
+        assert_eq!(d.as_deref(), Some("M385.374,92.5L428.039,155.193"));
+    }
+
+    /// mermaid 12.3.0: a stadium is as wide as its drawn polygon, whose
+    /// 50-point arcs miss the circles' extremes (`Start`: 171.227, not
+    /// 171.25), which decides where the route from C1 to x0 is cut at C1's
+    /// border and so how far its label moves.
+    #[test]
+    fn dagre_stadiums_are_as_wide_as_their_polygon() {
+        let scene = render_dagre(
+            "flowchart LR\n  subgraph C0\n    C0_0\n  end\n  subgraph C1\n    C1_0\n    C1_1\n    \
+             C1_0 --> C0_0\n  end\n  subgraph C2\n    C2_0\n    C2_1\n    C2_2\n  end\n  \
+             x0(\"Decision?\")\n  x1([\"Start\"])\n  x2[(\"ok\")]\n  C1_0 --x|two<br>lines| C1\n  \
+             C1_0 ==> C2\n  C1 -.->|yes| x0\n  x1 -.-> C2_0\n  x1 --> C1_1\n  C1_0 --> C0_0\n  \
+             C0_0 --> x1\n",
+        );
+        let mut all = Vec::new();
+        scene.elements.iter().for_each(|e| walk(e, &mut all));
+        let centres: Vec<Point> = all
+            .iter()
+            .filter_map(|e| match e {
+                Element::Group {
+                    class: Some(c),
+                    children,
+                    ..
+                } if c == "edgeLabel" => children.iter().find_map(|c| match c {
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        ..
+                    } => Some(rect.center()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .collect();
+        let at = Point::new(987.4221854345703, 434.0);
+        assert!(centres.iter().any(|c| c.dist(at) < 1e-3), "{centres:?}");
     }
 
     /// mermaid 12.3.0: under dagre `getEdgesToRender` draws the self-loops

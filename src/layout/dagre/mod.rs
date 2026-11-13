@@ -689,8 +689,9 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
     let sub = &ctx.subs[gi];
     let g = &sub.g;
     let input = ctx.input;
+    let f = |v: f64| f64::from(v as f32);
     let size = |v: &str| -> (f64, f64) {
-        match g.node(v) {
+        let (a, b) = match g.node(v) {
             Some(MNode::Leaf { idx }) => {
                 let (w, h) = (input.nodes[*idx].width, input.nodes[*idx].height);
                 let turned = sub.dir.is_horizontal() != input.direction.is_horizontal();
@@ -703,7 +704,8 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
             Some(MNode::Special) => (SELF_LOOP_DUMMY, SELF_LOOP_DUMMY),
             Some(MNode::ClusterNode { .. }) => inner.get(v).map_or((0.0, 0.0), |r| (r.1, r.2)),
             _ => (0.0, 0.0),
-        }
+        };
+        (f(a), f(b))
     };
     // dagre
     let mut dg: Graph<InNode, InEdge> = Graph::new(true, true, true);
