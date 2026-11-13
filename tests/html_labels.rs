@@ -49,7 +49,8 @@ fn svg_labels_use_1_1em_lines_and_the_text_box_height() {
         "{s}"
     );
     // First baseline 1em below the top of the text box.
-    assert!(s.contains("y=\"41.4\""), "{s}");
+    // (The layout starts inside ELK's 12px root padding.)
+    assert!(s.contains("y=\"53.4\""), "{s}");
 }
 
 #[test]

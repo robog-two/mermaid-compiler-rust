@@ -24,7 +24,7 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{TextBlock, line_width};
+use crate::text::{TextBlock, line_width, svg_bbox_width, svg_line_box};
 use crate::theme::Palette;
 
 /// Graph orientation.
@@ -1138,13 +1138,20 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             }
         }
         // Tags: newest first, stacked away from the commit.
+        // `drawCommitTags` sizes every tag of a commit by the widest and tallest
+        // `getBBox()` among them (10px: 11 tall, 12 with a deep descender).
         let tag_w = c
             .tags
             .iter()
-            .map(|t| line_width(t, TAG_FONT, false))
+            .map(|t| svg_bbox_width(t, TAG_FONT))
             .fold(0.0, f64::max);
+        let h2 = c
+            .tags
+            .iter()
+            .map(|t| svg_line_box(TAG_FONT, t))
+            .fold(0.0, f64::max)
+            / 2.0;
         for (k, t) in c.tags.iter().rev().enumerate() {
-            let h2 = TAG_FONT * 1.2 / 2.0;
             if vertical {
                 // mermaid's `drawCommitTags` (TB/BT): the tag is laid out to the
                 // right of the commit, then turned +45° about (x, pos) where
@@ -1230,14 +1237,18 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 Paint::fill(&pal.text_color),
                 "tag-hole",
             ));
+            // Its own bbox centred on the commit, baseline at y - 16.
             label_els.push(Element::classed_text(
-                Text::centered(
-                    center,
-                    std::slice::from_ref(t),
-                    TAG_FONT,
-                    TAG_FONT * 1.2,
-                    &pal.label_text,
-                ),
+                Text {
+                    x: center.x - svg_bbox_width(t, TAG_FONT) / 2.0,
+                    y: center.y + 3.2,
+                    lines: vec![t.clone()],
+                    line_height: TAG_FONT * 1.2,
+                    font_size: TAG_FONT,
+                    bold: false,
+                    anchor: Anchor::Start,
+                    fill: pal.label_text.clone(),
+                },
                 "tag-label",
             ));
         }
@@ -1429,6 +1440,51 @@ mod tests {
             gc,
             &crate::theme::palette(crate::theme::ThemeName::Default, &[]),
         )
+    }
+
+    /// Tag boxes follow the tags' `getBBox()`: 11px tall at 10px (12 with a
+    /// deep descender), as wide as the widest tag's ink. Reference (mermaid
+    /// 12.3.0, the gallery example): `v0.1` spans x 38.330..73.670 and is 15
+    /// tall (y -28.7..-13.7); `cherry-pick:hotfix` 16 (y 60.8..76.8).
+    #[test]
+    fn tag_boxes_follow_get_bbox() {
+        let example = include_str!("../../examples/diagrams/gitgraph.mmd");
+        // (without its title front matter)
+        let body = example.splitn(3, "---\n").nth(2).unwrap();
+        let s = scene_for(body, &GitConfig::default());
+        fn polys(els: &[Element], out: &mut Vec<Rect>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                        polys(children, out)
+                    }
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        class: Some(c),
+                        ..
+                    } if c == "tag-label-bkg" => {
+                        let mut b = Bounds::default();
+                        for c in cmds {
+                            if let PathCmd::MoveTo(p) | PathCmd::LineTo(p) = c {
+                                b.add_point(*p);
+                            }
+                        }
+                        out.push(b.rect());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut tags = Vec::new();
+        polys(&s.elements, &mut tags);
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-3;
+        let v01 = tags[0];
+        assert!(
+            near(v01.x, 38.330) && near(v01.right(), 73.670) && near(v01.h, 15.0),
+            "{v01:?}"
+        );
+        let cherry = tags.last().unwrap();
+        assert!(near(cherry.h, 16.0), "{cherry:?}");
     }
 
     #[test]

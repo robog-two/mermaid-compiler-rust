@@ -245,6 +245,41 @@ impl Element {
     pub fn line(a: Point, b: Point, paint: Paint) -> Self {
         Element::path(vec![PathCmd::MoveTo(a), PathCmd::LineTo(b)], paint)
     }
+    /// This element (and its children) moved by `(dx, dy)`.
+    pub fn translated(self, dx: f64, dy: f64) -> Self {
+        let all =
+            |children: Vec<Element>| children.into_iter().map(|c| c.translated(dx, dy)).collect();
+        match self {
+            Element::Group {
+                id,
+                class,
+                children,
+            } => Element::Group {
+                id,
+                class,
+                children: all(children),
+            },
+            Element::Shape { geom, paint, class } => Element::Shape {
+                geom: geom.translated(dx, dy),
+                paint,
+                class,
+            },
+            Element::Text { mut text, class } => {
+                text.x += dx;
+                text.y += dy;
+                Element::Text { text, class }
+            }
+            Element::Rotated {
+                deg,
+                about,
+                children,
+            } => Element::Rotated {
+                deg,
+                about: Point::new(about.x + dx, about.y + dy),
+                children: all(children),
+            },
+        }
+    }
 }
 
 /// Which diagram produced a scene (drives `aria-roledescription` and CSS class).

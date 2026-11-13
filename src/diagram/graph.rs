@@ -152,6 +152,8 @@ pub struct StyleOverrides {
     pub dash: Option<Vec<f64>>,
     pub color: Option<Color>,
     pub bold: Option<bool>,
+    /// `font-style: italic` / `oblique`.
+    pub italic: Option<bool>,
 }
 
 impl StyleOverrides {
@@ -179,6 +181,7 @@ impl StyleOverrides {
                     st.bold =
                         Some(v == "bold" || v.parse::<u32>().map(|w| w >= 600).unwrap_or(false))
                 }
+                "font-style" => st.italic = Some(matches!(v, "italic" | "oblique")),
                 _ => {}
             }
         }
@@ -194,6 +197,7 @@ impl StyleOverrides {
             dash: other.dash.clone().or_else(|| self.dash.clone()),
             color: other.color.clone().or_else(|| self.color.clone()),
             bold: other.bold.or(self.bold),
+            italic: other.italic.or(self.italic),
         }
     }
 }
@@ -633,6 +637,14 @@ fn measure_node(
     } else if bold {
         block = TextBlock::new(block.lines, font, true).html();
     }
+    // An HTML label takes the node's `font-style`; an SVG one does not (its
+    // inner tspans set `font-style="normal"`). Emphasis marks take no width.
+    if !svg && node.style.italic == Some(true) {
+        use crate::text::mark::{ITALIC_OFF, ITALIC_ON};
+        for l in block.lines.iter_mut().filter(|l| !l.is_empty()) {
+            *l = format!("{ITALIC_ON}{l}{ITALIC_OFF}");
+        }
+    }
     // labelHelper: `minWidth` widens non-empty labels; circles and collapsed
     // containers size without it.
     let widen = !block.is_empty()
@@ -1037,13 +1049,10 @@ pub fn render_with(
                                 && !deep_edge(nested[ei]))
                         })
                         .map(|b| {
-                            // An SVG label's box includes its background's padding.
+                            // `insertEdgeLabel` sizes the edge by the label's bbox;
+                            // an SVG label's includes its background's padding.
                             let pad = if b.svg { 2.0 * SVG_EDGE_LABEL_PAD } else { 0.0 };
-                            if elk || g.kind == DiagramKind::Er {
-                                (b.width + pad, b.height + pad)
-                            } else {
-                                (b.width + pad + 8.0, b.height + pad + 4.0)
-                            }
+                            (b.width + pad, b.height + pad)
                         }),
                     from_cluster,
                     to_cluster,
@@ -1074,7 +1083,7 @@ pub fn render_with(
         inner_node_sep: CLUSTER_NODE_SPACING,
         inner_rank_sep: CLUSTER_RANK_SPACING,
         routing: edge_routing(cfg.layout),
-        dagre_groups: g.kind == DiagramKind::Er && !elk,
+        dagre_groups: !elk,
     };
     // ER group titles wrap at the group's laid-out width. Under ELK mermaid lays
     // out once, with each title measured at the wrapping width, and wraps it again
@@ -1626,54 +1635,61 @@ pub fn render_with(
         }
     }
 
-    // Title above everything.
+    // The layout's origin: mermaid's ELK layout puts the root's contents inside
+    // its 12px padding, dagre inside its 8px `marginx` / `marginy`; the viewBox
+    // (`setupViewPortForSVG`) then starts at the drawing's bbox less the padding.
+    let origin = if elk { 12.0 } else { 8.0 };
+    let shift = |els: Vec<Element>| -> Vec<Element> {
+        els.into_iter()
+            .map(|e| e.translated(origin, origin))
+            .collect()
+    };
+    let (cluster_els, edge_els, label_els, node_els) = (
+        shift(cluster_els),
+        shift(edge_els),
+        shift(label_els),
+        shift(node_els),
+    );
+    let mut bounds = {
+        let r = bounds.rect();
+        let mut b = Bounds::default();
+        b.add_rect(Rect::new(r.x + origin, r.y + origin, r.w, r.h));
+        b
+    };
+
+    // Title above everything: `insertTitle` puts an unstyled `<text>` with its
+    // baseline at `y = -titleTopMargin`, centred on the drawing's bbox.
     let mut title_els = Vec::new();
     let title = g.title.as_ref().filter(|t| !t.trim().is_empty());
-    if let Some(t) = title.filter(|_| g.kind == DiagramKind::Er) {
-        // `insertTitle`: an unstyled `<text>` (root font size) with its baseline at
-        // `y = -titleTopMargin` in layout space, whose top margin is ELK's 12px
-        // padding or dagre's 8px `marginy`; centred on the drawing's bbox.
+    if let Some(t) = title {
         let content = bounds.rect();
-        let margin = if elk { 12.0 } else { 8.0 };
-        let baseline = content.y - margin - cfg.title_top_margin;
-        let tw = crate::text::line_width(t, font, false);
-        let ascent = (0.905 * font).round();
+        let baseline = -cfg.title_top_margin;
+        // Flowchart, state and agentflow stylesheets give their title class
+        // `font-size: 18px; fill: textColor`; ER's, class's (whose stylesheet
+        // styles `.classTitleText` instead) and requirement's are unstyled, so
+        // they take the root font.
+        let (size, class) = match g.kind {
+            DiagramKind::Er => (font, "erDiagramTitleText"),
+            DiagramKind::Class => (font, "classDiagramTitleText"),
+            DiagramKind::Requirement => (font, "requirementDiagramTitleText"),
+            DiagramKind::State => (18.0, "statediagramTitleText"),
+            DiagramKind::Agentflow => (18.0, "agentflowTitleText"),
+            _ => (18.0, "flowchartTitleText"),
+        };
+        let tw = crate::text::line_width(t, size, false);
+        let ascent = (0.905 * size).round();
         let cx = content.x + content.w / 2.0;
         bounds.add_rect(Rect::new(
             cx - tw / 2.0,
             baseline - ascent,
             tw,
-            crate::text::svg_line_box(font, t),
+            crate::text::svg_line_box(size, t),
         ));
         let lines = vec![t.clone()];
-        let center = Point::new(cx, baseline - font * 0.35);
+        let center = Point::new(cx, baseline - size * 0.35);
         title_els.push(Element::classed_text(
-            Text::centered(center, &lines, font, font, &pal.text_color),
-            "erDiagramTitleText",
-        ));
-    } else if let Some(t) = title {
-        let content = bounds.rect();
-        let tb = TextBlock::new(vec![t.clone()], font * 1.125, false);
-        let center = Point::new(
-            content.x + content.w / 2.0,
-            content.y - cfg.title_top_margin + tb.height / 2.0 - tb.height,
-        );
-        bounds.add_rect(Rect::centered(center, tb.width, tb.height));
-        title_els.push(Element::classed_text(
-            Text::centered(
-                center,
-                &tb.lines,
-                tb.font_size,
-                tb.line_height,
-                // `.flowchartTitleText` (and the class / state / agentflow
-                // equivalents): `fill: textColor`.
-                &pal.text_color,
-            ),
-            if g.kind == DiagramKind::Agentflow {
-                "agentflowTitleText"
-            } else {
-                "flowchartTitleText"
-            },
+            Text::centered(center, &lines, size, size, &pal.text_color),
+            class,
         ));
     }
 
@@ -1965,7 +1981,7 @@ pub fn draw_node(
 }
 
 /// Padding between a cluster frame and its children (mermaid's ELK `SUBGRAPH_PADDING`).
-const CLUSTER_PADDING: f64 = 24.0;
+pub(crate) const CLUSTER_PADDING: f64 = 24.0;
 /// Node gap inside a cluster laid out on its own (`DEFAULT_SUBGRAPH_NODE_SPACING`).
 pub(crate) const CLUSTER_NODE_SPACING: f64 = 50.0;
 /// Layer gap inside a cluster laid out on its own (`DEFAULT_SUBGRAPH_SPACING_BASE_VALUE`).
@@ -4125,6 +4141,39 @@ mod tests {
         };
         assert!((gap("A", "B") - 188.0).abs() < 1e-6, "{}", gap("A", "B"));
         assert!((gap("C", "D") - 94.0).abs() < 1e-6, "{}", gap("C", "D"));
+    }
+
+    /// `font-style: italic` (classDef / style) italicises an HTML node label.
+    #[test]
+    fn italic_font_style_italicises_html_labels() {
+        assert_eq!(
+            StyleOverrides::parse("font-style:italic").italic,
+            Some(true)
+        );
+        assert_eq!(
+            StyleOverrides::parse("font-style: normal").italic,
+            Some(false)
+        );
+        let (_, scene) = render_flowchart(
+            "flowchart LR\nA[Slanted]:::it\nB[Upright]\nclassDef it font-style:italic",
+        );
+        fn lines(els: &[Element], out: &mut Vec<String>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => lines(children, out),
+                    Element::Text { text, .. } => out.extend(text.lines.iter().cloned()),
+                    _ => {}
+                }
+            }
+        }
+        let mut all = Vec::new();
+        lines(&scene.elements, &mut all);
+        let runs = |s: &str| {
+            let l = all.iter().find(|l| crate::text::plain(l) == s).unwrap();
+            crate::text::styled_runs(l, false)
+        };
+        assert!(runs("Slanted").iter().all(|r| r.italic));
+        assert!(runs("Upright").iter().all(|r| !r.italic));
     }
 
     /// mermaid's ELK adapter never reads `nodeSpacing` / `rankSpacing`; dagre does.

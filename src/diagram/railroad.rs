@@ -20,7 +20,7 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{PathCmd, Point, Rect, arc_cubics};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::line_width;
+use crate::text::svg_bbox_width;
 use crate::theme::{Palette, ThemeName};
 
 // ───────────────────────────── AST ─────────────────────────────
@@ -912,7 +912,7 @@ impl Metrics {
         if text.is_empty() {
             return (0.0, 0.0);
         }
-        let w = line_width(&display_text(text), self.font_size, false);
+        let w = svg_bbox_width(text, self.font_size);
         let fs = self.font_size;
         let h = match fs as i64 {
             10 | 12 | 14 | 16 | 18 | 20 | 24 | 32 if fs.fract() == 0.0 => match fs as i64 {
@@ -2254,6 +2254,35 @@ mod tests {
         let mt = Metrics::from_config(&cfg, &pal);
         assert_eq!(mt.arc_radius, 4.0);
         assert_eq!(mt.padding, 10.0);
+    }
+
+    /// Boxes are sized by the label's `getBBox()`, which ends on the last
+    /// glyph's ink rounded out to whole pixels. Widths from mermaid 12.3.0.
+    #[test]
+    fn gallery_widths_follow_get_bbox() {
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        for (src, w) in [
+            (
+                include_str!("../../examples/diagrams/railroad.mmd"),
+                486.640625,
+            ),
+            (
+                include_str!("../../examples/diagrams/railroad-abnf.mmd"),
+                386.953125,
+            ),
+            (
+                include_str!("../../examples/diagrams/railroad-ir.mmd"),
+                430.90625,
+            ),
+            (
+                include_str!("../../examples/diagrams/railroad-peg.mmd"),
+                508.046875,
+            ),
+        ] {
+            let s = render(src, None, &cfg, &pal).unwrap();
+            assert!((s.view_box.w - w).abs() < 1e-6, "{} != {w}", s.view_box.w);
+        }
     }
 
     #[test]
