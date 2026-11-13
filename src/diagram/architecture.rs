@@ -4,14 +4,18 @@
 //! `service id(icon)[Title] in group`, text icons `service id("txt")[Title]`,
 //! `junction id in group`, edges `a:R -- L:b`, arrows `a:R --> L:b`,
 //! `a:R <--> L:b`, labelled edges `a:R -[Label]- L:b`, group modifiers
-//! `a{group}:B --> T:b{group}`, and `title`.
+//! `a{group}:B --> T:b{group}`, and `title` (parsed; mermaid 12.3 does not
+//! draw it).
 //!
-//! Layout: mermaid uses a force layout constrained by the port sides; we instead
-//! place every container's children (services, junctions, nested groups) on an
-//! integer grid derived from the side hints (`a:R -- L:b` puts `b` one cell right
-//! of `a`), size grid rows/columns to their contents, and route edges
-//! orthogonally between the named sides. Icons are drawn as simple generic glyphs.
+//! Layout: mermaid's own: cytoscape-fcose constrained by the port sides
+//! (see [`super::architecture_fcose`]), which reproduces its node positions;
+//! edges are drawn as svgDraw.ts does, from cytoscape's endpoints and
+//! midpoints. A diagram that gives fcose no constraints (no edges between
+//! distinct sides, no `align` hints) is placed on an integer grid instead:
+//! every container's children (services, junctions, nested groups) in grid
+//! cells sized to their contents. Icons are drawn as simple generic glyphs.
 
+use super::architecture_fcose::{self, Placement};
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
@@ -1198,9 +1202,49 @@ fn icon_glyph(icon: Option<&str>, r: Rect) -> Vec<Element> {
     }
 }
 
+/// Boxes from mermaid's fcose placement: a service's icon has its top left
+/// corner at the node's cytoscape position, and the groups' boxes are drawn
+/// shifted by half an icon the same way (svgDraw.ts).
+fn layout_from_placement(d: &Architecture, p: &Placement, font: f64) -> Layout {
+    let half = ICON / 2.0;
+    let icon_box: Vec<Rect> = p
+        .node_pos
+        .iter()
+        .map(|q| Rect::new(q.x, q.y, ICON, ICON))
+        .collect();
+    let node_box: Vec<Rect> = icon_box
+        .iter()
+        .enumerate()
+        .map(|(i, &ib)| match service_label(d, i, font) {
+            Some(b) => {
+                let w = ICON.max(b.width + 4.0);
+                Rect::new(ib.center().x - w / 2.0, ib.y, w, ICON + 6.0 + b.height)
+            }
+            None => ib,
+        })
+        .collect();
+    let group_box: Vec<Rect> = p
+        .group_bbox
+        .iter()
+        .map(|r| Rect::new(r.x + half, r.y + half, r.w, r.h))
+        .collect();
+    Layout {
+        cell_box: node_box.clone(),
+        group_cell: group_box.clone(),
+        node_box,
+        icon_box,
+        group_box,
+    }
+}
+
 fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let font = pal.font_size;
-    let lay = layout(d, font);
+    let label_width = |i: usize| service_label(d, i, font).map_or(0.0, |b| b.width);
+    let placement = architecture_fcose::place(d, &label_width);
+    let lay = match &placement {
+        Some(p) => layout_from_placement(d, p, font),
+        None => layout(d, font),
+    };
     let icon_bg = Color::new("#087ebf");
     let mut bounds = Bounds::default();
     let mut group_els = Vec::new();
@@ -1320,9 +1364,16 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 port(r, end.side)
             }
         };
-        let p0 = end_point(&e.lhs, &ra);
-        let p1 = end_point(&e.rhs, &rb);
-        let pts = route(p0, e.lhs.side, p1, e.rhs.side);
+        let pts = match &placement {
+            Some(p) => architecture_fcose::edge_points(d, p, e).to_vec(),
+            None => route(
+                end_point(&e.lhs, &ra),
+                e.lhs.side,
+                end_point(&e.rhs, &rb),
+                e.rhs.side,
+            ),
+        };
+        let (p0, p1) = (pts[0], pts[pts.len() - 1]);
         for p in &pts {
             bounds.add_point(*p);
         }
@@ -1352,7 +1403,11 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
             if !b.is_empty() {
                 // `createText` at the midpoint with `dy: 1em`: the label hangs just
                 // below the edge rather than covering it.
-                let mid = midpoint(&pts);
+                let mid = if placement.is_some() {
+                    pts[1]
+                } else {
+                    midpoint(&pts)
+                };
                 let at = Point::new(mid.x, mid.y + b.height / 2.0);
                 let r = Rect::centered(at, b.width + 6.0, b.height);
                 bounds.add_rect(r);
@@ -1371,36 +1426,16 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
         }
     }
 
-    let mut title_els = Vec::new();
-    if let Some(t) = d.title.as_ref().filter(|t| !t.trim().is_empty()) {
-        let content = bounds.rect();
-        let tb = TextBlock::new(vec![t.clone()], font * 1.125, false);
-        let center = Point::new(
-            content.x + content.w / 2.0,
-            content.y - 16.0 - tb.height / 2.0,
-        );
-        bounds.add_rect(Rect::centered(center, tb.width, tb.height));
-        title_els.push(Element::classed_text(
-            Text::centered(
-                center,
-                &tb.lines,
-                tb.font_size,
-                tb.line_height,
-                &pal.title_color,
-            ),
-            "architectureTitleText",
-        ));
-    }
-    let mut elements = vec![
+    let elements = vec![
         Element::group("architecture-groups", group_els),
         Element::group("architecture-edges", edge_els),
         Element::group("architecture-services", node_els),
         Element::group("edgeLabels", label_els),
     ];
-    elements.extend(title_els);
     Scene {
         kind: DiagramKind::Architecture,
-        view_box: bounds.rect().pad(20.0),
+        // setupGraphViewbox: the drawing's box plus `architecture.padding`.
+        view_box: bounds.rect().pad(GROUP_PAD),
         elements,
         acc_title: None,
         acc_descr: None,

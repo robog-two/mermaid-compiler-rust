@@ -2,6 +2,7 @@
 
 pub mod agentflow;
 pub mod architecture;
+pub mod architecture_fcose;
 pub mod block;
 pub mod c4;
 pub mod class;
