@@ -1180,3 +1180,74 @@ fn an_edgeless_port_on_a_containers_west_side_splits_its_sort() {
         ],
     );
 }
+
+#[test]
+fn a_crossed_subgraph_inside_a_directed_one_is_a_run_of_its_own() {
+    // `b00n0 --> c00n0` makes B00 `INCLUDE_CHILDREN`, but its parent A0 has a
+    // direction of its own (`SEPARATE_CHILDREN`): ELK lays B00 out as the root
+    // of a compound run of its own, with ELK's default direction (RIGHT), not
+    // A0's BT (mermaid 12.3.0).
+    expect_centres(
+        "flowchart BT
+  subgraph A0
+    direction BT
+    subgraph B00
+      b00n0
+      subgraph C00
+        c00n0
+      end
+    end
+  end
+  b00n0 --> c00n0
+  b00n0 --> C00
+",
+        &[("b00n0", 0.0, 6.0), ("c00n0", 246.0, 0.0)],
+    );
+}
+
+#[test]
+fn a_crossed_subgraphs_own_run_is_not_split_into_components() {
+    // B00 and B10 are compound runs of their own (an edge from each one's
+    // child into its subgraph C), laid out whole (`doCompoundLayout` packs no
+    // components): b00n1 stays in B00's layering rather than packed apart
+    // (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph A0
+    direction LR
+    subgraph B00
+      b00n0
+      b00n1
+      subgraph C00
+        c00n0
+        c00n1
+        c00n0 --> c00n1
+      end
+    end
+  end
+  subgraph A1
+    direction LR
+    a1n0
+    subgraph B10
+      b10n0
+      subgraph C10
+        c10n0
+      end
+    end
+  end
+  c00n1 --> b00n0
+  b00n0 --> c00n0
+  b10n0 --> c10n0
+  b10n0 --> c10n0
+",
+        &[
+            ("a1n0", 0.0, 0.0),
+            ("b00n0", 1124.0, 172.75),
+            ("b00n1", 777.0, 22.5),
+            ("b10n0", 24.0, 165.0),
+            ("c00n0", 666.0, 172.75),
+            ("c00n1", 878.0, 190.5),
+            ("c10n0", 330.0, 165.0),
+        ],
+    );
+}

@@ -170,7 +170,14 @@ impl Tree<'_> {
     /// (`SEPARATE_CHILDREN`: a cluster with its own direction no edge crosses, and
     /// everything inside one).
     fn hierarchical(&self, c: usize) -> bool {
-        let mut cur = Some(c);
+        // An `INCLUDE_CHILDREN` cluster (one an edge crosses) inside a
+        // `SEPARATE_CHILDREN` one is the root of a run of its own; anything
+        // else follows its nearest cluster with a policy of its own.
+        let mut cur = if self.crossed[c] {
+            self.parent[c]
+        } else {
+            Some(c)
+        };
         for _ in 0..=self.parent.len() {
             let Some(a) = cur else { return true };
             if self.crossed[a] {
@@ -264,7 +271,7 @@ impl Tree<'_> {
         let Some(c) = scope else {
             return self.input.direction;
         };
-        if self.crossed[c] {
+        if self.crossed[c] && self.hierarchical(c) {
             return self.direction(self.owner_of_cluster(c));
         }
         if let Some(d) = self.input.clusters[c].direction {
@@ -1397,8 +1404,11 @@ fn level_input(
     };
     let graph = match scope {
         None => ElkGraph::Root,
+        // The root of a run of its own that includes its children is laid
+        // out as a compound graph (`doCompoundLayout`) like any graph of a
+        // hierarchical run.
         Some(c) => ElkGraph::Container {
-            separate: !tree.hierarchical(c),
+            separate: !tree.hierarchical(c) && !tree.crossed[c],
         },
     };
     LevelInput {
