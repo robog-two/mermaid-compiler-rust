@@ -1,10 +1,8 @@
 # Mermaid Diagram Compiler (rust)
 
-I built this after having issues with the way that mermaid works in terms of the attack surface, memory footprint, etc. I heard that they use puppeteer because it allows them to take advantage of the Blink layout engine in Chrome(ium). I figured that there were some rust crates that could do layouts, I had remembered seeing them when working on another project. So, I found taffy and I pointed my agent at the Mermaid source code and told it to use that and implement as much as possible. Issues are open, I will do my best to get to them but this is a project that I basically 1-shotted in the middle of my databases class, so I can't promise anything in terms of maintaining.
+I built this after having issues with the way that mermaid works in terms of the attack surface, memory footprint, etc. I heard that they use puppeteer because it allows them to take advantage of the Blink layout engine in Chrome(ium). I figured that there were some rust crates that could do layouts, I had remembered seeing them when working on another project. So, I found taffy and I pointed my agent at the Mermaid source code and told it to use that and implement as much as possible.
 
-However, at least for the couple of diagrams that I've made through my academic career, it seems to be pretty good at matching the actual mermaid layout, even if it is lacking in the style department. Pull the code, `cargo build`, and run `mmdc` on your diagrams. Maybe it's good 'nough to replace the real deal. Enjoy!
-
-
+In the following days, I set up an agent loop that launches sub-agents and continues until the output diagrams match from both programs. So far, it has gotten pretty close to compatible in most cases. If you find anything that is incompatible, please feel free to leave an issue or open a pull request. I will do my best to review them in a timely manner.
 
 This project comes with no warranty, and if you would like to use it in your project,
 it is under the CC0 license in the public domain. Attribution is appreciated,
