@@ -21,7 +21,7 @@ use crate::diagram::graph::StyleOverrides;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::layout::boxes::Placed;
-use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
+use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
 use crate::theme::Palette;
 
@@ -720,40 +720,477 @@ pub struct Metrics {
     pub pad: f64,
 }
 
-/// A block node's `padding` (`block.padding`, 8) as the shapes see it.
-const NODE_PADDING: f64 = 8.0;
+/// The primitive a block shape draws, around the node centre.
+#[derive(Debug, Clone, PartialEq)]
+enum Prim {
+    Rect {
+        w: f64,
+        h: f64,
+        rx: f64,
+    },
+    /// Polygon points relative to the node centre.
+    Poly(Vec<Point>),
+    Circle(f64),
+    /// Inner and outer radius.
+    DoubleCircle(f64, f64),
+    /// Width, height between the cap centres, and the caps' radii.
+    Cylinder {
+        w: f64,
+        h: f64,
+        rx: f64,
+        ry: f64,
+    },
+    /// Outer width (frame included) and height.
+    Subroutine {
+        w: f64,
+        h: f64,
+    },
+    Stadium {
+        w: f64,
+        h: f64,
+    },
+}
 
-fn node_size(label: &str, shape: BlockShape, font: f64) -> (f64, f64) {
-    // An HTML label's box: layout units (1/64 px).
-    let tb = TextBlock::label(label, font).html();
-    let (tw, th) = (tb.width, tb.height.max(font * 1.5));
-    let pad = 16.0;
-    let (w, h) = match shape {
-        BlockShape::Circle => {
-            let d = tw.max(th) + pad;
-            (d, d)
-        }
-        BlockShape::DoubleCircle => {
-            let d = tw.max(th) + pad + 10.0;
-            (d, d)
+/// A block node as mermaid's rendering-util shape functions build it (classic
+/// look): the shape around the node centre and its HTML label box.
+#[derive(Debug, Clone, PartialEq)]
+struct NodeGeom {
+    prim: Prim,
+    /// Label box centre relative to the node centre.
+    label_off: Point,
+    /// Label box size: the text's own width, clipped to the width the shape
+    /// passes to `labelHelper`, and its height.
+    label_w: f64,
+    label_h: f64,
+    /// The label's lines as laid out, and whether its box cuts the text off.
+    lines: Vec<String>,
+    clipped: bool,
+}
+
+/// A block label laid out in at most `limit` pixels (`createText`'s
+/// `addHtmlSpan`).
+struct Fitted {
+    lines: Vec<String>,
+    w: f64,
+    h: f64,
+    clipped: bool,
+}
+
+/// `addHtmlSpan`: a label wider than `limit` gets `max-width: limit`. Its box
+/// then measures `limit` in layout units (1/64 px); only when that equals
+/// `limit` exactly does mermaid switch the box to `display: table` with
+/// `break-spaces` wrapping (a word that does not fit widens it). Otherwise the
+/// single line overflows the box and is cut off.
+fn fit_label(tb: &TextBlock, limit: f64) -> Fitted {
+    if tb.width <= limit {
+        return Fitted {
+            lines: tb.lines.clone(),
+            w: tb.width,
+            h: tb.height,
+            clipped: false,
+        };
+    }
+    let snapped = (limit * 64.0).floor() / 64.0;
+    if snapped != limit {
+        return Fitted {
+            lines: tb.lines.clone(),
+            w: snapped.max(0.0),
+            h: tb.height,
+            clipped: true,
+        };
+    }
+    let lines = crate::text::wrap_lines(
+        &tb.lines,
+        limit,
+        tb.font_size,
+        tb.bold,
+        crate::text::BreakRule::Browser,
+    );
+    let wrapped = TextBlock::new(lines, tb.font_size, tb.bold).html();
+    Fitted {
+        w: wrapped.width.max(limit),
+        h: wrapped.height,
+        lines: wrapped.lines,
+        clipped: false,
+    }
+}
+
+/// Width of the frame `subroutine` adds on each side.
+const SUBROUTINE_FRAME: f64 = 8.0;
+
+/// Cap radius of a cylinder `w` wide (`rx / (2.5 + w / 50)`).
+fn cylinder_ry(w: f64) -> f64 {
+    w / 2.0 / (2.5 + w / 50.0)
+}
+
+/// Build `shape` for a label `lw × lh`. `cell` is `None` while mermaid measures
+/// the block (`calculateBlockSize`: no `node.width/height`) and the laid-out
+/// size once it draws it (`insertBlockPositioned`), which some shapes fill and
+/// others ignore. `span` is the block's column span (block arrows stretch over
+/// several columns only).
+fn node_geom(
+    shape: BlockShape,
+    label: &TextBlock,
+    cell: Option<(f64, f64)>,
+    span: usize,
+    p: f64,
+) -> NodeGeom {
+    let (nw, nh) = cell.unwrap_or((0.0, 0.0));
+    // The width `labelHelper` lays the label out in (`node.width`, or no limit).
+    let wrap = |w: f64| if cell.is_some() { w } else { f64::INFINITY };
+    let mut label_off = Point::new(0.0, 0.0);
+    let (prim, fitted) = match shape {
+        BlockShape::Rect | BlockShape::Rounded => {
+            // squareRect / drawRect: labelPaddingX = 2p, labelPaddingY = p, each side.
+            let f = fit_label(label, wrap(nw));
+            let (lw, lh) = (f.w, f.h);
+            let rx = if shape == BlockShape::Rounded {
+                5.0
+            } else {
+                0.0
+            };
+            let w = (lw + 4.0 * p).max(nw);
+            let h = (lh + 2.0 * p).max(nh);
+            (Prim::Rect { w, h, rx }, f)
         }
         BlockShape::Diamond => {
-            let s = tw + th + pad;
-            (s, s * 0.75)
+            // question: a square diamond of side (label + padding) summed, its
+            // polygon shifted right by 0.5.
+            let f = fit_label(label, wrap(nw));
+            let (lw, lh) = (f.w, f.h);
+            let s = lw + p + lh + p;
+            let pts = [
+                (s / 2.0, 0.0),
+                (s, -s / 2.0),
+                (s / 2.0, -s),
+                (0.0, -s / 2.0),
+            ];
+            let pts = pts
+                .iter()
+                .map(|&(x, y)| Point::new(x - s / 2.0 + 0.5, y + s / 2.0))
+                .collect();
+            (Prim::Poly(pts), f)
         }
-        BlockShape::Hexagon => (tw + 2.0 * pad + th, th + pad),
-        BlockShape::Stadium => (tw + th + 2.0 * pad, th + pad),
-        BlockShape::Cylinder => (tw + 2.0 * pad, th + pad + 20.0),
-        BlockShape::LeanLeft
-        | BlockShape::LeanRight
+        BlockShape::Hexagon => {
+            // hexagon (classic f = 4): a laid-out hexagon fills its cell, the label
+            // limited to what the slanted ends leave.
+            let slant = 4.0;
+            let (h, label_limit) = match cell {
+                Some((w, h)) => (h, w - 2.0 * (h / slant) - p),
+                None => (label.height + p, f64::INFINITY),
+            };
+            let f = fit_label(label, label_limit);
+            let lw = f.w;
+            let m = h / slant;
+            let w = if cell.is_some() { nw } else { lw + 2.0 * m + p };
+            let pts = [
+                (m, 0.0),
+                (w - m, 0.0),
+                (w, -h / 2.0),
+                (w - m, -h),
+                (m, -h),
+                (0.0, -h / 2.0),
+            ];
+            (Prim::Poly(shift(&pts, w, h)), f)
+        }
+        BlockShape::Arrow(dirs) => {
+            let f = fit_label(label, wrap(nw));
+            let (lw, lh) = (f.w, f.h);
+            let h = lh + 2.0 * p;
+            let natural = lw + h + p;
+            let w = if cell.is_some() && span > 1 && nw > natural {
+                nw
+            } else {
+                natural
+            };
+            let r = Rect::new(-w / 2.0, -h / 2.0, w, h);
+            (Prim::Poly(block_arrow(r, dirs, p)), f)
+        }
+        BlockShape::Asymmetric => {
+            // rect_left_inv_arrow: the notch is a quarter of the height; polygon
+            // and label move right by half the notch.
+            let f = fit_label(label, wrap(nw));
+            let (lw, lh) = (f.w, f.h);
+            let h = (lh + p).max(nh);
+            let notch = h / 4.0;
+            let w = (lw + p).max(nw - notch);
+            let dx = notch / 2.0;
+            let pts = vec![
+                Point::new(-w / 2.0 - notch + dx, -h / 2.0),
+                Point::new(-w / 2.0 + dx, 0.0),
+                Point::new(-w / 2.0 - notch + dx, h / 2.0),
+                Point::new(w / 2.0 + dx, h / 2.0),
+                Point::new(w / 2.0 + dx, -h / 2.0),
+            ];
+            label_off = Point::new(dx, 0.0);
+            (Prim::Poly(pts), f)
+        }
+        BlockShape::LeanRight
+        | BlockShape::LeanLeft
         | BlockShape::Trapezoid
-        | BlockShape::InvTrapezoid => (tw + 2.0 * pad + th, th + pad),
-        BlockShape::Asymmetric => (tw + 2.0 * pad + th / 2.0, th + pad),
-        // mermaid `block_arrow`: height = label + 2 * padding(8), width = label + height + 8.
-        BlockShape::Arrow(_) => (tw + th + pad + 8.0, th + pad),
-        _ => (tw + 2.0 * pad, th + pad),
+        | BlockShape::InvTrapezoid => {
+            // The slanted ends add half the height on each side; `inv_trapezoid`
+            // pads its label on both sides.
+            let f = fit_label(label, wrap(nw));
+            let (lw, lh) = (f.w, f.h);
+            let k = if shape == BlockShape::InvTrapezoid {
+                2.0
+            } else {
+                1.0
+            };
+            let h = (lh + k * p).max(nh);
+            let w = (lw + k * p).max(nw - h);
+            let s = 3.0 * h / 6.0;
+            let pts = match shape {
+                BlockShape::LeanRight => [(-s, 0.0), (w, 0.0), (w + s, -h), (0.0, -h)],
+                BlockShape::LeanLeft => [(0.0, 0.0), (w + s, 0.0), (w, -h), (-s, -h)],
+                BlockShape::Trapezoid => [(-s, 0.0), (w + s, 0.0), (w, -h), (0.0, -h)],
+                _ => [(0.0, 0.0), (w, 0.0), (w + s, -h), (-s, -h)],
+            };
+            (Prim::Poly(shift(&pts, w, h)), f)
+        }
+        BlockShape::Circle => {
+            let f = fit_label(label, wrap(nw));
+            let (lw, lh) = (f.w, f.h);
+            (Prim::Circle(lw.hypot(lh) / 2.0 + p / 2.0), f)
+        }
+        BlockShape::DoubleCircle => {
+            // doublecircle: a laid-out one takes half the cell width as its
+            // label radius, so it outgrows its cell by the padding and gap.
+            let f = fit_label(label, wrap(nw));
+            let (lw, lh) = (f.w, f.h);
+            let inner = if cell.is_some() {
+                nw / 2.0
+            } else {
+                lw.hypot(lh) / 2.0
+            } + p;
+            (Prim::DoubleCircle(inner, inner + 5.0), f)
+        }
+        BlockShape::Stadium => {
+            // stadiumDimensions: the arc is a 50-point polygon, so the caps are a
+            // hair narrower than the height.
+            let f = fit_label(label, wrap(nw));
+            let (lw, lh) = (f.w, f.h);
+            let h = lh + p;
+            let inscribed = h * (std::f64::consts::PI / (2.0 * 49.0)).cos();
+            let cap = (inscribed * inscribed - lh * lh).max(0.0).sqrt();
+            let w = (lw + h / 4.0 + p)
+                .max(1.5 * h + (h - inscribed))
+                .max(lw + p + h - cap);
+            (Prim::Stadium { w, h }, f)
+        }
+        BlockShape::Subroutine => {
+            let f = fit_label(label, wrap(nw));
+            let (lw, lh) = (f.w, f.h);
+            let w = (lw + 2.0 * SUBROUTINE_FRAME + p).max(nw);
+            let h = (lh + p).max(nh);
+            (Prim::Subroutine { w, h }, f)
+        }
+        BlockShape::Cylinder => {
+            // cylinder: a laid-out one gives the label its cell less the padding
+            // and three cap radii, and grows back to fill the cell.
+            let (label_limit, min_h) = match cell {
+                Some((w, h)) => ((w - p).max(8.0), (h - p - 3.0 * cylinder_ry(w)).max(8.0)),
+                None => (f64::INFINITY, 0.0),
+            };
+            let f = fit_label(label, label_limit);
+            let (lw, lh) = (f.w, f.h);
+            let w = if cell.is_some() {
+                label_limit.max(lw)
+            } else {
+                lw
+            } + p;
+            let rx = w / 2.0;
+            let ry = cylinder_ry(w);
+            let h = min_h.max(lh) + p + ry;
+            label_off = Point::new(0.0, p / 1.5);
+            (Prim::Cylinder { w, h, rx, ry }, f)
+        }
     };
-    (w.max(40.0), h.max(40.0))
+    NodeGeom {
+        prim,
+        label_off,
+        label_w: fitted.w,
+        label_h: fitted.h,
+        lines: fitted.lines,
+        clipped: fitted.clipped,
+    }
+}
+
+/// `insertPolygonShape`'s `translate(-w / 2, h / 2)` of points given from the
+/// bottom-left corner.
+fn shift(pts: &[(f64, f64)], w: f64, h: f64) -> Vec<Point> {
+    pts.iter()
+        .map(|&(x, y)| Point::new(x - w / 2.0, y + h / 2.0))
+        .collect()
+}
+
+impl NodeGeom {
+    /// The node's bounding box around its centre (shape and label, as `getBBox`).
+    fn bbox(&self) -> Rect {
+        let shape = match &self.prim {
+            Prim::Rect { w, h, .. } | Prim::Subroutine { w, h } | Prim::Stadium { w, h } => {
+                Rect::centered(Point::new(0.0, 0.0), *w, *h)
+            }
+            Prim::Poly(pts) => {
+                let mut b = Bounds::default();
+                for p in pts {
+                    b.add_point(*p);
+                }
+                b.rect()
+            }
+            Prim::Circle(r) | Prim::DoubleCircle(_, r) => {
+                Rect::centered(Point::new(0.0, 0.0), 2.0 * r, 2.0 * r)
+            }
+            Prim::Cylinder { w, h, ry, .. } => {
+                Rect::centered(Point::new(0.0, 0.0), *w, h + 2.0 * ry)
+            }
+        };
+        shape.union(&Rect::centered(self.label_off, self.label_w, self.label_h))
+    }
+
+    /// The shape drawn around `c`, and its outline for clipping edges.
+    fn draw(&self, c: Point, paint: &Paint) -> (Vec<Element>, Outline) {
+        let at = |p: &Point| c.plus(*p);
+        let line = Paint::stroke(&paint.stroke, paint.stroke_width);
+        match &self.prim {
+            Prim::Rect { w, h, rx } => {
+                let r = Rect::centered(c, *w, *h);
+                (
+                    vec![Element::classed_shape(
+                        Geometry::Rect { rect: r, rx: *rx },
+                        paint.clone(),
+                        "label-container",
+                    )],
+                    Outline::Rect(r),
+                )
+            }
+            Prim::Stadium { w, h } => {
+                let r = Rect::centered(c, *w, *h);
+                (
+                    vec![Element::classed_shape(
+                        Geometry::Rect {
+                            rect: r,
+                            rx: h / 2.0,
+                        },
+                        paint.clone(),
+                        "label-container",
+                    )],
+                    Outline::Rect(r),
+                )
+            }
+            Prim::Subroutine { w, h } => {
+                let r = Rect::centered(c, *w, *h);
+                let inner = w / 2.0 - SUBROUTINE_FRAME;
+                (
+                    vec![
+                        Element::classed_shape(
+                            Geometry::Rect { rect: r, rx: 0.0 },
+                            paint.clone(),
+                            "label-container",
+                        ),
+                        Element::line(
+                            Point::new(c.x - inner, r.y),
+                            Point::new(c.x - inner, r.bottom()),
+                            line.clone(),
+                        ),
+                        Element::line(
+                            Point::new(c.x + inner, r.y),
+                            Point::new(c.x + inner, r.bottom()),
+                            line,
+                        ),
+                    ],
+                    Outline::Rect(r),
+                )
+            }
+            Prim::Poly(pts) => {
+                let pts: Vec<Point> = pts.iter().map(at).collect();
+                (
+                    vec![Element::classed_shape(
+                        Geometry::Path(geom::polygon(&pts)),
+                        paint.clone(),
+                        "label-container",
+                    )],
+                    Outline::Polygon(c, pts),
+                )
+            }
+            Prim::Circle(r) => (
+                vec![Element::classed_shape(
+                    Geometry::Circle { c, r: *r },
+                    paint.clone(),
+                    "label-container",
+                )],
+                Outline::Ellipse(c, *r, *r),
+            ),
+            Prim::DoubleCircle(inner, outer) => (
+                vec![
+                    Element::classed_shape(
+                        Geometry::Circle { c, r: *outer },
+                        paint.clone(),
+                        "outer-circle",
+                    ),
+                    Element::classed_shape(
+                        Geometry::Circle { c, r: *inner },
+                        paint.clone(),
+                        "inner-circle",
+                    ),
+                ],
+                Outline::Ellipse(c, *outer, *outer),
+            ),
+            Prim::Cylinder { w, h, rx, ry } => {
+                let pi = std::f64::consts::PI;
+                let (x0, x1) = (c.x - w / 2.0, c.x + w / 2.0);
+                let top = Point::new(c.x, c.y - h / 2.0);
+                let bot = Point::new(c.x, c.y + h / 2.0);
+                let mut body = vec![
+                    PathCmd::MoveTo(Point::new(x0, top.y)),
+                    PathCmd::LineTo(Point::new(x0, bot.y)),
+                ];
+                body.extend(geom::elliptic_arc_cubics(bot, *rx, *ry, pi, 0.0));
+                body.push(PathCmd::LineTo(Point::new(x1, top.y)));
+                body.extend(geom::elliptic_arc_cubics(top, *rx, *ry, 0.0, -pi));
+                body.push(PathCmd::Close);
+                let mut front = vec![PathCmd::MoveTo(Point::new(x0, top.y))];
+                front.extend(geom::elliptic_arc_cubics(top, *rx, *ry, pi, 0.0));
+                (
+                    vec![
+                        Element::classed_shape(
+                            Geometry::Path(body),
+                            paint.clone(),
+                            "label-container",
+                        ),
+                        Element::path(front, line),
+                    ],
+                    Outline::Rect(Rect::centered(c, *w, h + 2.0 * ry)),
+                )
+            }
+        }
+    }
+}
+
+/// A block's HTML label box (layout units, one 1.5em line box per line).
+fn label_box(label: &str, font: f64) -> TextBlock {
+    TextBlock::label(label, font).html()
+}
+
+/// The longest prefix of `line` that fits in `width`.
+fn clip_line(line: &str, width: f64, font: f64) -> String {
+    let mut out = String::new();
+    for ch in line.chars() {
+        out.push(ch);
+        if crate::text::line_width(&out, font, false) > width {
+            out.pop();
+            break;
+        }
+    }
+    out
+}
+
+/// `calculateBlockSize`: the bounding box of the block as drawn unpositioned.
+fn node_size(label: &str, shape: BlockShape, span: usize, m: &Metrics) -> (f64, f64) {
+    let tb = label_box(label, m.font);
+    let b = node_geom(shape, &tb, None, span, m.pad).bbox();
+    (b.w, b.h)
 }
 
 /// Working copy of a block for mermaid's sizing passes (`block.size`).
@@ -777,7 +1214,7 @@ fn sized_tree(blocks: &[Block], m: &Metrics) -> Vec<Sized> {
         .map(|b| {
             let (w, h, columns, children) = match &b.kind {
                 BlockKind::Node { label, shape } => {
-                    let (w, h) = node_size(label, *shape, m.font);
+                    let (w, h) = node_size(label, *shape, b.span.max(1), m);
                     (w, h, -1, Vec::new())
                 }
                 // Spaces are measured as empty rects; their size is never read.
@@ -1001,160 +1438,6 @@ impl Outline {
     }
 }
 
-/// Draw `shape` inside `r` (shared helper for box-like shapes).
-pub(crate) fn shape_elements(shape: BlockShape, r: Rect, paint: &Paint) -> (Vec<Element>, Outline) {
-    let c = r.center();
-    let (x0, y0, x1, y1) = (r.x, r.y, r.right(), r.bottom());
-    let poly = |pts: Vec<Point>| {
-        (
-            vec![Element::classed_shape(
-                Geometry::Path(geom::polygon(&pts)),
-                paint.clone(),
-                "label-container",
-            )],
-            Outline::Polygon(c, pts),
-        )
-    };
-    let rect = |rx: f64| {
-        (
-            vec![Element::classed_shape(
-                Geometry::Rect { rect: r, rx },
-                paint.clone(),
-                "label-container",
-            )],
-            Outline::Rect(r),
-        )
-    };
-    match shape {
-        BlockShape::Rect => rect(0.0),
-        BlockShape::Rounded => rect(5.0),
-        BlockShape::Stadium => rect(r.h / 2.0),
-        BlockShape::Subroutine => {
-            let (mut els, o) = rect(0.0);
-            let lp = Paint::stroke(&paint.stroke, paint.stroke_width);
-            els.push(Element::line(
-                Point::new(x0 + 8.0, y0),
-                Point::new(x0 + 8.0, y1),
-                lp.clone(),
-            ));
-            els.push(Element::line(
-                Point::new(x1 - 8.0, y0),
-                Point::new(x1 - 8.0, y1),
-                lp,
-            ));
-            (els, o)
-        }
-        BlockShape::Cylinder => {
-            let rx = r.w / 2.0;
-            let ry = cylinder_ry(r);
-            let pi = std::f64::consts::PI;
-            let top = Point::new(c.x, y0 + ry);
-            let bot = Point::new(c.x, y1 - ry);
-            let mut body = vec![
-                PathCmd::MoveTo(Point::new(x0, y0 + ry)),
-                PathCmd::LineTo(Point::new(x0, y1 - ry)),
-            ];
-            body.extend(geom::elliptic_arc_cubics(bot, rx, ry, pi, 0.0));
-            body.push(PathCmd::LineTo(Point::new(x1, y0 + ry)));
-            body.extend(geom::elliptic_arc_cubics(top, rx, ry, 0.0, -pi));
-            body.push(PathCmd::Close);
-            let mut front = vec![PathCmd::MoveTo(Point::new(x0, y0 + ry))];
-            front.extend(geom::elliptic_arc_cubics(top, rx, ry, pi, 0.0));
-            (
-                vec![
-                    Element::classed_shape(Geometry::Path(body), paint.clone(), "label-container"),
-                    Element::path(front, Paint::stroke(&paint.stroke, paint.stroke_width)),
-                ],
-                Outline::Rect(r),
-            )
-        }
-        BlockShape::Circle | BlockShape::DoubleCircle => {
-            let rad = r.w.min(r.h) / 2.0;
-            let mut els = vec![Element::classed_shape(
-                Geometry::Circle { c, r: rad },
-                paint.clone(),
-                "label-container",
-            )];
-            if shape == BlockShape::DoubleCircle {
-                els.push(Element::shape(
-                    Geometry::Circle {
-                        c,
-                        r: (rad - 5.0).max(1.0),
-                    },
-                    Paint::stroke(&paint.stroke, paint.stroke_width),
-                ));
-            }
-            (els, Outline::Ellipse(c, rad, rad))
-        }
-        BlockShape::Diamond => poly(vec![
-            Point::new(c.x, y0),
-            Point::new(x1, c.y),
-            Point::new(c.x, y1),
-            Point::new(x0, c.y),
-        ]),
-        BlockShape::Hexagon => {
-            let m = (r.h / 4.0).min(r.w / 4.0);
-            poly(vec![
-                Point::new(x0 + m, y0),
-                Point::new(x1 - m, y0),
-                Point::new(x1, c.y),
-                Point::new(x1 - m, y1),
-                Point::new(x0 + m, y1),
-                Point::new(x0, c.y),
-            ])
-        }
-        BlockShape::LeanRight
-        | BlockShape::LeanLeft
-        | BlockShape::Trapezoid
-        | BlockShape::InvTrapezoid => {
-            let k = (r.h / 2.0).min(r.w / 4.0);
-            let pts = match shape {
-                BlockShape::LeanRight => vec![
-                    Point::new(x0 + k, y0),
-                    Point::new(x1, y0),
-                    Point::new(x1 - k, y1),
-                    Point::new(x0, y1),
-                ],
-                BlockShape::LeanLeft => vec![
-                    Point::new(x0, y0),
-                    Point::new(x1 - k, y0),
-                    Point::new(x1, y1),
-                    Point::new(x0 + k, y1),
-                ],
-                BlockShape::Trapezoid => vec![
-                    Point::new(x0 + k, y0),
-                    Point::new(x1 - k, y0),
-                    Point::new(x1, y1),
-                    Point::new(x0, y1),
-                ],
-                _ => vec![
-                    Point::new(x0, y0),
-                    Point::new(x1, y0),
-                    Point::new(x1 - k, y1),
-                    Point::new(x0 + k, y1),
-                ],
-            };
-            poly(pts)
-        }
-        BlockShape::Asymmetric => {
-            let k = r.h / 4.0;
-            poly(vec![
-                Point::new(x0, y0),
-                Point::new(x1, y0),
-                Point::new(x1, y1),
-                Point::new(x0, y1),
-                Point::new(x0 + k, c.y),
-            ])
-        }
-        BlockShape::Arrow(dirs) => poly(block_arrow(r, dirs, NODE_PADDING)),
-    }
-}
-
-/// Vertical radius of a cylinder's end caps.
-fn cylinder_ry(r: Rect) -> f64 {
-    (r.w / 2.0 / (2.5 + r.w / 50.0)).min(r.h / 5.0)
-}
-
 /// Polygon of a block arrow in `r` (`blockArrow.ts` `getArrowPoints`): `pad` is the
 /// node padding; points are laid out from the bottom-left corner upwards, and the
 /// polygon of each direction set is upstream's (some, such as `up`, `down` or
@@ -1357,38 +1640,35 @@ fn draw_blocks(
                 out.push(Element::group(format!("block composite {}", b.id), g));
             }
             BlockKind::Node { label, shape } => {
-                // Circles and diamonds keep their natural size, centred in the cell.
-                let (nw, nh) = node_size(label, *shape, m.font);
-                let rr = match shape {
-                    BlockShape::Circle | BlockShape::DoubleCircle => {
-                        let s = r.w.min(r.h).min(nw.max(nh));
-                        Rect::centered(r.center(), s, s)
-                    }
-                    // Block arrows keep their natural size unless they span columns.
-                    BlockShape::Arrow(_) => {
-                        Rect::centered(r.center(), if b.span > 1 { r.w.max(nw) } else { nw }, nh)
-                    }
-                    BlockShape::Diamond => {
-                        Rect::centered(r.center(), r.w.min(nw.max(r.w * 0.6)), r.h.min(nh.max(r.h)))
-                    }
-                    _ => r,
-                };
-                bounds.add_rect(rr);
+                // The shape built again with its laid-out size: some shapes fill
+                // their cell, others keep their natural size (or outgrow it).
+                let tb = label_box(label, m.font);
+                let g = node_geom(*shape, &tb, Some((r.w, r.h)), b.span.max(1), m.pad);
+                let c = r.center();
+                let bb = g.bbox();
+                bounds.add_rect(Rect::new(bb.x + c.x, bb.y + c.y, bb.w, bb.h));
                 let mut paint = Paint::both(
                     st.fill.as_ref().unwrap_or(&pal.main_bkg),
                     st.stroke.as_ref().unwrap_or(&pal.node_border),
                     st.stroke_width.unwrap_or(1.0),
                 );
                 paint.dash = st.dash.clone();
-                let (mut els, outline) = shape_elements(*shape, rr, &paint);
-                let tb = TextBlock::label(label, m.font);
+                let (mut els, outline) = g.draw(c, &paint);
                 let color: Color = st.color.clone().unwrap_or_else(|| pal.node_text.clone());
-                let center = if *shape == BlockShape::Cylinder {
-                    rr.center().plus(Point::new(0.0, cylinder_ry(rr) / 2.0))
+                let center = c.plus(g.label_off);
+                let mut t = if g.clipped {
+                    // A label wider than the width the shape gave it overflows its
+                    // box to the right and is cut off there.
+                    let lines: Vec<String> = g
+                        .lines
+                        .iter()
+                        .map(|l| clip_line(l, g.label_w, m.font))
+                        .collect();
+                    Text::centered(center, &lines, m.font, tb.line_height, &color)
+                        .anchored(Anchor::Start, center.x - g.label_w / 2.0)
                 } else {
-                    rr.center()
+                    Text::centered(center, &g.lines, m.font, tb.line_height, &color)
                 };
-                let mut t = Text::centered(center, &tb.lines, m.font, tb.line_height, &color);
                 if st.bold == Some(true) {
                     t = t.bold();
                 }
@@ -1435,13 +1715,15 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         let cb = outline_center(b);
         let pa = a.clip(cb);
         let pb = b.clip(ca);
+        // `.edge-thickness-normal` is 1px in the block stylesheet, `-thick` 3.5px;
+        // `.edge-pattern-dotted` dashes 2.
         let width = match e.line {
             Line::Thick => 3.5,
-            _ => 2.0,
+            _ => 1.0,
         };
         let mut paint = Paint::stroke(&pal.line_color, width);
         if e.line == Line::Dotted {
-            paint = paint.dashed(vec![3.0]);
+            paint = paint.dashed(vec![2.0]);
         }
         let dir = pb.minus(pa).norm();
         let trim = |h: Head| if h == Head::Arrow { 8.0 } else { 0.0 };
@@ -1489,7 +1771,8 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
     }
     Scene {
         kind: DiagramKind::Block,
-        view_box: bounds.rect().pad(8.0),
+        // blockRenderer: the rendered bounding box with 5px around it.
+        view_box: bounds.rect().pad(5.0),
         elements: els,
         acc_title: None,
         acc_descr: None,
@@ -1573,7 +1856,7 @@ class c hot
         // mermaid 12.3.0: the label's foreignObject is 135.171875 wide (layout
         // units), the block 32 wider.
         assert_eq!(
-            node_size("Gamma three wide", BlockShape::Rect, 16.0).0,
+            node_size("Gamma three wide", BlockShape::Rect, 1, &m()).0,
             167.171875
         );
     }
@@ -1804,5 +2087,87 @@ class c hot
         let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
         let s = draw(&d, &p, &m(), &pal);
         assert!(s.view_box.w > 100.0 && s.view_box.h > 100.0);
+    }
+
+    fn scene(src: &str) -> Scene {
+        let d = parse(src, None).unwrap();
+        let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
+        draw(&d, &layout(&d, &m()), &m(), &pal)
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn shapes_size_like_mermaid_rendering_util() {
+        // mermaid 12.3.0, every block shape in a 4-column grid: the drawn bounding
+        // box (the viewBox less 5px) comes out exactly as in the browser.
+        let s = scene(concat!(
+            "block-beta\ncolumns 4\n",
+            "a[\"Rect\"] b(\"Round\") c([\"Stadium\"]) d[[\"Subroutine\"]]\n",
+            "e[(\"Cylinder\")] f((\"Circle\")) g(((\"Dbl\"))) h>\"Odd\"]\n",
+            "i{\"Diamond\"} j{{\"Hexagon\"}} k[/\"LeanR\"/] l[\\\"LeanL\"\\]\n",
+            "m[/\"Trap\"\\] n[\\\"InvTrap\"/] o<[\"Arrow\"]>(right) p<[\"Up\"]>(up)\n",
+            "q<[\"Both ways\"]>(x):2 r[\"Wide label here\"]:2\na --> b\n",
+        ));
+        let v = s.view_box;
+        assert!(close(v.x, -22.34375) && close(v.y, -281.078125), "{v:?}");
+        assert!(close(v.w, 513.40625) && close(v.h, 562.15625), "{v:?}");
+        // The gallery's block: a double circle (half a cell wide plus 13) outgrows
+        // its cell, a hexagon fills it.
+        let g = scene(include_str!("../../examples/diagrams/block.mmd")).view_box;
+        assert!(close(g.x, -18.0) && close(g.y, -278.890625), "{g:?}");
+        assert!(
+            close(g.w, 431.140625) && (g.h - 537.4036865234375).abs() < 1e-3,
+            "{g:?}"
+        );
+    }
+
+    #[test]
+    fn laid_out_shapes_fill_or_ignore_their_cell() {
+        let tb = label_box("API Gateway", 16.0);
+        let cell = Some((130.71354166666666, 103.15625));
+        let dc = node_geom(BlockShape::DoubleCircle, &tb, cell, 1, 8.0);
+        assert_eq!(
+            dc.prim,
+            Prim::DoubleCircle(65.35677083333333 + 8.0, 65.35677083333333 + 13.0)
+        );
+        // The hexagon fills the cell; its label gets what the ends leave, and as
+        // that is off the 1/64px grid the text is cut off rather than wrapped.
+        let hx = node_geom(BlockShape::Hexagon, &tb, cell, 1, 8.0);
+        let b = hx.bbox();
+        assert!(close(b.w, 130.71354166666666) && close(b.h, 103.15625));
+        assert!(hx.clipped);
+        assert_eq!(hx.label_w, 71.125);
+        // A stadium keeps its natural size: its caps are a 50-point polygon.
+        let st = node_geom(
+            BlockShape::Stadium,
+            &label_box("Browser", 16.0),
+            cell,
+            1,
+            8.0,
+        );
+        match st.prim {
+            Prim::Stadium { w, h } => {
+                assert_eq!(h, 32.0);
+                assert!((w - 77.546).abs() < 1e-2, "{w}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn labels_wrap_only_on_the_layout_grid() {
+        let tb = label_box("Hexagon wide", 16.0);
+        // 49.640625 is a whole number of 1/64px: `display: table` + wrapping.
+        let f = fit_label(&tb, 49.640625);
+        assert!(!f.clipped);
+        assert_eq!(f.lines.len(), 2);
+        assert_eq!(f.h, 48.0);
+        assert!(f.w >= 49.640625);
+        let f = fit_label(&tb, 49.64);
+        assert!(f.clipped);
+        assert_eq!((f.w, f.h), (49.625, 24.0));
     }
 }
