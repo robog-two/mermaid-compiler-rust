@@ -250,6 +250,9 @@ pub struct Node {
     /// A `collapsedGroup` standing in for a folded subgraph: how many expanded
     /// subgraphs `getData` pushes before it (subgraphs come before vertices).
     pub group_seq: Option<usize>,
+    /// Where the diagram's `getData` hands this node to the layout, among the
+    /// nodes and clusters that carry one (state diagrams: dataFetcher's order).
+    pub model_seq: Option<usize>,
 }
 
 impl Node {
@@ -266,6 +269,7 @@ impl Node {
             wrapped_width: None,
             annotation: None,
             group_seq: None,
+            model_seq: None,
         }
     }
 }
@@ -374,6 +378,8 @@ pub struct Cluster {
     /// which mermaid's dagre renderer does not take for `TB`).
     pub direction_td: bool,
     pub kind: ClusterKind,
+    /// As [`Node::model_seq`].
+    pub model_seq: Option<usize>,
 }
 
 impl Cluster {
@@ -387,6 +393,7 @@ impl Cluster {
             direction: None,
             direction_td: false,
             kind: ClusterKind::Group,
+            model_seq: None,
         }
     }
 }
@@ -981,7 +988,15 @@ pub fn render_with(
     // a loop on one inner node (constraining nothing) and drawn against the frame.
     // mermaid's own dagre renderer (see `layout::dagre`) takes such an edge as it
     // is: to the cluster's anchor node, inside it.
-    let dagre_engine = !elk && matches!(g.kind, DiagramKind::Flowchart | DiagramKind::Agentflow);
+    let dagre_engine = !elk
+        && matches!(
+            g.kind,
+            DiagramKind::Flowchart
+                | DiagramKind::Agentflow
+                | DiagramKind::State
+                | DiagramKind::Class
+                | DiagramKind::Er
+        );
     let nested: Vec<Option<NestedEdge>> = g
         .edges
         .iter()
@@ -1150,6 +1165,16 @@ pub fn render_with(
         nodes: (0..nodes.len()).map(|i| raw.nodes[pos_of[i]]).collect(),
         ..raw
     };
+    // A fork bar drawn in a graph laid out across the diagram's direction.
+    for (i, n) in nodes.iter().enumerate() {
+        let dir = extras.node_dirs.get(pos_of[i]).copied().flatten();
+        if n.shape == Shape::ForkBar
+            && dir.is_some_and(|d| d.is_horizontal() != g.direction.is_horizontal())
+        {
+            let m = &mut measured[i];
+            std::mem::swap(&mut m.w, &mut m.h);
+        }
+    }
     if elk {
         let sizes: Vec<(f64, f64)> = measured.iter().map(|m| (m.w, m.h)).collect();
         let anchors: Vec<(usize, Point)> = g
@@ -1407,7 +1432,11 @@ pub fn render_with(
                         pts[0] = geom::intersect_box(centre, w, h, pts[1]);
                     }
                 }
-                if let Endpoint::Node(NodeId(i)) = e.to {
+                // From a cluster laid out on its own (no `intersect`), the
+                // other end is left on dagre's box too.
+                let unclipped = matches!(e.from, Endpoint::Cluster(c)
+                    if extras.extracted.get(c.0).copied().unwrap_or(false));
+                if let (Endpoint::Node(NodeId(i)), false) = (e.to, unclipped) {
                     let rev: Vec<Point> = pts.iter().rev().copied().collect();
                     pts[n - 1] = clip_end(&boundaries[i], &rev, false);
                 } else {
@@ -1553,7 +1582,7 @@ pub fn render_with(
         };
         // `insertEdge`'s `points` (the cut route) and the point it probes the
         // drawn path for.
-        let cut = (dagre_engine && edge_labels[ei].is_some()).then(|| pts.clone());
+        let cut = dagre_engine.then(|| pts.clone());
         // A neo edge takes the `*-margin` markers (`useMargin`) and the neo
         // barb's pull-back, and leaves its first and last `markerOffsets2` px
         // undrawn by a dash pattern (see `neo_dash`), not by a shorter line.
@@ -1642,10 +1671,12 @@ pub fn render_with(
             ));
         }
         let (end_back, start_back) = (end_trim, start_trim);
-        if end_back > 0.0 && pts[last].dist(pts[last - 1]) > end_back {
+        if dagre_engine && !degenerate {
+            pts = line_with_offset(&pts, start_back, end_back);
+        } else if end_back > 0.0 && pts[last].dist(pts[last - 1]) > end_back {
             pts[last] = pts[last].minus(end_dir.scale(end_back));
         }
-        if start_back > 0.0 && pts[0].dist(pts[1]) > start_back {
+        if !dagre_engine && start_back > 0.0 && pts[0].dist(pts[1]) > start_back {
             pts[0] = pts[0].minus(start_dir.scale(start_back));
         }
         if !dagre_engine {
@@ -1668,22 +1699,26 @@ pub fn render_with(
                 bounds.add_rect(r);
             }
         }
-        // `positionEdgeLabel`: a label whose route was cut at a frame, or whose
-        // route's middle point the drawn path does not mention, is moved by as much as cutting the route moved the
-        // route's midpoint.
-        if let (Some(cut), Some(at), Some(orig)) = (
-            &cut,
-            label_at,
-            extras.raw_points.get(ei).filter(|p| !p.is_empty()),
-        ) {
-            // (A route cut at a cluster's frame always counts as moved.)
-            let to_frame =
-                matches!(e.from, Endpoint::Cluster(_)) || matches!(e.to, Endpoint::Cluster(_));
-            if to_frame || !label_coordinate_in_path(cut[cut.len() / 2], &cmds) {
-                let (a, b) = (calc_label_position(cut), calc_label_position(orig));
-                label_at = Some(Point::new(at.x + a.x - b.x, at.y + a.y - b.y));
+        // `insertEdge`'s `pointsHasChanged`: the route was cut at a frame, or
+        // the drawn path does not mention its middle point. `positionEdgeLabel`
+        // then moves the label by as much as cutting the route moved the
+        // route's midpoint, and places the terminal labels along the cut route
+        // (along dagre's own points otherwise).
+        let raw = extras.raw_points.get(ei).filter(|p| !p.is_empty());
+        let changed = match (&cut, raw) {
+            (Some(cut), Some(_)) => {
+                let to_frame =
+                    matches!(e.from, Endpoint::Cluster(_)) || matches!(e.to, Endpoint::Cluster(_));
+                let origin = extras.edge_origins.get(ei).copied().unwrap_or_default();
+                to_frame || !label_coordinate_in_path(cut[cut.len() / 2], &cmds, origin)
             }
+            _ => false,
+        };
+        if let (true, Some(cut), Some(at), Some(orig)) = (changed, &cut, label_at, raw) {
+            let (a, b) = (calc_label_position(cut), calc_label_position(orig));
+            label_at = Some(Point::new(at.x + a.x - b.x, at.y + a.y - b.y));
         }
+        let terminal_path = if changed { cut.clone() } else { raw.cloned() };
         let mut paint = Paint::stroke(&stroke, width);
         // A neo edge writes its pattern inline, outranking the stylesheet's
         // (an edge's own style comes after it).
@@ -1773,21 +1808,45 @@ pub fn render_with(
                 }
             }
         }
-        for (txt, anchor_pt, toward) in [
+        for (k, (txt, anchor_pt, toward)) in [
             (&e.start_label, pts[0], pts[1]),
             (&e.end_label, pts[last], pts[last - 1]),
-        ] {
-            if let Some(t) = txt.as_ref().filter(|_| !elk) {
-                let dir = toward.minus(anchor_pt).norm();
-                let perp = Point::new(-dir.y, dir.x);
-                let at = anchor_pt.plus(dir.scale(16.0)).plus(perp.scale(10.0));
-                let b = TextBlock::label(t, font * 0.875);
-                bounds.add_rect(Rect::centered(at, b.width, b.height));
-                label_els.push(Element::classed_text(
-                    Text::centered(at, &b.lines, b.font_size, b.line_height, &text_color),
-                    "edgeTerminals",
-                ));
-            }
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let Some(t) = txt.as_ref().filter(|_| !elk) else {
+                continue;
+            };
+            let b = TextBlock::label(t, font * 0.875);
+            let at = match &terminal_path {
+                // `calcTerminalLabelPosition`, past the end's marker (classDb
+                // names one, `none` included, for every relation end).
+                Some(path) if path.len() >= 2 => {
+                    calc_terminal_label_position(TERMINAL_MARKER_SIZE, k == 1, path)
+                }
+                _ => {
+                    let dir = toward.minus(anchor_pt).norm();
+                    let perp = Point::new(-dir.y, dir.x);
+                    anchor_pt.plus(dir.scale(16.0)).plus(perp.scale(10.0))
+                }
+            };
+            // `setTerminalWidth`: an HTML label's box is at least 9px a character wide.
+            let w = if b.svg {
+                b.width
+            } else {
+                b.width.max(9.0 * t.encode_utf16().count() as f64)
+            };
+            bounds.add_rect(Rect::new(
+                at.x - b.width / 2.0,
+                at.y - b.height / 2.0,
+                w,
+                b.height,
+            ));
+            label_els.push(Element::classed_text(
+                Text::centered(at, &b.lines, b.font_size, b.line_height, &text_color),
+                "edgeTerminals",
+            ));
         }
     }
 
@@ -2121,11 +2180,116 @@ fn calc_label_position(points: &[Point]) -> Point {
     points.last().copied().unwrap_or_default()
 }
 
+/// `getLineFunctionsWithOffset`: the points d3 draws an edge through. Its
+/// ends are pulled back along the line by their markers' `markerOffsets`
+/// (`start` and `end`, 0 for none), and any point within a marker's height
+/// of an end, on both axes, is pushed away from it (a self-loop's ends).
+fn line_with_offset(data: &[Point], start: f64, end: f64) -> Vec<Point> {
+    let last = data.len() - 1;
+    let (first, final_) = (data[0], data[last]);
+    // `calculateDeltaAndAngle` from `a` to `b`: the offsets along the line.
+    let along = |a: Point, b: Point, h: f64| {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        if dx == 0.0 && dy == 0.0 {
+            return (0.0, 0.0);
+        }
+        let angle = (dy / dx).atan();
+        (
+            h * angle.cos() * if dx >= 0.0 { 1.0 } else { -1.0 },
+            h * angle.sin().abs() * if dy >= 0.0 { 1.0 } else { -1.0 },
+        )
+    };
+    let flip_x = if first.x < final_.x { 1.0 } else { -1.0 };
+    let flip_y = if first.y < final_.y { 1.0 } else { -1.0 };
+    data.iter()
+        .enumerate()
+        .map(|(i, &d)| {
+            let (mut ox, mut oy) = if i == 0 && start > 0.0 {
+                along(data[0], data[1], start)
+            } else if i == last && end > 0.0 {
+                along(data[last], data[last - 1], end)
+            } else {
+                (0.0, 0.0)
+            };
+            let near = |a: f64, b: f64, h: f64| a < h && a > 0.0 && b < h;
+            let (ex, ey) = ((d.x - final_.x).abs(), (d.y - final_.y).abs());
+            let (sx, sy) = ((d.x - first.x).abs(), (d.y - first.y).abs());
+            if near(ex, ey, end) {
+                ox -= (end + 1.0 - ex) * flip_x;
+            }
+            if near(sx, sy, start) {
+                ox += (start + 1.0 - sx) * flip_x;
+            }
+            if near(ey, ex, end) {
+                oy -= (end + 1.0 - ey) * flip_y;
+            }
+            if near(sy, sx, start) {
+                oy += (start + 1.0 - sy) * flip_y;
+            }
+            Point::new(d.x + ox, d.y + oy)
+        })
+        .collect()
+}
+
+/// The `terminalMarkerSize` mermaid's dagre renderer passes for an end with a marker.
+const TERMINAL_MARKER_SIZE: f64 = 10.0;
+
+/// `utils.calcTerminalLabelPosition` for a start label on the right
+/// (`startLabelRight`) or an end label on the left (`endLabelLeft`): half way
+/// along the route's first (last) `25 + marker` px, `10 + marker / 2` to the
+/// side.
+fn calc_terminal_label_position(marker: f64, end: bool, path: &[Point]) -> Point {
+    let mut points = path.to_vec();
+    if end {
+        points.reverse();
+    }
+    let center = calculate_point(&points, 25.0 + marker);
+    let d = 10.0 + marker * 0.5;
+    let p0 = points[0];
+    let angle = (p0.y - center.y).atan2(p0.x - center.x);
+    Point::new(
+        angle.sin() * d + (p0.x + center.x) / 2.0,
+        -angle.cos() * d + (p0.y + center.y) / 2.0,
+    )
+}
+
+/// `utils.calculatePoint`: the point `distance` along `points`.
+fn calculate_point(points: &[Point], distance: f64) -> Point {
+    let round5 = |v: f64| (v * 1e5).round() / 1e5;
+    let mut remaining = distance;
+    for w in points.windows(2) {
+        let (prev, p) = (w[0], w[1]);
+        let d = p.dist(prev);
+        if d == 0.0 {
+            return prev;
+        }
+        if d < remaining {
+            remaining -= d;
+        } else {
+            let r = remaining / d;
+            if r <= 0.0 {
+                return prev;
+            }
+            if r >= 1.0 {
+                return p;
+            }
+            return Point::new(
+                round5((1.0 - r) * prev.x + r * p.x),
+                round5((1.0 - r) * prev.y + r * p.y),
+            );
+        }
+    }
+    points.last().copied().unwrap_or_default()
+}
+
 /// `utils.isLabelCoordinateInPath`: whether the rounded `x` or `y` of `p`
 /// occurs anywhere in the path data (its decimals rounded too), as text.
-fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd]) -> bool {
+fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> bool {
     // JS `Math.round` (half up) and number printing.
     let js_round = |v: f64| ((v + 0.5).floor() as i64).to_string();
+    // Both in the coordinates of the group the path is drawn in.
+    let local = |q: Point| q.minus(origin);
+    let p = local(p);
     // The `d` d3 writes, each `\d+\.\d+` replaced by its rounded value.
     let n = |v: f64| {
         if v.fract() == 0.0 {
@@ -2139,9 +2303,16 @@ fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd]) -> bool {
     let mut d = String::new();
     for c in cmds {
         match *c {
-            geom::PathCmd::MoveTo(a) => d += &format!("M{},{}", n(a.x), n(a.y)),
-            geom::PathCmd::LineTo(a) => d += &format!("L{},{}", n(a.x), n(a.y)),
+            geom::PathCmd::MoveTo(a) => {
+                let a = local(a);
+                d += &format!("M{},{}", n(a.x), n(a.y))
+            }
+            geom::PathCmd::LineTo(a) => {
+                let a = local(a);
+                d += &format!("L{},{}", n(a.x), n(a.y))
+            }
             geom::PathCmd::CubicTo(a, b, e) => {
+                let (a, b, e) = (local(a), local(b), local(e));
                 d += &format!(
                     "C{},{},{},{},{},{}",
                     n(a.x),
@@ -2196,6 +2367,47 @@ fn dagre_model(
             node_names[pos_of[p]] = g.clusters[ci].id.clone();
         }
     }
+    // classDb pads a namespace by `class.padding ?? 16`.
+    let cluster_pad = if g.kind == DiagramKind::Class {
+        16.0
+    } else {
+        8.0
+    };
+    let cluster_pads = vec![cluster_pad; g.clusters.len()];
+    let mut turns = vec![false; nodes.len()];
+    for (i, n) in nodes.iter().enumerate() {
+        turns[pos_of[i]] = n.shape == Shape::ForkBar;
+    }
+    // A diagram that says where each node and cluster goes (state diagrams).
+    if g.nodes.iter().any(|n| n.model_seq.is_some()) {
+        let mut items: Vec<(usize, DagreItem)> = g
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                (
+                    n.model_seq.unwrap_or(usize::MAX),
+                    DagreItem::Node(pos_of[i]),
+                )
+            })
+            .chain(g.clusters.iter().enumerate().map(|(ci, c)| {
+                let item = match empty_of[ci] {
+                    Some(p) => DagreItem::Node(pos_of[p]),
+                    None => DagreItem::Cluster(ci),
+                };
+                (c.model_seq.unwrap_or(usize::MAX), item)
+            }))
+            .collect();
+        items.sort_by_key(|&(k, _)| k);
+        return DagreModel {
+            node_names,
+            cluster_names: g.clusters.iter().map(|c| c.id.clone()).collect(),
+            order: items.into_iter().map(|(_, item)| item).collect(),
+            cluster_td: g.clusters.iter().map(|c| c.direction_td).collect(),
+            turns,
+            cluster_pads,
+        };
+    }
     // Collapsed subgraphs take their place among the expanded ones.
     let mut folded: Vec<(usize, usize)> = g
         .nodes
@@ -2227,6 +2439,8 @@ fn dagre_model(
         cluster_names: g.clusters.iter().map(|c| c.id.clone()).collect(),
         order,
         cluster_td: g.clusters.iter().map(|c| c.direction_td).collect(),
+        turns,
+        cluster_pads,
     }
 }
 
@@ -3787,6 +4001,67 @@ mod tests {
         assert_eq!(mid, p(0.0, 0.0), "a zero-length step returns its start");
     }
 
+    /// mermaid 12.3.0 (class diagram under dagre): `0..1` at both ends of a
+    /// route through (35.21, 89), (40.70, 124.5), (35.21, 160).
+    #[test]
+    fn terminal_labels_sit_beside_the_routes_ends() {
+        let p = Point::new;
+        let path = [
+            p(35.21463815789474, 89.0),
+            p(40.703125, 124.5),
+            p(35.21463815789474, 160.0),
+        ];
+        let close = |a: Point, b: Point| (a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9;
+        let start = calc_terminal_label_position(TERMINAL_MARKER_SIZE, false, &path);
+        assert!(
+            close(start, p(23.064584056151183, 108.58637601386286)),
+            "{start:?}"
+        );
+        let end = calc_terminal_label_position(TERMINAL_MARKER_SIZE, true, &path);
+        assert!(
+            close(end, p(52.71234410174355, 144.99732601386287)),
+            "{end:?}"
+        );
+    }
+
+    /// `getLineFunctionsWithOffset` (mermaid 12.3.0, a class self-loop with an
+    /// `extension` end): the loop's first point, 16.8 above its end, is pushed
+    /// up to clear the end's marker; the end is pulled back along its line.
+    #[test]
+    fn line_offsets_clear_a_nearby_end_marker() {
+        let p = Point::new;
+        let data = [
+            p(288.6156250014901, 420.68501042864625),
+            p(264.6156250014901, 411.0750000011176),
+            p(264.6156250014901, 447.0750000011176),
+            p(288.6156250014901, 437.4649895735889),
+        ];
+        let out = line_with_offset(&data, 0.0, 17.25);
+        assert!((out[0].y - 419.215).abs() < 1e-3, "{:?}", out[0]);
+        assert_eq!(out[0].x, data[0].x);
+        assert_eq!(&out[1..3], &data[1..3]);
+        let back = out[3].minus(data[3]);
+        assert!((back.len() - 17.25).abs() < 1e-9);
+    }
+
+    /// `isLabelCoordinateInPath` reads the `d` of a path drawn in a
+    /// translated group (a cluster's own graph): in its local coordinates.
+    #[test]
+    fn label_coordinate_is_looked_up_in_local_coordinates() {
+        let p = Point::new;
+        let d = [
+            geom::PathCmd::MoveTo(p(100.0, 0.0)),
+            geom::PathCmd::LineTo(p(300.0, 0.0)),
+        ];
+        // "M100,0L300,0" has no 50 or 77; locally "M50,0L250,0" has the 0.
+        assert!(!label_coordinate_in_path(
+            p(50.0, 77.0),
+            &d,
+            Point::default()
+        ));
+        assert!(label_coordinate_in_path(p(50.0, 77.0), &d, p(50.0, 0.0)));
+    }
+
     #[test]
     fn label_coordinate_is_looked_up_as_text() {
         let p = Point::new;
@@ -3795,9 +4070,21 @@ mod tests {
             geom::PathCmd::LineTo(p(-3.5, 40.0)),
         ];
         // "M12,151L-4,40": 15 is inside "151", 4 inside "-4".
-        assert!(label_coordinate_in_path(p(15.2, 999.0), &d));
-        assert!(label_coordinate_in_path(p(999.0, 3.6), &d));
-        assert!(!label_coordinate_in_path(p(77.0, 99.0), &d));
+        assert!(label_coordinate_in_path(
+            p(15.2, 999.0),
+            &d,
+            Point::default()
+        ));
+        assert!(label_coordinate_in_path(
+            p(999.0, 3.6),
+            &d,
+            Point::default()
+        ));
+        assert!(!label_coordinate_in_path(
+            p(77.0, 99.0),
+            &d,
+            Point::default()
+        ));
     }
 
     #[test]

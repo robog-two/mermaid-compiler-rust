@@ -3669,6 +3669,8 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
                 .chain((0..clusters.len()).map(layout::dagre::DagreItem::Cluster))
                 .collect(),
             cluster_td: vec![false; clusters.len()],
+            turns: Vec::new(),
+            cluster_pads: Vec::new(),
         }),
     };
     let out = layout::layout(&input);
