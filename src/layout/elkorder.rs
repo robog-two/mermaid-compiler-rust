@@ -264,6 +264,7 @@ pub(super) fn minimize(
     minimize_run(run).pop().unwrap_or(RunOrder {
         layers: Vec::new(),
         port_rank: Vec::new(),
+        inl_rank: Vec::new(),
         rng: JavaRandom::new(1),
         ports_set: [false; 2],
     })
@@ -297,6 +298,10 @@ pub(super) struct RunOrder {
     /// nodes. A container's ports keep the order crossing minimisation leaves
     /// them in, which its contents' placement need not follow.
     pub port_rank: Vec<(Option<usize>, Option<usize>)>,
+    /// Per in-layer edge: where its port on its node is in ELK's port list of
+    /// that side (clockwise: the east side top down, the west bottom up). A
+    /// container's list need not follow where its contents put the ports.
+    pub inl_rank: Vec<Option<usize>>,
     /// The graph's random generator as crossing minimisation leaves it, which
     /// ELK's edge router draws from next (`HyperEdgeCycleDetector`).
     pub rng: JavaRandom,
@@ -642,6 +647,14 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
                     port_rank[k].1 = Some(i);
                 }
             }
+            let inl_rank = (0..s.inl.len())
+                .map(|k| {
+                    let l = &s.inl[k];
+                    let side = s.side_ports(l.node, !l.before);
+                    let i = side.iter().position(|&p| p == Port::InLayer(k, true))?;
+                    Some(if l.before { side.len() - 1 - i } else { i })
+                })
+                .collect();
             let mut kept = s.layers.into_iter();
             let layers = gs
                 .into_iter()
@@ -658,6 +671,7 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
             RunOrder {
                 layers,
                 port_rank,
+                inl_rank,
                 rng: s.rng,
                 ports_set,
             }

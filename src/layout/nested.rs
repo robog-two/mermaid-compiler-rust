@@ -776,7 +776,8 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             (Some(out), _) => out,
             (None, Some((prep, layers, port_rank, rng, _))) => {
                 let hier = Hierarchy {
-                    port_rank,
+                    port_rank: port_rank.edge,
+                    inl_rank: port_rank.inl,
                     route_rng: rng,
                     ..li.hier.clone()
                 };
@@ -2272,7 +2273,8 @@ fn layout_components(tree: &Tree, scope: Option<usize>, li: &LevelInput) -> Opti
                 .pop()
                 .expect("one level");
         let hier = Hierarchy {
-            port_rank,
+            port_rank: port_rank.edge,
+            inl_rank: port_rank.inl,
             route_rng: ordered,
             ..sub.hier.clone()
         };
@@ -2416,18 +2418,21 @@ fn order_runs(
         .zip(ordered)
         .enumerate()
         .map(|(i, (setup, o))| {
-            let (layers, seg_rank, rng, ports_set) = match o {
-                Some(o) => (o.layers, o.port_rank, Some(o.rng), o.ports_set),
-                None => (Vec::new(), Vec::new(), None, [false; 2]),
+            let (layers, seg_rank, inl_rank, rng, ports_set) = match o {
+                Some(o) => (o.layers, o.port_rank, o.inl_rank, Some(o.rng), o.ports_set),
+                None => (Vec::new(), Vec::new(), Vec::new(), None, [false; 2]),
             };
             // Per edge of the level: the ranks at its real ends.
-            let mut rank: PortRanks = Vec::new();
+            let mut rank = PortRanks {
+                edge: Vec::new(),
+                inl: inl_rank,
+            };
             for (e, r) in setup.seg_edges().zip(seg_rank) {
-                if rank.len() <= e {
-                    rank.resize(e + 1, (None, None));
+                if rank.edge.len() <= e {
+                    rank.edge.resize(e + 1, (None, None));
                 }
-                rank[e].0 = rank[e].0.or(r.0);
-                rank[e].1 = rank[e].1.or(r.1);
+                rank.edge[e].0 = rank.edge[e].0.or(r.0);
+                rank.edge[e].1 = rank.edge[e].1.or(r.1);
             }
             let layers = setup.complete(layers, &preps[i].verts, &ctxs[i]);
             (layers, rank, rng, ports_set)
@@ -2441,9 +2446,13 @@ fn order_runs(
         .collect()
 }
 
-/// Per edge: the ranks of its ports in ELK's port lists (see
-/// `elkorder::RunOrder::port_rank`).
-type PortRanks = Vec<(Option<usize>, Option<usize>)>;
+/// Where ports are in ELK's port lists: per edge, its ports' (see
+/// `elkorder::RunOrder::port_rank`); per in-layer edge, its port's on its
+/// node (`elkorder::RunOrder::inl_rank`).
+struct PortRanks {
+    edge: Vec<(Option<usize>, Option<usize>)>,
+    inl: Vec<Option<usize>>,
+}
 
 /// One level of an ELK run, ordered: its prepared pass, its layers, its
 /// port ranks, its random generator and which sides of its container's port

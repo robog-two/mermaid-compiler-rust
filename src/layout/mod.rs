@@ -232,6 +232,11 @@ fn layout_flat(input: &LayoutInput) -> LayoutOutput {
     layout_flat_in(input, ElkGraph::Root, &Hierarchy::default())
 }
 
+/// Where ports are in ELK's port lists after crossing minimisation: per edge,
+/// its ports' at its upper and lower ends (`Hierarchy::port_rank`), and per
+/// in-layer edge its port's on its node (`Hierarchy::inl_rank`).
+type ListRanks<'a> = (&'a [(Option<usize>, Option<usize>)], &'a [Option<usize>]);
+
 /// What one graph of ELK's hierarchy adds to a layered pass (see `nested`).
 #[derive(Debug, Clone, Default)]
 struct Hierarchy {
@@ -247,6 +252,9 @@ struct Hierarchy {
     /// and lower ends are in ELK's port lists after crossing minimisation
     /// (`elkorder::RunOrder::port_rank`).
     port_rank: Vec<(Option<usize>, Option<usize>)>,
+    /// Per in-layer edge (of `inl`): where its port is in its node's port list
+    /// of that side (`elkorder::RunOrder::inl_rank`).
+    inl_rank: Vec<Option<usize>>,
     /// The graph's random generator after crossing minimisation, which the
     /// edge router draws from (see `elkorder::RunOrder::rng`).
     route_rng: Option<elkorder::JavaRandom>,
@@ -1328,7 +1336,7 @@ fn finish_rng(
             ports,
             &inl,
             &hier.ports,
-            &hier.port_rank,
+            (&hier.port_rank, &hier.inl_rank),
             &mut route_rng,
         )),
         EdgeRouting::Splines => None,
@@ -2383,6 +2391,8 @@ struct InLayerRoute {
     port: f64,
     at: f64,
     before: bool,
+    /// Where its port is in its node's port list of that side, if known.
+    list_rank: Option<usize>,
     channel: Option<usize>,
     slot: usize,
     /// Split in two by the router (a critical cycle in its channel): where the
@@ -2402,7 +2412,7 @@ fn ortho_plan(
     ports: Option<(Vec<f64>, Vec<f64>)>,
     inl: &[InLayer],
     fixed: &[(Option<f64>, Option<f64>)],
-    port_rank: &[(Option<usize>, Option<usize>)],
+    (port_rank, inl_rank): ListRanks,
     rng: &mut elkorder::JavaRandom,
 ) -> OrthoPlan {
     let max_rank = verts.iter().map(|v| v.rank).max().unwrap_or(0);
@@ -2572,6 +2582,7 @@ fn ortho_plan(
             port,
             at,
             before: l.before,
+            list_rank: inl_rank.get(k).copied().flatten(),
             channel: channel.map(|c| c.0),
             slot: 0,
             split: None,
@@ -2588,9 +2599,15 @@ fn ortho_plan(
     // one before the first layer, those between layers, the one after the last;
     // each with the graph's random generator, its segments in ELK's order (see
     // `ortho::assign_slots_trunks`): by the upper layer's ports, then by the
-    // lower layer's ports of in-layer edges.
+    // lower layer's ports of in-layer edges, node by node, each node's in its
+    // port list (a container's ports stand in the order crossing minimisation
+    // gave them, which their positions need not follow).
     let in_layer_key = |r: &InLayerRoute| {
-        if r.before { (1, r.port) } else { (0, r.at) }
+        if r.before {
+            (1, x[r.node], r.list_rank.map_or(r.port, |i| i as f64))
+        } else {
+            (0, r.at, r.at)
+        }
     };
     let mut outer = (0, 0);
     let route_outer =
@@ -2598,7 +2615,9 @@ fn ortho_plan(
             let mut list = outer_lists[side].clone();
             list.sort_by(|&a, &b| {
                 let (ka, kb) = (in_layer_key(&in_layer[a]), in_layer_key(&in_layer[b]));
-                ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
+                ka.0.cmp(&kb.0)
+                    .then(ka.1.total_cmp(&kb.1))
+                    .then(ka.2.total_cmp(&kb.2))
             });
             let segs: Vec<ortho::Trunk> = list
                 .iter()
@@ -2633,10 +2652,7 @@ fn ortho_plan(
         // crossing minimisation gave them, which their positions (from its
         // contents' layout) need not follow.
         let key = |e: &Entry| match e.0 {
-            usize::MAX => {
-                let (g, at) = in_layer_key(&in_layer[e.1]);
-                (g, at, at)
-            }
+            usize::MAX => in_layer_key(&in_layer[e.1]),
             ei => {
                 let (a, at) = stops[ei][e.1];
                 let rank = port_rank.get(ei).and_then(|r| r.0).filter(|_| {
@@ -4402,6 +4418,7 @@ mod tests {
             port: 10.0,
             at: 100.0,
             before: true,
+            list_rank: None,
             channel: None,
             slot: 0,
             split: Some((60.0, 1)),

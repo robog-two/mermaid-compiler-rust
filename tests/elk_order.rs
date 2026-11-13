@@ -1805,3 +1805,55 @@ fn a_containers_ports_for_inverted_edges_are_made_as_its_contents_made_them() {
         "{w}x{h}"
     );
 }
+
+/// The smallest and largest x of the edge `L-{from}-{to}-*` in our SVG.
+fn edge_x_range(svg: &str, from: &str, to: &str) -> (f64, f64) {
+    let key = format!("<g id=\"L-{from}-{to}-");
+    let at = svg.find(&key).expect("edge group");
+    let d = at + svg[at..].find(" d=\"").expect("path") + 4;
+    let end = d + svg[d..].find('"').expect("closing quote");
+    let nums: Vec<f64> = svg[d..end]
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse().expect("number"))
+        .collect();
+    let xs = nums.iter().step_by(2);
+    (
+        xs.clone().copied().fold(f64::INFINITY, f64::min),
+        xs.copied().fold(f64::NEG_INFINITY, f64::max),
+    )
+}
+
+#[test]
+fn inverted_ports_feed_their_channel_in_their_containers_port_list_order() {
+    // Both edges leave C0's east side back into C0A through inverted ports on
+    // C0A's west side; their legs before C0A tie in that channel, and ELK
+    // makes the segments in C0A's port list order (clockwise: bottom up there,
+    // c0aan0's first), not top down by position: c0an1's leg goes outside
+    // (mermaid 12.3.0: 12px left of c0aan0's).
+    let src = "flowchart LR
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C0A
+      c0an0
+      c0an1
+      subgraph C0AA
+        c0aan0
+      end
+    end
+  end
+  x0
+  C0 -->|lab1| c0aan0
+  c0an0 --> C0
+  c0an1 -->|lab2| C0
+  c0an0 --> x0
+  C0AA --> C0
+  C0 --> c0an1
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let (deep, _) = edge_x_range(&svg, "C0", "c0aan0");
+    let (near, _) = edge_x_range(&svg, "C0", "c0an1");
+    assert!((deep - near - 12.0).abs() < 0.5, "{deep} {near}");
+}
