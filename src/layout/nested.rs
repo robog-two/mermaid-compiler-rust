@@ -69,6 +69,23 @@ struct Seg {
     /// The segment between the two ends' common ancestor's children, which holds
     /// the label.
     main: bool,
+    /// Its external port dummy stands on the side against the segment's flow:
+    /// in the last layer for an edge entering, the first for one leaving. ELK
+    /// picks a port's side by its net flow (`calculateNetFlow`), which counts an
+    /// edge between a container and anything deeper than its own children as
+    /// flowing the other way, so such a segment runs backwards.
+    against: bool,
+}
+
+impl Seg {
+    /// Whether its external port dummy (if any) is in the level's first layer.
+    fn ext_first(&self) -> Option<bool> {
+        match (self.from, self.to) {
+            (SegEnd::Ext, _) => Some(!self.against),
+            (_, SegEnd::Ext) => Some(self.against),
+            _ => None,
+        }
+    }
 }
 
 /// What an edge end attaches to at one level.
@@ -764,11 +781,11 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                             }
                         };
                         if seg.from == SegEnd::Ext {
-                            route.points[0] = snap(first, true);
+                            route.points[0] = snap(first, !seg.against);
                         }
                         if seg.to == SegEnd::Ext {
                             let at = route.points.len() - 1;
-                            route.points[at] = snap(last, false);
+                            route.points[at] = snap(last, seg.against);
                         }
                     }
                     pieces[ei].push((seg, route));
@@ -840,27 +857,6 @@ fn segments(tree: &Tree, ends: &[(Member, Member)]) -> Vec<Seg> {
     let mut out = Vec::new();
     for (ei, &(a, b)) in ends.iter().enumerate() {
         let anc = tree.common_ancestor(a, b);
-        if let Some(c) = anc.filter(|&c| a == Member::Cluster(c) || b == Member::Cluster(c)) {
-            // A direct member's edge to or from its own container runs inside
-            // it, to or from a port dummy in its last or first layer
-            // (`CompoundGraphPreprocessor`: the port's side by its net flow).
-            let direct =
-                |m: Member| matches!(m, Member::Node(v) if tree.input.nodes[v].cluster == Some(c));
-            if tree.separate[c] && (direct(a) || direct(b)) {
-                let end = |m: Member| match m {
-                    Member::Node(v) => SegEnd::Node(v),
-                    _ => SegEnd::Ext,
-                };
-                out.push(Seg {
-                    edge: ei,
-                    scope: Some(c),
-                    from: end(a),
-                    to: end(b),
-                    main: true,
-                });
-            }
-            continue;
-        }
         // The levels from `m`'s up to (not including) the common ancestor's, each
         // with what stands for `m` there; and what stands for it at the ancestor.
         let chain = |m: Member| -> Option<(Vec<LevelEnd>, SegEnd)> {
@@ -883,6 +879,42 @@ fn segments(tree: &Tree, ends: &[(Member, Member)]) -> Vec<Seg> {
             }
             Some((levels, item))
         };
+        if let Some(c) = anc.filter(|&c| a == Member::Cluster(c) || b == Member::Cluster(c)) {
+            // An edge between a container and something inside it runs inside
+            // it, between the member (or the box of the child holding it) and
+            // a port dummy of the container's own (`CompoundGraphPreprocessor`).
+            // The port's side is by its net flow: a child's edge flows with
+            // the layering, a deeper member's against it.
+            let leaving = b == Member::Cluster(c);
+            let inner = if leaving { a } else { b };
+            if !tree.separate[c] || inner == Member::Cluster(c) {
+                continue;
+            }
+            let Some((up, item)) = chain(inner) else {
+                continue;
+            };
+            let against = tree.parent_of(inner) != Some(c);
+            let seg = |scope, from, to, main, against| Seg {
+                edge: ei,
+                scope,
+                from,
+                to,
+                main,
+                against,
+            };
+            if leaving {
+                for (scope, from) in up {
+                    out.push(seg(scope, from, SegEnd::Ext, false, false));
+                }
+                out.push(seg(Some(c), item, SegEnd::Ext, true, against));
+            } else {
+                out.push(seg(Some(c), SegEnd::Ext, item, true, against));
+                for (scope, to) in up {
+                    out.push(seg(scope, SegEnd::Ext, to, false, false));
+                }
+            }
+            continue;
+        }
         let (Some((up_a, ia)), Some((up_b, ib))) = (chain(a), chain(b)) else {
             continue;
         };
@@ -896,6 +928,7 @@ fn segments(tree: &Tree, ends: &[(Member, Member)]) -> Vec<Seg> {
                 from,
                 to: SegEnd::Ext,
                 main: false,
+                against: false,
             });
         }
         out.push(Seg {
@@ -904,6 +937,7 @@ fn segments(tree: &Tree, ends: &[(Member, Member)]) -> Vec<Seg> {
             from: ia,
             to: ib,
             main: true,
+            against: false,
         });
         for (scope, to) in up_b {
             out.push(Seg {
@@ -912,6 +946,7 @@ fn segments(tree: &Tree, ends: &[(Member, Member)]) -> Vec<Seg> {
                 from: SegEnd::Ext,
                 to,
                 main: false,
+                against: false,
             });
         }
     }
@@ -1061,7 +1096,7 @@ fn level_input(
     // Per external port: (item, entering, unconnected inside).
     let mut ext_kinds: Vec<(usize, bool, bool)> = ext_segs
         .iter()
-        .filter_map(|s| Some((*ext_item.get(&s.edge)?, s.from == SegEnd::Ext, false)))
+        .filter_map(|s| Some((*ext_item.get(&s.edge)?, s.ext_first()?, false)))
         .collect();
     let mut stub_ext = Vec::new();
     for &(ei, _, entering) in stubs.iter().filter(|s| Some(s.1) == scope) {
@@ -1174,11 +1209,9 @@ fn level_input(
                 hier.margins[to].0 = super::ELK_HIERARCHICAL_PORT_OFFSET;
             }
         }
-        if s.from == SegEnd::Ext {
-            hier.ext.push((from, true));
-        }
-        if s.to == SegEnd::Ext {
-            hier.ext.push((to, false));
+        if let Some(first) = s.ext_first() {
+            hier.ext
+                .push((if s.from == SegEnd::Ext { from } else { to }, first));
         }
         edges.push(LayoutEdge {
             from,

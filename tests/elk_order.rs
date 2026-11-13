@@ -506,3 +506,206 @@ fn a_members_edges_to_its_own_container_run_to_port_dummies_inside_it() {
     let without = height("flowchart TD\n  subgraph C\n    x --> y\n  end\n");
     assert!((with - without).abs() < 0.5, "{with} {without}");
 }
+
+/// Every node's centre, relative to the least x and y among them, within
+/// half a pixel of mermaid's render.
+fn expect_centres(src: &str, want: &[(&str, f64, f64)]) {
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let names: Vec<&str> = want.iter().map(|w| w.0).collect();
+    let cs = centres(&svg, &names, true);
+    let x0 = cs.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+    let y0 = cs.iter().map(|c| c.2).fold(f64::INFINITY, f64::min);
+    for ((n, x, y), &(_, wx, wy)) in cs.iter().zip(want) {
+        assert!(
+            (x - x0 - wx).abs() < 0.5 && (y - y0 - wy).abs() < 0.5,
+            "{n}: {} {} vs {wx} {wy}\n{cs:?}",
+            x - x0,
+            y - y0
+        );
+    }
+}
+
+#[test]
+fn an_edge_to_an_ancestor_container_runs_back_to_a_port_against_the_flow() {
+    // `c1n0 --> C0`: C0's port counts the edge as incoming (its source is no
+    // child of C0), so its dummy is in C0's first layer: the edge leaves C1 at
+    // the bottom and comes back up inside C0, which grows to make room.
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C1
+      c1n0
+    end
+    c0n0 --> c0n1
+  end
+  x0
+  x1
+  c1n0 -->|x| x0
+  x1 -->|x| C0
+  c1n0 --> C0
+  c0n1 --> c0n0
+",
+        &[
+            ("c0n0", 0.0, 266.0),
+            ("c0n1", 0.0, 381.0),
+            ("c1n0", 226.0, 242.0),
+            ("x0", 204.27, 561.0),
+            ("x1", 350.0, 0.0),
+        ],
+    );
+}
+
+#[test]
+fn a_containers_port_without_an_outside_edge_counts_for_the_sweep_type() {
+    // C1's own port for `C1 --> c2n0` has no edge in C0's graph, but with the
+    // port for `c2n0 --> x0` it makes two on C1's side: C1 is swept within C0
+    // (not bottom-up), and its dummy comes first on that side.
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+    subgraph C1
+      c1n0
+      subgraph C2
+        c2n0
+      end
+    end
+  end
+  x0
+  c2n0 --> x0
+  C1 --> c2n0
+",
+        &[
+            ("c0n0", 0.0, 0.0),
+            ("c1n0", 226.0, 22.0),
+            ("c2n0", 426.0, 34.0),
+            ("x0", 426.0, 221.0),
+        ],
+    );
+}
+
+#[test]
+fn a_containers_unconnected_port_dummy_goes_last_on_its_west_side() {
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+    subgraph C1
+      c1n0
+    end
+  end
+  subgraph C2
+    c2n0
+    subgraph C3
+      c3n0
+      c3n1
+      c3n2
+      subgraph C4
+        c4n0
+        c4n1
+        c4n2
+        c4n1 --> c4n2
+      end
+      c3n1 --> c3n2
+    end
+  end
+  x0
+  x1
+  C2 --> c3n0
+  x1 --> C3
+  x1 --> c3n1
+  c4n0 --> C3
+",
+        &[
+            ("c0n0", 242.0, 12.0),
+            ("c1n0", 16.0, 24.0),
+            ("c2n0", 0.0, 444.0),
+            ("c3n0", 200.0, 333.0),
+            ("c3n1", 402.0, 408.5),
+            ("c3n2", 402.0, 589.0),
+            ("c4n0", 830.0, 450.0),
+            ("c4n1", 628.0, 381.0),
+            ("c4n2", 628.0, 450.0),
+            ("x0", 458.0, 0.0),
+            ("x1", 650.0, 72.0),
+        ],
+    );
+}
+
+#[test]
+fn labels_of_edges_to_ancestor_containers_take_their_layers() {
+    // `c3n0 -->|yes| C2`: the label dummy stays in C2's layering, tied to C3,
+    // when the edge to the port dummy is hidden from it.
+    expect_centres(
+        "flowchart BT
+  subgraph C0
+    c0n0
+  end
+  subgraph C1
+    c1n0
+  end
+  subgraph C2
+    c2n0
+    subgraph C3
+      c3n0
+      c3n1
+      c3n2
+      c3n0 --> c3n1
+      c3n1 --> c3n2
+    end
+  end
+  x0
+  x1
+  c0n0 -->|yes| c2n0
+  x0 --> C0
+  c3n0 -->|yes| C2
+  c0n0 --> x0
+",
+        &[
+            ("c0n0", 314.53, 529.0),
+            ("c1n0", 62.53, 524.0),
+            ("c2n0", 292.8, 267.0),
+            ("c3n0", 44.0, 174.0),
+            ("c3n1", 0.0, 69.0),
+            ("c3n2", 0.0, 0.0),
+            ("x0", 419.59, 386.0),
+            ("x1", 537.59, 512.0),
+        ],
+    );
+    // `C0 -->|yes| C2`: the label moves into C1's layer, to the dummy of
+    // C1's inverted port (`LabelDummySwitcher`), above C1.
+    expect_centres(
+        "flowchart LR
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C1
+      c1n0
+      c1n1
+      subgraph C2
+        c2n0
+      end
+      c1n0 --> c1n1
+    end
+    c0n0 --> c0n1
+  end
+  x0
+  x1
+  c0n1 -->|x| x0
+  C1 -->|a label| C2
+  C0 -->|yes| C2
+",
+        &[
+            ("c0n0", 248.0, 238.0),
+            ("c0n1", 424.0, 238.0),
+            ("c1n0", 0.0, 119.0),
+            ("c1n1", 176.0, 119.0),
+            ("c2n0", 200.0, 0.0),
+            ("x0", 697.0, 238.0),
+            ("x1", 185.0, 347.0),
+        ],
+    );
+}

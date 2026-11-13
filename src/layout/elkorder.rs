@@ -582,7 +582,22 @@ pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
 /// `LayerSweepTypeDecider.useBottomUp` for the graph of `child`, the container
 /// at vertex `v` of `parent`.
 fn bottom_up(child: &Sweeper, parent: &Sweeper, v: usize) -> bool {
-    if parent.side_ports(v, true).len() < 2 && parent.side_ports(v, false).len() < 2 {
+    // `fewerThanTwoInOutEdges` counts the container's ports, those without an
+    // edge outside (for an edge to something inside it) too: each has a port
+    // dummy in the first or last layer of its graph.
+    let dummies = |li: Option<usize>| {
+        li.and_then(|li| child.layers.get(li))
+            .map_or(0, |l| l.iter().filter(|&&u| child.ext[u]).count())
+    };
+    let last = child.layers.len().checked_sub(1);
+    let (east, west) = if child.layers.len() > 1 {
+        (dummies(last), dummies(Some(0)))
+    } else {
+        (0, 0)
+    };
+    if parent.side_ports(v, true).len().max(east) < 2
+        && parent.side_ports(v, false).len().max(west) < 2
+    {
         return true;
     }
     let nv = child.border.len();
@@ -703,11 +718,17 @@ impl Run<'_> {
                 Port::InLayer(_, false) => None,
             })
             .collect();
+        // A dummy whose port has no edge outside (the container's own port for
+        // an edge to something inside it): without connections the port
+        // distributor sorts it to the front of its side's clockwise list
+        // (barycentre 0), which is the top of the east side but the bottom of
+        // the west.
         let ext_key = &self.extra[g].1;
+        let unconnected = if west { usize::MAX } else { 0 };
         let rank = |u: usize| {
             ext_key[u]
                 .and_then(|k| keys.iter().position(|&x| x == k))
-                .unwrap_or(usize::MAX)
+                .map_or(unconnected, |p| p + 1)
         };
         self.sw[g].layers[li].sort_by_key(|&u| rank(u));
     }

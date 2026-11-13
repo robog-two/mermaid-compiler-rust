@@ -389,7 +389,40 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
     // ELK layers in its own units (see `elk_ranks`): an edge spans one layer, a
     // labelled one two, its label being a node of the layer between.
     let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
-    let mut oriented = orient_edges(n, &input.edges, if elk { 1 } else { rank_scale }, elk);
+    // An edge into an external port dummy of the first layer (out of one of the
+    // last) is reversed before cycle breaking (`EdgeAndLayerConstraintEdgeReverser`).
+    let mut ext_first: Vec<Option<bool>> = vec![None; n];
+    for &(v, first) in &hier.ext {
+        ext_first[v] = Some(first);
+    }
+    let against: Vec<bool> = input
+        .edges
+        .iter()
+        .map(|e| ext_first[e.to] == Some(true) || ext_first[e.from] == Some(false))
+        .collect();
+    let mut oriented = if against.iter().any(|&a| a) {
+        let flipped: Vec<LayoutEdge> = input
+            .edges
+            .iter()
+            .zip(&against)
+            .map(|(e, &a)| {
+                let mut e = e.clone();
+                if a {
+                    std::mem::swap(&mut e.from, &mut e.to);
+                }
+                e
+            })
+            .collect();
+        let mut o = orient_edges(n, &flipped, if elk { 1 } else { rank_scale }, elk);
+        for (o, _) in o.iter_mut().zip(&against).filter(|(_, a)| **a) {
+            if let Some(o) = o.as_mut() {
+                o.reversed = !o.reversed;
+            }
+        }
+        o
+    } else {
+        orient_edges(n, &input.edges, if elk { 1 } else { rank_scale }, elk)
+    };
     if elk {
         for (o, e) in oriented.iter_mut().zip(&input.edges) {
             if let Some(o) = o.as_mut().filter(|_| e.label.is_some()) {
@@ -415,7 +448,7 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         })
         .collect();
     let (mut ranks, mut layered, mut created, label_layer) =
-        rank_with_clusters(n, &mut oriented, input, &is_ext);
+        rank_with_clusters(n, &mut oriented, input, (&is_ext, &hidden));
     if elk && !hier.ext.is_empty() {
         let moved = pin_ext_neighbours(
             (&mut ranks, &mut layered, &created),
@@ -469,9 +502,23 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         let ext_shift = usize::from(hier.ext.iter().any(|&(_, first)| first));
         for (ei, o) in oriented.iter().enumerate() {
             if let Some(o) = o.as_ref().filter(|_| input.edges[ei].label.is_some()) {
-                // The switcher's median layer: half-way, on the balanced layers.
+                // The switcher's median layer: half-way along the edge's dummies,
+                // on the balanced layers. A reversed edge at a side-fixed node
+                // has a dummy in the node's own layer too (`InvertedPortProcessor`).
+                let inverted =
+                    |v: usize| o.reversed && hier.side_fixed.get(v).copied().unwrap_or(false);
                 let (lu, lv) = (layered[o.from], layered[o.to]);
-                let median = to_rank(lu + lv.saturating_sub(lu) / 2);
+                let first = if inverted(o.from) { lu } else { lu + 1 };
+                let last = if inverted(o.to) {
+                    lv
+                } else {
+                    lv.saturating_sub(1)
+                };
+                let median = if last >= first {
+                    to_rank(first + (last - first) / 2)
+                } else {
+                    to_rank(lu + lv.saturating_sub(lu) / 2)
+                };
                 match label_layer.get(ei).copied().flatten() {
                     Some(l) => {
                         label_ranks[ei] = Some(to_rank(l + ext_shift));
@@ -781,6 +828,10 @@ fn pin_ext_neighbours(
         } else if hidden[ei].is_some() {
             for (a, b) in [(e.from, e.to), (e.to, e.from)] {
                 if let (false, Some(first)) = (is_ext[a], entering[b]) {
+                    // Its label dummy stays in the layering, tied to `a`.
+                    if e.label.is_some() {
+                        seen[a].0 = true;
+                    }
                     if first {
                         seen[a].1 = true;
                     } else {
@@ -840,9 +891,11 @@ fn switch_labels(prep: &mut Prepared) {
         if prep.verts[lv_].rank == target {
             continue;
         }
-        let Some(&d) = chain[1..chain.len() - 1]
+        // Any dummy of the chain: an inverted port's stands at its very end.
+        let n = prep.n;
+        let Some(&d) = chain
             .iter()
-            .find(|&&d| prep.verts[d].rank == target && d != lv_)
+            .find(|&&d| d >= n && prep.verts[d].rank == target && d != lv_)
         else {
             continue;
         };
@@ -857,6 +910,12 @@ fn switch_labels(prep: &mut Prepared) {
             cluster: a.cluster,
             ..b
         };
+        // Swapped with an inverted port's dummy (in its node's layer), the
+        // label leaves a long-edge dummy behind, which keeps the label's
+        // layer an ELK layer: it stands in as a label of no size.
+        if prep.inl.iter().any(|l| l.dummy == d) {
+            prep.verts[lv_].kind = Kind::Dummy { labeled: true };
+        }
         *lv = d;
     }
 }
@@ -1870,6 +1929,16 @@ fn elk_place(
         elkbk::NodeType::Label => label_across[v].1,
         _ => 0.0,
     };
+    // An edge whose chain ends at an inverted port's dummy (a label dummy, if
+    // `LabelDummySwitcher` moved one there) leaves or enters it at its port.
+    for (ei, s) in stops.iter().enumerate().filter(|(_, s)| s.len() >= 2) {
+        if s[0] >= real {
+            out_port[ei] = port_of(s[0]);
+        }
+        if s[s.len() - 1] >= real {
+            in_port[ei] = port_of(s[s.len() - 1]);
+        }
+    }
     // The order of a node's ports on a side: where a laid out container fixes
     // them all, the order crossing minimisation left them in (which its
     // contents' placement need not follow), else their positions.
@@ -2177,7 +2246,13 @@ fn ortho_plan(
         let r = verts[l.dummy].rank;
         let (f, t) = fixed.get(l.edge).copied().unwrap_or((None, None));
         let port = x[l.node] + if l.before { t } else { f }.unwrap_or(0.0);
-        let at = xs[l.dummy];
+        // A label dummy (moved there by `LabelDummySwitcher`) carries the edge
+        // at its port, as the rest of the route has it.
+        let at = match (verts[l.dummy].kind, l.before) {
+            (Kind::Dummy { labeled: true }, true) => start_x[l.edge],
+            (Kind::Dummy { labeled: true }, false) => end_x[l.edge],
+            _ => xs[l.dummy],
+        };
         let (lo, hi) = (port.min(at), port.max(at));
         let trunk = if l.before {
             ortho::Trunk {
@@ -2698,7 +2773,7 @@ fn rank_with_label_nodes(
     n: usize,
     oriented: &[Option<Oriented>],
     input: &LayoutInput,
-    hidden: &[bool],
+    (hidden, hidden_edges): (&[bool], &[Option<Oriented>]),
 ) -> Ranking {
     // Every edge end is a port of its own, in the order the edges were imported;
     // a label dummy has its input port, then its output port.
@@ -2711,10 +2786,20 @@ fn rank_with_label_nodes(
     }
     let mut edges: Vec<elkns::NsEdge> = Vec::new();
     let mut label_of: Vec<Option<usize>> = vec![None; oriented.len()];
-    let mut by_source: Vec<(usize, usize)> = oriented
-        .iter()
-        .enumerate()
-        .filter_map(|(ei, o)| o.as_ref().map(|o| (o.from, ei)))
+    // An edge to an external port dummy is hidden with it, but its label
+    // dummy, made before, stays: tied to the edge's other end only.
+    let edge_of = |ei: usize| -> Option<(&Oriented, bool)> {
+        match (
+            oriented[ei].as_ref(),
+            hidden_edges.get(ei).and_then(Option::as_ref),
+        ) {
+            (Some(o), _) => Some((o, false)),
+            (None, Some(o)) if input.edges[ei].label.is_some() => Some((o, true)),
+            _ => None,
+        }
+    };
+    let mut by_source: Vec<(usize, usize)> = (0..oriented.len())
+        .filter_map(|ei| edge_of(ei).map(|(o, _)| (o.from, ei)))
         .collect();
     by_source.sort_unstable();
     // Port keys at the edge's (oriented) source and target.
@@ -2736,21 +2821,26 @@ fn rank_with_label_nodes(
     // `LabelDummyInserter` makes the dummies in node order, per node in the order
     // of its outgoing edges, and appends them to the nodes.
     for (_, ei) in by_source {
-        if let Some(o) = oriented[ei].as_ref() {
+        if let Some((o, hid)) = edge_of(ei) {
             if input.edges[ei].label.is_some() && o.from != o.to {
                 let (ks, kt) = key(ei, o);
-                edges.push(elkns::NsEdge {
-                    from: id[o.from],
-                    to: next,
-                    delta: 1,
-                    ports: (ks, 0),
-                });
-                edges.push(elkns::NsEdge {
-                    from: next,
-                    to: id[o.to],
-                    delta: 1,
-                    ports: (1, kt),
-                });
+                let shown = |v: usize| !hid || !hidden.get(v).copied().unwrap_or(false);
+                if shown(o.from) {
+                    edges.push(elkns::NsEdge {
+                        from: id[o.from],
+                        to: next,
+                        delta: 1,
+                        ports: (ks, 0),
+                    });
+                }
+                if shown(o.to) {
+                    edges.push(elkns::NsEdge {
+                        from: next,
+                        to: id[o.to],
+                        delta: 1,
+                        ports: (1, kt),
+                    });
+                }
                 label_of[ei] = Some(next);
                 next += 1;
             }
@@ -2797,7 +2887,7 @@ fn rank_with_clusters(
     n: usize,
     oriented: &mut [Option<Oriented>],
     input: &LayoutInput,
-    hidden: &[bool],
+    (hidden, hidden_edges): (&[bool], &[Option<Oriented>]),
 ) -> Ranking {
     let mut slot: Vec<Option<usize>> = vec![None; input.clusters.len()];
     let mut used = Vec::new();
@@ -2819,7 +2909,7 @@ fn rank_with_clusters(
     }
     let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
     if used.is_empty() && elk {
-        return rank_with_label_nodes(n, oriented, input, hidden);
+        return rank_with_label_nodes(n, oriented, input, (hidden, hidden_edges));
     }
     if used.is_empty() {
         let mut ranks = rank_nodes(n, oriented);
@@ -4488,7 +4578,7 @@ mod tests {
                 Direction::TopBottom,
             ));
             let oriented = orient_edges(n, &inp.edges, 1, true);
-            let (ranks, _, _, _) = rank_with_label_nodes(n, &oriented, &inp, &[]);
+            let (ranks, _, _, _) = rank_with_label_nodes(n, &oriented, &inp, (&[], &[]));
             let mut used: Vec<usize> = ranks.clone();
             for (o, e) in oriented.iter().zip(&inp.edges) {
                 if let (Some(o), Some(_)) = (o, e.label) {

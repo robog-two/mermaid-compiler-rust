@@ -940,10 +940,18 @@ pub fn render_with(
             matches!(ne.inner, Endpoint::Node(NodeId(i)) if nodes[i].cluster == Some(ne.cluster))
         })
     };
+    // Anything deeper inside runs there too, through its own containers' ports,
+    // to or from a port dummy of the container's, which takes the side against
+    // the flow (its net flow): the route comes back around inside the frame.
+    let deep_edge = |ne: Option<NestedEdge>| {
+        elk && !member_edge(ne) && ne.is_some_and(|ne| ne.inner != Endpoint::Cluster(ne.cluster))
+    };
     let layout_ends = |ei: usize, e: &Edge| -> ((usize, Option<usize>), (usize, Option<usize>)) {
         match nested[ei] {
             None => (layout_end(e.from, true), layout_end(e.to, false)),
-            ne if member_edge(ne) => (layout_end(e.from, true), layout_end(e.to, false)),
+            ne if member_edge(ne) || deep_edge(ne) => {
+                (layout_end(e.from, true), layout_end(e.to, false))
+            }
             Some(ne) => {
                 let v = match ne.inner {
                     Endpoint::Node(NodeId(i)) => i,
@@ -999,11 +1007,17 @@ pub fn render_with(
                     to: pos_of[to],
                     // The ELK adapter hands ELK no edge length (`--->` is as long as `-->`).
                     minlen: if elk { 1 } else { e.minlen },
-                    // A cluster's edge to its own member is laid out as a loop but drawn
+                    // A cluster's edge to itself is laid out as a loop but drawn
                     // against the frame: under ELK its label reserves no loop room.
+                    // One to something inside runs there, its label a layer of its own.
                     label: lb
                         .as_ref()
-                        .filter(|_| !(elk && nested[ei].is_some()))
+                        .filter(|_| {
+                            !(elk
+                                && nested[ei].is_some()
+                                && !member_edge(nested[ei])
+                                && !deep_edge(nested[ei]))
+                        })
                         .map(|b| {
                             // An SVG label's box includes its background's padding.
                             let pad = if b.svg { 2.0 * SVG_EDGE_LABEL_PAD } else { 0.0 };
@@ -1199,7 +1213,21 @@ pub fn render_with(
     for (ei, (e, route)) in g.edges.iter().zip(&out.edges).enumerate() {
         let mut pts = route.points.clone();
         let mut label_at = route.label;
-        if let Some(ne) = nested[ei] {
+        if let Some(ne) = nested[ei].filter(|&ne| deep_edge(Some(ne))) {
+            // The layout's own route, from (or to) the inner end's border.
+            if pts.len() < 2 {
+                continue;
+            }
+            if let Endpoint::Node(NodeId(i)) = ne.inner {
+                if ne.inner_is_target {
+                    pts.reverse();
+                }
+                pts[0] = clip_end(&boundaries[i], &pts, elk);
+                if ne.inner_is_target {
+                    pts.reverse();
+                }
+            }
+        } else if let Some(ne) = nested[ei] {
             let frame = cluster_rects[ne.cluster.0];
             let inner_rect = match ne.inner {
                 Endpoint::Node(NodeId(i)) => {
@@ -3423,15 +3451,25 @@ mod tests {
 
     #[test]
     fn edge_to_an_ancestor_cluster_leaves_the_node() {
-        // fc_edge_to_ancestor: x --> outer must not become a loop on x.
+        // fc_edge_to_ancestor: x --> outer must not become a loop on x. Under
+        // ELK outer's port counts the edge as incoming (x is no child of
+        // outer): its dummy is in outer's first layer, so the edge leaves x
+        // and inner along the flow and runs back to outer's left side (as in
+        // mermaid's render: from x's right side to outer's left frame).
         let src = "flowchart LR\nsubgraph outer\nsubgraph inner\nx --> z\nend\nend\nx --> outer\nouter --> y";
         let (g, scene) = render_flowchart(src);
         let frame = frame_of(&scene, "outer");
+        let inner = frame_of(&scene, "inner");
         let pts = edge_points(&scene, "L-x-outer-1");
         let x = scene_node_center(&g, &scene, "x");
-        assert!((pts[0].x - x.x).abs() < 1.0 && pts[0].y > x.y, "{pts:?}");
+        assert!(
+            pts[0].x > x.x + 50.0 && (pts[0].y - x.y).abs() < 10.0,
+            "{pts:?}"
+        );
+        assert!(pts.iter().any(|p| p.x > inner.right()), "{pts:?}");
         let end = *pts.last().unwrap();
-        assert!((end.x - frame.right()).abs() < 8.0, "{end:?} {frame:?}");
+        assert!((end.x - frame.x).abs() < 8.0, "{end:?} {frame:?}");
+        assert!(end.y < inner.y, "{end:?} {inner:?}");
     }
 
     #[test]
