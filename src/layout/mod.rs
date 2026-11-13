@@ -273,6 +273,10 @@ struct Hierarchy {
     /// Per edge (empty: none): such a loop's routing slot, counted out from
     /// the container on the side it goes round (see `nested::routing_slots`).
     loop_slot: Vec<usize>,
+    /// Per edge (empty: none): such a loop's slots on the container's side
+    /// towards the next layer, where it leaves, and the other, where it comes
+    /// back (see `nested::leg_slots`).
+    loop_legs: Vec<[usize; 2]>,
 }
 
 /// ELK's `InvertedPortProcessor`: where cycle breaking reverses an edge at a node
@@ -1106,10 +1110,10 @@ fn finish_rng(
     // Per node and side: how much of the reach is the room kept between the
     // outermost loop's label and the next loop, which its margin leaves out.
     let mut loop_trail = vec![[0.0f64; 2]; n];
-    // Per loop round a container whose ports keep their sides: how many legs
-    // its container's margins hold outside its own (the side with the most
-    // loops sets them).
-    let mut loop_level = vec![0.0f64; input.edges.len()];
+    // Per loop round a container whose ports keep their sides: how many slots
+    // its container's margins hold outside its own legs, on the side it comes
+    // back to and the one it leaves (see `nested::leg_slots`).
+    let mut loop_level = vec![[0.0f64; 2]; input.edges.len()];
     let loop_high = |ei: usize| hier.loop_high.get(ei).copied().unwrap_or(false);
     if matches!(input.routing, EdgeRouting::Orthogonal(_)) {
         let mut loops = vec![0usize; n];
@@ -1140,22 +1144,25 @@ fn finish_rng(
                     .or_default()
                     .push(ei);
             }
-            // The container's margins hold the side with the most loops.
-            let most = |v: usize| {
-                groups
-                    .iter()
-                    .filter(|((w, _), _)| *w == v)
-                    .map(|(_, g)| g.len())
-                    .max()
-                    .unwrap_or(0)
+            // The container's margins hold its outermost legs on either side.
+            let legs = |ei: usize| {
+                let [out, back] = hier.loop_legs.get(ei).copied().unwrap_or_default();
+                [back, out]
             };
-            let most: Vec<usize> = groups.keys().map(|&(v, _)| most(v)).collect();
-            for ((_, mut group), m) in groups.into_iter().zip(most) {
+            let mut most = vec![[0usize; 2]; n];
+            for g in groups.values() {
+                for &ei in g {
+                    let (v, l) = (input.edges[ei].from, legs(ei));
+                    most[v] = [most[v][0].max(l[0]), most[v][1].max(l[1])];
+                }
+            }
+            for ((v, _), mut group) in groups {
                 let positions = group.clone();
                 group.sort_by_key(|&ei| hier.loop_slot.get(ei).copied().unwrap_or(0));
-                for (k, (&slot, &ei)) in positions.iter().zip(&group).enumerate() {
+                for (&slot, &ei) in positions.iter().zip(&group) {
                     slots[slot] = ei;
-                    loop_level[ei] = (m - 1 - k) as f64;
+                    let l = legs(ei);
+                    loop_level[ei] = [(most[v][0] - l[0]) as f64, (most[v][1] - l[1]) as f64];
                 }
             }
         }
@@ -1624,8 +1631,8 @@ fn finish_rng(
                         // The container's margins hold the outermost loop's
                         // legs; each one inside stands `spacing.edgeEdge` nearer.
                         let (before, after) = hier.margins.get(v).copied().unwrap_or_default();
-                        let inside = SELF_LOOP_EXT * loop_level[ei];
-                        let (before, after) = (before - inside, after - inside);
+                        let [back_in, out_in] = loop_level[ei].map(|l| SELF_LOOP_EXT * l);
+                        let (before, after) = (before - back_in, after - out_in);
                         let high = loop_high(ei);
                         let out = if high {
                             cx + verts[v].w / 2.0 + loop_out[ei]

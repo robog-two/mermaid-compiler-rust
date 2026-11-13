@@ -710,7 +710,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 Some((_, layers, _, Some(rng), _)) => (Some(&layers[..]), rng),
                 _ => (None, &mut elkorder::JavaRandom::new(1)),
             };
-            (li.hier.loop_high, li.hier.loop_slot) = loop_sides(
+            (li.hier.loop_high, li.hier.loop_slot, li.hier.loop_legs) = loop_sides(
                 &tree,
                 &ends,
                 segs.as_deref().unwrap_or_default(),
@@ -721,15 +721,16 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 rng,
                 layers,
             );
-            // Loops going round opposite sides of a container nest apart, so
-            // its margins hold the legs of the side with the most of them (one
-            // `spacing.nodeSelfLoop` was reserved for every loop).
+            // A container's margins hold its loops' outermost legs on either
+            // side (one `spacing.nodeSelfLoop` was reserved for every loop).
             let loop_ext = super::self_loop_ext(if scope.is_none() {
                 ElkGraph::Root
             } else {
                 ElkGraph::Container { separate: false }
             });
-            let mut sides: Vec<(usize, [usize; 2])> = Vec::new();
+            // Per container: its loops, and their highest slot on the side
+            // they come back to and the one they leave.
+            let mut sides: Vec<(usize, usize, [usize; 2])> = Vec::new();
             for (k, seg) in li.seg_of.iter().enumerate() {
                 let looped = seg.is_some_and(|s| {
                     s.from == s.to
@@ -742,23 +743,23 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                     continue;
                 }
                 let v = li.flat.edges[k].from;
-                let side = usize::from(li.hier.loop_high.get(k).copied().unwrap_or(false));
-                match sides.iter_mut().find(|(w, _)| *w == v) {
-                    Some((_, n)) => n[side] += 1,
-                    None => {
-                        let mut n = [0, 0];
-                        n[side] = 1;
-                        sides.push((v, n));
+                let [out, back] = li.hier.loop_legs.get(k).copied().unwrap_or_default();
+                match sides.iter_mut().find(|(w, ..)| *w == v) {
+                    Some((_, n, m)) => {
+                        *n += 1;
+                        *m = [m[0].max(back), m[1].max(out)];
                     }
+                    None => sides.push((v, 1, [back, out])),
                 }
             }
-            for (v, [low, high]) in sides {
-                // The first leg `spacing.nodeSelfLoop` out, each further one
+            for (v, n, [before, after]) in sides {
+                // The first leg `spacing.nodeSelfLoop` out, each further slot
                 // `spacing.edgeEdge` (20 in every graph) beyond.
-                let held = loop_ext + super::SELF_LOOP_EXT * (low.max(high) - 1) as f64;
-                let spare = loop_ext * (low + high) as f64 - held;
+                let spare = |slot: usize| {
+                    loop_ext * n as f64 - (loop_ext + super::SELF_LOOP_EXT * slot as f64)
+                };
                 if let Some(m) = li.hier.margins.get_mut(v) {
-                    *m = (m.0 - spare, m.1 - spare);
+                    *m = (m.0 - spare(before), m.1 - spare(after));
                 }
             }
         }
@@ -1196,11 +1197,14 @@ fn loop_sides(
     import: &[usize],
     rng: &mut elkorder::JavaRandom,
     layers: Option<&[Vec<usize>]>,
-) -> (Vec<bool>, Vec<usize>) {
+) -> (Vec<bool>, Vec<usize>, Vec<[usize; 2]>) {
     let ne = ends.len();
     // Per container: its loops (level edge, their span in its port list:
     // first and last index clockwise, the list's length).
     let mut spans: Vec<(usize, Vec<LoopSpan>)> = Vec::new();
+    // Per container: how many of its ports are on the side towards the next
+    // layer (the first in its list).
+    let mut east_len: HashMap<usize, usize> = HashMap::new();
     let within = |m: Member, c: usize| match m {
         Member::Node(v) => tree.input.nodes[v]
             .cluster
@@ -1270,6 +1274,7 @@ fn loop_sides(
         let (Some(a), Some(b)) = (at(s.edge), at(s.edge + ne)) else {
             continue;
         };
+        east_len.insert(c, east.len());
         let (e, w) = if a < east.len() { (a, b) } else { (b, a) };
         // The penalty of going clockwise from the port at `l` to the one at
         // `r`, past the ports between them.
@@ -1303,12 +1308,47 @@ fn loop_sides(
         spans.sort_by_key(|(c, _)| at(*c));
     }
     let mut slot = vec![0usize; li.seg_of.len()];
-    for (_, loops) in &spans {
-        for (k, s) in routing_slots(loops, rng) {
-            slot[k] = s;
+    let mut legs = vec![[0usize; 2]; li.seg_of.len()];
+    for (c, loops) in &spans {
+        let raw = routing_slots(loops, rng);
+        let ne = east_len.get(c).copied().unwrap_or(0);
+        for ((k, s), l) in raw.iter().zip(leg_slots(loops, &raw, ne)) {
+            slot[*k] = *s;
+            legs[*k] = l;
         }
     }
-    (high, slot)
+    (high, slot, legs)
+}
+
+/// `RoutingSlotAssigner.shiftTowardsNode` on the sides of a container with
+/// ports (the one towards the next layer, its first `ne` ports, and the
+/// other): taking the loops by their routing slots (`raw`, as
+/// [`routing_slots`] gives them), each moves in to the lowest slot free at
+/// every port of the side within its span. Per loop: its slots on the two
+/// sides.
+fn leg_slots(loops: &[LoopSpan], raw: &[(usize, usize)], ne: usize) -> Vec<[usize; 2]> {
+    let mut out = vec![[0usize; 2]; loops.len()];
+    let Some(&(_, _, _, n)) = loops.first() else {
+        return out;
+    };
+    let mut order: Vec<usize> = (0..loops.len()).collect();
+    order.sort_by_key(|&i| raw[i].1);
+    let mut next_free = vec![0usize; n];
+    for (side, ports) in [(0, 0..ne.min(n)), (1, ne.min(n)..n)] {
+        for &i in &order {
+            let (_, a, b, n) = loops[i];
+            let active: Vec<usize> = ports
+                .clone()
+                .filter(|&p| (p + n - a) % n <= (b + n - a) % n)
+                .collect();
+            let s = active.iter().map(|&p| next_free[p]).max().unwrap_or(0);
+            out[i][side] = s;
+            for p in active {
+                next_free[p] = s + 1;
+            }
+        }
+    }
+    out
 }
 
 /// A loop on a container: its level edge, the first and last index of its
@@ -2467,6 +2507,26 @@ mod tests {
             && outer.y <= inner.y + 1e-6
             && outer.right() >= inner.right() - 1e-6
             && outer.bottom() >= inner.bottom() - 1e-6
+    }
+
+    /// ELK's `RoutingSlotAssigner.shiftTowardsNode` on the sides with ports.
+    #[test]
+    fn leg_slots_move_in_where_the_ports_spanned_are_free() {
+        use crate::layout::nested::leg_slots;
+        // Port list of 6, the first 3 on the side towards the next layer. Loop
+        // 1 (raw slot 0) spans 0..=4, loop 2 (raw slot 1) 2..=5: on the near
+        // side they share port 2 (loop 2 one further out), on the far one
+        // port 4 (loop 2 again).
+        assert_eq!(
+            leg_slots(&[(1, 0, 4, 6), (2, 2, 5, 6)], &[(1, 0), (2, 1)], 3),
+            vec![[0, 0], [1, 1]]
+        );
+        // Loop 2 (raw slot 1) spans 4..=0, loop 1 (raw slot 0) 1..=3: they
+        // share no port on either side, so loop 2 moves in next to the node.
+        assert_eq!(
+            leg_slots(&[(1, 1, 3, 6), (2, 4, 0, 6)], &[(1, 0), (2, 1)], 3),
+            vec![[0, 0], [0, 0]]
+        );
     }
 
     /// ELK's `RoutingSlotAssigner`: a loop whose span holds another's ports

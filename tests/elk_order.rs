@@ -1635,3 +1635,58 @@ fn a_loop_label_in_a_containers_graph_stands_its_edge_label_spacing_off() {
     );
     assert!((h - 283.4).abs() < 0.5, "{h}");
 }
+
+#[test]
+fn a_containers_loops_take_the_lowest_free_slot_on_each_side_with_ports() {
+    // Two loops round C0's high side, one round its low side: on the low
+    // and high sides they nest by their routing slots, but on the sides with
+    // ports each moves in to the lowest slot free at the ports it spans
+    // (`RoutingSlotAssigner.shiftTowardsNode`), and C0's margins hold the
+    // outermost legs there (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+  end
+  x0
+  x2 --> C0
+  C0 --> x0
+  c0n0 -->|lab1| x0
+  x2 -->|lab2| x1
+  C0 -->|lab3| C0
+  C0 --> C0
+  C0 --> C0
+",
+        &[
+            ("c0n0", 0.0, 173.0),
+            ("x0", 6.0, 457.0),
+            ("x2", 93.98, 0.0),
+            ("x1", 219.97, 372.0),
+        ],
+    );
+    // Round opposite sides, two loops leave from C0's ports apart but come
+    // back to crossing ones: they take different slots there, and C0's
+    // margin holds both (mermaid 12.3.0).
+    expect_centres(
+        "flowchart LR
+  subgraph C0
+    c0n0
+    c0n1
+    c0n2
+  end
+  x0
+  c0n0 --> c0n1
+  c0n0 -->|lab1| x1
+  C0 --> c0n2
+  C0 --> C0
+  C0 --> C0
+",
+        &[
+            ("c0n0", 0.0, 95.0),
+            ("c0n1", 212.0, 112.75),
+            ("c0n2", 0.0, 0.0),
+            ("x0", 101.0, 241.75),
+            ("x1", 524.47, 77.25),
+        ],
+    );
+}
