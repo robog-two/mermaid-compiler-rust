@@ -1496,13 +1496,20 @@ pub fn render_with(
             let ports = (pts[0], pts[pts.len() - 1]);
             // An edge to / from a whole cluster is cut where it crosses the cluster's
             // border (mermaid's `cutPathAtIntersect` for `fromCluster` / `toCluster`).
+            // Under ELK, an edge with a cluster at one end leaves `cutter2`
+            // out: its node end is cut where the line from the node's centre
+            // to its port leaves the outline (`applyStart/EndIntersectionIfNeeded`),
+            // not along the edge's last segment, and keeps a tail however short.
+            let by_centre = elk && (from_cluster || to_cluster);
             match e.from {
                 Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0], elk),
+                Endpoint::Node(NodeId(i)) if by_centre => pts[0] = boundaries[i].clip(pts[0]),
                 Endpoint::Node(NodeId(i)) => pts[0] = clip_end(&boundaries[i], &pts, elk),
             }
             pts.reverse();
             match e.to {
                 Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0], elk),
+                Endpoint::Node(NodeId(i)) if by_centre => pts[0] = boundaries[i].clip(pts[0]),
                 Endpoint::Node(NodeId(i)) => pts[0] = clip_target_end(&boundaries[i], &pts, elk),
             }
             pts.reverse();
@@ -1532,8 +1539,13 @@ pub fn render_with(
                 }
                 if let Some(i) = node(e.to) {
                     let r = Rect::centered(out.nodes[i], measured[i].w, measured[i].h);
-                    kept[ei][1] =
-                        kept_port(ports.1, Some(pts[pts.len() - 1]), offset(e.end), r, true);
+                    kept[ei][1] = kept_port(
+                        ports.1,
+                        Some(pts[pts.len() - 1]),
+                        offset(e.end),
+                        r,
+                        !by_centre,
+                    );
                 }
             }
         }
@@ -2710,6 +2722,32 @@ pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
     // The point level with the centre on the line, and the way out from it.
     let inner = port.plus(d.scale(depth));
     let out = d.scale(-1.0);
+    if let Boundary::Cylinder(..) = b {
+        // `outlineAttachPoint` bisects (20 steps) between the two, a point
+        // being inside when it is no further from the centre than where the
+        // shape's `intersect` puts the ray through it; the cylinder's, the
+        // box's crossing moved by the cap, is no outline of its own.
+        let inside = |p: Point| {
+            let from_centre = p.minus(center).len();
+            from_centre < 1e-12 || from_centre <= b.clip(p).minus(center).len() + 1e-9
+        };
+        if !inside(inner) {
+            return port;
+        }
+        if inside(port) {
+            return port;
+        }
+        let (mut lo, mut hi) = (0.0, depth);
+        for _ in 0..20 {
+            let mid = (lo + hi) / 2.0;
+            if inside(inner.plus(out.scale(mid))) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        return inner.plus(out.scale(lo));
+    }
     let t = match b {
         Boundary::Rect(r) | Boundary::Cylinder(r, _) => {
             let exit = |p: f64, v: f64, lo: f64, hi: f64| {
@@ -5482,6 +5520,18 @@ mod tests {
         let rect = Boundary::Rect(Rect::new(-10.0, -5.0, 20.0, 10.0));
         let p = clip_along(&rect, Point::new(4.0, 5.0), Point::new(4.0, 20.0));
         assert!(p.dist(Point::new(4.0, 5.0)) < 1e-6, "{p:?}");
+        // A cylinder's port off its middle, at the bottom: mermaid bisects
+        // with its `intersect` (the box's crossing moved by the cap) as the
+        // inside test, which lands inside the box, where the ray through the
+        // point meets that `intersect` (mermaid 12.3.0: 1.1px in).
+        let cyl = Boundary::Cylinder(Rect::new(-50.0, -40.0, 100.0, 80.0), 10.0);
+        let p = clip_along(&cyl, Point::new(30.0, 40.0), Point::new(30.0, 80.0));
+        assert!(p.x == 30.0 && p.y < 40.0 && p.y > 30.0, "{p:?}");
+        let on = cyl.clip(p).minus(c).len() - p.minus(c).len();
+        assert!(on.abs() < 1e-3, "{p:?} {on}");
+        // Straight down its middle the port is on the cap.
+        let p = clip_along(&cyl, Point::new(0.0, 40.0), Point::new(0.0, 80.0));
+        assert!(p.dist(Point::new(0.0, 40.0)) < 1e-3, "{p:?}");
     }
 
     #[test]

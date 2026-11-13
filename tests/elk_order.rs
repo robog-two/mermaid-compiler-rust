@@ -2072,3 +2072,32 @@ fn an_inverted_port_starts_where_its_node_made_it_among_the_others() {
         assert!(w[0].2 < w[1].2, "{cs:?}");
     }
 }
+
+#[test]
+fn an_edge_from_a_cluster_meets_a_diamond_on_the_line_to_its_centre() {
+    // `G4 --> d` leaves `cutter2` out (one end is a cluster): its end at the
+    // diamond is where the line from d's centre to its port, off d's middle,
+    // leaves the outline, and the edge's last leg runs slanted into it
+    // (mermaid 12.3.0 ends the path at 300.2, 191.5).
+    let src = "flowchart TD
+  subgraph G4
+    a
+  end
+  b --> d{\"Load\"}
+  G4 --> d
+  c --> d
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let at = svg.find("<g id=\"L-G4-d-").expect("edge");
+    let d = &svg[at..];
+    let d = &d[d.find(" d=\"").expect("path") + 4..];
+    let d = &d[..d.find('"').expect("end")];
+    let nums: Vec<f64> = d
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().expect("number"))
+        .collect();
+    let (x, y) = (nums[nums.len() - 2], nums[nums.len() - 1]);
+    assert!((x - 300.2).abs() < 1.0 && (y - 191.5).abs() < 1.0, "{d}");
+}
