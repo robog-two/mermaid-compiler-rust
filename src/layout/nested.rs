@@ -1767,16 +1767,33 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
         } else {
             (super::ELK_EDGE_THICKNESS, 0.0)
         };
+        let horizontal = flat.direction.is_horizontal();
+        let rects: Vec<Rect> = (flat.nodes.iter().zip(&out.nodes))
+            .map(|(nd, p)| Rect::centered(*p, nd.width, nd.height))
+            .collect();
         for (e, route) in flat.edges.iter().zip(&out.edges) {
             let (w, h) = if e.from == e.to { (0.0, 0.0) } else { thick };
-            for p in &route.points {
-                add(Rect::new(p.x, p.y, w, h));
+            let thin = inverted_port_runs(&route.points, [e.from, e.to], &rects, horizontal);
+            for (p, thin) in route.points.iter().zip(thin) {
+                if thin {
+                    add(Rect::new(p.x, p.y, 0.0, 0.0));
+                } else {
+                    add(Rect::new(p.x, p.y, w, h));
+                }
             }
         }
     }
     for (e, route) in flat.edges.iter().zip(&out.edges) {
         if let (Some((w, h)), Some(p)) = (e.label, route.label) {
-            add(Rect::centered(p, w, h));
+            let r = Rect::centered(p, w, h);
+            // Across a horizontal layout ELK's label dummy is the edge's
+            // thickness taller than its label, which sits at the dummy's top
+            // (`LabelDummyInserter`).
+            if elk && flat.direction.is_horizontal() {
+                add(Rect::new(r.x, r.y, w, h + super::ELK_EDGE_THICKNESS));
+            } else {
+                add(r);
+            }
         }
         // Orthogonal self-loops stand off their node's side.
         if e.from == e.to && matches!(flat.routing, EdgeRouting::Orthogonal(_)) {
@@ -1839,6 +1856,59 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
         ext_kinds,
         bbox,
     }
+}
+
+/// Which points of an ELK route lie on the run through an inverted port's
+/// dummy, which `InvertedPortProcessor` makes of no size (unlike the long-edge
+/// dummies, as thick as their edge): where the edge leaves a node's port away
+/// from the flow, turns, and runs back past the node in the node's own layer
+/// (the run spans the node along the flow), to or from its dummy there. Only
+/// where that run reaches no further layer (no other node lies along it, clear
+/// of the node), so no long-edge dummy shares it.
+fn inverted_port_runs(
+    points: &[Point],
+    ends: [usize; 2],
+    nodes: &[Rect],
+    horizontal: bool,
+) -> Vec<bool> {
+    let mut thin = vec![false; points.len()];
+    let n = points.len();
+    if n < 4 {
+        return thin;
+    }
+    let flow = |p: Point| if horizontal { p.x } else { p.y };
+    let cross = |p: Point| if horizontal { p.y } else { p.x };
+    let span = |r: &Rect| {
+        if horizontal {
+            (r.x, r.right())
+        } else {
+            (r.y, r.bottom())
+        }
+    };
+    for (end, idx) in [
+        (ends[0], [0, 1, 2, 3]),
+        (ends[1], [n - 1, n - 2, n - 3, n - 4]),
+    ] {
+        let [p0, p1, p2, p3] = idx.map(|i| points[i]);
+        let along = |a: Point, b: Point| (cross(a) - cross(b)).abs() < 1e-9;
+        if !(along(p0, p1) && !along(p1, p2) && along(p2, p3)) {
+            continue;
+        }
+        let (lo, hi) = span(&nodes[end]);
+        let (a, b) = (flow(p2).min(flow(p3)), flow(p2).max(flow(p3)));
+        if !(a < lo && b > hi) {
+            continue;
+        }
+        let further = nodes.iter().enumerate().any(|(k, r)| {
+            let (l, h) = span(r);
+            k != end && r.w > 0.0 && r.h > 0.0 && l >= a && h <= b && (h <= lo || l >= hi)
+        });
+        if !further {
+            thin[idx[2]] = true;
+            thin[idx[3]] = true;
+        }
+    }
+    thin
 }
 
 /// mermaid's `elk.spacing.portsSurrounding` (12 on every side).
@@ -2204,8 +2274,8 @@ type RunLevel = (
 mod tests {
     use super::super::*;
     use super::{
-        Item, LevelInput, components, even_group_frames, level_output, place_components,
-        subgraph_feedback_edges,
+        Item, LevelInput, components, even_group_frames, inverted_port_runs, level_output,
+        place_components, subgraph_feedback_edges,
     };
 
     fn node(cluster: Option<usize>) -> LayoutNode {
@@ -2406,6 +2476,74 @@ mod tests {
             elk: true,
         };
         assert_eq!(level_output(li, out2).bbox.right(), 101.0);
+    }
+
+    #[test]
+    fn inverted_port_dummy_has_no_thickness() {
+        // LR: an edge from node 1 (right) back into node 0's west side runs
+        // round below node 0 through its inverted port's dummy in node 0's
+        // layer: that run carries no thickness. Once the run reaches past
+        // another layer's node (node 2), a long-edge dummy shares it.
+        let pts = [
+            (260.0, 20.0),
+            (230.0, 20.0),
+            (230.0, 80.0),
+            (20.0, 80.0),
+            (20.0, 20.0),
+            (40.0, 20.0),
+        ]
+        .map(|(x, y)| Point::new(x, y));
+        let rect = |x: f64| Rect::new(x, 0.0, 80.0, 40.0);
+        let nodes = [rect(40.0), rect(260.0)];
+        let thin = inverted_port_runs(&pts, [1, 0], &nodes, true);
+        assert_eq!(thin, [false, false, true, true, false, false]);
+        let nodes = [rect(40.0), rect(260.0), rect(140.0)];
+        assert!(!inverted_port_runs(&pts, [1, 0], &nodes, true).contains(&true));
+        // An ordinary back edge, leaving east of node 0, carries its thickness.
+        let pts = [(120.0, 20.0), (140.0, 20.0), (140.0, 80.0), (240.0, 80.0)]
+            .map(|(x, y)| Point::new(x, y));
+        assert!(
+            !inverted_port_runs(&pts, [0, 1], &[rect(40.0), rect(260.0)], true).contains(&true)
+        );
+    }
+
+    #[test]
+    fn elk_graph_size_takes_in_label_dummies() {
+        // An LR graph whose labelled edge runs below both nodes: its label
+        // (21 tall, at the top of its dummy) reaches the graph's bottom, and
+        // the dummy is the edge's thickness taller than the label.
+        let level = |direction: Direction| {
+            let mut flat = input(
+                vec![node(None), node(None)],
+                vec![LayoutEdge::new(0, 1, 1, Some((40.0, 21.0)))],
+                vec![],
+                direction,
+            );
+            flat.routing = EdgeRouting::Orthogonal(OrthoSpacing::CONTAINER);
+            let out = LayoutOutput {
+                nodes: vec![Point::new(40.0, 20.0), Point::new(240.0, 20.0)],
+                edges: vec![EdgeRoute {
+                    points: vec![Point::new(80.0, 30.0), Point::new(200.0, 30.0)],
+                    label: Some(Point::new(140.0, 60.5)),
+                }],
+                clusters: vec![],
+                cluster_directions: vec![],
+            };
+            let li = LevelInput {
+                items: vec![Item::Node(0), Item::Node(1)],
+                flat,
+                hier: Hierarchy::default(),
+                graph: ElkGraph::Container { separate: true },
+                flat_clusters: vec![],
+                edge_ids: vec![0],
+                seg_of: vec![None],
+                ext_kinds: vec![],
+                elk: true,
+            };
+            level_output(li, out).bbox
+        };
+        assert_eq!(level(Direction::LeftRight).bottom(), 72.0);
+        assert_eq!(level(Direction::TopBottom).bottom(), 71.0);
     }
 
     #[test]
