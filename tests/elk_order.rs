@@ -1290,3 +1290,177 @@ fn a_containers_loop_stands_off_its_crossing_edges_ports() {
         &[("c0n0", 21.73, 0.0), ("x0", 0.0, 220.0)],
     );
 }
+
+/// A container's frame `(x, y, w, h)` and the extent `(min x, max x, min y,
+/// max y)` of the path of its `n`th loop, from our SVG.
+type Extent = (f64, f64, f64, f64);
+fn frame_and_loop(src: &str, c: &str, n: usize) -> (Extent, Extent) {
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let at = svg
+        .find(&format!("<g id=\"cluster-{c}\" class=\"cluster\">"))
+        .expect("cluster");
+    let rect = at + svg[at..].find("<rect x=").expect("frame");
+    let tag = &svg[rect..rect + svg[rect..].find('>').expect("tag end")];
+    let frame = (
+        attr(tag, "x"),
+        attr(tag, "y"),
+        attr(tag, "width"),
+        attr(tag, "height"),
+    );
+    let key = format!("<g id=\"L-{c}-{c}-");
+    let at = svg.match_indices(&key).nth(n).expect("loop").0;
+    let d = at + svg[at..].find(" d=\"").expect("path") + 4;
+    let d = &svg[d..d + svg[d..].find('"').expect("path end")];
+    let nums: Vec<f64> = d
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.' || ch == '-'))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.parse().expect("number"))
+        .collect();
+    let (xs, ys): (Vec<f64>, Vec<f64>) = nums.chunks(2).map(|p| (p[0], p[1])).unzip();
+    let min = |v: &[f64]| v.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = |v: &[f64]| v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    (frame, (min(&xs), max(&xs), min(&ys), max(&ys)))
+}
+
+#[test]
+fn a_containers_loop_goes_round_the_side_passing_fewer_ports() {
+    // Neither way round C0 passes a port (its port for `c0n0 --> x0` stands
+    // on the side the loop leaves from, before it): ELK's `RoutingDirector`
+    // then goes clockwise, from the bottom round the right to the top
+    // (mermaid 12.3.0: 114.9,390 -> 114.9,410 -> 256,410 -> 256,243 ->
+    // 169.7,243 -> 169.7,273 round C0 at 36,273 200x117).
+    let ((x, y, w, h), (lx, hx, ly, hy)) = frame_and_loop(
+        "flowchart TD
+  subgraph C0
+    c0n0
+  end
+  x0
+  x1
+  x0 --> x1
+  x1 -->|x| c0n0
+  c0n0 --> x0
+  C0 --> C0
+",
+        "C0",
+        0,
+    );
+    assert!(lx > x - 0.5, "{lx} {x}");
+    assert!((hx - (x + w + 20.0)).abs() < 0.5, "{hx} {x} {w}");
+    assert!((ly - (y - 30.0)).abs() < 0.5, "{ly} {y}");
+    assert!((hy - (y + h + 20.0)).abs() < 0.5, "{hy} {y} {h}");
+}
+
+#[test]
+fn a_containers_loop_counts_its_ports_in_the_order_they_were_made() {
+    // Nothing sweeps the root graph (its model order has no crossing), so
+    // C0's ports stay as made: `C0 --> x0`'s, the loop's, then those of the
+    // edges crossing C0's border. Round the right the loop would pass those
+    // two (penalty 6), round the left `C0 --> x0`'s (3) (mermaid 12.3.0:
+    // round the left, 20 off C0 at 32,32 200x117).
+    let ((x, _, w, _), (lx, hx, _, _)) = frame_and_loop(
+        "flowchart TD
+  subgraph C0
+    c0n0
+  end
+  x0
+  C0 --> x0
+  c0n0 --> x0
+  c0n0 -->|yes| x0
+  C0 --> C0
+",
+        "C0",
+        0,
+    );
+    assert!((lx - (x - 20.0)).abs() < 0.5, "{lx} {x}");
+    assert!(hx < x + w, "{hx} {x} {w}");
+}
+
+#[test]
+fn a_containers_ports_without_edges_outside_keep_their_order_inside() {
+    // C0's ports for its edges into itself have no edges outside: the port
+    // distributor keeps them as `PortListSorter` left them, and their dummies
+    // inside follow, the loop's port on the top side third from the left of
+    // four. Round the left the loop passes one, round the right two (mermaid
+    // 12.3.0: round the left, 20 off C0 at 32,32 267.3x327).
+    let ((x, _, w, _), (lx, hx, _, _)) = frame_and_loop(
+        "flowchart BT
+  subgraph C0
+    c0n0
+    c0n1
+    c0n2
+    c0n0 --> c0n1
+    c0n1 --> c0n2
+  end
+  C0 --> c0n1
+  C0 --> c0n2
+  C0 --> c0n1
+  c0n2 --> c0n0
+  C0 --> C0
+",
+        "C0",
+        0,
+    );
+    assert!((lx - (x - 20.0)).abs() < 0.5, "{lx} {x}");
+    assert!(hx < x + w, "{hx} {x} {w}");
+}
+
+#[test]
+fn loops_in_a_containers_graph_stand_off_by_its_spacing() {
+    // In P's graph (`spacing.baseValue` 24) C's first loop stands 12 off it
+    // (`spacing.nodeSelfLoop`), the second 20 beyond (`spacing.edgeEdge`)
+    // (mermaid 12.3.0: legs at 56 and 36, C at 68).
+    let src = "flowchart TD
+  subgraph P
+    subgraph C
+      a
+    end
+    b
+  end
+  C --> C
+  C --> C
+";
+    let ((x, _, _, _), (lx, _, _, _)) = frame_and_loop(src, "C", 0);
+    assert!((lx - (x - 12.0)).abs() < 0.5, "{lx} {x}");
+    let ((x, _, _, _), (lx, _, _, _)) = frame_and_loop(src, "C", 1);
+    assert!((lx - (x - 32.0)).abs() < 0.5, "{lx} {x}");
+}
+
+#[test]
+fn a_container_with_only_a_loop_and_port_edges_is_pinned_like_elk() {
+    // C1's loop is no edge of C0's graph when ELK layers it: C1, with edges
+    // only to C0's border, goes next to C0's port dummies, after c0n0
+    // (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+    subgraph C1
+      c1n0
+    end
+  end
+  subgraph C2
+    c2n0
+    c2n1
+    subgraph C3
+      c3n0
+    end
+    c2n0 --> c2n1
+  end
+  x0
+  c1n0 --> c3n0
+  x0 --> C3
+  c1n0 --> x0
+  C2 -->|x| x0
+  c2n1 -->|a label| x0
+  C1 --> C1
+  C3 --> C3
+",
+        &[
+            ("c0n0", 78.0, 0.0),
+            ("c1n0", 304.0, 7.0),
+            ("c2n0", 0.0, 324.0),
+            ("x0", 154.78, 605.0),
+        ],
+    );
+}

@@ -259,6 +259,10 @@ struct Hierarchy {
     /// them, and those for edges crossing its border after, in the order of
     /// their dummies inside (`CompoundGraphPreprocessor`).
     port_made: Vec<[(usize, usize); 2]>,
+    /// Per edge (empty: none): a loop on a container whose ports keep their
+    /// sides that goes round the high cross-axis side (see
+    /// `nested::loop_sides`).
+    loop_high: Vec<bool>,
 }
 
 /// ELK's `InvertedPortProcessor`: where cycle breaking reverses an edge at a node
@@ -850,9 +854,12 @@ fn pin_ext_neighbours(
     // Per node: (has a visible edge, met an entering port, met a leaving port).
     let mut seen = vec![(false, false, false); n];
     for (ei, e) in input.edges.iter().enumerate() {
+        // ELK has taken self-loops out of the graph by then
+        // (`SelfLoopPreProcessor`).
         if e.from == e.to {
-            seen[e.from].0 = true;
-        } else if oriented[ei].is_some() {
+            continue;
+        }
+        if oriented[ei].is_some() {
             seen[e.from].0 = true;
             seen[e.to].0 = true;
         } else if hidden[ei].is_some() {
@@ -1062,12 +1069,17 @@ fn finish_rng(
     // room free. As ELK places them (`SelfLoopPortRestorer`, `SelfLoopRouter`): the
     // 2k ports of a node's k loops are spread evenly over the side inside its
     // `spacing.portsSurrounding`, the first loop on the middle pair and each later one
-    // on the pair around it; the first leg stands one edge-node spacing (20) off the
-    // side, each later one 20 beyond the previous leg or beyond its label, which
+    // on the pair around it; the first leg stands `spacing.nodeSelfLoop` (20 in the
+    // root, 12 in a container's graph) off the side, each later one 20
+    // (`spacing.edgeEdge`) beyond the previous leg or beyond its label, which
     // stands 4px (`spacing.edgeLabel` 2, twice) outside its leg.
+    // A loop on a container whose ports keep their sides may go round its
+    // high side instead (see `nested::loop_sides`), keeping the room there.
     let mut loop_out = vec![0.0f64; input.edges.len()];
     let mut loop_half = vec![0.0f64; input.edges.len()];
     let mut loop_reach = vec![0.0f64; n];
+    let mut loop_reach_high = vec![0.0f64; n];
+    let loop_high = |ei: usize| hier.loop_high.get(ei).copied().unwrap_or(false);
     if matches!(input.routing, EdgeRouting::Orthogonal(_)) {
         let mut loops = vec![0usize; n];
         for e in input.edges.iter().filter(|e| e.from == e.to) {
@@ -1082,8 +1094,19 @@ fn finish_rng(
             let gap = ((verts[v].h - 2.0 * PORTS_SURROUNDING) / (2 * loops[v] + 1) as f64).max(0.0);
             loop_half[ei] = gap * (2 * seen[v] + 1) as f64 / 2.0;
             seen[v] += 1;
-            loop_out[ei] = loop_reach[v] + SELF_LOOP_EXT;
-            loop_reach[v] = loop_out[ei]
+            let reach = if loop_high(ei) {
+                &mut loop_reach_high[v]
+            } else {
+                &mut loop_reach[v]
+            };
+            // The first one `spacing.nodeSelfLoop` off the node, each later
+            // one `spacing.edgeEdge` (20 in every graph) beyond the one before.
+            loop_out[ei] = if *reach > 0.0 {
+                *reach + SELF_LOOP_EXT
+            } else {
+                self_loop_ext(graph)
+            };
+            *reach = loop_out[ei]
                 + e.label
                     .map_or(0.0, |(lw, lh)| SELF_LOOP_LABEL_GAP + swap(lw, lh).0);
         }
@@ -1131,7 +1154,8 @@ fn finish_rng(
         } else {
             half(va) + half(vb) + spacing(va) / 2.0 + spacing(vb) / 2.0
         };
-        let loops = loop_reach.get(b).copied().unwrap_or(0.0);
+        let loops = loop_reach.get(b).copied().unwrap_or(0.0)
+            + loop_reach_high.get(a).copied().unwrap_or(0.0);
         if loops > 0.0 {
             g.max(half(va) + half(vb) + loops + SELF_LOOP_CLEARANCE)
         } else {
@@ -1166,7 +1190,7 @@ fn finish_rng(
             &verts,
             n,
             &chains,
-            &loop_reach,
+            (&loop_reach, &loop_reach_high),
             &label_across,
             &is_ext,
             &hier.ports,
@@ -1440,9 +1464,21 @@ fn finish_rng(
                 ins[l.node] += 1;
             }
         }
-        for e in input.edges.iter().filter(|e| e.from == e.to) {
-            outs[e.from] += 1;
-            ins[e.from] += 1;
+        // A loop on a container whose ports keep their sides has its edge
+        // taken off its ports while ELK places the layers' nodes
+        // (`SelfLoopPreProcessor` until `SelfLoopPostProcessor`).
+        for (ei, e) in input
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.from == e.to)
+        {
+            let fixed = hier.side_fixed.get(e.from).copied().unwrap_or(false)
+                && matches!(hier.ports.get(ei), Some((Some(_), Some(_))));
+            if !fixed {
+                outs[e.from] += 1;
+                ins[e.from] += 1;
+            }
         }
         for v in 0..n {
             let total = ins[v] + outs[v];
@@ -1485,13 +1521,19 @@ fn finish_rng(
                     // On a laid out container with ports of fixed sides its
                     // ports are on the far and the near side, where its
                     // contents put them: the loop leaves on the far side and
-                    // comes back round the low side to the near one, standing
-                    // off each.
+                    // comes back round the low or the high side to the near
+                    // one, standing off each.
                     if let Some((Some(fs), Some(ft))) = hier.ports.get(ei).copied()
                         && hier.side_fixed.get(v).copied().unwrap_or(false)
                     {
                         let (top, bottom) = (cy - verts[v].h / 2.0, cy + verts[v].h / 2.0);
                         let (before, after) = hier.margins.get(v).copied().unwrap_or_default();
+                        let high = loop_high(ei);
+                        let out = if high {
+                            cx + verts[v].w / 2.0 + loop_out[ei]
+                        } else {
+                            out
+                        };
                         let points = [
                             Point::new(cx + fs, bottom),
                             Point::new(cx + fs, bottom + after),
@@ -1504,7 +1546,12 @@ fn finish_rng(
                         .to_vec();
                         let label = e.label.map(|(lw, lh)| {
                             let lw = swap(lw, lh).0;
-                            to_out(Point::new(out - lw / 2.0 - SELF_LOOP_LABEL_GAP, cy))
+                            let at = if high {
+                                out + lw / 2.0 + SELF_LOOP_LABEL_GAP
+                            } else {
+                                out - lw / 2.0 - SELF_LOOP_LABEL_GAP
+                            };
+                            to_out(Point::new(at, cy))
                         });
                         return EdgeRoute { points, label };
                     }
@@ -1867,7 +1914,7 @@ fn elk_place(
     verts: &[Vertex],
     real: usize,
     chains: &[Option<Chain>],
-    loop_reach: &[f64],
+    (loop_reach, loop_reach_high): (&[f64], &[f64]),
     label_across: &[(f64, f64)],
     is_ext: &[bool],
     fixed: &[(Option<f64>, Option<f64>)],
@@ -1914,7 +1961,7 @@ fn elk_place(
                 kind,
                 size,
                 margin_top: loop_reach.get(v).copied().unwrap_or(0.0),
-                margin_bottom: 0.0,
+                margin_bottom: loop_reach_high.get(v).copied().unwrap_or(0.0),
             }
         })
         .collect();
@@ -2132,8 +2179,18 @@ fn elk_label_centre(c: Point, label: Option<(f64, f64)>, horizontal: bool) -> Po
     }
 }
 
-/// How far an orthogonal self-loop stands off its node.
+/// How far an orthogonal self-loop stands off its node in the root graph.
 const SELF_LOOP_EXT: f64 = 20.0;
+
+/// How far an orthogonal self-loop stands off its node: ELK's
+/// `spacing.nodeSelfLoop`, half the graph's `spacing.baseValue` (40 in the
+/// root, 24 in a container's graph).
+fn self_loop_ext(graph: ElkGraph) -> f64 {
+    match graph {
+        ElkGraph::Root => SELF_LOOP_EXT,
+        ElkGraph::Container { .. } => ELK_CONTAINER_BASE_SPACING / 2.0,
+    }
+}
 /// Gap between an ELK self-loop's outer leg and its label.
 const SELF_LOOP_LABEL_GAP: f64 = 4.0;
 /// ELK's `spacing.portsSurrounding` as mermaid sets it: no port within 12px of a
