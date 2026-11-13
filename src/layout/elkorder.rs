@@ -1299,8 +1299,9 @@ fn sort_by_model_order(
         let mut layer = std::mem::take(slot);
         let ctx_fb = (&first_in[..], &feedback[..], other, &src_key[..]);
         // Before the layer's ports are sorted they are in the order ELK made
-        // them: a node's in the order of its edges.
-        let unsorted = PortOrder::Created;
+        // them (a container's as `container_port_order` has it), then as
+        // `PortListSorter` left them.
+        let unsorted = PortOrder::Created(seg_made_in);
         model_order_sort_in(
             &mut layer, west, segs, info, real, &pos, &port_at, ctx_fb, unsorted,
         );
@@ -1385,11 +1386,13 @@ fn model_order_sort(
 
 /// Where a node's incoming ports stand in its port list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PortOrder {
+enum PortOrder<'a> {
     /// Sorted (`west`, top to bottom): clockwise, the west side from the bottom.
     Clockwise,
-    /// As ELK made them, in the order of their edges.
-    Created,
+    /// As ELK made them (per segment: when its port on its target was, see
+    /// `container_port_order`; otherwise in the order of the edges), then as
+    /// `PortListSorter` left the west side (see `port_list_sorter_west`).
+    Created(&'a [Made]),
 }
 
 /// `model_order_sort` with the layer's ports in the given order.
@@ -1409,8 +1412,14 @@ fn model_order_sort_in(
     // A node's incoming ports, first first.
     let incoming = |v: usize| -> Vec<usize> {
         let mut w: Vec<usize> = west[v].iter().rev().copied().collect();
-        if ports == PortOrder::Created {
-            w.sort_by_key(|&s| info[s].edge);
+        if let PortOrder::Created(made) = ports {
+            // Top to bottom (ELK's list reversed), as made, then sorted.
+            w.sort_by_key(|&s| {
+                let m = made.get(s).copied().unwrap_or((0, info[s].edge));
+                std::cmp::Reverse((m, s))
+            });
+            port_list_sorter_west(&mut w);
+            w.reverse();
         }
         w
     };
@@ -2594,6 +2603,41 @@ mod tests {
             (&[], &[], &[], &[]),
         );
         assert_eq!(layer, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn unsorted_ports_compare_by_the_port_made_first() {
+        // Layer 1 as made: dummies 2 (from 6) and 3 (from 7), and the
+        // containers 1 (from 5) and 0 (from 4 and 8, its port from 8 made
+        // first). Before its ports are sorted, ELK compares container 0 by its
+        // first port with an edge from the layer before: from 8, which stands
+        // last there, not from 4, whose edge comes first. Container 0 then
+        // never meets container 1 in the insertion sort, which would keep
+        // their model order.
+        let segs = [(4, 0), (5, 1), (6, 2), (7, 3), (8, 0)];
+        let info = info(&segs);
+        let west = vec![vec![0, 4], vec![1], vec![2], vec![3]];
+        // Layer 0: 4 to 8, in that order.
+        let pos: Vec<usize> = (0..9usize)
+            .map(|v| v.checked_sub(4).unwrap_or(usize::MAX))
+            .collect();
+        let port_at = [0; 5];
+        let other = [false, false, true, false];
+        let sort = |made: &[Made]| {
+            let mut layer = vec![2, 1, 0, 3];
+            let fb = (&[][..], &[][..], &other[..], &[][..]);
+            let ports = PortOrder::Created(made);
+            model_order_sort_in(
+                &mut layer, &west, &segs, &info, 2, &pos, &port_at, fb, ports,
+            );
+            layer
+        };
+        assert_eq!(
+            sort(&[(0, 1), (0, 0), (0, 0), (0, 0), (0, 0)]),
+            vec![1, 2, 3, 0]
+        );
+        // Made in the order of the edges, it compares by the port from 4.
+        assert_eq!(sort(&[]), vec![0, 1, 2, 3]);
     }
 
     #[test]
