@@ -193,7 +193,7 @@ fn under_dagre(src: &str) -> String {
 #[test]
 fn gallery_examples_under_dagre_match_mermaid() {
     // mermaid 12.3.0 in Chromium, the examples with `layout: dagre`.
-    let cases: [(&str, [f64; 4]); 5] = [
+    let cases: [(&str, [f64; 4]); 6] = [
         (
             include_str!("../examples/diagrams/subgraphs.mmd"),
             [0.0, 0.0, 1674.26220703125, 304.75],
@@ -209,6 +209,10 @@ fn gallery_examples_under_dagre_match_mermaid() {
         (
             include_str!("../examples/diagrams/agentflow.mmd"),
             [0.0, 0.0, 483.1999816894531, 881.9920043945312],
+        ),
+        (
+            include_str!("../examples/diagrams/usecase.mmd"),
+            [-12.0, -12.0, 853.265625, 648.75],
         ),
         (
             include_str!("../examples/diagrams/subgraph-collapse.mmd"),
