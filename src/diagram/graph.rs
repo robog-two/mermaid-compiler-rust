@@ -1866,6 +1866,27 @@ pub fn render_with(
     }
 
     edge_tag.resize(edge_els.len(), g.edges.len().saturating_sub(1));
+    if dagre_engine {
+        // `getEdgesToRender` draws the merged self-loops after the other edges
+        // (their labels keep their places).
+        let is_loop = |k: &usize| g.edges.get(*k).is_some_and(|e| e.from == e.to);
+        let (mut els, mut tags): (Vec<Element>, Vec<usize>) = (Vec::new(), Vec::new());
+        let mut loops: Vec<(Element, usize)> = Vec::new();
+        for (el, tag) in edge_els.drain(..).zip(edge_tag.drain(..)) {
+            if is_loop(&tag) {
+                loops.push((el, tag));
+            } else {
+                els.push(el);
+                tags.push(tag);
+            }
+        }
+        for (el, tag) in loops {
+            els.push(el);
+            tags.push(tag);
+        }
+        edge_els = els;
+        edge_tag = tags;
+    }
     label_tag.resize(label_els.len(), g.edges.len().saturating_sub(1));
 
     if elk {
@@ -4014,6 +4035,39 @@ mod tests {
         assert_eq!(mid, p(10.0, 0.0));
         let mid = calc_label_position(&[p(0.0, 0.0), p(0.0, 0.0), p(0.0, 10.0)]);
         assert_eq!(mid, p(0.0, 0.0), "a zero-length step returns its start");
+    }
+
+    /// mermaid 12.3.0: under dagre `getEdgesToRender` draws the self-loops
+    /// after the other edges; ELK keeps the edges' order.
+    #[test]
+    fn dagre_draws_self_loops_last() {
+        fn edge_ids(e: &Element, out: &mut Vec<String>) {
+            if let Element::Group {
+                id,
+                class,
+                children,
+            } = e
+            {
+                match (id, class.as_deref()) {
+                    (Some(i), Some("edgePath")) => out.push(i.clone()),
+                    _ => children.iter().for_each(|c| edge_ids(c, out)),
+                }
+            }
+        }
+        let order = |layout: &str| {
+            let src = format!(
+                "---\nconfig:\n  layout: {layout}\n---\nflowchart TD\n  A --> A\n  A --> B\n  \
+                 B --> B\n  B --> C\n"
+            );
+            let scene = crate::render::render(&src, &crate::config::MermaidConfig::default())
+                .unwrap()
+                .scene;
+            let mut ids = Vec::new();
+            scene.elements.iter().for_each(|e| edge_ids(e, &mut ids));
+            ids
+        };
+        assert_eq!(order("dagre"), ["L-A-B-1", "L-B-C-3", "L-A-A-0", "L-B-B-2"]);
+        assert_eq!(order("elk"), ["L-A-A-0", "L-A-B-1", "L-B-B-2", "L-B-C-3"]);
     }
 
     /// mermaid 12.3.0 (class diagram under dagre): `0..1` at both ends of a
