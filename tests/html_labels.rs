@@ -158,3 +158,19 @@ stateDiagram-v2
     );
     assert_eq!(hh - sh, 5.0);
 }
+
+#[test]
+fn an_html_edge_labels_background_is_its_text_box() {
+    // `.edgeLabel p` paints the label's own box: in mermaid 12.3.0 the
+    // foreignObject of "Get money" is 68.484375 wide, and so is its grey.
+    for layout in ["elk", "dagre"] {
+        let s = svg(&format!(
+            "---\nconfig:\n  layout: {layout}\n---\nflowchart TD\n  A -->|Get money| B\n"
+        ));
+        let bg = s
+            .split("<g class=\"edgeLabel\"><rect")
+            .nth(1)
+            .expect("edge label");
+        assert!(bg.contains("width=\"68.484\""), "{layout}: {}", &bg[..80]);
+    }
+}

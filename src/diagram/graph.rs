@@ -1553,18 +1553,18 @@ pub fn render_with(
                     Paint::fill(fill).with_opacity(0.5),
                 )
             } else {
+                // An HTML label's background is its `<p>`'s: the text box itself.
                 (
-                    Rect::centered(at, block.width + 4.0, block.height),
+                    Rect::centered(at, block.width, block.height),
                     Paint::fill(edge_label_bg),
                 )
             };
-            // The drawing's bbox holds an HTML label's `foreignObject`, which is the
-            // text box itself: the 2px background margin stays outside it. (Kept
-            // under dagre, whose output is pinned.)
-            bounds.add_rect(if block.svg || !elk {
+            // The drawing's bbox holds an HTML label's `foreignObject`, the text
+            // box. (Under dagre, whose output is pinned, 2px wider each side.)
+            bounds.add_rect(if block.svg || elk {
                 r
             } else {
-                Rect::centered(at, block.width, block.height)
+                Rect::centered(at, block.width + 4.0, block.height)
             });
             label_els.push(Element::group(
                 "edgeLabel",
