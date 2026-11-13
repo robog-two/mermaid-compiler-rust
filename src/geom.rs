@@ -132,6 +132,68 @@ pub enum PathCmd {
     Close,
 }
 
+/// The tight bounding box of a path (curves by their extremes, as SVG's
+/// `getBBox` measures them), or `None` for an empty path.
+pub fn path_bbox(cmds: &[PathCmd]) -> Option<Rect> {
+    let mut b = Bounds::default();
+    let mut cur = Point::default();
+    let mut start = cur;
+    for c in cmds {
+        match *c {
+            PathCmd::MoveTo(p) => {
+                b.add_point(p);
+                cur = p;
+                start = p;
+            }
+            PathCmd::LineTo(p) => {
+                b.add_point(p);
+                cur = p;
+            }
+            PathCmd::CubicTo(c1, c2, p) => {
+                b.add_point(p);
+                // Roots of the derivative, per axis.
+                let axis = |a: f64, b1: f64, c3: f64, d: f64| -> Vec<f64> {
+                    let (qa, qb, qc) = (
+                        3.0 * (-a + 3.0 * b1 - 3.0 * c3 + d),
+                        6.0 * (a - 2.0 * b1 + c3),
+                        3.0 * (b1 - a),
+                    );
+                    let mut ts = Vec::new();
+                    if qa.abs() < 1e-12 {
+                        if qb.abs() > 1e-12 {
+                            ts.push(-qc / qb);
+                        }
+                    } else {
+                        let disc = qb * qb - 4.0 * qa * qc;
+                        if disc >= 0.0 {
+                            let r = disc.sqrt();
+                            ts.push((-qb + r) / (2.0 * qa));
+                            ts.push((-qb - r) / (2.0 * qa));
+                        }
+                    }
+                    ts.into_iter().filter(|t| *t > 0.0 && *t < 1.0).collect()
+                };
+                let at = |t: f64| {
+                    let u = 1.0 - t;
+                    let f = |a: f64, b1: f64, c3: f64, d: f64| {
+                        u * u * u * a + 3.0 * u * u * t * b1 + 3.0 * u * t * t * c3 + t * t * t * d
+                    };
+                    Point::new(f(cur.x, c1.x, c2.x, p.x), f(cur.y, c1.y, c2.y, p.y))
+                };
+                for t in axis(cur.x, c1.x, c2.x, p.x)
+                    .into_iter()
+                    .chain(axis(cur.y, c1.y, c2.y, p.y))
+                {
+                    b.add_point(at(t));
+                }
+                cur = p;
+            }
+            PathCmd::Close => cur = start,
+        }
+    }
+    b.0
+}
+
 /// Closed polygon path.
 pub fn polygon(points: &[Point]) -> Vec<PathCmd> {
     let mut cmds = Vec::with_capacity(points.len() + 1);
@@ -419,6 +481,31 @@ pub fn clip_rect(r: &Rect, toward: Point) -> Point {
         f64::INFINITY
     };
     c.plus(d.scale(sx.min(sy)))
+}
+
+/// mermaid's `intersectRect` (as dagre's): where the line from the centre of
+/// `r` towards `p` crosses its border, in that code's arithmetic.
+pub fn intersect_rect(r: &Rect, p: Point) -> Point {
+    intersect_box(r.center(), r.w, r.h, p)
+}
+
+/// [`intersect_rect`] for the `w` × `h` box centred on `c` (mermaid's node
+/// `x`, `y`, `width`, `height`, taken as they are).
+pub fn intersect_box(c: Point, w: f64, h: f64, p: Point) -> Point {
+    let (dx, dy) = (p.x - c.x, p.y - c.y);
+    let (mut w, mut h) = (w / 2.0, h / 2.0);
+    let (sx, sy) = if dy.abs() * w > dx.abs() * h {
+        if dy < 0.0 {
+            h = -h;
+        }
+        (if dy == 0.0 { 0.0 } else { h * dx / dy }, h)
+    } else {
+        if dx < 0.0 {
+            w = -w;
+        }
+        (w, if dx == 0.0 { 0.0 } else { w * dy / dx })
+    };
+    Point::new(c.x + sx, c.y + sy)
 }
 
 /// Exit point of the ray from `c` toward `toward` through an ellipse.

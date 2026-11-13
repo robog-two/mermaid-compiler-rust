@@ -247,6 +247,9 @@ pub struct Node {
     /// A class box's `«annotation»` (classBox draws only the first one), stacked
     /// above the name in normal weight.
     pub annotation: Option<String>,
+    /// A `collapsedGroup` standing in for a folded subgraph: how many expanded
+    /// subgraphs `getData` pushes before it (subgraphs come before vertices).
+    pub group_seq: Option<usize>,
 }
 
 impl Node {
@@ -262,6 +265,7 @@ impl Node {
             color_slot: None,
             wrapped_width: None,
             annotation: None,
+            group_seq: None,
         }
     }
 }
@@ -366,6 +370,9 @@ pub struct Cluster {
     pub color_slot: Option<ColorSlot>,
     /// The cluster's own `direction` statement.
     pub direction: Option<Direction>,
+    /// That statement said `TD` (flowDb keeps a subgraph's `TD` as written,
+    /// which mermaid's dagre renderer does not take for `TB`).
+    pub direction_td: bool,
     pub kind: ClusterKind,
 }
 
@@ -378,6 +385,7 @@ impl Cluster {
             style: StyleOverrides::default(),
             color_slot: None,
             direction: None,
+            direction_td: false,
             kind: ClusterKind::Group,
         }
     }
@@ -637,7 +645,17 @@ fn measure_node(
         };
         block = TextBlock::svg(lines, font, bold);
     } else if wrap_width > 0.0 && !block.is_empty() {
-        block = TextBlock::new(wrap_lines(&block.lines, wrap_width, font, bold), font, bold).html();
+        let raw = block.lines.clone();
+        block = TextBlock::new(wrap_lines(&raw, wrap_width, font, bold), font, bold).html();
+        // A label too wide for one line is laid out in a `display: table` box of
+        // the wrapping width (or its widest word): the label's box is that wide
+        // however short its lines come out.
+        let natural = TextBlock::new(raw.clone(), font, bold).html().width;
+        if natural > wrap_width {
+            block.width = block
+                .width
+                .max(crate::text::html_wrap_width(&raw, wrap_width, font, bold));
+        }
     } else if bold {
         block = TextBlock::new(block.lines, font, true).html();
     }
@@ -961,10 +979,13 @@ pub fn render_with(
     let resolve = |e: Endpoint, outgoing: bool| layout_end(e, outgoing).0;
     // Edges between a cluster and itself or something inside it. They are laid out as
     // a loop on one inner node (constraining nothing) and drawn against the frame.
+    // mermaid's own dagre renderer (see `layout::dagre`) takes such an edge as it
+    // is: to the cluster's anchor node, inside it.
+    let dagre_engine = !elk && matches!(g.kind, DiagramKind::Flowchart | DiagramKind::Agentflow);
     let nested: Vec<Option<NestedEdge>> = g
         .edges
         .iter()
-        .map(|e| nested_edge(&g.clusters, &nodes, &empty_of, e))
+        .map(|e| nested_edge(&g.clusters, &nodes, &empty_of, e).filter(|_| !dagre_engine))
         .collect();
     // Under ELK a direct member's edge to or from its own container is laid
     // out as it is: inside the container, to or from a port dummy in its first
@@ -1092,7 +1113,11 @@ pub fn render_with(
         inner_rank_sep: CLUSTER_RANK_SPACING,
         routing: edge_routing(cfg.layout),
         dagre_groups: !elk,
+        dagre: None,
     };
+    if dagre_engine {
+        input.dagre = Some(dagre_model(g, &nodes, &empty_of, &pos_of));
+    }
     // ER group titles wrap at the group's laid-out width. Under ELK mermaid lays
     // out once, with each title measured at the wrapping width, and wraps it again
     // at the frame's width when painting (below); under dagre a probe layout gives
@@ -1117,7 +1142,10 @@ pub fn render_with(
             title_pad,
         );
     }
-    let raw = layout::layout(&input);
+    let (raw, extras) = match &input.dagre {
+        Some(model) if dagre_engine => layout::dagre::layout_full(&input, model),
+        _ => (layout::layout(&input), Default::default()),
+    };
     let mut out = layout::LayoutOutput {
         nodes: (0..nodes.len()).map(|i| raw.nodes[pos_of[i]]).collect(),
         ..raw
@@ -1142,6 +1170,9 @@ pub fn render_with(
     }
 
     let mut bounds = Bounds::default();
+    for r in &extras.hidden {
+        bounds.add_rect(*r);
+    }
     let mut cluster_els = Vec::new();
     let mut edge_els = Vec::new();
     let mut label_els = Vec::new();
@@ -1322,13 +1353,83 @@ pub fn render_with(
         } else if pts.len() < 2 {
             continue;
         }
-        let is_loop = nested[ei].is_some() || resolve(e.from, true) == resolve(e.to, false);
+        // (mermaid's dagre renderer loops only an edge written from a thing to
+        // itself; one between a cluster and something inside it is routed.)
+        let is_loop = if dagre_engine {
+            e.from == e.to
+        } else {
+            nested[ei].is_some() || resolve(e.from, true) == resolve(e.to, false)
+        };
         if elk && is_loop && nested[ei].is_none() {
             // An orthogonal self-loop leaves and re-enters through ports on the node's side.
             if let (Endpoint::Node(NodeId(a)), Endpoint::Node(NodeId(b))) = (e.from, e.to) {
                 let n = pts.len();
                 pts[0] = clip_along(&boundaries[a], pts[0], pts[1]);
                 pts[n - 1] = clip_along(&boundaries[b], pts[n - 1], pts[n - 2]);
+            }
+        }
+        if dagre_engine && is_loop && nested[ei].is_none() && pts.len() >= 3 {
+            // mermaid's compact loop: its first and last corner are replaced by
+            // where the lines from the node's centre to the next ones leave it.
+            if let (Endpoint::Node(NodeId(a)), Endpoint::Node(NodeId(b))) = (e.from, e.to) {
+                let n = pts.len();
+                pts[0] = boundaries[a].clip(pts[1]);
+                pts[n - 1] = boundaries[b].clip(pts[n - 2]);
+            }
+        }
+        let raw = extras.raw_points.get(ei).filter(|p| p.len() >= 2);
+        // A cluster's node as mermaid cuts against it: dagre's centre, the
+        // frame's size.
+        let frame = |c: usize| {
+            let r = cluster_rects[c];
+            let centre = extras
+                .cluster_centres
+                .get(c)
+                .copied()
+                .flatten()
+                .unwrap_or_else(|| r.center());
+            (centre, r.w, r.h)
+        };
+        let to_cluster = matches!(e.to, Endpoint::Cluster(_));
+        let from_cluster = matches!(e.from, Endpoint::Cluster(_));
+        if let (true, false, Some(raw)) = (dagre_engine, is_loop, raw) {
+            if to_cluster || from_cluster {
+                // `insertEdge`: the route clipped at its nodes (an end on a
+                // cluster's anchor as dagre left it), then, to a cluster, dagre's
+                // own route cut at the frame and, from one, that cut at its frame.
+                // (A route from a cluster starts where the line from the frame's
+                // centre to its first bend leaves the frame, as mermaid draws it.)
+                let n = pts.len();
+                match e.from {
+                    Endpoint::Node(NodeId(i)) => pts[0] = clip_end(&boundaries[i], &pts, false),
+                    Endpoint::Cluster(c) => {
+                        let (centre, w, h) = frame(c.0);
+                        pts[0] = geom::intersect_box(centre, w, h, pts[1]);
+                    }
+                }
+                if let Endpoint::Node(NodeId(i)) = e.to {
+                    let rev: Vec<Point> = pts.iter().rev().copied().collect();
+                    pts[n - 1] = clip_end(&boundaries[i], &rev, false);
+                } else {
+                    pts[n - 1] = raw[raw.len() - 1];
+                }
+                if let Endpoint::Cluster(c) = e.to {
+                    pts = cut_path_at_intersect(raw, frame(c.0));
+                }
+                if let Endpoint::Cluster(c) = e.from {
+                    pts.reverse();
+                    pts = cut_path_at_intersect(&pts, frame(c.0));
+                    pts.reverse();
+                }
+                // A route cut down to one point is drawn as that point (an
+                // empty path), its label kept.
+                match pts.len() {
+                    0 => continue,
+                    1 => pts.push(pts[0]),
+                    _ => {}
+                }
+                routed[ei] = Some((pts, label_at));
+                continue;
             }
         }
         if !is_loop {
@@ -1447,9 +1548,12 @@ pub fn render_with(
     for (ei, e) in g.edges.iter().enumerate() {
         edge_tag.resize(edge_els.len(), ei.saturating_sub(1));
         label_tag.resize(label_els.len(), ei.saturating_sub(1));
-        let Some((mut pts, label_at)) = routed[ei].take() else {
+        let Some((mut pts, mut label_at)) = routed[ei].take() else {
             continue;
         };
+        // `insertEdge`'s `points` (the cut route) and the point it probes the
+        // drawn path for.
+        let cut = (dagre_engine && edge_labels[ei].is_some()).then(|| pts.clone());
         // A neo edge takes the `*-margin` markers (`useMargin`) and the neo
         // barb's pull-back, and leaves its first and last `markerOffsets2` px
         // undrawn by a dash pattern (see `neo_dash`), not by a shorter line.
@@ -1493,8 +1597,26 @@ pub fn render_with(
         }
         let mut heads = Vec::new();
         let last = pts.len() - 1;
-        let end_dir = pts[last].minus(pts[last - 1]).norm();
-        let start_dir = pts[0].minus(pts[1]).norm();
+        // A route cut down to one point: d3 draws `M p Z` with the end marker's
+        // offset added to x, and the browser orients the marker along +x.
+        let degenerate = dagre_engine && pts.len() == 2 && pts[0] == pts[1];
+        if degenerate {
+            let v = Point::new(pts[0].x + end_trim, pts[0].y);
+            pts = vec![v, v];
+        }
+        let (end_dir, start_dir) = if degenerate {
+            (Point::new(1.0, 0.0), Point::new(-1.0, 0.0))
+        } else {
+            (
+                pts[last].minus(pts[last - 1]).norm(),
+                pts[0].minus(pts[1]).norm(),
+            )
+        };
+        let end_tip = if degenerate {
+            pts[last].plus(end_dir.scale(end_trim))
+        } else {
+            pts[last]
+        };
         let colors = MarkerColors {
             line: &stroke,
             background: &pal.main_bkg,
@@ -1502,21 +1624,23 @@ pub fn render_with(
         heads.extend(markers::elements(
             e.end,
             End::End,
-            pts[last],
+            end_tip,
             end_dir,
             colors,
             width,
             neo,
         ));
-        heads.extend(markers::elements(
-            e.start,
-            End::Start,
-            pts[0],
-            start_dir,
-            colors,
-            width,
-            neo,
-        ));
+        if !degenerate {
+            heads.extend(markers::elements(
+                e.start,
+                End::Start,
+                pts[0],
+                start_dir,
+                colors,
+                width,
+                neo,
+            ));
+        }
         let (end_back, start_back) = (end_trim, start_trim);
         if end_back > 0.0 && pts[last].dist(pts[last - 1]) > end_back {
             pts[last] = pts[last].minus(end_dir.scale(end_back));
@@ -1524,16 +1648,42 @@ pub fn render_with(
         if start_back > 0.0 && pts[0].dist(pts[1]) > start_back {
             pts[0] = pts[0].minus(start_dir.scale(start_back));
         }
-        for p in &pts {
-            bounds.add_point(*p);
+        if !dagre_engine {
+            for p in &pts {
+                bounds.add_point(*p);
+            }
         }
         let cmds = match cfg.curve {
+            // d3's line through a single point.
+            _ if degenerate => vec![geom::PathCmd::MoveTo(pts[0]), geom::PathCmd::Close],
             // The ELK adapter overrides every routed edge's curve with `rounded`.
             _ if elk => geom::rounded_path(&pts, EDGE_CORNER_RADIUS),
             Curve::Basis => geom::basis_curve(&pts),
             Curve::Linear => geom::polyline(&pts),
             Curve::Step => geom::polyline(&step_points(&pts, horizontal)),
         };
+        if dagre_engine {
+            // The drawing's bbox holds the curve itself, not its control points.
+            if let Some(r) = geom::path_bbox(&cmds) {
+                bounds.add_rect(r);
+            }
+        }
+        // `positionEdgeLabel`: a label whose route was cut at a frame, or whose
+        // route's middle point the drawn path does not mention, is moved by as much as cutting the route moved the
+        // route's midpoint.
+        if let (Some(cut), Some(at), Some(orig)) = (
+            &cut,
+            label_at,
+            extras.raw_points.get(ei).filter(|p| !p.is_empty()),
+        ) {
+            // (A route cut at a cluster's frame always counts as moved.)
+            let to_frame =
+                matches!(e.from, Endpoint::Cluster(_)) || matches!(e.to, Endpoint::Cluster(_));
+            if to_frame || !label_coordinate_in_path(cut[cut.len() / 2], &cmds) {
+                let (a, b) = (calc_label_position(cut), calc_label_position(orig));
+                label_at = Some(Point::new(at.x + a.x - b.x, at.y + a.y - b.y));
+            }
+        }
         let mut paint = Paint::stroke(&stroke, width);
         // A neo edge writes its pattern inline, outranking the stylesheet's
         // (an edge's own style comes after it).
@@ -1595,7 +1745,7 @@ pub fn render_with(
             };
             // The drawing's bbox holds an HTML label's `foreignObject`, the text
             // box. (Under dagre, whose output is pinned, 2px wider each side.)
-            bounds.add_rect(if block.svg || elk {
+            bounds.add_rect(if block.svg || elk || dagre_engine {
                 r
             } else {
                 Rect::centered(at, block.width + 4.0, block.height)
@@ -1661,7 +1811,14 @@ pub fn render_with(
     // The layout's origin: mermaid's ELK layout puts the root's contents inside
     // its 12px padding, dagre inside its 8px `marginx` / `marginy`; the viewBox
     // (`setupViewPortForSVG`) then starts at the drawing's bbox less the padding.
-    let origin = if elk { ELK_ORIGIN } else { 8.0 };
+    // (The port of mermaid's own dagre renderer already lays out inside them.)
+    let origin = if elk {
+        ELK_ORIGIN
+    } else if dagre_engine {
+        0.0
+    } else {
+        8.0
+    };
     let shift = |els: Vec<Element>| -> Vec<Element> {
         els.into_iter()
             .map(|e| e.translated(origin, origin))
@@ -1830,6 +1987,249 @@ pub(crate) fn edge_routing(layout: LayoutAlgorithm) -> EdgeRouting {
     }
 }
 
+/// mermaid's `cutPathAtIntersect`: `points` up to where they first enter the
+/// `width` × `height` box centred on `c`, ending at that crossing (by
+/// `intersection`).
+fn cut_path_at_intersect(points: &[Point], (c, width, height): (Point, f64, f64)) -> Vec<Point> {
+    let (w, h) = (width / 2.0, height / 2.0);
+    // On the border is outside (give or take the last bits, which our text
+    // widths do not reproduce anyway).
+    const ULP: f64 = 1e-9;
+    let outside = |p: Point| (p.x - c.x).abs() >= w - ULP || (p.y - c.y).abs() >= h - ULP;
+    let mut out: Vec<Point> = Vec::new();
+    let Some(&first) = points.first() else {
+        return out;
+    };
+    let mut last_outside = first;
+    let mut inside = false;
+    for &p in points {
+        if !outside(p) && !inside {
+            let at = rect_intersection(c, w, h, last_outside, p);
+            if !out.iter().any(|q| q.x == at.x && q.y == at.y) {
+                out.push(at);
+            }
+            inside = true;
+        } else {
+            last_outside = p;
+            if !inside {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// mermaid's `intersection(node, outsidePoint, insidePoint)` for the box of
+/// half-size `w` × `h` centred on `c`.
+fn rect_intersection(c: Point, w: f64, h: f64, outside: Point, inside: Point) -> Point {
+    // An outside point on the border gives an offset of exactly 0 (and then
+    // the outside point itself); rounding noise in the last bits counts as 0.
+    let snap = |v: f64| if v.abs() < 1e-9 { 0.0 } else { v };
+    let q_full = (outside.y - inside.y).abs();
+    let r_full = (outside.x - inside.x).abs();
+    if (c.y - outside.y).abs() * w > (c.x - outside.x).abs() * h {
+        let q = snap(if inside.y < outside.y {
+            outside.y - h - c.y
+        } else {
+            c.y - h - outside.y
+        });
+        let r = r_full * q / q_full;
+        let mut res = Point::new(
+            if inside.x < outside.x {
+                inside.x + r
+            } else {
+                inside.x - r_full + r
+            },
+            if inside.y < outside.y {
+                inside.y + q_full - q
+            } else {
+                inside.y - q_full + q
+            },
+        );
+        if r == 0.0 {
+            res = outside;
+        }
+        if r_full == 0.0 {
+            res.x = outside.x;
+        }
+        if q_full == 0.0 {
+            res.y = outside.y;
+        }
+        res
+    } else {
+        let r = snap(if inside.x < outside.x {
+            outside.x - w - c.x
+        } else {
+            c.x - w - outside.x
+        });
+        let q = q_full * r / r_full;
+        let mut res = Point::new(
+            if inside.x < outside.x {
+                inside.x + r_full - r
+            } else {
+                inside.x - r_full + r
+            },
+            if inside.y < outside.y {
+                inside.y + q
+            } else {
+                inside.y - q
+            },
+        );
+        if r == 0.0 {
+            res = outside;
+        }
+        if r_full == 0.0 {
+            res.x = outside.x;
+        }
+        if q_full == 0.0 {
+            res.y = outside.y;
+        }
+        res
+    }
+}
+
+/// `utils.calcLabelPosition`: the point half way along `points`.
+fn calc_label_position(points: &[Point]) -> Point {
+    if points.len() == 1 {
+        return points[0];
+    }
+    let total: f64 = points.windows(2).map(|w| w[0].dist(w[1])).sum();
+    let mut remaining = total / 2.0;
+    let round5 = |v: f64| (v * 1e5).round() / 1e5;
+    for w in points.windows(2) {
+        let (prev, p) = (w[0], w[1]);
+        let d = p.dist(prev);
+        if d == 0.0 {
+            return prev;
+        }
+        if d < remaining {
+            remaining -= d;
+        } else {
+            let r = remaining / d;
+            if r <= 0.0 {
+                return prev;
+            }
+            if r >= 1.0 {
+                return p;
+            }
+            return Point::new(
+                round5((1.0 - r) * prev.x + r * p.x),
+                round5((1.0 - r) * prev.y + r * p.y),
+            );
+        }
+    }
+    points.last().copied().unwrap_or_default()
+}
+
+/// `utils.isLabelCoordinateInPath`: whether the rounded `x` or `y` of `p`
+/// occurs anywhere in the path data (its decimals rounded too), as text.
+fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd]) -> bool {
+    // JS `Math.round` (half up) and number printing.
+    let js_round = |v: f64| ((v + 0.5).floor() as i64).to_string();
+    // The `d` d3 writes, each `\d+\.\d+` replaced by its rounded value.
+    let n = |v: f64| {
+        if v.fract() == 0.0 {
+            format!("{}", v as i64)
+        } else if v < 0.0 {
+            format!("-{}", js_round(-v))
+        } else {
+            js_round(v)
+        }
+    };
+    let mut d = String::new();
+    for c in cmds {
+        match *c {
+            geom::PathCmd::MoveTo(a) => d += &format!("M{},{}", n(a.x), n(a.y)),
+            geom::PathCmd::LineTo(a) => d += &format!("L{},{}", n(a.x), n(a.y)),
+            geom::PathCmd::CubicTo(a, b, e) => {
+                d += &format!(
+                    "C{},{},{},{},{},{}",
+                    n(a.x),
+                    n(a.y),
+                    n(b.x),
+                    n(b.y),
+                    n(e.x),
+                    n(e.y)
+                )
+            }
+            geom::PathCmd::Close => d += "Z",
+        }
+    }
+    d.contains(&js_round(p.x)) || d.contains(&js_round(p.y))
+}
+
+/// The order subgraphs close in (flowDb pushes a subgraph at its `end`): a
+/// post-order walk of the subgraph forest, siblings in declaration order.
+pub(crate) fn closing_order(clusters: &[Cluster]) -> Vec<usize> {
+    fn post(clusters: &[Cluster], parent: Option<ClusterId>, out: &mut Vec<usize>, depth: usize) {
+        if depth > clusters.len() {
+            return;
+        }
+        for (ci, c) in clusters.iter().enumerate() {
+            if c.parent == parent && Some(ClusterId(ci)) != parent {
+                post(clusters, Some(ClusterId(ci)), out, depth + 1);
+                out.push(ci);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    post(clusters, None, &mut out, 0);
+    out
+}
+
+/// The ids and node order mermaid's dagre renderer keys its graph by: flowDb's
+/// `getData` pushes the subgraphs first, last closed first (an empty one as a
+/// plain node), then the vertices in the order they were first seen.
+fn dagre_model(
+    g: &GraphDiagram,
+    nodes: &[Node],
+    empty_of: &[Option<usize>],
+    pos_of: &[usize],
+) -> crate::layout::dagre::DagreModel {
+    use crate::layout::dagre::{DagreItem, DagreModel};
+    let mut node_names = vec![String::new(); nodes.len()];
+    for (i, n) in nodes.iter().enumerate() {
+        node_names[pos_of[i]] = n.id.clone();
+    }
+    for (ci, p) in empty_of.iter().enumerate() {
+        if let Some(p) = *p {
+            node_names[pos_of[p]] = g.clusters[ci].id.clone();
+        }
+    }
+    // Collapsed subgraphs take their place among the expanded ones.
+    let mut folded: Vec<(usize, usize)> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| n.group_seq.map(|k| (k, i)))
+        .collect();
+    folded.sort_by_key(|&(k, _)| k);
+    let mut order: Vec<DagreItem> = Vec::new();
+    let mut next = folded.iter().peekable();
+    for (j, ci) in closing_order(&g.clusters).into_iter().rev().enumerate() {
+        while let Some(&&(_, i)) = next.peek().filter(|f| f.0 <= j) {
+            order.push(DagreItem::Node(pos_of[i]));
+            next.next();
+        }
+        order.push(match empty_of[ci] {
+            Some(p) => DagreItem::Node(pos_of[p]),
+            None => DagreItem::Cluster(ci),
+        });
+    }
+    order.extend(next.map(|&(_, i)| DagreItem::Node(pos_of[i])));
+    order.extend(
+        (0..g.nodes.len())
+            .filter(|&i| g.nodes[i].group_seq.is_none())
+            .map(|i| DagreItem::Node(pos_of[i])),
+    );
+    DagreModel {
+        node_names,
+        cluster_names: g.clusters.iter().map(|c| c.id.clone()).collect(),
+        order,
+        cluster_td: g.clusters.iter().map(|c| c.direction_td).collect(),
+    }
+}
+
 /// The clipped first point of `pts` (which starts at node `b`). A dagre route
 /// starts at the node's centre and is cut where the line toward the next point
 /// leaves the outline; an orthogonal (ELK) route starts at a port on the node's
@@ -1903,7 +2303,7 @@ fn clip_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
 /// first segment). `port` if the line misses the outline.
 pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
     let center = match b {
-        Boundary::Rect(r) => r.center(),
+        Boundary::Rect(r) | Boundary::Cylinder(r, _) => r.center(),
         Boundary::Ellipse(c, _, _) | Boundary::Polygon(c, _) | Boundary::Outline(c, _) => *c,
     };
     let inward = port.minus(next);
@@ -1920,7 +2320,7 @@ pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
     let inner = port.plus(d.scale(depth));
     let out = d.scale(-1.0);
     let t = match b {
-        Boundary::Rect(r) => {
+        Boundary::Rect(r) | Boundary::Cylinder(r, _) => {
             let exit = |p: f64, v: f64, lo: f64, hi: f64| {
                 if v > 1e-12 {
                     (hi - p) / v
@@ -3377,6 +3777,44 @@ fn entity_table_elements(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn label_position_is_half_way_along_and_stops_at_a_repeat() {
+        let p = Point::new;
+        let mid = calc_label_position(&[p(0.0, 0.0), p(10.0, 0.0), p(10.0, 10.0)]);
+        assert_eq!(mid, p(10.0, 0.0));
+        let mid = calc_label_position(&[p(0.0, 0.0), p(0.0, 0.0), p(0.0, 10.0)]);
+        assert_eq!(mid, p(0.0, 0.0), "a zero-length step returns its start");
+    }
+
+    #[test]
+    fn label_coordinate_is_looked_up_as_text() {
+        let p = Point::new;
+        let d = [
+            geom::PathCmd::MoveTo(p(12.4, 150.6)),
+            geom::PathCmd::LineTo(p(-3.5, 40.0)),
+        ];
+        // "M12,151L-4,40": 15 is inside "151", 4 inside "-4".
+        assert!(label_coordinate_in_path(p(15.2, 999.0), &d));
+        assert!(label_coordinate_in_path(p(999.0, 3.6), &d));
+        assert!(!label_coordinate_in_path(p(77.0, 99.0), &d));
+    }
+
+    #[test]
+    fn cut_path_stops_at_the_frame() {
+        let p = Point::new;
+        let r = (p(50.0, 50.0), 100.0, 100.0);
+        // `intersection` measures its offset from the inside point's side.
+        let cut = cut_path_at_intersect(&[p(80.0, 160.0), p(50.0, 50.0)], r);
+        assert_eq!(cut[0], p(80.0, 160.0));
+        assert!((cut[1].x - (50.0 + 30.0 * 60.0 / 110.0)).abs() < 1e-9 && cut[1].y == 100.0);
+        // Met straight on, it returns the outside point (`r === 0`): no new one.
+        let cut = cut_path_at_intersect(&[p(50.0, 200.0), p(50.0, 150.0), p(50.0, 50.0)], r);
+        assert_eq!(cut, vec![p(50.0, 200.0), p(50.0, 150.0)]);
+        // A point on the border counts as outside.
+        let cut = cut_path_at_intersect(&[p(50.0, 150.0), p(50.0, 100.0), p(50.0, 50.0)], r);
+        assert_eq!(cut, vec![p(50.0, 150.0), p(50.0, 100.0)]);
+    }
 
     #[test]
     fn empty_members_keep_their_divider_two_gaps_down() {

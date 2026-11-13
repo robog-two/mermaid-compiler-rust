@@ -2235,6 +2235,7 @@ mod tests {
             inner_rank_sep: 24.0,
             routing: EdgeRouting::Splines,
             dagre_groups: false,
+            dagre: None,
         }
     }
 

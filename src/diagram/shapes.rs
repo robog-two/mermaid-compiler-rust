@@ -385,6 +385,9 @@ pub enum Boundary {
     /// A possibly concave outline clipped like `intersect.polygon`: of the crossings
     /// between the centre and the outer point, the one nearest the outer point.
     Outline(Point, Vec<Point>),
+    /// A cylinder: its bounding box and end-cap radius `ry`, clipped as
+    /// `cylinder.ts`'s `intersect` does (the box's crossing, moved by the cap).
+    Cylinder(Rect, f64),
 }
 
 impl Boundary {
@@ -394,8 +397,32 @@ impl Boundary {
             Boundary::Ellipse(c, rx, ry) => geom::clip_ellipse(*c, *rx, *ry, toward),
             Boundary::Polygon(c, pts) => geom::clip_polygon(*c, pts, toward),
             Boundary::Outline(c, pts) => outline_clip(*c, pts, toward),
+            Boundary::Cylinder(r, ry) => cylinder_clip(r, *ry, toward),
         }
     }
+}
+
+/// `cylinder.ts`'s `intersect`: the bounding box's crossing, moved along y by
+/// what the end cap's ellipse (`rx` = half the width) leaves of `ry` there.
+fn cylinder_clip(r: &Rect, ry: f64, toward: Point) -> Point {
+    let c = r.center();
+    let mut pos = geom::intersect_rect(r, toward);
+    let rx = r.w / 2.0;
+    let x = pos.x - c.x;
+    if rx != 0.0
+        && (x.abs() < r.w / 2.0 || (x.abs() == r.w / 2.0 && (pos.y - c.y).abs() > r.h / 2.0 - ry))
+    {
+        let mut y = ry * ry * (1.0 - x * x / (rx * rx));
+        if y > 0.0 {
+            y = y.sqrt();
+        }
+        y = ry - y;
+        if toward.y - c.y > 0.0 {
+            y = -y;
+        }
+        pos.y += y;
+    }
+    pos
 }
 
 /// How a part of an outline is painted.
@@ -579,7 +606,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             }
             Outline {
                 parts,
-                boundary: Boundary::Rect(r),
+                boundary: Boundary::Cylinder(r, ry),
                 glyphs: Vec::new(),
             }
         }
@@ -1703,6 +1730,24 @@ fn local(shape: Shape, tw: f64, th: f64, m: &ShapeMetrics) -> Option<Local> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cylinder_clips_as_cylinder_ts() {
+        // A 144 x 85.15 cylinder with 13.38 caps, met on its side from above:
+        // the box's crossing moved down by the whole cap.
+        let r = Rect::centered(
+            Point::new(370.0, 212.57434844970703),
+            144.0,
+            85.14869888475836,
+        );
+        let b = Boundary::Cylinder(r, 13.382899628252789);
+        let p = b.clip(Point::new(503.0, 148.29));
+        assert!((p.x - 442.0).abs() < 1e-9, "{p:?}");
+        assert!((p.y - 191.155).abs() < 2e-2, "{p:?}");
+        // Through the top cap: the ellipse's depth there.
+        let top = b.clip(Point::new(370.0, 0.0));
+        assert!((top.y - r.y).abs() < 1e-9, "{top:?}");
+    }
 
     fn sized(shape: Shape, tw: f64, th: f64, p: f64) -> ShapeSize {
         size(shape, tw, th, &ShapeMetrics::classic(shape, p), false).unwrap()

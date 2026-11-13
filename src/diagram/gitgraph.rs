@@ -529,7 +529,8 @@ pub fn layout(g: &GitGraph, gc: &GitConfig) -> Layout {
         // mermaid's `setBranchPosition`.
         p += 50.0 + if gc.rotate_commit_label { 40.0 } else { 0.0 };
         if vertical {
-            p += line_width(&g.branches[b].name, BRANCH_FONT, false) / 2.0;
+            // (Half the label's `getBBox` width: the ink's.)
+            p += svg_bbox_width(&g.branches[b].name, BRANCH_FONT) / 2.0;
         }
     }
     // Commit step: mermaid uses 50; with horizontal LR labels widen it so
@@ -598,8 +599,10 @@ fn commit_label_geometry(
     id: &str,
     rotate: bool,
 ) -> (Rect, Text, Option<(Point, f64)>) {
-    let w = line_width(id, LABEL_FONT, false);
-    let h = LABEL_FONT * 1.2;
+    // `drawCommitLabel` sizes the box by the text's `getBBox()`: the ink's
+    // width, 11px tall at 10px (12 with a deep descender).
+    let w = svg_bbox_width(id, LABEL_FONT);
+    let h = svg_line_box(LABEL_FONT, id);
     let text = |x: f64, y: f64| Text {
         x,
         y,
@@ -907,7 +910,13 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             // the axis start in TB / BT.
             let tb = TextBlock::svg(vec![br.name.clone()], BRANCH_FONT, false);
             let (pad_x, pad_y) = if st.redux { (16.0, 12.0) } else { (0.0, 0.0) };
-            let (w, h) = (tb.width + 18.0 + pad_x, tb.height + 4.0 + pad_y);
+            // (Its width is the ink's, as `getBBox` measures it.)
+            let tw = if st.redux {
+                tb.width
+            } else {
+                svg_bbox_width(&br.name, BRANCH_FONT)
+            };
+            let (w, h) = (tw + 18.0 + pad_x, tb.height + 4.0 + pad_y);
             // mermaid's `drawBranches`: LR labels move 30px further left when
             // commit labels are rotated (they lean towards the branch label).
             let rot_shift = if gc.rotate_commit_label { 30.0 } else { 0.0 };
@@ -917,11 +926,9 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 (0.0, 0.0)
             };
             let rect = match o {
-                Orientation::LR => {
-                    Rect::new(-tb.width - 4.0 - rot_shift - 19.0, across - h / 2.0, w, h)
-                }
-                Orientation::TB => Rect::new(across - tb.width / 2.0 - 10.0 + dx, -dy, w, h),
-                Orientation::BT => Rect::new(across - tb.width / 2.0 - 10.0 + dx, hi + dy, w, h),
+                Orientation::LR => Rect::new(-tw - 4.0 - rot_shift - 19.0, across - h / 2.0, w, h),
+                Orientation::TB => Rect::new(across - tw / 2.0 - 10.0 + dx, -dy, w, h),
+                Orientation::BT => Rect::new(across - tw / 2.0 - 10.0 + dx, hi + dy, w, h),
             };
             bounds.add_rect(rect);
             let k = st.branch_index(lay.lane_index[b]);
@@ -1265,8 +1272,15 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
         // y = -titleTopMargin (not above the drawing's top).
         let r = bounds.rect();
         let (x, y) = (r.center().x, -gc.title_top_margin);
+        // (Its box: the font's rounded ascent above the baseline, as
+        // `getBBox` measures text.)
         let w = line_width(t, 18.0, false);
-        bounds.add_rect(Rect::new(x - w / 2.0, y - 0.905 * 18.0, w, 1.117 * 18.0));
+        bounds.add_rect(Rect::new(
+            x - w / 2.0,
+            y - (0.905f64 * 18.0).round(),
+            w,
+            svg_line_box(18.0, t),
+        ));
         els.push(Element::classed_text(
             Text {
                 x,
@@ -1495,8 +1509,9 @@ mod tests {
         assert_eq!(rot.len(), 2);
         // Background and text turn together by -45°.
         assert!(rot.iter().all(|(d, _, n)| *d == -45.0 && *n == 2));
-        // LR: about (pos, y) shifted by mermaid's (r_x, r_y).
-        let w = line_width("abc", LABEL_FONT, false);
+        // LR: about (pos, y) shifted by mermaid's (r_x, r_y), from the label's
+        // `getBBox` width.
+        let w = svg_bbox_width("abc", LABEL_FONT);
         let (dx, dy) = (-7.5 - (w + 10.0) / 25.0 * 9.5, 10.0 + w / 25.0 * 8.5);
         assert!((rot[0].1.x - (0.0 + dx)).abs() < 1e-9, "{rot:?}");
         assert!((rot[0].1.y - dy).abs() < 1e-9);
@@ -1606,7 +1621,7 @@ mod tests {
         }
         walk(&s.elements, &mut rect, &mut title);
         let r = rect.unwrap();
-        let tw = line_width("main", 16.0, false);
+        let tw = svg_bbox_width("main", 16.0);
         assert!((r.w - (tw + 18.0)).abs() < 1e-9 && r.h == 21.0, "{r:?}");
         assert!((r.x - (-tw - 53.0)).abs() < 1e-9, "{r:?}");
         assert_eq!(title.unwrap().y, -25.0);
