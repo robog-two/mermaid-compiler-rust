@@ -703,7 +703,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             &ext_off,
         );
         if elk {
-            li.hier.loop_high = loop_sides(
+            (li.hier.loop_high, li.hier.loop_slot) = loop_sides(
                 &tree,
                 &ends,
                 segs.as_deref().unwrap_or_default(),
@@ -712,6 +712,46 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 &ports_set,
                 &import,
             );
+            // Loops going round opposite sides of a container nest apart, so
+            // its margins hold the legs of the side with the most of them (one
+            // `spacing.nodeSelfLoop` was reserved for every loop).
+            let loop_ext = super::self_loop_ext(if scope.is_none() {
+                ElkGraph::Root
+            } else {
+                ElkGraph::Container { separate: false }
+            });
+            let mut sides: Vec<(usize, [usize; 2])> = Vec::new();
+            for (k, seg) in li.seg_of.iter().enumerate() {
+                let looped = seg.is_some_and(|s| {
+                    s.from == s.to
+                        && matches!(
+                            (s.from, li.hier.ports.get(k)),
+                            (SegEnd::Box(_), Some((Some(_), Some(_))))
+                        )
+                });
+                if !looped {
+                    continue;
+                }
+                let v = li.flat.edges[k].from;
+                let side = usize::from(li.hier.loop_high.get(k).copied().unwrap_or(false));
+                match sides.iter_mut().find(|(w, _)| *w == v) {
+                    Some((_, n)) => n[side] += 1,
+                    None => {
+                        let mut n = [0, 0];
+                        n[side] = 1;
+                        sides.push((v, n));
+                    }
+                }
+            }
+            for (v, [low, high]) in sides {
+                // The first leg `spacing.nodeSelfLoop` out, each further one
+                // `spacing.edgeEdge` (20 in every graph) beyond.
+                let held = loop_ext + super::SELF_LOOP_EXT * (low.max(high) - 1) as f64;
+                let spare = loop_ext * (low + high) as f64 - held;
+                if let Some(m) = li.hier.margins.get_mut(v) {
+                    *m = (m.0 - spare, m.1 - spare);
+                }
+            }
         }
         // A container whose run holds no other graph may be split.
         let alone = !scopes
@@ -1144,8 +1184,11 @@ fn loop_sides(
     ext_off: &ExtPorts,
     ports_set: &[[bool; 2]],
     import: &[usize],
-) -> Vec<bool> {
+) -> (Vec<bool>, Vec<usize>) {
     let ne = ends.len();
+    // Per container: its loops (level edge, their span in its port list:
+    // first and last index clockwise, the list's length).
+    let mut spans: Vec<(usize, Vec<LoopSpan>)> = Vec::new();
     let within = |m: Member, c: usize| match m {
         Member::Node(v) => tree.input.nodes[v]
             .cluster
@@ -1227,8 +1270,74 @@ fn loop_sides(
                 .sum()
         };
         high[k] = pen(e, w) <= pen(w, e);
+        let span = if high[k] { (e, w) } else { (w, e) };
+        let entry = (k, span.0, span.1, n);
+        match spans.iter_mut().find(|(cc, _)| *cc == c) {
+            Some((_, list)) => list.push(entry),
+            None => spans.push((c, vec![entry])),
+        }
     }
-    high
+    let mut slot = vec![0usize; li.seg_of.len()];
+    for (_, loops) in &spans {
+        for (k, s) in routing_slots(loops) {
+            slot[k] = s;
+        }
+    }
+    (high, slot)
+}
+
+/// A loop on a container: its level edge, the first and last index of its
+/// span clockwise in the container's port list, the list's length.
+type LoopSpan = (usize, usize, usize, usize);
+
+/// ELK's `RoutingSlotAssigner` for the loops on one container (each: its
+/// level edge, the first and last index of its span clockwise in the port
+/// list, the list's length): a loop goes outside another where that crosses
+/// fewer of their ports (a loop crosses those of the other's within its own
+/// span); slots count up from the node, each loop one beyond the loops it must
+/// stay outside of. Where it is a tie with crossings either way ELK breaks the
+/// cycle at random (`breakNonCriticalCycles`); here the earlier loop stays
+/// inside, which is how mermaid's runs came out.
+fn routing_slots(loops: &[LoopSpan]) -> Vec<(usize, usize)> {
+    let active = |l: &LoopSpan, i: usize| {
+        let (_, a, b, n) = *l;
+        (i + n - a) % n <= (b + n - a) % n
+    };
+    // `crossings(u, l)`: ports of loop `u` within the span of loop `l`, were
+    // `u` routed outside it.
+    let crossings = |u: usize, l: usize| {
+        usize::from(active(&loops[l], loops[u].1)) + usize::from(active(&loops[l], loops[u].2))
+    };
+    let m = loops.len();
+    // `outside[i]`: the loops loop `i` must stay outside of.
+    let mut outside: Vec<Vec<usize>> = vec![Vec::new(); m];
+    for i in 0..m {
+        for j in i + 1..m {
+            let (ij, ji) = (crossings(i, j), crossings(j, i));
+            if ij < ji {
+                outside[i].push(j);
+            } else if ji < ij || ij > 0 {
+                // Cheaper, or a tie with crossings: the earlier stays inside.
+                outside[j].push(i);
+            }
+        }
+    }
+    let mut slot = vec![None; m];
+    fn level(i: usize, outside: &[Vec<usize>], slot: &mut [Option<usize>]) -> usize {
+        if let Some(s) = slot[i] {
+            return s;
+        }
+        let s = outside[i]
+            .iter()
+            .map(|&j| level(j, outside, slot) + 1)
+            .max()
+            .unwrap_or(0);
+        slot[i] = Some(s);
+        s
+    }
+    (0..m)
+        .map(|i| (loops[i].0, level(i, &outside, &mut slot)))
+        .collect()
 }
 
 /// The key of an edge's port on a container: the edge, but for the port
@@ -2141,6 +2250,32 @@ mod tests {
             && outer.y <= inner.y + 1e-6
             && outer.right() >= inner.right() - 1e-6
             && outer.bottom() >= inner.bottom() - 1e-6
+    }
+
+    /// ELK's `RoutingSlotAssigner`: a loop whose span holds another's ports
+    /// goes outside it; where both hold each other's (a tie with crossings)
+    /// the earlier stays inside.
+    #[test]
+    fn routing_slots_nest_loops_by_their_spans() {
+        // Port list of 6: loop 7 spans 0..=5, loop 8 spans 1..=4.
+        assert_eq!(
+            crate::layout::nested::routing_slots(&[(7, 0, 5, 6), (8, 1, 4, 6)]),
+            vec![(7, 1), (8, 0)]
+        );
+        assert_eq!(
+            crate::layout::nested::routing_slots(&[(8, 1, 4, 6), (7, 0, 5, 6)]),
+            vec![(8, 0), (7, 1)]
+        );
+        // Interleaved: 0..=2 and 1..=3.
+        assert_eq!(
+            crate::layout::nested::routing_slots(&[(1, 0, 2, 4), (2, 1, 3, 4)]),
+            vec![(1, 0), (2, 1)]
+        );
+        // Apart: no crossings, both next to the node.
+        assert_eq!(
+            crate::layout::nested::routing_slots(&[(1, 0, 1, 4), (2, 2, 3, 4)]),
+            vec![(1, 0), (2, 0)]
+        );
     }
 
     #[test]

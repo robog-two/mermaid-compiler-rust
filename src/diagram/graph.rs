@@ -3716,6 +3716,124 @@ mod tests {
         assert!(ba + 40.0 < ab, "{ab} {ba}");
     }
 
+    /// Loops round a container whose ports keep their sides (mermaid 12.3.0):
+    /// they nest by ELK's routing slots, each leg `spacing.edgeEdge` (20)
+    /// beyond the one inside it; loops round opposite sides nest apart; a
+    /// label stands on its loop's leg.
+    #[test]
+    fn elk_loops_round_a_container_nest() {
+        fn find<'a>(e: &'a Element, id: &str) -> Option<&'a [Element]> {
+            match e {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i == id => Some(children.as_slice()),
+                Element::Group { children, .. } => children.iter().find_map(|c| find(c, id)),
+                _ => None,
+            }
+        }
+        let group = |scene: &Scene, id: &str| -> Vec<Element> {
+            scene
+                .elements
+                .iter()
+                .find_map(|e| find(e, id))
+                .unwrap_or_else(|| panic!("no {id}"))
+                .to_vec()
+        };
+        let frame = |scene: &Scene| -> Rect {
+            group(scene, "cluster-C0")
+                .iter()
+                .find_map(|e| match e {
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        class,
+                        ..
+                    } if class.as_deref() != Some("drop-shadow") => Some(*rect),
+                    _ => None,
+                })
+                .expect("frame")
+        };
+        // Leftmost, rightmost and lowest point of a loop's path.
+        let extent = |scene: &Scene, id: &str| -> (f64, f64, f64) {
+            let els = group(scene, id);
+            let Some(Element::Shape {
+                geom: Geometry::Path(cmds),
+                ..
+            }) = els.first()
+            else {
+                panic!("path {id}");
+            };
+            let pts: Vec<Point> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(*p),
+                    _ => None,
+                })
+                .collect();
+            let xs = pts.iter().map(|p| p.x);
+            (
+                xs.clone().fold(f64::INFINITY, f64::min),
+                xs.fold(f64::NEG_INFINITY, f64::max),
+                pts.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
+            )
+        };
+        let render = |src: &str| {
+            crate::render::render(src, &crate::config::MermaidConfig::default())
+                .expect("renders")
+                .scene
+        };
+        let near = |a: f64, b: f64| (a - b).abs() < 0.5;
+        let base = "  subgraph C0\n    c0n0\n  end\n  x0\n  x0 --> C0\n  c0n0 --> x0\n  \
+                    C0 --> c0n0\n  c0n0 --> C0\n";
+        // Two loops left to right, round the bottom: the second, whose ports
+        // are the lower ones, inside (mermaid: frame 254..514 x 12..144; legs
+        // at 554 / 534 east, 204 / 224 west, 196 / 176 below).
+        let scene = render(&format!("flowchart LR\n{base}  C0 --> C0\n  C0 --> C0\n"));
+        let f = frame(&scene);
+        let (w0, e0, b0) = extent(&scene, "L-C0-C0-4");
+        let (w1, e1, b1) = extent(&scene, "L-C0-C0-5");
+        assert!(
+            near(e0 - f.right(), 40.0) && near(e1 - f.right(), 20.0),
+            "{e0} {e1} {f:?}"
+        );
+        assert!(
+            near(f.x - w0, 50.0) && near(f.x - w1, 30.0),
+            "{w0} {w1} {f:?}"
+        );
+        assert!(
+            near(b0 - f.bottom(), 52.0) && near(b1 - f.bottom(), 32.0),
+            "{b0} {b1} {f:?}"
+        );
+        // Labelled, each stands on its leg's middle, the leg one half its
+        // label further out (mermaid: 231.5 and 186.5).
+        let scene = render(&format!(
+            "flowchart LR\n{base}  C0 -->|one| C0\n  C0 -->|two| C0\n"
+        ));
+        let f = frame(&scene);
+        let (_, _, b0) = extent(&scene, "L-C0-C0-4");
+        let (_, _, b1) = extent(&scene, "L-C0-C0-5");
+        assert!(
+            near(b0 - f.bottom(), 87.5) && near(b1 - f.bottom(), 42.5),
+            "{b0} {b1} {f:?}"
+        );
+        // Top down, one loop round the left and two round the right: the left
+        // one's legs stand as the innermost right one's (mermaid: frame
+        // 32..232 x 147..333; legs below at 353, 373 and 353).
+        let scene = render(
+            "flowchart TD\n  subgraph C0\n    c0n0 --> c0n1\n  end\n  x0 --> c0n0\n  \
+             C0 --> C0\n  C0 --> C0\n  C0 --> C0\n",
+        );
+        let f = frame(&scene);
+        let below: Vec<f64> = (2..5)
+            .map(|i| extent(&scene, &format!("L-C0-C0-{i}")).2 - f.bottom())
+            .collect();
+        assert!(
+            near(below[0], 20.0) && near(below[1], 40.0) && near(below[2], 20.0),
+            "{below:?}"
+        );
+    }
+
     #[test]
     fn elk_loop_on_a_cluster_stands_off_its_side_across_the_flow() {
         // As ELK's self-loop on the container's node (mermaid: frame 32,12

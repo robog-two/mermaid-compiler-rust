@@ -263,6 +263,9 @@ struct Hierarchy {
     /// sides that goes round the high cross-axis side (see
     /// `nested::loop_sides`).
     loop_high: Vec<bool>,
+    /// Per edge (empty: none): such a loop's routing slot, counted out from
+    /// the container on the side it goes round (see `nested::routing_slots`).
+    loop_slot: Vec<usize>,
 }
 
 /// ELK's `InvertedPortProcessor`: where cycle breaking reverses an edge at a node
@@ -1093,6 +1096,10 @@ fn finish_rng(
     let mut loop_half = vec![0.0f64; input.edges.len()];
     let mut loop_reach = vec![0.0f64; n];
     let mut loop_reach_high = vec![0.0f64; n];
+    // Per loop round a container whose ports keep their sides: how many legs
+    // its container's margins hold outside its own (the side with the most
+    // loops sets them).
+    let mut loop_level = vec![0.0f64; input.edges.len()];
     let loop_high = |ei: usize| hier.loop_high.get(ei).copied().unwrap_or(false);
     if matches!(input.routing, EdgeRouting::Orthogonal(_)) {
         let mut loops = vec![0usize; n];
@@ -1100,7 +1107,50 @@ fn finish_rng(
             loops[e.from] += 1;
         }
         let mut seen = vec![0usize; n];
-        for (ei, e) in input.edges.iter().enumerate() {
+        // Loops round a container whose ports keep their sides nest by their
+        // routing slots (ELK's `RoutingSlotAssigner`), innermost first.
+        let fixed_ports = |ei: usize| match hier.ports.get(ei).copied() {
+            Some((Some(fs), Some(ft)))
+                if input.edges[ei].from == input.edges[ei].to
+                    && hier.side_fixed.get(input.edges[ei].from) == Some(&true) =>
+            {
+                Some((fs, ft))
+            }
+            _ => None,
+        };
+        // Those loops take, in their nesting order, the places the edge order
+        // gives their group; the rest keep theirs.
+        let mut slots: Vec<usize> = (0..input.edges.len()).collect();
+        {
+            let mut groups: std::collections::BTreeMap<(usize, bool), Vec<usize>> =
+                std::collections::BTreeMap::new();
+            for ei in (0..input.edges.len()).filter(|&ei| fixed_ports(ei).is_some()) {
+                groups
+                    .entry((input.edges[ei].from, loop_high(ei)))
+                    .or_default()
+                    .push(ei);
+            }
+            // The container's margins hold the side with the most loops.
+            let most = |v: usize| {
+                groups
+                    .iter()
+                    .filter(|((w, _), _)| *w == v)
+                    .map(|(_, g)| g.len())
+                    .max()
+                    .unwrap_or(0)
+            };
+            let most: Vec<usize> = groups.keys().map(|&(v, _)| most(v)).collect();
+            for ((_, mut group), m) in groups.into_iter().zip(most) {
+                let positions = group.clone();
+                group.sort_by_key(|&ei| hier.loop_slot.get(ei).copied().unwrap_or(0));
+                for (k, (&slot, &ei)) in positions.iter().zip(&group).enumerate() {
+                    slots[slot] = ei;
+                    loop_level[ei] = (m - 1 - k) as f64;
+                }
+            }
+        }
+        for ei in slots {
+            let e = &input.edges[ei];
             if e.from != e.to {
                 continue;
             }
@@ -1120,9 +1170,16 @@ fn finish_rng(
             } else {
                 self_loop_ext(graph)
             };
-            *reach = loop_out[ei]
-                + e.label
-                    .map_or(0.0, |(lw, lh)| SELF_LOOP_LABEL_GAP + swap(lw, lh).0);
+            let across = e.label.map(|(lw, lh)| swap(lw, lh).0);
+            if fixed_ports(ei).is_some() {
+                // Round a container its label stands on its leg, which runs
+                // through the label's middle.
+                let half = across.map_or(0.0, |a| a / 2.0);
+                loop_out[ei] += half;
+                *reach = loop_out[ei] + across.map_or(0.0, |_| half + SELF_LOOP_LABEL_GAP);
+            } else {
+                *reach = loop_out[ei] + across.map_or(0.0, |a| SELF_LOOP_LABEL_GAP + a);
+            }
         }
     }
     let gap = |a: usize, b: usize| -> f64 {
@@ -1543,7 +1600,11 @@ fn finish_rng(
                         && hier.side_fixed.get(v).copied().unwrap_or(false)
                     {
                         let (top, bottom) = (cy - verts[v].h / 2.0, cy + verts[v].h / 2.0);
+                        // The container's margins hold the outermost loop's
+                        // legs; each one inside stands `spacing.edgeEdge` nearer.
                         let (before, after) = hier.margins.get(v).copied().unwrap_or_default();
+                        let inside = SELF_LOOP_EXT * loop_level[ei];
+                        let (before, after) = (before - inside, after - inside);
                         let high = loop_high(ei);
                         let out = if high {
                             cx + verts[v].w / 2.0 + loop_out[ei]
@@ -1560,15 +1621,7 @@ fn finish_rng(
                         ]
                         .map(to_out)
                         .to_vec();
-                        let label = e.label.map(|(lw, lh)| {
-                            let lw = swap(lw, lh).0;
-                            let at = if high {
-                                out + lw / 2.0 + SELF_LOOP_LABEL_GAP
-                            } else {
-                                out - lw / 2.0 - SELF_LOOP_LABEL_GAP
-                            };
-                            to_out(Point::new(at, cy))
-                        });
+                        let label = e.label.map(|_| to_out(Point::new(out, cy)));
                         return EdgeRoute { points, label };
                     }
                     let points = [
@@ -2216,7 +2269,7 @@ fn elk_label_centre(c: Point, label: Option<(f64, f64)>, horizontal: bool) -> Po
 }
 
 /// How far an orthogonal self-loop stands off its node in the root graph.
-const SELF_LOOP_EXT: f64 = 20.0;
+pub(crate) const SELF_LOOP_EXT: f64 = 20.0;
 
 /// How far an orthogonal self-loop stands off its node: ELK's
 /// `spacing.nodeSelfLoop`, half the graph's `spacing.baseValue` (40 in the
