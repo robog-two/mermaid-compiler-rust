@@ -3061,9 +3061,12 @@ fn node_elements(
     };
     if n.shape == Shape::CollapsedGroup {
         // collapsedGroup.ts: a dashed separator 8px below the title, inset 8px, and three
-        // dots centred in the 20px indicator row (`.collapsed-indicator`: nodeBorder, 50%).
+        // dots centred in the 20px indicator row. flowchart/styles.ts paints both
+        // clusterBorder (the dots at 60%), or the palette slot's border colour.
+        let marker =
+            slot_colors(n.color_slot, pal).map_or(pal.cluster_border.clone(), |s| s.border);
         let sep_y = y0 + shapes::COLLAPSED_PAD + m.block.height + 8.0;
-        let mut sep = Paint::stroke(&pal.cluster_border, 0.75);
+        let mut sep = Paint::stroke(&marker, 0.75);
         sep.dash = Some(vec![3.0, 3.0]);
         els.push(Element::classed_shape(
             Geometry::Path(vec![
@@ -3073,8 +3076,8 @@ fn node_elements(
             sep,
             "collapsed-separator",
         ));
-        let mut dot = Paint::fill(&pal.node_border);
-        dot.opacity = Some(0.5);
+        let mut dot = Paint::fill(&marker);
+        dot.opacity = Some(0.6);
         for i in [-1.0, 0.0, 1.0] {
             els.push(Element::classed_shape(
                 Geometry::Circle {

@@ -274,3 +274,37 @@ fn er_table_lines_take_the_neo_stroke_width() {
     let classic = widths(&format!("---\nconfig:\n  look: classic\n---\n{src}"));
     assert!(classic.iter().all(|w| w == "1"), "{classic:?}");
 }
+
+#[test]
+fn collapsed_subgraph_markers_take_the_slot_colour() {
+    // flowchart/styles.ts: a collapsed subgraph's separator and dots are
+    // clusterBorder (dots at 60%), or its palette slot's border colour.
+    let render = |src: &str| {
+        let r = render::render(src, &MermaidConfig::default()).expect("renders");
+        mmdc::output::encode_svg(&r, &mmdc::output::EncodeOptions::default())
+    };
+    let src = "flowchart LR\n  subgraph a [A]\n    x\n  end\n  subgraph b [B]\n    y\n  end\n  b@{ view: collapsed }\n";
+    let svg = render(src);
+    let dot = svg
+        .split("class=\"collapsed-indicator\"")
+        .nth(1)
+        .expect("dot");
+    assert!(
+        dot.contains("fill=\"#2DD4BF\"") && dot.contains("opacity=\"0.6\""),
+        "{dot:.120}"
+    );
+    let sep = svg
+        .split("class=\"collapsed-separator\"")
+        .nth(1)
+        .expect("separator");
+    assert!(sep.contains("stroke=\"#2DD4BF\""), "{sep:.120}");
+    let classic = render(&format!("---\nconfig:\n  theme: default\n---\n{src}"));
+    let dot = classic
+        .split("class=\"collapsed-indicator\"")
+        .nth(1)
+        .expect("dot");
+    assert!(
+        !dot.contains("#2DD4BF") && dot.contains("opacity=\"0.6\""),
+        "{dot:.120}"
+    );
+}
