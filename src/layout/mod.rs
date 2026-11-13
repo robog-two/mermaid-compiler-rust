@@ -1144,6 +1144,7 @@ fn finish(
             ports,
             &inl,
             &hier.ports,
+            &hier.port_rank,
             &mut hier
                 .route_rng
                 .clone()
@@ -2109,6 +2110,7 @@ fn ortho_plan(
     ports: Option<(Vec<f64>, Vec<f64>)>,
     inl: &[InLayer],
     fixed: &[(Option<f64>, Option<f64>)],
+    port_rank: &[(Option<usize>, Option<usize>)],
     rng: &mut elkorder::JavaRandom,
 ) -> OrthoPlan {
     let max_rank = verts.iter().map(|v| v.rank).max().unwrap_or(0);
@@ -2335,13 +2337,32 @@ fn ortho_plan(
         if list.is_empty() {
             continue;
         }
+        // Node by node, port by port: a container's ports stand in the order
+        // crossing minimisation gave them, which their positions (from its
+        // contents' layout) need not follow.
         let key = |e: &Entry| match e.0 {
-            usize::MAX => in_layer_key(&in_layer[e.1]),
-            _ => (0, e.2.incoming.first().copied().unwrap_or(0.0)),
+            usize::MAX => {
+                let (g, at) = in_layer_key(&in_layer[e.1]);
+                (g, at, at)
+            }
+            ei => {
+                let (a, at) = stops[ei][e.1];
+                let rank = port_rank.get(ei).and_then(|r| r.0).filter(|_| {
+                    let reversed = chains[ei].as_ref().is_some_and(|c| c.2);
+                    let (from, to) = fixed.get(ei).copied().unwrap_or((None, None));
+                    e.1 == 0 && a < n && if reversed { to } else { from }.is_some()
+                });
+                match rank {
+                    Some(r) => (0, x[a], r as f64),
+                    None => (0, if a < n { x[a] } else { at }, at),
+                }
+            }
         };
         list.sort_by(|a, b| {
             let (ka, kb) = (key(a), key(b));
-            ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
+            ka.0.cmp(&kb.0)
+                .then(ka.1.total_cmp(&kb.1))
+                .then(ka.2.total_cmp(&kb.2))
         });
         let segs: Vec<ortho::Trunk> = list.iter().map(|(_, _, j)| j.clone()).collect();
         let out = ortho::assign_slots_trunks(&segs, spacing.edge_edge, rng);

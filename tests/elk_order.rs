@@ -709,3 +709,45 @@ fn labels_of_edges_to_ancestor_containers_take_their_layers() {
         ],
     );
 }
+
+#[test]
+fn a_containers_ports_feed_its_channel_in_port_list_order() {
+    // C0's four edges into the channel above it (BT) cross pairwise with
+    // equal penalties; ELK breaks those ties by the order of its hyperedge
+    // segments, which follows C0's port list (edge order here), not where
+    // the ports ended up from C0's contents: three routing slots, not two.
+    expect_centres(
+        "flowchart BT
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C1
+      c1n0
+    end
+  end
+  subgraph C2
+    c2n0
+    c2n1
+    c2n2
+    c2n0 --> c2n1
+    c2n1 --> c2n2
+  end
+  x0
+  x1
+  c0n1 --> c2n1
+  c2n2 --> c1n0
+  c0n0 --> x1
+  c0n1 --> x1
+",
+        &[
+            ("c0n0", 304.0, 437.0),
+            ("c0n1", 506.0, 437.0),
+            ("c1n0", 78.0, 485.0),
+            ("c2n0", 0.0, 210.0),
+            ("c2n1", 44.0, 105.0),
+            ("c2n2", 88.0, 0.0),
+            ("x0", 722.0, 451.0),
+            ("x1", 559.73, 234.0),
+        ],
+    );
+}
