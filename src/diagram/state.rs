@@ -711,7 +711,8 @@ mod tests {
     const NOTED: &str = "stateDiagram-v2\n  [*] --> A\n  state c <<choice>>\n  A --> c\n  c --> A : yes\n  note right of A : a note";
 
     /// The note edge: 2px dashes under the (default) neo look, which writes the
-    /// pattern inline; `.note-edge`'s 5 under the classic look.
+    /// pattern inline (`generateDashArray`: `0 0 2 2 … 2 2 0`, mermaid 12.3.0);
+    /// `.note-edge`'s 5 under the classic look.
     #[test]
     fn note_edge_dashes_follow_the_look() {
         let dash = |src: &str| {
@@ -720,7 +721,12 @@ mod tests {
                 .filter(|(g, _)| g.starts_with("L-"))
                 .find_map(|(_, p)| p.dash)
         };
-        assert_eq!(dash(NOTED), Some(vec![2.0, 2.0]));
+        let neo = dash(NOTED).expect("a pattern");
+        let n = neo.len();
+        assert!(n > 5 && n % 2 == 1, "{neo:?}");
+        assert_eq!(neo[..2], [0.0, 0.0]);
+        assert_eq!(neo[n - 1], 0.0);
+        assert!(neo[2..n - 1].iter().all(|&d| d == 2.0), "{neo:?}");
         let classic = format!("---\nconfig:\n  look: classic\n---\n{NOTED}");
         assert_eq!(dash(&classic), Some(vec![5.0]));
     }
