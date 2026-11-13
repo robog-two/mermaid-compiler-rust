@@ -4,23 +4,22 @@
 //! positional or `$named="..."` arguments, boundaries nested with `{ }`,
 //! relationships and the `Update*` style/layout statements.
 //!
-//! Layout mirrors mermaid's row placement (`c4ShapeInRow` shapes per row, then
-//! `c4BoundaryInRow` child boundaries per row) but is computed with Taffy: each
-//! boundary is a padded flex column with a title band whose children are rows.
+//! Layout is a port of mermaid 12.3's `c4Renderer`: `drawInsideBoundary` and the
+//! `Bounds` row filler (`c4ShapeInRow` shapes per row, wrapping at the screen
+//! width, then `c4BoundaryInRow` child boundaries per row), with its quirks kept.
 //! Cards are drawn like mermaid 12.3's `c4ShapeAdapter`: unified shapes (person
 //! silhouette, rounded box, cylinder, horizontal cylinder, framed rectangle) with a
 //! stacked label of bold name, Structurizr type line (`[Container: tech]`) and
-//! description. Relationships follow mermaid: the first is straight, later ones are
-//! quadratic curves, clipped to the shapes' outlines; labels sit near the midpoint,
-//! nudged along the curve to avoid overlaps.
+//! description. Relationships follow svgDraw: the first is straight, later ones are
+//! quadratic curves, clipped by each shape's `intersect`; labels sit at the chord's
+//! midpoint shifted right by half their width.
 
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
-use crate::geom::{self, Bounds, PathCmd, Point, Rect};
+use crate::geom::{self, PathCmd, Point, Rect};
 use crate::json::Json;
-use crate::layout::boxes::{self, BoxNode, Placed};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
-use crate::text::{self, TextBlock};
+use crate::text;
 use crate::theme::Palette;
 use std::f64::consts::PI;
 
@@ -793,14 +792,6 @@ pub fn parse(body: &str, title: Option<String>) -> Result<C4Diagram> {
 // Measurement
 // ---------------------------------------------------------------------------
 
-/// Boundary title font (`boundaryFontSize` 14 + 2, bold).
-const LABEL_FONT: f64 = 16.0;
-const BODY_FONT: f64 = 14.0;
-const REL_FONT: f64 = 12.0;
-const BOUNDARY_PAD: f64 = 20.0;
-const ROW_GAP_X: f64 = 80.0;
-const ROW_GAP_Y: f64 = 70.0;
-const BOUNDARY_GAP: f64 = 40.0;
 /// `c4.width` default: the target width of an element card.
 const SHAPE_W: f64 = 216.0;
 /// Gap between the name / type / description sections (`c4LabelHelper`).
@@ -1016,28 +1007,6 @@ fn wrap(textv: &str, font: f64, bold: bool, max: f64) -> Vec<String> {
     out
 }
 
-/// A run of centred text lines inside a boundary title, relative to its top.
-#[derive(Debug, Clone, PartialEq)]
-struct TextRun {
-    top: f64,
-    lines: Vec<String>,
-    font: f64,
-    line_height: f64,
-    bold: bool,
-}
-
-impl TextRun {
-    fn height(&self) -> f64 {
-        self.line_height * self.lines.len() as f64
-    }
-    fn width(&self) -> f64 {
-        self.lines
-            .iter()
-            .map(|l| text::line_width(l, self.font, self.bold))
-            .fold(0.0, f64::max)
-    }
-}
-
 /// Which `c4LabelHelper` section a text block is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SectionKind {
@@ -1072,17 +1041,11 @@ impl Section {
             .iter()
             .map(|l| text::line_width(l, font, bold))
             .fold(0.0, f64::max);
+        // The section's SVG text box: rows 1.1em apart, from the first row's top
+        // to the last row's bottom, whose descent depends on its glyphs.
         let extra = (lines.len().max(1) - 1) as f64;
-        // Chromium's SVG text boxes at the default 14px base: name 16px,
-        // type 13px, description 12px for one line; 1.1em per extra line.
-        let k = base / 14.0;
-        let height = match kind {
-            SectionKind::Name => 16.0 * k + extra * 1.1 * font,
-            SectionKind::Type => 13.0 * k + extra * 1.1 * font,
-            SectionKind::Descr => {
-                12.0 * k + extra * 1.1 * font + if extra > 0.0 { 0.5 * k } else { 0.0 }
-            }
-        };
+        let last = lines.last().map_or("", String::as_str);
+        let height = extra * 1.1 * font + text::svg_line_box(font, last);
         Section {
             kind,
             lines,
@@ -1235,214 +1198,368 @@ fn measure_shape(s: &Shape, conf: &C4Conf) -> CardLayout {
     }
 }
 
-fn measure_boundary_title(b: &Boundary, max: f64) -> (Vec<TextRun>, f64) {
-    let mut runs = Vec::new();
-    let mut y = 8.0;
-    let label = TextRun {
-        top: y,
-        lines: wrap(&b.label, LABEL_FONT, true, max),
-        font: LABEL_FONT,
-        line_height: 20.0,
-        bold: true,
-    };
-    y += label.height();
-    runs.push(label);
-    if !b.type_text.is_empty() {
-        let r = TextRun {
-            top: y + 2.0,
-            lines: vec![format!("[{}]", b.type_text)],
-            font: BODY_FONT,
-            line_height: 17.0,
-            bold: false,
-        };
-        y = r.top + r.height();
-        runs.push(r);
-    }
-    if let Some(dsc) = b.descr.as_ref().filter(|t| !t.is_empty()) {
-        let r = TextRun {
-            top: y + 2.0,
-            lines: wrap(dsc, 12.0, false, max),
-            font: 12.0,
-            line_height: 15.0,
-            bold: false,
-        };
-        y = r.top + r.height();
-        runs.push(r);
-    }
-    (runs, y)
-}
-
 // ---------------------------------------------------------------------------
 // Layout
 // ---------------------------------------------------------------------------
 
+/// `screen.availWidth` in mermaid-cli's headless Chromium (no viewport
+/// override, so the 800×600 default screen): the width limit of the top row.
+pub const SCREEN_WIDTH: f64 = 800.0;
+
+/// The `c4` config values the layout depends on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutConf {
+    pub diagram_margin_x: f64,
+    pub diagram_margin_y: f64,
+    pub shape_margin: f64,
+    pub next_line_padding_x: f64,
+    pub boundary_font: f64,
+    pub message_font: f64,
+    /// Boundary titles and relationship texts wrap only with the top-level
+    /// `wrap` setting (captured while parsing) and `c4.wrap`.
+    pub wrap: bool,
+    /// `screen.availWidth`.
+    pub screen_width: f64,
+}
+
+impl Default for LayoutConf {
+    fn default() -> Self {
+        LayoutConf {
+            diagram_margin_x: 50.0,
+            diagram_margin_y: 10.0,
+            shape_margin: 50.0,
+            next_line_padding_x: 0.0,
+            boundary_font: 14.0,
+            message_font: 12.0,
+            wrap: false,
+            screen_width: SCREEN_WIDTH,
+        }
+    }
+}
+
+impl LayoutConf {
+    pub fn from_config(cfg: &MermaidConfig) -> Self {
+        let d = LayoutConf::default();
+        let f = |key: &str, v: f64| cfg.section_f64("c4", key, v);
+        LayoutConf {
+            diagram_margin_x: f("diagramMarginX", d.diagram_margin_x),
+            diagram_margin_y: f("diagramMarginY", d.diagram_margin_y),
+            shape_margin: f("c4ShapeMargin", d.shape_margin),
+            next_line_padding_x: f("nextLinePaddingX", d.next_line_padding_x),
+            boundary_font: f("boundaryFontSize", d.boundary_font).max(1.0),
+            message_font: f("messageFontSize", d.message_font).max(1.0),
+            wrap: cfg.top_bool("wrap", false) && cfg.section_bool("c4", "wrap", true),
+            screen_width: d.screen_width,
+        }
+    }
+}
+
+/// JavaScript's `Math.round`.
+fn js_round(x: f64) -> f64 {
+    (x + 0.5).floor()
+}
+
+/// A text block measured like `calcC4ShapeTextWH`: lines, the widest line's
+/// rounded width and the summed per-line box heights.
+#[derive(Debug, Clone, PartialEq)]
+struct TextWH {
+    lines: Vec<String>,
+    width: f64,
+    height: f64,
+    font: f64,
+    bold: bool,
+    /// Offset of the text from its boundary's top (`label.Y` etc.).
+    y: f64,
+}
+
+fn calc_text_wh(raw: &str, font: f64, bold: bool, wrap_to: Option<f64>) -> TextWH {
+    let lines = match wrap_to {
+        Some(w) => wrap(raw, font, bold, w),
+        None => text::split_lines(raw),
+    };
+    let width = match wrap_to {
+        Some(w) => w,
+        None => lines
+            .iter()
+            .map(|l| js_round(text::line_width(l, font, bold)))
+            .fold(0.0, f64::max),
+    };
+    let height = lines.iter().map(|l| text::svg_line_box(font, l)).sum();
+    TextWH {
+        lines,
+        width,
+        height,
+        font,
+        bold,
+        y: 0.0,
+    }
+}
+
+/// A boundary's title texts (label, `[type]`, description).
+#[derive(Debug, Clone, PartialEq)]
+struct BoundaryText {
+    label: TextWH,
+    kind: Option<TextWH>,
+    descr: Option<TextWH>,
+}
+
+/// Measure a boundary's title like `drawInsideBoundary`: returns the texts and
+/// the height `Y` they take above the boundary's first row.
+fn measure_boundary(
+    label: &str,
+    type_text: &str,
+    descr: Option<&str>,
+    conf: &LayoutConf,
+    width_limit: f64,
+) -> (BoundaryText, f64) {
+    let wrap_to = conf.wrap.then_some(width_limit);
+    let mut label = calc_text_wh(label, conf.boundary_font + 2.0, true, wrap_to);
+    label.y = 8.0;
+    let mut y = label.y + label.height;
+    let kind = (!type_text.is_empty()).then(|| {
+        let mut t = calc_text_wh(
+            &format!("[{type_text}]"),
+            conf.boundary_font,
+            false,
+            wrap_to,
+        );
+        t.y = y + 5.0;
+        y = t.y + t.height;
+        t
+    });
+    let descr = descr.filter(|t| !t.is_empty()).map(|d| {
+        let mut t = calc_text_wh(d, conf.boundary_font - 2.0, false, wrap_to);
+        t.y = y + 20.0;
+        y = t.y + t.height;
+        t
+    });
+    (BoundaryText { label, kind, descr }, y)
+}
+
+/// mermaid's `Bounds`: the extent of what has been placed (`data`) and the
+/// row currently being filled (`next`).
+#[derive(Debug, Clone, Copy, Default)]
+struct Extent {
+    startx: f64,
+    stopx: f64,
+    starty: f64,
+    stopy: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RowBounds {
+    data: Extent,
+    next: Extent,
+    cnt: usize,
+    width_limit: f64,
+}
+
+impl RowBounds {
+    fn set_data(&mut self, x: f64, y: f64) {
+        let e = Extent {
+            startx: x,
+            stopx: x,
+            starty: y,
+            stopy: y,
+        };
+        self.data = e;
+        self.next = e;
+    }
+
+    /// `Bounds.insert`: place a `w`×`h` shape after the previous one, starting
+    /// a new row past the width limit or `shape_in_row` shapes.
+    fn insert(&mut self, w: f64, h: f64, m: f64, shape_in_row: usize, pad_x: f64) -> Point {
+        self.cnt += 1;
+        let n = self.next;
+        let mut sx = if n.startx == n.stopx {
+            n.stopx + m
+        } else {
+            n.stopx + 2.0 * m
+        };
+        let mut ex = sx + w;
+        let mut sy = n.starty + 2.0 * m;
+        let mut ey = sy + h;
+        if sx >= self.width_limit || ex >= self.width_limit || self.cnt > shape_in_row {
+            sx = n.startx + m + pad_x;
+            sy = n.stopy + 2.0 * m;
+            ex = sx + w;
+            ey = sy + h;
+            self.next.stopx = ex;
+            self.next.starty = n.stopy;
+            self.next.stopy = ey;
+            self.cnt = 1;
+        }
+        for e in [&mut self.data, &mut self.next] {
+            e.startx = e.startx.min(sx);
+            e.starty = e.starty.min(sy);
+            e.stopx = e.stopx.max(ex);
+            e.stopy = e.stopy.max(ey);
+        }
+        Point::new(sx, sy)
+    }
+}
+
 /// Absolute geometry of a laid-out diagram.
 #[derive(Debug, Clone, PartialEq)]
 pub struct C4Layout {
+    /// Element boxes (top-left corner and size), indexed like the shapes.
     pub shapes: Vec<Rect>,
+    /// Boundary boxes, indexed like the boundaries.
     pub boundaries: Vec<Rect>,
-    /// Height of the title band at the top (0 without a title).
-    pub title_band: f64,
+    /// Right and bottom edge of everything (`globalBoundaryMaxX/Y`).
+    pub max_x: f64,
+    pub max_y: f64,
+    /// Drawing order: each boundary's shapes, its child boundaries, then itself.
+    order: Vec<Item>,
+    titles: Vec<Option<BoundaryText>>,
     /// Card geometry and label sections, indexed like `shapes`.
     cards: Vec<CardLayout>,
 }
 
-/// Shapes already counted into the current row when a boundary's shapes
-/// start, per boundary.
-///
-/// mermaid's `drawInsideBoundary` places sibling boundaries with one shared
-/// `Bounds` whose row counter (`nextData.cnt`) is never reset, so a boundary's
-/// first shape row is shortened by the shapes of the siblings drawn before it
-/// (e.g. with `c4ShapeInRow=3`, two shapes in one boundary leave room for one
-/// in the next sibling's first row). Nested boundaries get a fresh counter.
-fn row_carry(d: &C4Diagram) -> Vec<usize> {
-    fn visit(d: &C4Diagram, items: &[Item], carry: &mut Vec<usize>) {
-        let n = d.shape_in_row.max(1);
-        let mut cnt = 0usize;
-        for it in items {
-            if let Item::Boundary(b) = *it {
-                carry[b] = cnt;
-                for c in &d.boundaries[b].children {
-                    if matches!(c, Item::Shape(_)) {
-                        cnt += 1;
-                        if cnt > n {
-                            cnt = 1;
-                        }
-                    }
-                }
-                visit(d, &d.boundaries[b].children, carry);
-            }
+struct LayoutState<'a> {
+    d: &'a C4Diagram,
+    conf: &'a LayoutConf,
+    cards: &'a [CardLayout],
+    shapes: Vec<Rect>,
+    boundaries: Vec<Rect>,
+    titles: Vec<Option<BoundaryText>>,
+    order: Vec<Item>,
+    max_x: f64,
+    max_y: f64,
+}
+
+/// What `drawInsideBoundary` iterates over: the implicit `global` boundary
+/// (the diagram root) or a declared one.
+#[derive(Debug, Clone, Copy)]
+enum Container {
+    Global,
+    Declared(usize),
+}
+
+impl LayoutState<'_> {
+    fn children(&self, c: Container) -> &[Item] {
+        match c {
+            Container::Global => &self.d.root,
+            Container::Declared(b) => &self.d.boundaries[b].children,
         }
     }
-    let mut carry = vec![0; d.boundaries.len()];
-    visit(d, &d.root, &mut carry);
-    carry
-}
 
-/// Rows of a container: shapes in rows of `shape_in_row` (the first row
-/// shortened by `carry`, see [`row_carry`]), then child boundaries in rows of
-/// `boundary_in_row` (mermaid's order).
-fn rows_of(d: &C4Diagram, items: &[Item], carry: usize) -> Vec<Vec<Item>> {
-    let n = d.shape_in_row.max(1);
-    let shapes: Vec<Item> = items
-        .iter()
-        .copied()
-        .filter(|i| matches!(i, Item::Shape(_)))
-        .collect();
-    let bounds: Vec<Item> = items
-        .iter()
-        .copied()
-        .filter(|i| matches!(i, Item::Boundary(_)))
-        .collect();
-    let first = if carry >= n { n } else { n - carry };
-    let mut rows: Vec<Vec<Item>> = Vec::new();
-    let mut rest: &[Item] = &shapes;
-    if !rest.is_empty() {
-        let k = first.min(rest.len());
-        rows.push(rest[..k].to_vec());
-        rest = &rest[k..];
-    }
-    rows.extend(rest.chunks(n).map(<[Item]>::to_vec));
-    rows.extend(
-        bounds
-            .chunks(d.boundary_in_row.max(1))
-            .map(<[Item]>::to_vec),
-    );
-    rows
-}
-
-fn container_node(
-    d: &C4Diagram,
-    items: &[Item],
-    cards: &[CardLayout],
-    style: boxes::taffy::Style,
-    carry_in: usize,
-    carry: &[usize],
-) -> BoxNode {
-    let rows = rows_of(d, items, carry_in)
-        .into_iter()
-        .map(|row| {
-            let gap = if matches!(row.first(), Some(Item::Boundary(_))) {
-                BOUNDARY_GAP
-            } else {
-                ROW_GAP_X
+    /// `drawInsideBoundary`: lay out sibling boundaries in rows of
+    /// `c4BoundaryInRow`, each with its shapes and nested boundaries. The
+    /// siblings share one `Bounds`, so its row counter carries over.
+    fn inside(&mut self, parent: &mut RowBounds, list: &[Container]) {
+        let (m, mx, my) = (
+            self.conf.shape_margin,
+            self.conf.diagram_margin_x,
+            self.conf.diagram_margin_y,
+        );
+        let per_row = self.d.boundary_in_row.max(1);
+        let mut cur = RowBounds {
+            width_limit: parent.width_limit / per_row.min(list.len()) as f64,
+            ..RowBounds::default()
+        };
+        for (i, &c) in list.iter().enumerate() {
+            let (label, type_text, descr) = match c {
+                Container::Global => ("global", "global", None),
+                Container::Declared(b) => {
+                    let b = &self.d.boundaries[b];
+                    (b.label.as_str(), b.type_text.as_str(), b.descr.as_deref())
+                }
             };
-            BoxNode::new(
-                boxes::row(gap),
-                row.iter()
-                    .map(|it| item_node(d, *it, cards, carry))
-                    .collect(),
-            )
-        })
-        .collect();
-    BoxNode::new(style, rows)
-}
-
-fn item_node(d: &C4Diagram, item: Item, cards: &[CardLayout], carry: &[usize]) -> BoxNode {
-    match item {
-        Item::Shape(i) => BoxNode::leaf(cards[i].w, cards[i].h),
-        Item::Boundary(b) => {
-            let bd = &d.boundaries[b];
-            let (runs, title_h) = measure_boundary_title(bd, 2.0 * SHAPE_W);
-            let title_w = runs.iter().map(TextRun::width).fold(0.0, f64::max);
-            let style = boxes::min_size(
-                boxes::padded_with_title(boxes::column(ROW_GAP_Y), BOUNDARY_PAD, title_h),
-                title_w + 2.0 * BOUNDARY_PAD,
-                title_h + 2.0 * BOUNDARY_PAD,
-            );
-            container_node(d, &bd.children, cards, style, carry[b], carry)
-        }
-    }
-}
-
-fn read_container(
-    d: &C4Diagram,
-    items: &[Item],
-    carry_in: usize,
-    carry: &[usize],
-    placed: &Placed,
-    shapes: &mut [Rect],
-    bounds: &mut [Rect],
-) {
-    for (row, prow) in rows_of(d, items, carry_in).iter().zip(&placed.children) {
-        for (item, p) in row.iter().zip(&prow.children) {
-            match *item {
-                Item::Shape(i) => shapes[i] = p.rect,
-                Item::Boundary(b) => {
-                    bounds[b] = p.rect;
-                    let children = &d.boundaries[b].children;
-                    read_container(d, children, carry[b], carry, p, shapes, bounds);
-                }
+            let (title, y_off) =
+                measure_boundary(label, type_text, descr, self.conf, cur.width_limit);
+            if i % per_row == 0 {
+                let x = parent.data.startx + mx;
+                let y = parent.data.stopy + my + y_off;
+                cur.set_data(x, y);
+            } else {
+                let x = if cur.data.stopx != cur.data.startx {
+                    cur.data.stopx + mx
+                } else {
+                    cur.data.startx
+                };
+                let y = cur.data.starty;
+                cur.set_data(x, y);
             }
+            let items = self.children(c).to_vec();
+            let shapes: Vec<usize> = items
+                .iter()
+                .filter_map(|it| match it {
+                    Item::Shape(s) => Some(*s),
+                    Item::Boundary(_) => None,
+                })
+                .collect();
+            if !shapes.is_empty() {
+                for &s in &shapes {
+                    let card = &self.cards[s];
+                    let p = cur.insert(
+                        card.w,
+                        card.h,
+                        m,
+                        self.d.shape_in_row.max(1),
+                        self.conf.next_line_padding_x,
+                    );
+                    self.shapes[s] = Rect::new(p.x, p.y, card.w, card.h);
+                    self.order.push(Item::Shape(s));
+                }
+                cur.data.stopx += m;
+                cur.data.stopy += m;
+            }
+            let nested: Vec<Container> = items
+                .iter()
+                .filter_map(|it| match it {
+                    Item::Boundary(b) => Some(Container::Declared(*b)),
+                    Item::Shape(_) => None,
+                })
+                .collect();
+            if !nested.is_empty() {
+                self.inside(&mut cur, &nested);
+            }
+            if let Container::Declared(b) = c {
+                self.boundaries[b] = Rect::new(
+                    cur.data.startx,
+                    cur.data.starty,
+                    cur.data.stopx - cur.data.startx,
+                    cur.data.stopy - cur.data.starty,
+                );
+                self.titles[b] = Some(title);
+                self.order.push(Item::Boundary(b));
+            }
+            parent.data.stopy = parent.data.stopy.max(cur.data.stopy + m);
+            parent.data.stopx = parent.data.stopx.max(cur.data.stopx + m);
+            self.max_x = self.max_x.max(parent.data.stopx);
+            self.max_y = self.max_y.max(parent.data.stopy);
         }
     }
 }
 
-fn title_band(d: &C4Diagram) -> f64 {
-    if d.title.as_ref().is_some_and(|t| !t.trim().is_empty()) {
-        40.0
-    } else {
-        0.0
-    }
-}
-
-/// Lay out cards and boundaries with Taffy.
-pub fn layout(d: &C4Diagram, conf: &C4Conf) -> C4Layout {
+/// Lay out cards and boundaries like mermaid's C4 renderer.
+pub fn layout(d: &C4Diagram, conf: &C4Conf, lconf: &LayoutConf) -> C4Layout {
     let cards: Vec<CardLayout> = d.shapes.iter().map(|s| measure_shape(s, conf)).collect();
-    let band = title_band(d);
-    let carry = row_carry(d);
-    let root = container_node(d, &d.root, &cards, boxes::column(ROW_GAP_Y), 0, &carry);
-    let placed = boxes::compute(&root);
-    let mut shapes = vec![Rect::default(); d.shapes.len()];
-    let mut bounds = vec![Rect::default(); d.boundaries.len()];
-    read_container(d, &d.root, 0, &carry, &placed, &mut shapes, &mut bounds);
-    let shift = |r: &mut Rect| r.y += band;
-    shapes.iter_mut().for_each(shift);
-    bounds.iter_mut().for_each(shift);
+    let mut st = LayoutState {
+        d,
+        conf: lconf,
+        cards: &cards,
+        shapes: vec![Rect::default(); d.shapes.len()],
+        boundaries: vec![Rect::default(); d.boundaries.len()],
+        titles: vec![None; d.boundaries.len()],
+        order: Vec::new(),
+        max_x: lconf.diagram_margin_x,
+        max_y: lconf.diagram_margin_y,
+    };
+    let mut screen = RowBounds {
+        width_limit: lconf.screen_width,
+        ..RowBounds::default()
+    };
+    screen.set_data(lconf.diagram_margin_x, lconf.diagram_margin_y);
+    st.inside(&mut screen, &[Container::Global]);
     C4Layout {
-        shapes,
-        boundaries: bounds,
-        title_band: band,
+        shapes: st.shapes,
+        boundaries: st.boundaries,
+        max_x: st.max_x,
+        max_y: st.max_y,
+        order: st.order,
+        titles: st.titles,
         cards,
     }
 }
@@ -1451,142 +1568,179 @@ pub fn layout(d: &C4Diagram, conf: &C4Conf) -> C4Layout {
 // Drawing
 // ---------------------------------------------------------------------------
 
-fn draw_runs(out: &mut Vec<Element>, runs: &[TextRun], cx: f64, top: f64, fill: &Color) {
-    for r in runs {
-        let c = Point::new(cx, top + r.top + r.height() / 2.0);
-        let mut t = Text::centered(c, &r.lines, r.font, r.line_height, fill);
-        t.bold = r.bold;
-        out.push(Element::text(t));
+/// How far the alphabetic baseline sits below `y` for svgDraw's texts
+/// (`dominant-baseline: middle` with `alignment-baseline: mathematical`):
+/// Chromium puts it half the rounded font ascent down, measured 6, 7 and 7px
+/// at 12, 14 and 16px.
+fn baseline_shift(font: f64) -> f64 {
+    js_round((0.905 * font).round() / 2.0)
+}
+
+/// svgDraw's `byTspan`: one centred `<text>` per line around `y`
+/// (`dominant-baseline: middle`).
+fn tspan_lines(lines: &[String], x: f64, y: f64, font: f64, bold: bool, fill: &Color) -> Element {
+    let n = lines.len() as f64;
+    Element::text(Text {
+        x,
+        y: y - font * (n - 1.0) / 2.0 + baseline_shift(font),
+        lines: lines.to_vec(),
+        line_height: font,
+        font_size: font,
+        bold,
+        anchor: Anchor::Middle,
+        fill: fill.clone(),
+    })
+}
+
+/// `intersectLine` from mermaid's rendering utilities.
+fn intersect_line(p1: Point, p2: Point, q1: Point, q2: Point) -> Option<Point> {
+    let a1 = p2.y - p1.y;
+    let b1 = p1.x - p2.x;
+    let c1 = p2.x * p1.y - p1.x * p2.y;
+    let r3 = a1 * q1.x + b1 * q1.y + c1;
+    let r4 = a1 * q2.x + b1 * q2.y + c1;
+    if r3 != 0.0 && r4 != 0.0 && r3 * r4 > 0.0 {
+        return None;
     }
+    let a2 = q2.y - q1.y;
+    let b2 = q1.x - q2.x;
+    let c2 = q2.x * q1.y - q1.x * q2.y;
+    let r1 = a2 * p1.x + b2 * p1.y + c2;
+    let r2 = a2 * p2.x + b2 * p2.y + c2;
+    if r1.abs() < 1e-6 && r2.abs() < 1e-6 && r1 * r2 > 0.0 {
+        return None;
+    }
+    let denom = a1 * b2 - a2 * b1;
+    if denom == 0.0 {
+        return None;
+    }
+    Some(Point::new(
+        (b1 * c2 - b2 * c1) / denom,
+        (a2 * c1 - a1 * c2) / denom,
+    ))
 }
 
-/// A convex piece of a card outline, for ray intersection.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Piece {
-    Rect(Rect),
-    Ellipse(Point, f64, f64),
-}
-
-impl Piece {
-    /// Parameter interval `[t_in, t_out]` where `c + t·d` is inside the piece.
-    fn interval(&self, c: Point, d: Point) -> Option<(f64, f64)> {
-        match *self {
-            Piece::Rect(r) => {
-                let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
-                for (p, dv, a, b) in [(c.x, d.x, r.x, r.right()), (c.y, d.y, r.y, r.bottom())] {
-                    if dv.abs() < 1e-12 {
-                        if p < a || p > b {
-                            return None;
-                        }
-                    } else {
-                        let (t1, t2) = ((a - p) / dv, (b - p) / dv);
-                        lo = lo.max(t1.min(t2));
-                        hi = hi.min(t1.max(t2));
-                    }
-                }
-                (lo <= hi).then_some((lo, hi))
-            }
-            Piece::Ellipse(e, a, b) => {
-                if a <= 0.0 || b <= 0.0 {
-                    return None;
-                }
-                let (px, py) = ((c.x - e.x) / a, (c.y - e.y) / b);
-                let (dx, dy) = (d.x / a, d.y / b);
-                let qa = dx * dx + dy * dy;
-                let qb = 2.0 * (px * dx + py * dy);
-                let qc = px * px + py * py - 1.0;
-                let disc = qb * qb - 4.0 * qa * qc;
-                if qa < 1e-18 || disc < 0.0 {
-                    return None;
-                }
-                let s = disc.sqrt();
-                Some(((-qb - s) / (2.0 * qa), (-qb + s) / (2.0 * qa)))
-            }
+/// `intersectRect`: where the line from the box centre toward `p` leaves it.
+fn intersect_rect(r: Rect, p: Point) -> Point {
+    let c = r.center();
+    let (dx, dy) = (p.x - c.x, p.y - c.y);
+    let (mut w, mut h) = (r.w / 2.0, r.h / 2.0);
+    let (sx, sy) = if dy.abs() * w > dx.abs() * h {
+        if dy < 0.0 {
+            h = -h;
         }
-    }
-}
-
-/// Where the ray from `c` toward `toward` leaves the union of `pieces`
-/// (`None` when `c` is outside all of them).
-fn union_exit(pieces: &[Piece], c: Point, toward: Point) -> Option<Point> {
-    let d = toward.minus(c);
-    if d.len() < 1e-9 {
-        return Some(c);
-    }
-    let spans: Vec<(f64, f64)> = pieces.iter().filter_map(|p| p.interval(c, d)).collect();
-    let mut t = 0.0;
-    let mut inside = false;
-    loop {
-        let next = spans
-            .iter()
-            .filter(|(lo, hi)| *lo <= t + 1e-9 && *hi > t + 1e-9)
-            .map(|&(_, hi)| hi)
-            .fold(None, |m: Option<f64>, h| Some(m.map_or(h, |m| m.max(h))));
-        match next {
-            Some(h) => {
-                t = h;
-                inside = true;
-            }
-            None => break,
+        (if dy == 0.0 { 0.0 } else { h * dx / dy }, h)
+    } else {
+        if dx < 0.0 {
+            w = -w;
         }
-    }
-    inside.then(|| c.plus(d.scale(t)))
+        (w, if dx == 0.0 { 0.0 } else { w * dy / dx })
+    };
+    Point::new(c.x + sx, c.y + sy)
 }
 
-/// Pieces of a rounded rectangle (two cross rectangles and four corner discs).
-fn rounded_rect_pieces(r: Rect, radius: f64) -> Vec<Piece> {
-    let k = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
-    let mut v = vec![
-        Piece::Rect(Rect::new(r.x + k, r.y, r.w - 2.0 * k, r.h)),
-        Piece::Rect(Rect::new(r.x, r.y + k, r.w, r.h - 2.0 * k)),
-    ];
-    for (x, y) in [
-        (r.x + k, r.y + k),
-        (r.right() - k, r.y + k),
-        (r.x + k, r.bottom() - k),
-        (r.right() - k, r.bottom() - k),
-    ] {
-        v.push(Piece::Ellipse(Point::new(x, y), k, k));
-    }
+/// mermaid's `generateCirclePoints` (points negated, as upstream).
+fn circle_points(cx: f64, cy: f64, r: f64, n: usize, start: f64, end: f64) -> Vec<Point> {
+    let (a0, a1) = (start.to_radians(), end.to_radians());
+    let step = (a1 - a0) / (n as f64 - 1.0);
+    (0..n)
+        .map(|i| {
+            let a = a0 + i as f64 * step;
+            Point::new(-(cx + r * a.cos()), -(cy + r * a.sin()))
+        })
+        .collect()
+}
+
+/// The person shape's outline polygon, relative to its centre.
+fn person_outline(w: f64, total: f64, head_r: f64, overlap: f64, body_r: f64) -> Vec<Point> {
+    let top = -total / 2.0;
+    let body_top = top + 2.0 * head_r - overlap;
+    let head_cy = top + head_r;
+    let phi = ((body_top - head_cy) / head_r).min(1.0).asin().to_degrees();
+    let mut v = circle_points(0.0, -head_cy, head_r, 24, 180.0 + phi, -phi);
+    let (l, r) = (-(-w / 2.0 + body_r), -(w / 2.0 - body_r));
+    let (t, b) = (-(body_top + body_r), -(total / 2.0 - body_r));
+    v.extend(circle_points(l, t, body_r, 12, 90.0, 0.0));
+    v.extend(circle_points(l, b, body_r, 12, 360.0, 270.0));
+    v.extend(circle_points(r, b, body_r, 12, 270.0, 180.0));
+    v.extend(circle_points(r, t, body_r, 12, 180.0, 90.0));
     v
 }
 
-/// Outline of a card as convex pieces, matching each unified shape's `intersect`.
-fn card_pieces(card: &CardLayout, r: Rect) -> Vec<Piece> {
-    match card.geom {
-        CardGeom::Rounded | CardGeom::Framed => vec![Piece::Rect(r)],
-        CardGeom::Person {
-            head_r,
-            body_h,
-            body_r,
-            ..
-        } => {
-            let mut v =
-                rounded_rect_pieces(Rect::new(r.x, r.bottom() - body_h, r.w, body_h), body_r);
-            v.push(Piece::Ellipse(
-                Point::new(r.center().x, r.y + head_r),
-                head_r,
-                head_r,
-            ));
-            v
+/// `intersectPolygon`: the polygon is moved so its bounding box's corner sits
+/// at the node box's corner; the crossing nearest to `p` wins.
+fn intersect_polygon(r: Rect, poly: &[Point], p: Point) -> Point {
+    let c = r.center();
+    let min_x = poly.iter().map(|q| q.x).fold(f64::INFINITY, f64::min);
+    let min_y = poly.iter().map(|q| q.y).fold(f64::INFINITY, f64::min);
+    let (left, top) = (r.x - min_x, r.y - min_y);
+    let mut best: Option<(f64, Point)> = None;
+    for (i, a) in poly.iter().enumerate() {
+        let b = poly[(i + 1) % poly.len()];
+        let q1 = Point::new(left + a.x, top + a.y);
+        let q2 = Point::new(left + b.x, top + b.y);
+        if let Some(x) = intersect_line(c, p, q1, q2) {
+            let dist = x.minus(p).len();
+            if best.is_none_or(|(d, _)| dist < d) {
+                best = Some((dist, x));
+            }
         }
-        CardGeom::Cylinder { ry } => vec![
-            Piece::Rect(Rect::new(r.x, r.y + ry, r.w, r.h - 2.0 * ry)),
-            Piece::Ellipse(Point::new(r.center().x, r.y + ry), r.w / 2.0, ry),
-            Piece::Ellipse(Point::new(r.center().x, r.bottom() - ry), r.w / 2.0, ry),
-        ],
-        CardGeom::HorizontalCylinder { rx } => vec![
-            Piece::Rect(Rect::new(r.x + rx, r.y, r.w - 2.0 * rx, r.h)),
-            Piece::Ellipse(Point::new(r.x + rx, r.center().y), rx, r.h / 2.0),
-            Piece::Ellipse(Point::new(r.right() - rx, r.center().y), rx, r.h / 2.0),
-        ],
     }
+    best.map_or(c, |(_, x)| x)
 }
 
-/// Where a relationship toward `toward` meets a card's outline.
-fn card_exit(card: &CardLayout, r: Rect, toward: Point) -> Point {
-    union_exit(&card_pieces(card, r), r.center(), toward)
-        .unwrap_or_else(|| geom::clip_rect(&r, toward))
+/// Each unified shape's `intersect` toward `p`.
+fn card_intersect(card: &CardLayout, r: Rect, p: Point) -> Point {
+    let c = r.center();
+    match card.geom {
+        CardGeom::Rounded | CardGeom::Framed => intersect_rect(r, p),
+        CardGeom::Person {
+            head_r,
+            overlap,
+            body_r,
+            ..
+        } => intersect_polygon(r, &person_outline(r.w, r.h, head_r, overlap, body_r), p),
+        CardGeom::Cylinder { ry } => {
+            let rx = r.w / 2.0;
+            let mut pos = intersect_rect(r, p);
+            let x = pos.x - c.x;
+            if rx != 0.0
+                && (x.abs() < r.w / 2.0
+                    || (x.abs() == r.w / 2.0 && (pos.y - c.y).abs() > r.h / 2.0 - ry))
+            {
+                let mut y = ry * ry * (1.0 - x * x / (rx * rx));
+                if y > 0.0 {
+                    y = y.sqrt();
+                }
+                y = ry - y;
+                if p.y - c.y > 0.0 {
+                    y = -y;
+                }
+                pos.y += y;
+            }
+            pos
+        }
+        CardGeom::HorizontalCylinder { rx } => {
+            let ry = r.h / 2.0;
+            let mut pos = intersect_rect(r, p);
+            let y = pos.y - c.y;
+            if ry != 0.0
+                && (y.abs() < r.h / 2.0
+                    || (y.abs() == r.h / 2.0 && (pos.x - c.x).abs() > r.w / 2.0 - rx))
+            {
+                let mut x = rx * rx * (1.0 - y * y / (ry * ry));
+                if x != 0.0 {
+                    x = x.abs().sqrt();
+                }
+                x = rx - x;
+                if p.x - c.x > 0.0 {
+                    x = -x;
+                }
+                pos.x += x;
+            }
+            pos
+        }
+    }
 }
 
 /// Draw one element card through its unified shape.
@@ -1701,106 +1855,88 @@ fn arrowhead(end: Point, dir: Point, color: &Color) -> Element {
     )
 }
 
-fn overlap_area(a: &Rect, b: &Rect) -> f64 {
-    let w = a.right().min(b.right()) - a.x.max(b.x);
-    let h = a.bottom().min(b.bottom()) - a.y.max(b.y);
-    if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
+/// A relationship end: an element card or a boundary box.
+fn end_point(d: &C4Diagram, lay: &C4Layout, alias: &str, toward: Point) -> Option<Point> {
+    match d.shape_index(alias) {
+        Some(i) => Some(card_intersect(&lay.cards[i], lay.shapes[i], toward)),
+        None => d
+            .boundary_index(alias)
+            .map(|b| intersect_rect(lay.boundaries[b], toward)),
+    }
+}
+
+fn box_of(d: &C4Diagram, lay: &C4Layout, alias: &str) -> Option<Rect> {
+    d.shape_index(alias)
+        .map(|i| lay.shapes[i])
+        .or_else(|| d.boundary_index(alias).map(|b| lay.boundaries[b]))
+}
+
+/// svgDraw `drawBoundary`: a dashed (deployment nodes: solid) box with its
+/// centred title texts.
+fn draw_boundary(b: &Boundary, r: Rect, title: &BoundaryText) -> Element {
+    let ink = Color::new("#444444");
+    let stroke = b
+        .style
+        .border
+        .clone()
+        .map_or_else(|| ink.clone(), Color::new);
+    let fill = Color::new(b.style.bg.clone().unwrap_or_else(|| "none".into()));
+    let mut paint = Paint::both(&fill, &stroke, 1.0);
+    if b.kind != BoundaryKind::Node {
+        paint = paint.dashed(vec![7.0, 7.0]);
+    }
+    let mut els = vec![Element::rect(r, 2.5, paint)];
+    let cx = r.x + r.w / 2.0;
+    for t in std::iter::once(&title.label)
+        .chain(title.kind.as_ref())
+        .chain(title.descr.as_ref())
+    {
+        els.push(tspan_lines(&t.lines, cx, r.y + t.y, t.font, t.bold, &ink));
+    }
+    Element::group("c4-boundary", els)
 }
 
 /// Render a parsed and laid-out diagram.
-pub fn draw(d: &C4Diagram, lay: &C4Layout, conf: &C4Conf, pal: &Palette) -> Scene {
-    // mermaid's C4 renderer uses a fixed scheme regardless of theme.
+pub fn draw(
+    d: &C4Diagram,
+    lay: &C4Layout,
+    conf: &C4Conf,
+    lconf: &LayoutConf,
+    pal: &Palette,
+) -> Result<Scene> {
     let ink = Color::new("#444444");
-    let label_bg = Color::new("white");
-    // Arrow markers and the title take the svg root's `fill: textColor`, not the
-    // relationship colour.
+    // Arrow markers and the title take the svg root's `fill: textColor`.
     let marker = pal.text_color.clone();
-    let mut bounds = Bounds::default();
-    let mut boundary_els = Vec::new();
-    let mut boundary_title_els = Vec::new();
-    let mut obstacles: Vec<Rect> = Vec::new();
-    for (b, r) in d.boundaries.iter().zip(&lay.boundaries) {
-        bounds.add_rect(*r);
-        let stroke = Color::new(
-            b.style
-                .border
-                .clone()
-                .unwrap_or_else(|| ink.css().to_string()),
-        );
-        let fill = Color::new(b.style.bg.clone().unwrap_or_else(|| "none".into()));
-        let mut paint = Paint::both(&fill, &stroke, 1.0);
-        if b.kind != BoundaryKind::Node {
-            paint = paint.dashed(vec![7.0, 7.0]);
+    let mut elements = Vec::new();
+    for item in &lay.order {
+        match *item {
+            Item::Shape(i) => {
+                elements.push(draw_shape(&d.shapes[i], &lay.cards[i], lay.shapes[i], conf))
+            }
+            Item::Boundary(b) => {
+                if let Some(t) = &lay.titles[b] {
+                    elements.push(draw_boundary(&d.boundaries[b], lay.boundaries[b], t));
+                }
+            }
         }
-        let els = vec![Element::rect(*r, 2.5, paint)];
-        let (runs, title_h) = measure_boundary_title(b, (r.w - 2.0 * BOUNDARY_PAD).max(SHAPE_W));
-        let font = b.style.font.clone().map_or_else(|| ink.clone(), Color::new);
-        let tw = runs.iter().map(TextRun::width).fold(0.0, f64::max);
-        let title_rect = Rect::new(
-            r.center().x - tw / 2.0 - 4.0,
-            r.y + 6.0,
-            tw + 8.0,
-            title_h - 4.0,
-        );
-        obstacles.push(title_rect.pad(2.0));
-        // Titles sit above relationship lines, on a light backing.
-        let backing = b
-            .style
-            .bg
-            .clone()
-            .map_or_else(|| label_bg.clone(), Color::new);
-        let mut title = vec![Element::rect(
-            title_rect,
-            2.0,
-            Paint::fill(&backing).with_opacity(0.85),
-        )];
-        draw_runs(&mut title, &runs, r.center().x, r.y, &font);
-        boundary_title_els.push(Element::group("c4-boundary-title", title));
-        boundary_els.push(Element::group("c4-boundary", els));
-    }
-    let mut shape_els = Vec::new();
-    for ((s, card), r) in d.shapes.iter().zip(&lay.cards).zip(&lay.shapes) {
-        bounds.add_rect(*r);
-        obstacles.push(r.pad(4.0));
-        shape_els.push(draw_shape(s, card, *r, conf));
     }
 
-    let rect_of = |alias: &str| -> Option<Rect> {
-        d.shape_index(alias)
-            .map(|i| lay.shapes[i])
-            .or_else(|| d.boundary_index(alias).map(|b| lay.boundaries[b]))
-    };
-    // Where a relationship toward `toward` meets an element's (or boundary's) outline.
-    let exit_of = |alias: &str, toward: Point| -> Option<Point> {
-        match d.shape_index(alias) {
-            Some(i) => Some(card_exit(&lay.cards[i], lay.shapes[i], toward)),
-            None => d
-                .boundary_index(alias)
-                .map(|b| geom::clip_rect(&lay.boundaries[b], toward)),
-        }
-    };
-    let ends_of = |rel: &Rel| -> Option<(Point, Point)> {
-        let (fr, tr) = (rect_of(&rel.from)?, rect_of(&rel.to)?);
-        Some((
-            exit_of(&rel.from, tr.center())?,
-            exit_of(&rel.to, fr.center())?,
-        ))
-    };
-    // Keep labels off arrowheads when possible (weaker than covering a card).
-    let mut heads: Vec<Rect> = Vec::new();
-    for rel in d.rels.iter().filter(|r| r.from != r.to) {
-        if let Some((s, e)) = ends_of(rel) {
-            heads.push(Rect::centered(s, 24.0, 24.0));
-            heads.push(Rect::centered(e, 24.0, 24.0));
-        }
-    }
-    let mut line_els = Vec::new();
-    let mut label_els = Vec::new();
-    let mut placed_labels: Vec<Rect> = Vec::new();
+    let font = lconf.message_font;
+    let mut rel_els = Vec::new();
     for (idx, rel) in d.rels.iter().enumerate() {
-        let Some(fr) = rect_of(&rel.from) else {
-            continue;
+        let missing = || {
+            Error::parse(
+                rel.line,
+                format!(
+                    "C4 rel \"{}\" -> \"{}\" references an unknown shape or boundary",
+                    rel.from, rel.to
+                ),
+            )
         };
+        let from_box = box_of(d, lay, &rel.from).ok_or_else(missing)?;
+        let to_box = box_of(d, lay, &rel.to).ok_or_else(missing)?;
+        let start = end_point(d, lay, &rel.from, to_box.center()).ok_or_else(missing)?;
+        let end = end_point(d, lay, &rel.to, from_box.center()).ok_or_else(missing)?;
         let line_color = rel
             .line_color
             .clone()
@@ -1809,158 +1945,102 @@ pub fn draw(d: &C4Diagram, lay: &C4Layout, conf: &C4Conf, pal: &Palette) -> Scen
             .text_color
             .clone()
             .map_or_else(|| ink.clone(), Color::new);
-        // The label runs along a quadratic curve (start, control, end).
-        let curve = if rel.from == rel.to {
-            // Self relationship: a loop off the right edge.
-            let a = Point::new(fr.right(), fr.y + fr.h * 0.3);
-            let b = Point::new(fr.right(), fr.y + fr.h * 0.7);
-            let pts = [
-                a,
-                Point::new(fr.right() + 40.0, a.y),
-                Point::new(fr.right() + 40.0, b.y),
-                b,
-            ];
-            line_els.push(Element::path(
-                geom::polyline(&pts),
-                Paint::stroke(&line_color, 1.0),
-            ));
-            line_els.push(arrowhead(b, Point::new(-1.0, 0.0), &marker));
-            bounds.add_point(Point::new(fr.right() + 40.0, a.y));
-            (pts[1], pts[1].lerp(pts[2], 0.5), pts[2])
+        // The first relationship is a straight line, every later one a
+        // quadratic curve whose control point sits a quarter of the way along x.
+        let ctrl = if idx == 0 {
+            start.lerp(end, 0.5)
         } else {
-            let Some((start, end)) = ends_of(rel) else {
-                continue;
-            };
-            // mermaid draws the first relationship straight and every later one
-            // as a quadratic curve bowed toward the start.
-            let ctrl = if idx == 0 {
-                start.lerp(end, 0.5)
-            } else {
-                Point::new(
-                    start.x + (end.x - start.x) / 4.0,
-                    start.y + (end.y - start.y) / 2.0,
-                )
-            };
-            let mut cmds = vec![PathCmd::MoveTo(start)];
-            if idx == 0 {
-                cmds.push(PathCmd::LineTo(end));
-            } else {
-                cmds.push(PathCmd::CubicTo(
-                    start.lerp(ctrl, 2.0 / 3.0),
-                    end.lerp(ctrl, 2.0 / 3.0),
-                    end,
-                ));
-                bounds.add_point(ctrl.lerp(start.lerp(end, 0.5), 0.5));
-            }
-            line_els.push(Element::path(cmds, Paint::stroke(&line_color, 1.0)));
-            // Tangents at the ends (fall back to the chord for degenerate curves).
-            let chord = end.minus(start).norm();
-            let tan_end = match end.minus(ctrl).norm() {
-                v if v.len() > 0.5 => v,
-                _ => chord,
-            };
-            let tan_start = match ctrl.minus(start).norm() {
-                v if v.len() > 0.5 => v,
-                _ => chord,
-            };
-            if rel.kind != RelKind::Back {
-                line_els.push(arrowhead(end, tan_end, &marker));
-            }
-            if matches!(rel.kind, RelKind::BiRel | RelKind::Back) {
-                line_els.push(arrowhead(start, tan_start.scale(-1.0), &marker));
-            }
-            (start, ctrl, end)
+            Point::new(
+                start.x + (end.x - start.x) / 2.0 - (end.x - start.x) / 4.0,
+                start.y + (end.y - start.y) / 2.0,
+            )
         };
-        // Label block: label lines + [technology]. C4Dynamic numbers its steps.
+        let mut cmds = vec![PathCmd::MoveTo(start)];
+        if idx == 0 {
+            cmds.push(PathCmd::LineTo(end));
+        } else {
+            cmds.push(PathCmd::CubicTo(
+                start.lerp(ctrl, 2.0 / 3.0),
+                end.lerp(ctrl, 2.0 / 3.0),
+                end,
+            ));
+        }
+        rel_els.push(Element::path(cmds, Paint::stroke(&line_color, 1.0)));
+        // `orient: auto` markers follow the path's end tangents.
+        let chord = end.minus(start).norm();
+        let tangent = |v: Point| if v.len() > 1e-9 { v.norm() } else { chord };
+        if rel.kind != RelKind::Back {
+            rel_els.push(arrowhead(end, tangent(end.minus(ctrl)), &marker));
+        }
+        if matches!(rel.kind, RelKind::BiRel | RelKind::Back) {
+            rel_els.push(arrowhead(
+                start,
+                tangent(ctrl.minus(start)).scale(-1.0),
+                &marker,
+            ));
+        }
+        // Labels sit at the chord's midpoint, shifted right by half their width.
         let label = if d.variant == Variant::Dynamic {
             format!("{}: {}", idx + 1, rel.label)
         } else {
             rel.label.clone()
         };
-        // Like mermaid, relationship text only breaks at explicit line breaks.
-        let mut lines = text::label_lines(&label);
-        if let Some(t) = rel.techn.as_ref().filter(|t| !t.is_empty()) {
-            lines.push(format!("[{t}]"));
-        }
-        lines.retain(|l| !l.is_empty());
-        if lines.is_empty() {
-            continue;
-        }
-        let tb = TextBlock::new(lines, REL_FONT, false);
-        let lh = REL_FONT * 1.25;
-        let (w, h) = (tb.width + 6.0, lh * tb.lines.len() as f64 + 4.0);
-        let (p0, q, p1) = curve;
-        let mut best: Option<(f64, Rect)> = None;
-        let perp = h / 2.0 + 6.0;
-        for t in [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.12, 0.88] {
-            let on = p0.lerp(q, t).lerp(q.lerp(p1, t), t);
-            let dir = q.lerp(p1, t).minus(p0.lerp(q, t)).norm();
-            let normal = Point::new(-dir.y, dir.x);
-            for k in [0.0, 1.0, -1.0] {
-                let c = on
-                    .plus(normal.scale(k * perp))
-                    .plus(Point::new(rel.offset.0, rel.offset.1));
-                let r = Rect::centered(c, w, h);
-                let overlap: f64 = obstacles
-                    .iter()
-                    .chain(&placed_labels)
-                    .map(|o| overlap_area(&r, o))
-                    .sum::<f64>()
-                    + 0.3 * heads.iter().map(|o| overlap_area(&r, o)).sum::<f64>();
-                // Prefer the midpoint on the line when nothing is in the way.
-                let cost = overlap + 40.0 * (t - 0.5_f64).abs() + 8.0 * k.abs();
-                if best.as_ref().is_none_or(|(bc, _)| cost < *bc - 1e-6) {
-                    best = Some((cost, r));
-                }
-            }
-        }
-        let Some((_, r)) = best else { continue };
-        placed_labels.push(r.pad(2.0));
-        bounds.add_rect(r);
-        label_els.push(Element::rect(
-            r,
-            2.0,
-            Paint::fill(&label_bg).with_opacity(0.85),
-        ));
-        label_els.push(Element::text(Text::centered(
-            r.center(),
-            &tb.lines,
-            REL_FONT,
-            lh,
+        let lw = calc_text_wh(&label, font, false, None);
+        let x = start.x.min(end.x) + (end.x - start.x).abs() / 2.0 + rel.offset.0;
+        let y = start.y.min(end.y) + (end.y - start.y).abs() / 2.0 + rel.offset.1;
+        rel_els.push(tspan_lines(
+            &lw.lines,
+            x + lw.width / 2.0,
+            y,
+            font,
+            false,
             &text_color,
-        )));
+        ));
+        if let Some(t) = rel.techn.as_ref().filter(|t| !t.is_empty()) {
+            let tw = calc_text_wh(t, font, false, None);
+            let lines = text::split_lines(&format!("[{t}]"));
+            rel_els.push(tspan_lines(
+                &lines,
+                x + lw.width.max(tw.width) / 2.0,
+                y + font + 5.0,
+                font,
+                false,
+                &text_color,
+            ));
+        }
     }
+    elements.push(Element::group("c4-rels", rel_els));
 
-    let mut title_els = Vec::new();
-    if let Some(t) = d.title.as_ref().filter(|t| !t.trim().is_empty()) {
-        let content = bounds.rect();
-        let tb = TextBlock::new(vec![t.trim().to_string()], 16.0, false);
-        let c = Point::new(content.x + content.w / 2.0, lay.title_band / 2.0 - 4.0);
-        let r = Rect::centered(c, tb.width, tb.height);
-        bounds.add_rect(r);
-        title_els.push(Element::classed_text(
-            Text::centered(c, &tb.lines, 16.0, 24.0, &marker),
+    let (mx, my) = (lconf.diagram_margin_x, lconf.diagram_margin_y);
+    let box_w = lay.max_x - mx;
+    let title = d.title.as_ref().map(|t| t.trim()).filter(|t| !t.is_empty());
+    if let Some(t) = title {
+        elements.push(Element::classed_text(
+            Text {
+                x: box_w / 2.0 - 4.0 * mx,
+                y: my + my,
+                lines: vec![t.to_string()],
+                line_height: 16.0,
+                font_size: 16.0,
+                bold: false,
+                anchor: Anchor::Start,
+                fill: marker.clone(),
+            },
             "c4-title",
         ));
     }
-
-    let view_box = bounds.rect().pad(20.0);
-    Scene {
+    let extra = if title.is_some() { 60.0 } else { 0.0 };
+    let width = box_w + 2.0 * mx;
+    let height = lay.max_y - my + 2.0 * my;
+    Ok(Scene {
         kind: DiagramKind::C4,
-        view_box,
-        elements: vec![
-            Element::group("c4-boundaries", boundary_els),
-            Element::group("c4-rels", line_els),
-            Element::group("c4-boundary-titles", boundary_title_els),
-            Element::group("c4-shapes", shape_els),
-            Element::group("c4-rel-labels", label_els),
-            Element::group("c4-title", title_els),
-        ],
+        view_box: Rect::new(0.0, -(my + extra), width, height + extra),
+        elements,
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
         css: String::new(),
-    }
+    })
 }
 
 /// Parse and render a C4 diagram body (already preprocessed).
@@ -1970,18 +2050,13 @@ pub fn render(
     cfg: &MermaidConfig,
     pal: &Palette,
 ) -> Result<Scene> {
-    let mut d = parse(body, title)?;
-    // Config values apply unless the diagram set them with UpdateLayoutConfig.
-    let defaults = (4, 2);
-    if d.shape_in_row == defaults.0 {
-        d.shape_in_row = cfg.section_f64("c4", "c4ShapeInRow", 4.0).max(1.0) as usize;
-    }
-    if d.boundary_in_row == defaults.1 {
-        d.boundary_in_row = cfg.section_f64("c4", "c4BoundaryInRow", 2.0).max(1.0) as usize;
-    }
+    // The rows per line come from the diagram (`UpdateLayoutConfig`) only:
+    // mermaid's db starts from 4 and 2 whatever the `c4` config says.
+    let d = parse(body, title)?;
     let conf = C4Conf::from_config(cfg);
-    let lay = layout(&d, &conf);
-    Ok(draw(&d, &lay, &conf, pal))
+    let lconf = LayoutConf::from_config(cfg);
+    let lay = layout(&d, &conf, &lconf);
+    draw(&d, &lay, &conf, &lconf, pal)
 }
 
 #[cfg(test)]
@@ -2014,13 +2089,26 @@ Boundary(b1, "B1") {
   }
 }
 UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
-        assert_eq!(row_carry(&d), vec![0, 0, 2, 1, 0]);
-        let lay = layout(&d, &C4Conf::default());
+        let lay = layout(&d, &C4Conf::default(), &LayoutConf::default());
         let r = |i: usize| lay.shapes[i];
         assert!((r(0).y - r(1).y).abs() < 1e-6 && r(1).x > r(0).right());
         assert!(r(3).y > r(2).bottom(), "G wraps under F");
-        // A nested boundary list starts a fresh counter: H and I share a row.
-        assert!((r(4).y - r(5).y).abs() < 1e-6);
+        // A nested boundary list starts a fresh counter, but I would end past
+        // the 800px screen width, so it wraps under H too.
+        // Top-left corners from mermaid 12.3 (element centres minus 108×36).
+        let corners: Vec<(f64, f64)> = lay.shapes.iter().map(|r| (r.x, r.y)).collect();
+        assert_eq!(
+            corners,
+            vec![
+                (250.0, 279.0),
+                (566.0, 279.0),
+                (250.0, 607.0),
+                (250.0, 779.0),
+                (300.0, 1163.0),
+                (300.0, 1335.0)
+            ]
+        );
+        assert_eq!((lay.max_x, lay.max_y), (982.0, 1657.0));
         // Every shape stays inside its boundary.
         for (b, s) in [(1, 0), (1, 1), (2, 2), (2, 3), (4, 4), (4, 5)] {
             let (o, i) = (lay.boundaries[b], r(s));
@@ -2160,7 +2248,11 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         }
         src.push_str("UpdateLayoutConfig($c4ShapeInRow=\"4\")\n");
         let d = p(&src);
-        let lay = layout(&d, &C4Conf::default());
+        let wide = LayoutConf {
+            screen_width: 4000.0,
+            ..LayoutConf::default()
+        };
+        let lay = layout(&d, &C4Conf::default(), &wide);
         assert_eq!(lay.shapes[0].y, lay.shapes[3].y);
         assert!(lay.shapes[4].y > lay.shapes[0].bottom());
         assert_eq!(lay.shapes[4].x, lay.shapes[0].x);
@@ -2181,7 +2273,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
             System_Boundary(c, "C") {
               ContainerQueue(c1, "C1")
             }"#);
-        let lay = layout(&d, &C4Conf::default());
+        let lay = layout(&d, &C4Conf::default(), &LayoutConf::default());
         let inside = |outer: &Rect, inner: &Rect| {
             inner.x >= outer.x
                 && inner.y >= outer.y
@@ -2195,8 +2287,6 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         // Two boundaries per row: the third starts a new row.
         assert_eq!(lay.boundaries[0].y, lay.boundaries[1].y);
         assert!(lay.boundaries[2].y >= lay.boundaries[0].bottom());
-        // Title band pushes content down.
-        assert!(lay.shapes[0].y >= 40.0);
     }
 
     #[test]
@@ -2265,8 +2355,9 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
             &shape(r#"SystemQueue(a, "Banking System F Queue", "A system of the bank.")"#),
             &conf,
         );
-        assert!((m.h - 57.0).abs() < 1e-6);
-        let rx = 28.5 / (2.5 + 57.0 / 50.0);
+        // The description's last row has a descender: 13px instead of 12px.
+        assert!((m.h - 58.0).abs() < 1e-6);
+        let rx = 29.0 / (2.5 + 58.0 / 50.0);
         assert!((m.w - (206.0 + 3.0 * rx + 10.0)).abs() < 1e-6);
         // The bold name wraps at regular-weight widths (one line here).
         assert_eq!(m.sections[0].lines.len(), 1);
@@ -2301,10 +2392,10 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         let card = measure_shape(&shape(r#"Person(a, "A")"#), &C4Conf::default());
         let r = Rect::new(0.0, 0.0, card.w, card.h);
         // Straight up exits through the head top.
-        let p = card_exit(&card, r, Point::new(r.center().x, -500.0));
+        let p = card_intersect(&card, r, Point::new(r.center().x, -500.0));
         assert!(p.y.abs() < 1e-6);
         // Toward a far corner the rounded body is cut inside the bounding box.
-        let p = card_exit(
+        let p = card_intersect(
             &card,
             r,
             Point::new(r.right() + 1000.0, r.bottom() + 1000.0 * r.h / r.w),
@@ -2323,5 +2414,97 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         )
         .unwrap();
         assert!(format!("{s:?}").contains("1: Calls"));
+    }
+
+    fn scene(src: &str) -> Scene {
+        let cfg = MermaidConfig::default();
+        render(src, None, &cfg, &cfg.palette()).unwrap()
+    }
+
+    fn texts(s: &Scene) -> Vec<Text> {
+        fn walk(e: &[Element], out: &mut Vec<Text>) {
+            for el in e {
+                match el {
+                    Element::Text { text, .. } => out.push(text.clone()),
+                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                        walk(children, out)
+                    }
+                    Element::Shape { .. } => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&s.elements, &mut out);
+        out
+    }
+
+    fn close(a: Rect, b: (f64, f64, f64, f64)) -> bool {
+        (a.x - b.0).abs() < 0.01
+            && (a.y - b.1).abs() < 0.01
+            && (a.w - b.2).abs() < 0.01
+            && (a.h - b.3).abs() < 0.01
+    }
+
+    #[test]
+    fn gallery_diagrams_match_mermaids_view_box() {
+        // mermaid 12.3 in mmdc's 800px-wide headless screen.
+        let s = scene(include_str!("../../examples/diagrams/c4-container.mmd"));
+        assert!(
+            close(s.view_box, (0.0, -70.0, 955.489, 1546.478)),
+            "{:?}",
+            s.view_box
+        );
+        let s = scene(include_str!("../../examples/diagrams/c4.mmd"));
+        assert!(
+            close(s.view_box, (0.0, -70.0, 1032.0, 2801.359)),
+            "{:?}",
+            s.view_box
+        );
+        // Without a title there is no 60px band.
+        let s = scene("C4Context\nSystem(a, \"A\")");
+        assert!(
+            close(s.view_box, (0.0, -10.0, 516.0, 349.0)),
+            "{:?}",
+            s.view_box
+        );
+    }
+
+    #[test]
+    fn relationship_and_boundary_texts_follow_svg_draw() {
+        // Two stacked systems: the label is centred half its width right of the
+        // chord midpoint, the technology 17px lower, baselines 6px below.
+        let s = scene(
+            "C4Context\nSystem(a, \"A\")\nSystem(c, \"C\")\nRel(a, c, \"HHHH\", \"HHHH\")\nUpdateLayoutConfig($c4ShapeInRow=\"1\")",
+        );
+        let t = texts(&s);
+        let label = t.iter().find(|t| t.lines == ["HHHH"]).unwrap();
+        let techn = t.iter().find(|t| t.lines == ["[HHHH]"]).unwrap();
+        assert_eq!((label.y, techn.y), (295.0, 312.0));
+        assert!((label.x - techn.x).abs() < 1e-9 && label.x > 258.0);
+        // Boundary title: bold label at Y = 8, type 5px under its 17px box.
+        let s = scene("C4Context\nBoundary(b, \"HHHH\", \"HHHH\") {\n  System(a, \"A\")\n}");
+        let t = texts(&s);
+        let label = t.iter().find(|t| t.lines == ["HHHH"]).unwrap();
+        let kind = t.iter().find(|t| t.lines == ["[HHHH]"]).unwrap();
+        assert_eq!((label.y, kind.y), (138.0, 160.0));
+        assert!(label.bold && (label.x - 308.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cylinder_intersect_drops_onto_the_cap() {
+        let card = measure_shape(&shape(r#"SystemDb(a, "D")"#), &C4Conf::default());
+        let r = Rect::new(0.0, 0.0, card.w, card.h);
+        let CardGeom::Cylinder { ry } = card.geom else {
+            panic!("not a cylinder")
+        };
+        // Straight up: the top of the cap; off-centre, the rectangle hit
+        // drops vertically onto the ellipse.
+        let p = card_intersect(&card, r, Point::new(r.center().x, -1000.0));
+        assert!(p.y.abs() < 1e-9);
+        let p = card_intersect(&card, r, Point::new(r.right() + 20.0, -1000.0));
+        let x = p.x - r.center().x;
+        let rx = r.w / 2.0;
+        let expect = ry - (ry * ry * (1.0 - x * x / (rx * rx))).sqrt();
+        assert!((p.y - expect).abs() < 1e-9);
     }
 }
