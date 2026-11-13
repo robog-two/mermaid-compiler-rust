@@ -1103,6 +1103,9 @@ fn finish_rng(
     let mut loop_half = vec![0.0f64; input.edges.len()];
     let mut loop_reach = vec![0.0f64; n];
     let mut loop_reach_high = vec![0.0f64; n];
+    // Per node and side: how much of the reach is the room kept between the
+    // outermost loop's label and the next loop, which its margin leaves out.
+    let mut loop_trail = vec![[0.0f64; 2]; n];
     // Per loop round a container whose ports keep their sides: how many legs
     // its container's margins hold outside its own (the side with the most
     // loops sets them).
@@ -1165,11 +1168,14 @@ fn finish_rng(
             let gap = ((verts[v].h - 2.0 * PORTS_SURROUNDING) / (2 * loops[v] + 1) as f64).max(0.0);
             loop_half[ei] = gap * (2 * seen[v] + 1) as f64 / 2.0;
             seen[v] += 1;
-            let reach = if loop_high(ei) {
+            let high = loop_high(ei);
+            let reach = if high {
                 &mut loop_reach_high[v]
             } else {
                 &mut loop_reach[v]
             };
+            let trail = &mut loop_trail[v][usize::from(high)];
+            let label_gap = self_loop_label_gap(graph);
             // The first one `spacing.nodeSelfLoop` off the node, each later
             // one `spacing.edgeEdge` (20 in every graph) beyond the one before.
             loop_out[ei] = if *reach > 0.0 {
@@ -1180,13 +1186,21 @@ fn finish_rng(
             let across = e.label.map(|(lw, lh)| swap(lw, lh).0);
             if fixed_ports(ei).is_some() {
                 // Round a container its label stands on its leg, which runs
-                // through the label's middle.
+                // through the label's middle; the next loop keeps
+                // `spacing.edgeLabel` (twice) off it, but the container's
+                // margin ends at the label (`OrthogonalSelfLoopRouter`).
                 let half = across.map_or(0.0, |a| a / 2.0);
                 loop_out[ei] += half;
-                *reach = loop_out[ei] + across.map_or(0.0, |_| half + SELF_LOOP_LABEL_GAP);
+                *reach = loop_out[ei] + across.map_or(0.0, |_| half + label_gap);
+                *trail = across.map_or(0.0, |_| label_gap);
             } else {
-                *reach = loop_out[ei] + across.map_or(0.0, |a| SELF_LOOP_LABEL_GAP + a);
+                *reach = loop_out[ei] + across.map_or(0.0, |a| label_gap + a);
+                *trail = 0.0;
             }
+        }
+        for (v, [low, high]) in loop_trail.iter().enumerate() {
+            loop_reach[v] -= low;
+            loop_reach_high[v] -= high;
         }
     }
     let gap = |a: usize, b: usize| -> f64 {
@@ -1641,7 +1655,7 @@ fn finish_rng(
                     .to_vec();
                     let label = e.label.map(|(lw, lh)| {
                         let lw = swap(lw, lh).0;
-                        to_out(Point::new(out - lw / 2.0 - SELF_LOOP_LABEL_GAP, cy))
+                        to_out(Point::new(out - lw / 2.0 - self_loop_label_gap(graph), cy))
                     });
                     return EdgeRoute { points, label };
                 }
@@ -2289,6 +2303,16 @@ fn self_loop_ext(graph: ElkGraph) -> f64 {
 }
 /// Gap between an ELK self-loop's outer leg and its label.
 const SELF_LOOP_LABEL_GAP: f64 = 4.0;
+
+/// The room an ELK self-loop's label keeps from the next loop out: the
+/// graph's `spacing.edgeLabel`, a tenth of its `spacing.baseValue` (4 in the
+/// root, 2.4 in a container's graph).
+fn self_loop_label_gap(graph: ElkGraph) -> f64 {
+    match graph {
+        ElkGraph::Root => SELF_LOOP_LABEL_GAP,
+        ElkGraph::Container { .. } => ELK_CONTAINER_BASE_SPACING / 10.0,
+    }
+}
 /// ELK's `spacing.portsSurrounding` as mermaid sets it: no port within 12px of a
 /// node's corner.
 pub(crate) const PORTS_SURROUNDING: f64 = 12.0;

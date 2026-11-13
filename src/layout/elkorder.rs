@@ -138,6 +138,12 @@ struct Sweeper<'a> {
     inl_ord: Vec<Option<(bool, usize)>>,
     /// Per in-layer edge: the key of its edge (see `RunGraph::seg_key`).
     inl_key: Vec<usize>,
+    /// Per container vertex, per side (east, west): the keys of its ports top
+    /// to bottom as its contents last ordered them
+    /// (`sortPortsByDummyPositionsInLastLayer`); the ports without an edge in
+    /// this graph keep that order among themselves until the next time. Empty:
+    /// never ordered so, the ports as made.
+    port_list: Vec<[Vec<usize>; 2]>,
 }
 
 /// A port in the sweeps: a segment's on its source (east) or target (west), or
@@ -206,6 +212,7 @@ struct Snapshot {
     west: Vec<Vec<usize>>,
     inl_pos: Vec<(usize, usize)>,
     inl_ord: Vec<Option<(bool, usize)>>,
+    port_list: Vec<[Vec<usize>; 2]>,
 }
 
 /// What ELK knows of an edge segment: its edge (whose index is the edge's model
@@ -528,6 +535,7 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
             inl_pos: vec![(usize::MAX, 0); inl.len()],
             inl_ord: vec![None; inl.len()],
             inl_key,
+            port_list: vec![[Vec::new(), Vec::new()]; nv],
         });
         extra.push((opts, ext_key, seg_key, parent));
     }
@@ -582,6 +590,7 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
                     run.sw[k].west = snap.west;
                     run.sw[k].inl_pos = snap.inl_pos;
                     run.sw[k].inl_ord = snap.inl_ord;
+                    run.sw[k].port_list = snap.port_list;
                 }
             }
         }
@@ -748,6 +757,7 @@ impl Run<'_> {
         let seg_key = &self.extra[pg].2;
         let rank_of = |key: usize| keys.iter().position(|&k| k == key).unwrap_or(usize::MAX);
         let parent = &mut self.sw[pg];
+        parent.port_list[v][usize::from(!east)] = keys.clone();
         let ports = if east {
             &mut parent.east[v]
         } else {
@@ -792,8 +802,9 @@ impl Run<'_> {
         // an edge to something inside it, or for a loop on it): without
         // connections the port distributor sorts it to the front of its side's
         // clockwise list (barycentre 0), which is the top of the east side but
-        // the bottom of the west, keeping such ports in the order they had,
-        // as `PortListSorter` left them: as they were made, the west side
+        // the bottom of the west, keeping such ports in the order they had:
+        // as the container's contents last ordered them (`port_list`), or
+        // else as `PortListSorter` left them: as they were made, the west side
         // reversed but for its last port (see `port_list_sorter_west`).
         let ext_key = &self.extra[g].1;
         let made = |k: usize| {
@@ -806,11 +817,17 @@ impl Run<'_> {
             .iter()
             .filter_map(|&u| ext_key[u])
             .collect();
-        side.sort_by_key(|&k| (made(k), k));
-        if west {
-            // Top to bottom: ELK's list reversed.
-            side.reverse();
-            port_list_sorter_west(&mut side);
+        let listed = &self.sw[pg].port_list[v][usize::from(west)];
+        if listed.is_empty() {
+            side.sort_by_key(|&k| (made(k), k));
+            if west {
+                // Top to bottom: ELK's list reversed.
+                side.reverse();
+                port_list_sorter_west(&mut side);
+            }
+        } else {
+            // As the container's contents last left them.
+            side.sort_by_key(|&k| listed.iter().position(|&x| x == k));
         }
         let unconnected = if west { usize::MAX } else { 0 };
         let rank = |u: usize| {
@@ -1039,13 +1056,42 @@ fn container_port_order(
         .collect()
 }
 
+/// Per port of a node's west side (`ports`, segments made at `made`): its
+/// part of the side, counted up from the bottom, between the ports without
+/// edges (made at `walls`), as `PortListSorter` leaves the side: as made, then
+/// turned round (see [`port_list_sorter_west`]).
+fn west_parts(walls: &[Made], ports: &[usize], made: &[Made]) -> Vec<(usize, usize)> {
+    let mut side: Vec<(Made, Option<usize>)> = walls
+        .iter()
+        .map(|&w| (w, None))
+        .chain(
+            ports
+                .iter()
+                .map(|&s| (made.get(s).copied().unwrap_or((0, s)), Some(s))),
+        )
+        .collect();
+    side.sort_by_key(|&(m, s)| (m, s.map_or(0, |s| s + 1)));
+    // Top to bottom.
+    side.reverse();
+    port_list_sorter_west(&mut side);
+    let mut below = 0;
+    let mut out = Vec::with_capacity(ports.len());
+    for &(_, s) in side.iter().rev() {
+        match s {
+            Some(s) => out.push((s, below)),
+            None => below += 1,
+        }
+    }
+    out
+}
+
 /// `PortListSorter.reverseWestAndSouthSide` on a node's west side (`west`, top
 /// to bottom: the reverse of ELK's port list, which runs clockwise). It means to
 /// reverse the side, but `findPortSideRange` reads the side of the range's first
 /// port again and again, so the range runs on to the list's last port and
 /// `reverse` leaves that one out (and does nothing for fewer than four ports):
 /// of ELK's list `l0 .. lk` the side becomes `lk-1 .. l0, lk`.
-fn port_list_sorter_west(west: &mut [usize]) {
+fn port_list_sorter_west<T>(west: &mut [T]) {
     if west.len() >= 4 {
         west[1..].reverse();
     }
@@ -1239,11 +1285,13 @@ fn sort_by_model_order(
                 let m = made.get(s).copied().unwrap_or((0, s));
                 walls.iter().filter(|&&w| w < m).count()
             };
-            // Incoming ports by where they come from (top to bottom); ELK's
-            // list runs clockwise, up the west side, so a later part is higher.
+            // Incoming ports by where they come from (top to bottom), each
+            // part as `PortListSorter` left the west side: ELK's list runs
+            // clockwise, up the side, so a later part is higher.
+            let part_in = west_parts(&walls_in, &west[v], seg_made_in);
             west[v].sort_by_key(|&s| {
                 (
-                    std::cmp::Reverse(part(&walls_in, seg_made_in, s)),
+                    std::cmp::Reverse(part_in.iter().find(|p| p.0 == s).map_or(0, |p| p.1)),
                     pos[segs[s].0],
                     port_at[s],
                 )
@@ -1607,6 +1655,7 @@ impl Sweeper<'_> {
             west: self.west.clone(),
             inl_pos: self.inl_pos.clone(),
             inl_ord: self.inl_ord.clone(),
+            port_list: self.port_list.clone(),
         }
     }
 

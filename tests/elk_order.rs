@@ -1297,17 +1297,7 @@ type Extent = (f64, f64, f64, f64);
 fn frame_and_loop(src: &str, c: &str, n: usize) -> (Extent, Extent) {
     let r = render::render(src, &MermaidConfig::default()).expect("renders");
     let svg = output::encode_svg(&r, &EncodeOptions::default());
-    let at = svg
-        .find(&format!("<g id=\"cluster-{c}\" class=\"cluster\">"))
-        .expect("cluster");
-    let rect = at + svg[at..].find("<rect x=").expect("frame");
-    let tag = &svg[rect..rect + svg[rect..].find('>').expect("tag end")];
-    let frame = (
-        attr(tag, "x"),
-        attr(tag, "y"),
-        attr(tag, "width"),
-        attr(tag, "height"),
-    );
+    let frame = frame_of(&svg, c);
     let key = format!("<g id=\"L-{c}-{c}-");
     let at = svg.match_indices(&key).nth(n).expect("loop").0;
     let d = at + svg[at..].find(" d=\"").expect("path") + 4;
@@ -1321,6 +1311,27 @@ fn frame_and_loop(src: &str, c: &str, n: usize) -> (Extent, Extent) {
     let min = |v: &[f64]| v.iter().copied().fold(f64::INFINITY, f64::min);
     let max = |v: &[f64]| v.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     (frame, (min(&xs), max(&xs), min(&ys), max(&ys)))
+}
+
+/// A container's frame `(x, y, w, h)` in our SVG.
+fn frame_of(svg: &str, c: &str) -> Extent {
+    let at = svg
+        .find(&format!("<g id=\"cluster-{c}\" class=\"cluster\">"))
+        .expect("cluster");
+    let rect = at + svg[at..].find("<rect x=").expect("frame");
+    let tag = &svg[rect..rect + svg[rect..].find('>').expect("tag end")];
+    (
+        attr(tag, "x"),
+        attr(tag, "y"),
+        attr(tag, "width"),
+        attr(tag, "height"),
+    )
+}
+
+/// A container's frame `(x, y, w, h)` as we render `src`.
+fn frame(src: &str, c: &str) -> Extent {
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    frame_of(&output::encode_svg(&r, &EncodeOptions::default()), c)
 }
 
 #[test]
@@ -1463,4 +1474,164 @@ fn a_container_with_only_a_loop_and_port_edges_is_pinned_like_elk() {
             ("x0", 154.78, 605.0),
         ],
     );
+}
+
+#[test]
+fn a_containers_unconnected_ports_keep_the_order_its_contents_gave_them() {
+    // The forward sweep diving into C0 orders its east ports by their dummies
+    // there: `c0n0 --> C0`'s (beside c0n0) first, then the loops' (without a
+    // barycentre, kept after it). The backward sweep takes that order back
+    // into C0, so the loops' dummies stand below c0n0's and C0 grows for
+    // them (mermaid 12.3.0: C0 260x225.5).
+    let (_, _, w, h) = frame(
+        "flowchart LR
+  subgraph C0
+    c0n0
+    c0n1
+  end
+  x0
+  c0n0 --> C0
+  x0 --> c0n0
+  C0 --> c0n0
+  x1 --> c0n1
+  C0 -->|lab0| C0
+  C0 --> C0
+  C0 --> C0
+",
+        "C0",
+    );
+    assert!(
+        (w - 260.0).abs() < 0.5 && (h - 225.5).abs() < 0.5,
+        "{w} {h}"
+    );
+}
+
+#[test]
+fn a_containers_model_order_sorts_its_ports_as_port_list_sorter_left_them() {
+    // `PortListSorter` turns C0's west side round (but for its last port)
+    // before the model order sorts it: x0's and x1's ports end up side by
+    // side, no loop port between them, and sort by their sources. The model
+    // order has no crossing, nothing is swept, and C0's port dummies keep
+    // the order they were made in: the loops' after x1's, below c0n0
+    // (mermaid 12.3.0: C0 200x142.5).
+    let (_, _, w, h) = frame(
+        "flowchart RL
+  subgraph C0
+    c0n0
+  end
+  x0
+  x1 --> c0n0
+  x0 --> C0
+  C0 --> C0
+  C0 -->|lab1| C0
+  C0 -->|lab2| C0
+",
+        "C0",
+    );
+    assert!(
+        (w - 200.0).abs() < 0.5 && (h - 142.5).abs() < 0.5,
+        "{w} {h}"
+    );
+}
+
+#[test]
+fn a_containers_margin_ends_at_its_outer_loops_label() {
+    // The outer loop's label (inline, on its leg) is the last thing round
+    // C0: its margin ends there, without `spacing.edgeLabel` beyond it, and
+    // x0 (a component of its own) stands that much nearer (mermaid 12.3.0).
+    expect_centres(
+        "flowchart BT
+  subgraph C0
+    c0n0
+    c0n1
+    c0n0 --> c0n1
+  end
+  x0
+  C0 --> c0n0
+  C0 --> C0
+  C0 -->|lab1| C0
+  C0 --> C0
+",
+        &[
+            ("c0n0", 0.0, 69.0),
+            ("c0n1", 0.0, 0.0),
+            ("x0", 282.47, 22.5),
+        ],
+    );
+    // So does a reversed edge's dummy below C0 (mermaid 12.3.0).
+    expect_centres(
+        "flowchart LR
+  subgraph C0
+    c0n0
+    c0n1
+  end
+  x0
+  C0 --> x0
+  C0 --> c0n0
+  x0 --> C0
+  c0n1 --> x1
+  C0 -->|lab0| C0
+  C0 --> C0
+",
+        &[
+            ("c0n0", 0.0, 95.0),
+            ("c0n1", 0.0, 0.0),
+            ("x0", 266.0, 231.83),
+            ("x1", 266.0, 0.0),
+        ],
+    );
+}
+
+#[test]
+fn loop_labels_in_a_containers_graph_keep_its_edge_label_spacing() {
+    // In A's graph (`spacing.baseValue` 24) the loop beyond lab0's stands
+    // `spacing.edgeLabel` 2.4 (not the root's 4) past the label, and A
+    // holds it (mermaid 12.3.0: A 529.84 wide).
+    let (_, _, w, _) = frame(
+        "flowchart BT
+  subgraph A
+    subgraph C0
+      c0n0
+    end
+    a1
+  end
+  x0
+  c0n0 --> x0
+  C0 --> x0
+  c0n0 --> C0
+  x0 --> C0
+  C0 -->|lab0| C0
+  C0 -->|lab1| C0
+",
+        "A",
+    );
+    assert!((w - 529.84).abs() < 0.5, "{w}");
+}
+
+#[test]
+fn a_loop_label_in_a_containers_graph_stands_its_edge_label_spacing_off() {
+    // D0's loop in C0's graph: its label stands `spacing.edgeLabel` 2.4 off
+    // the loop's leg, and C0 holds it (mermaid 12.3.0: C0 283.4 high).
+    let (_, _, _, h) = frame(
+        "flowchart RL
+  subgraph C0
+    c0n0
+    c0n1
+    c0n2
+    c0n0 --> c0n1
+    subgraph D0
+      d0n0
+    end
+  end
+  x0
+  C0 -->|lab1| x0
+  c0n1 --> D0
+  c0n1 -->|lab2| D0
+  D0 -->|lab3| D0
+  C0 --> C0
+  C0 --> C0
+",
+        "C0",
+    );
+    assert!((h - 283.4).abs() < 0.5, "{h}");
 }
