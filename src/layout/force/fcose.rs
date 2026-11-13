@@ -6,10 +6,11 @@
 //! mulberry32-seeded `Math.random` (seed 1), so the run is deterministic and
 //! reproduced here step by step.
 //!
-//! Not ported (mermaid never reaches them with constraints present): the
-//! spectral layout, fixed-node constraints, tiling of zero-degree nodes and
-//! tree reduction. A graph without constraints runs the same incremental
-//! spring embedder without them, which can differ from fcose.
+//! mermaid always hands fcose an `alignmentConstraint` object, even when both
+//! of its lists are empty, so fcose treats every architecture as constrained:
+//! it turns off tiling and component packing and skips tree reduction. Those
+//! parts and the spectral layout (only for `randomize: true`) are therefore
+//! not ported, nor are fixed-node constraints, which mermaid never sets.
 
 use super::geometry::{RectD, clip_points, separation_amount, sign};
 use super::jsmath;
@@ -52,12 +53,6 @@ pub struct Constraints {
     /// `alignmentConstraint.horizontal`: groups sharing a y.
     pub horizontal: Vec<Vec<usize>>,
     pub relative: Vec<Relative>,
-}
-
-impl Constraints {
-    fn is_empty(&self) -> bool {
-        self.vertical.is_empty() && self.horizontal.is_empty() && self.relative.is_empty()
-    }
 }
 
 /// Run fcose once. `positions` are the cytoscape positions of the leaves (the
@@ -660,10 +655,12 @@ impl Fcose {
         self.calc_inclusion_tree_depths(root, 1.0);
         self.graph_estimated_size(root);
         self.calc_ideal_edge_lengths();
-        if !self.constraints.is_empty() {
-            self.handle_constraints();
-            self.init_constraint_variables();
-        }
+        // mermaid always passes an `alignmentConstraint` object (possibly
+        // with both lists empty), so fcose takes its constrained path on every
+        // architecture: no tiling, no tree reduction, and the constraint
+        // handler re-centres every leaf even when it has nothing to enforce.
+        self.handle_constraints();
+        self.init_constraint_variables();
         self.init_spring_embedder();
         while !self.tick() {}
         self.update_bounds();
@@ -1002,9 +999,7 @@ impl Fcose {
                 self.propagate(v, dx, dy);
             }
         }
-        if !self.constraints.is_empty() {
-            self.update_displacements();
-        }
+        self.update_displacements();
         for k in 0..self.all_nodes.len() {
             let v = self.all_nodes[k];
             let leaf = self.nodes[v]

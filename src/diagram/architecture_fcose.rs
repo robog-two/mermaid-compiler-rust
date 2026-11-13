@@ -337,18 +337,14 @@ fn elements(d: &Architecture) -> (Vec<fcose::Node>, Vec<fcose::Edge>) {
     (nodes, edges)
 }
 
-/// Lay the diagram out as mermaid does. `label_width(n)` is the width of a
-/// service's title (0 for none), used for the group boxes cytoscape draws
-/// around their members' labels. `None` when the edges and hints give fcose
-/// no constraints (mermaid then tiles and prunes, which is not ported).
-pub fn place(d: &Architecture, label_width: &dyn Fn(usize) -> f64) -> Option<Placement> {
+/// Lay the diagram out as mermaid does. `measure(text, edge)` is the width
+/// cytoscape measures for a label (a service's title, or with `edge` an edge's
+/// label), which widens the boxes it puts around nodes, edges and groups.
+pub fn place(d: &Architecture, measure: &dyn Fn(&str, bool) -> f64) -> Placement {
     let ng = d.groups.len();
     let (maps, group_al) = data_structures(d);
     let (horizontal, vertical) = alignments(d, &maps, &group_al);
     let relative = relative_constraints(d, &maps);
-    if horizontal.is_empty() && vertical.is_empty() && relative.is_empty() {
-        return None;
-    }
     let (nodes, edges) = elements(d);
     let order: Vec<usize> = (0..d.nodes.len())
         .filter(|&i| matches!(d.nodes[i].kind, NodeKind::Service { .. }))
@@ -378,12 +374,13 @@ pub fn place(d: &Architecture, label_width: &dyn Fn(usize) -> f64) -> Option<Pla
     // Each run is moved onto the centre of the elements' bounding box before
     // it (cytoscape's, labels included).
     let mut pos = vec![(0.0, 0.0); nodes.len()];
-    let mut first_pos = Vec::new();
+    let mut first_pos: Vec<Point> = Vec::new();
     for run in 0..2 {
         let node_pos: Vec<Point> = (0..d.nodes.len())
             .map(|i| Point::new(pos[cy_of[i]].0, pos[cy_of[i]].1))
             .collect();
-        let (_, all) = cy_boxes(d, &node_pos, &|g| pos[g], label_width);
+        let first = (run == 1).then_some(first_pos.as_slice());
+        let (_, all) = cy_boxes(d, &node_pos, first, &|g| pos[g], measure);
         let center = (all.x + all.w / 2.0, all.y + all.h / 2.0);
         let rects = fcose::run(&nodes, &edges, &constraints, &pos, center);
         pos = rects.iter().map(|r| (r.center_x(), r.center_y())).collect();
@@ -396,12 +393,12 @@ pub fn place(d: &Architecture, label_width: &dyn Fn(usize) -> f64) -> Option<Pla
     let node_pos: Vec<Point> = (0..d.nodes.len())
         .map(|i| Point::new(pos[cy_of[i]].0, pos[cy_of[i]].1))
         .collect();
-    let (group_bbox, _) = cy_boxes(d, &node_pos, &|g| pos[g], label_width);
-    Some(Placement {
+    let (group_bbox, _) = cy_boxes(d, &node_pos, Some(&first_pos), &|g| pos[g], measure);
+    Placement {
         node_pos,
         first_pos,
         group_bbox,
-    })
+    }
 }
 
 /// A node's `source-endpoint` / `target-endpoint` (`'100% 50%'` etc.:
@@ -440,32 +437,29 @@ fn segment_weights(s: Point, t: Point, point: Point) -> (f64, f64) {
     (w, d)
 }
 
-/// An edge as svgDraw.ts draws it: `M start L mid L end`, from the
-/// cytoscape endpoints and midpoint, with `{group}` ends pushed past the
-/// group border and junction ends pulled to the junction's centre.
-pub fn edge_points(
-    d: &Architecture,
-    p: &Placement,
+/// Cytoscape's source endpoint, midpoint and target endpoint of an edge with
+/// the nodes at `now`. A `segments` edge (ports on perpendicular sides) bends
+/// at the weight and distance mermaid's `layoutstop` handler derived from the
+/// first run's positions `first` (cytoscape's default style before that).
+fn cy_edge(
+    now: &[Point],
+    first: Option<&[Point]>,
     e: &super::architecture::ArchEdge,
 ) -> [Point; 3] {
     let (a, b) = (e.lhs.node, e.rhs.node);
-    let (s, t) = (
-        endpoint(p.node_pos[a], e.lhs.side),
-        endpoint(p.node_pos[b], e.rhs.side),
-    );
+    let (s, t) = (endpoint(now[a], e.lhs.side), endpoint(now[b], e.rhs.side));
     let mid = if is_x(e.lhs.side) != is_x(e.rhs.side) {
-        // `segments` edge: weight and distance fixed after the first run.
-        let (pa, pb) = (p.first_pos[a], p.first_pos[b]);
-        let (w, dist) = if pa.x != pb.x && pa.y != pb.y {
-            let (s1, t1) = (endpoint(pa, e.lhs.side), endpoint(pb, e.rhs.side));
-            let corner = if is_x(e.lhs.side) {
-                Point::new(t1.x, s1.y)
-            } else {
-                Point::new(s1.x, t1.y)
-            };
-            segment_weights(s1, t1, corner)
-        } else {
-            (0.0, 0.5)
+        let (w, dist) = match first {
+            Some(f) if f[a].x != f[b].x && f[a].y != f[b].y => {
+                let (s1, t1) = (endpoint(f[a], e.lhs.side), endpoint(f[b], e.rhs.side));
+                let corner = if is_x(e.lhs.side) {
+                    Point::new(t1.x, s1.y)
+                } else {
+                    Point::new(s1.x, t1.y)
+                };
+                segment_weights(s1, t1, corner)
+            }
+            _ => (0.0, 0.5),
         };
         let (dx, dy) = (t.x - s.x, t.y - s.y);
         let l = (dx * dx + dy * dy).sqrt();
@@ -481,6 +475,18 @@ pub fn edge_points(
     } else {
         Point::new((s.x + t.x) / 2.0, (s.y + t.y) / 2.0)
     };
+    [s, mid, t]
+}
+
+/// An edge as svgDraw.ts draws it: `M start L mid L end`, from the
+/// cytoscape endpoints and midpoint, with `{group}` ends pushed past the
+/// group border and junction ends pulled to the junction's centre.
+pub fn edge_points(
+    d: &Architecture,
+    p: &Placement,
+    e: &super::architecture::ArchEdge,
+) -> [Point; 3] {
+    let [s, mid, t] = cy_edge(&p.node_pos, Some(&p.first_pos), e);
     let shift = |mut q: Point, end: &super::architecture::EdgeEnd| {
         let group_shift = PADDING + 4.0;
         if end.group {
@@ -511,14 +517,20 @@ pub fn edge_points(
 fn cy_boxes(
     d: &Architecture,
     node_pos: &[Point],
+    first_pos: Option<&[Point]>,
     group_pos: &dyn Fn(usize) -> (f64, f64),
-    label_width: &dyn Fn(usize) -> f64,
+    measure: &dyn Fn(&str, bool) -> f64,
 ) -> (Vec<Rect>, Rect) {
     let ng = d.groups.len();
     let leaf_box = |i: usize| {
         let p = node_pos[i];
-        let lw = label_width(i);
-        let half = (ICON_SIZE / 2.0 + 1.0).max(lw / 2.0 + 1.0);
+        let lw = match &d.nodes[i].kind {
+            NodeKind::Service { title: Some(t), .. } if !t.is_empty() => measure(t, false),
+            _ => 0.0,
+        };
+        // The label's box is widened by cytoscape's `marginOfError` (2px),
+        // and every box by 1px.
+        let half = (ICON_SIZE / 2.0 + 1.0).max(lw / 2.0 + 3.0);
         let bottom = if lw > 0.0 { 59.0 } else { 41.0 };
         (
             Rect::new(p.x - half, p.y - 41.0, 2.0 * half, 41.0 + bottom),
@@ -577,6 +589,35 @@ fn cy_boxes(
     for &r in &groups {
         add(r);
     }
+    // Edges: their source, middle and target points widened by half the
+    // default 3px width and the 1px margin, and their labels (cytoscape's
+    // default 16px font) by its 2px `marginOfError` and the same margin.
+    for e in &d.edges {
+        let pts = cy_edge(node_pos, first_pos, e);
+        let (mut x0, mut y0, mut x1, mut y1) = (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        );
+        for q in pts {
+            x0 = x0.min(q.x);
+            y0 = y0.min(q.y);
+            x1 = x1.max(q.x);
+            y1 = y1.max(q.y);
+        }
+        let m = 2.5;
+        add(Rect::new(
+            x0 - m,
+            y0 - m,
+            x1 - x0 + 2.0 * m,
+            y1 - y0 + 2.0 * m,
+        ));
+        if let Some(l) = e.label.as_deref().filter(|l| !l.is_empty()) {
+            let (hw, hh) = (measure(l, true) / 2.0 + 3.0, 8.0 + 3.0);
+            add(Rect::new(pts[1].x - hw, pts[1].y - hh, 2.0 * hw, 2.0 * hh));
+        }
+    }
     (groups, all.unwrap_or_default())
 }
 
@@ -585,12 +626,9 @@ mod tests {
     use super::*;
     use crate::diagram::architecture::parse;
 
-    fn titled(d: &Architecture) -> impl Fn(usize) -> f64 + '_ {
-        // Any title narrower than the icon gives the same boxes.
-        |i| match &d.nodes[i].kind {
-            NodeKind::Service { title: Some(_), .. } => 40.0,
-            _ => 0.0,
-        }
+    /// Any title narrower than the icon gives the same boxes.
+    fn titled(_: &Architecture) -> impl Fn(&str, bool) -> f64 {
+        |_, _| 40.0
     }
 
     #[test]
@@ -609,7 +647,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let p = place(&d, &titled(&d)).unwrap();
+        let p = place(&d, &titled(&d));
         let want = [
             (-229.5803166068381, 105.67886565152662),
             (-9.62211433371776, 105.67886565152662),
@@ -665,7 +703,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let p = place(&d, &titled(&d)).unwrap();
+        let p = place(&d, &titled(&d));
         // mermaid's positions, compared relative to s0 (the absolute offset
         // depends on cytoscape's label metrics).
         let want = [

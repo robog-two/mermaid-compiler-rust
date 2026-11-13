@@ -297,7 +297,7 @@ fn wrap(text: &str, font: f64, width: f64) -> (Vec<String>, f64) {
         .fold(0.0, f64::max);
     let lines = crate::text::wrap_lines(&raw, width, font, false, BreakRule::Browser);
     let tw = if natural > width {
-        width
+        crate::text::html_wrap_width(&raw, width, font, false)
     } else {
         // An HTML label's box: layout units (1/64 px).
         TextBlock::new(lines.clone(), font, false).html().width
@@ -645,6 +645,25 @@ mod tests {
     fn label_width_is_the_html_label_box() {
         // mermaid 12.3.0 sizes this label's foreignObject 107.609375 wide.
         assert_eq!(wrap("Origins of thing", 16.0, 200.0).1, 107.609375);
+    }
+
+    #[test]
+    fn wrapped_labels_follow_break_spaces() {
+        // mermaid 12.3.0: three lines (the space after "leaf" must fit too).
+        let (lines, w) = wrap(
+            "rho W Long-term kappa leaf alpha lambda Long-term i",
+            16.0,
+            200.0,
+        );
+        assert_eq!(
+            lines,
+            ["rho W Long-term kappa", "leaf alpha lambda Long-", "term i"]
+        );
+        assert_eq!(w, 200.0);
+        // The box widens to its longest word: foreignObject 137.875 wide.
+        let (lines, w) = wrap("theta internationalization eta alpha lambda", 16.0, 120.0);
+        assert_eq!(lines, ["theta", "internationalization", "eta alpha lambda"]);
+        assert_eq!(w, 137.875);
     }
 
     #[test]

@@ -597,6 +597,12 @@ pub fn wrap(raw: &str, max_width: f64, font_size: f64, bold: bool, rule: BreakRu
 }
 
 /// [`wrap`] for lines that are already split and entity-decoded.
+///
+/// [`BreakRule::Browser`] follows `createText`'s HTML label: laid out on one
+/// line (`white-space: nowrap`) while that fits `max_width`; otherwise in a
+/// `display: table` box of that width with `white-space: break-spaces`, where
+/// a space stays at the end of its line and must fit too, and the box widens
+/// to its widest unbreakable piece (see [`html_wrap_width`]).
 pub fn wrap_lines(
     lines: &[String],
     max_width: f64,
@@ -604,15 +610,33 @@ pub fn wrap_lines(
     bold: bool,
     rule: BreakRule,
 ) -> Vec<String> {
+    let paras: Vec<String> = lines
+        .iter()
+        .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let width = match rule {
+        BreakRule::Spaces => max_width,
+        BreakRule::Browser => {
+            let natural = paras
+                .iter()
+                .map(|p| line_width(p, font_size, bold))
+                .fold(0.0, f64::max);
+            if natural <= max_width {
+                return balance_marks(paras);
+            }
+            html_wrap_width(&paras, max_width, font_size, bold)
+        }
+    };
     let mut out = Vec::new();
-    for para in lines {
-        let para = para.split_whitespace().collect::<Vec<_>>().join(" ");
+    for para in &paras {
         let mut cur = String::new();
-        for seg in segments(&para, rule) {
+        for seg in segments(para, rule) {
             let cand = format!("{cur}{seg}");
-            if !plain(&cur).trim().is_empty()
-                && line_width(cand.trim_end(), font_size, bold) > max_width
-            {
+            let used = match rule {
+                BreakRule::Spaces => line_width(cand.trim_end(), font_size, bold),
+                BreakRule::Browser => line_width(&cand, font_size, bold),
+            };
+            if !plain(&cur).trim().is_empty() && used > width {
                 out.push(std::mem::replace(&mut cur, seg).trim_end().to_string());
             } else {
                 cur = cand;
@@ -621,6 +645,27 @@ pub fn wrap_lines(
         out.push(cur.trim_end().to_string());
     }
     balance_marks(out)
+}
+
+/// The width an HTML label wrapped at `max_width` takes ([`BreakRule::Browser`]):
+/// `max_width`, or its widest unbreakable piece (a word with the space after
+/// it) when that is wider, since a table box cannot shrink below it. Chromium
+/// measures a piece between its start and end offsets in the paragraph, each
+/// rounded to the nearest layout unit (1/64 px).
+pub fn html_wrap_width(lines: &[String], max_width: f64, font_size: f64, bold: bool) -> f64 {
+    let lu = |w: f64| (w * 64.0 + 0.5).floor();
+    let mut min_content = 0.0f64;
+    for para in lines {
+        let para = para.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut prefix = String::new();
+        for seg in segments(&para, BreakRule::Browser) {
+            let start = lu(line_width(&prefix, font_size, bold));
+            prefix.push_str(&seg);
+            let end = lu(line_width(&prefix, font_size, bold));
+            min_content = min_content.max((end - start) / 64.0);
+        }
+    }
+    max_width.max(min_content)
 }
 
 /// Wrap already-split lines as mermaid's SVG text labels do (`createFormattedText`
@@ -1382,5 +1427,51 @@ mod tests {
             BreakRule::Spaces,
         );
         assert_eq!(s, ["中文文本", "DELIVERY-ADDRESS"]);
+    }
+
+    #[test]
+    fn browser_wrapping_keeps_the_space_on_its_line() {
+        // `white-space: break-spaces`: the space after a line's last word
+        // takes room ("...kappa leaf " is 202.77px), as Chromium wraps it.
+        let w = |s: &str, max: f64| wrap(s, max, 16.0, false, BreakRule::Browser);
+        assert_eq!(
+            w("rho W Long-term kappa leaf alpha lambda Long-term i", 200.0),
+            ["rho W Long-term kappa", "leaf alpha lambda Long-", "term i"]
+        );
+        assert_eq!(
+            w("iiii map omega kappa map node epsilon node", 120.0),
+            ["iiii map omega", "kappa map", "node epsilon", "node"]
+        );
+        // A label that fits stays on one line (`nowrap`), even when its last
+        // word only fits without a space after it.
+        assert_eq!(w("kappa map node", 120.0), ["kappa map node"]);
+    }
+
+    #[test]
+    fn browser_wrapping_widens_to_the_longest_word() {
+        // The table box cannot be narrower than "internationalization "
+        // (137.87px), so the other lines wrap at that width too.
+        let text = "research nu iiii branch lambda kappa internationalization eta mind l omicron xi research Long-term";
+        let lines = wrap(text, 120.0, 16.0, false, BreakRule::Browser);
+        assert_eq!(
+            lines,
+            [
+                "research nu iiii",
+                "branch lambda",
+                "kappa",
+                "internationalization",
+                "eta mind l omicron",
+                "xi research Long-",
+                "term"
+            ]
+        );
+        // "internationalization " is 137.8671875px, half a layout unit: it
+        // starts half a unit in here (rounded up), so it spans 8823/64 px...
+        let paras = [text.to_string()];
+        assert_eq!(html_wrap_width(&paras, 120.0, 16.0, false), 137.859375);
+        assert_eq!(html_wrap_width(&paras, 200.0, 16.0, false), 200.0);
+        // ... and 8824/64 px from a whole unit (as Chromium sizes both boxes).
+        let paras = ["theta internationalization eta alpha lambda".to_string()];
+        assert_eq!(html_wrap_width(&paras, 120.0, 16.0, false), 137.875);
     }
 }
