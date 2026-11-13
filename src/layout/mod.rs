@@ -1481,6 +1481,32 @@ fn finish_rng(
                     let (cx, cy) = (x[v], vy[v]);
                     let (side, half) = (cx - verts[v].w / 2.0, loop_half[ei]);
                     let out = side - loop_out[ei];
+                    // On a laid out container with ports of fixed sides its
+                    // ports are on the far and the near side, where its
+                    // contents put them: the loop leaves on the far side and
+                    // comes back round the low side to the near one, standing
+                    // off each.
+                    if let Some((Some(fs), Some(ft))) = hier.ports.get(ei).copied()
+                        && hier.side_fixed.get(v).copied().unwrap_or(false)
+                    {
+                        let (top, bottom) = (cy - verts[v].h / 2.0, cy + verts[v].h / 2.0);
+                        let (before, after) = hier.margins.get(v).copied().unwrap_or_default();
+                        let points = [
+                            Point::new(cx + fs, bottom),
+                            Point::new(cx + fs, bottom + after),
+                            Point::new(out, bottom + after),
+                            Point::new(out, top - before),
+                            Point::new(cx + ft, top - before),
+                            Point::new(cx + ft, top),
+                        ]
+                        .map(to_out)
+                        .to_vec();
+                        let label = e.label.map(|(lw, lh)| {
+                            let lw = swap(lw, lh).0;
+                            to_out(Point::new(out - lw / 2.0 - SELF_LOOP_LABEL_GAP, cy))
+                        });
+                        return EdgeRoute { points, label };
+                    }
                     let points = [
                         Point::new(side, cy - half),
                         Point::new(out, cy - half),

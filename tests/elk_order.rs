@@ -1251,3 +1251,42 @@ fn a_crossed_subgraphs_own_run_is_not_split_into_components() {
         ],
     );
 }
+
+#[test]
+fn a_loop_on_a_container_with_port_dummies_goes_round_it() {
+    // A has port dummies inside (`A --> a1`, `a2 --> A`), so its ports keep
+    // their sides: `A --> A` leaves at the bottom and comes back round to the
+    // top, 20 off each, which takes room in the layer gap above A (and A's
+    // ports get unconnected dummies inside, beside a1's) (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TB
+subgraph A
+a1 --> a2
+end
+start --> A
+A --> A
+A --> a1
+a2 --> A
+",
+        &[("a1", 0.0, 153.0), ("a2", 0.0, 222.0), ("start", 12.0, 0.0)],
+    );
+}
+
+#[test]
+fn a_containers_loop_stands_off_its_crossing_edges_ports() {
+    // C0's ports for `c0n0 --> x0` (crossing its border) stand 10 outside it;
+    // the loop's leg below stands 20 beyond those (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+  end
+  x0
+  C0 --> x0
+  c0n0 --> x0
+  c0n0 -->|yes| x0
+  C0 --> C0
+",
+        &[("c0n0", 21.73, 0.0), ("x0", 0.0, 220.0)],
+    );
+}
