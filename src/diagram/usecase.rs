@@ -3659,6 +3659,17 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         inner_rank_sep: super::graph::CLUSTER_RANK_SPACING,
         routing: super::graph::edge_routing(o.layout),
         dagre_groups: false,
+        // Under dagre: mermaid's own dagre renderer, keyed by the `getData`
+        // ids, the boundaries last.
+        dagre: (!elk).then(|| layout::dagre::DagreModel {
+            node_names: nodes.iter().map(|n| n.id.clone()).collect(),
+            cluster_names: clusters.iter().map(|c| c.id.clone()).collect(),
+            order: (0..nodes.len())
+                .map(layout::dagre::DagreItem::Node)
+                .chain((0..clusters.len()).map(layout::dagre::DagreItem::Cluster))
+                .collect(),
+            cluster_td: vec![false; clusters.len()],
+        }),
     };
     let out = layout::layout(&input);
 
@@ -3893,11 +3904,12 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         }
     }
 
-    // The layout's origin: ELK's 12px root padding, dagre's 8px margins.
+    // The layout's origin: ELK's 12px root padding (the dagre port lays out
+    // inside dagre's 8px margins itself).
     let origin = if o.layout == LayoutAlgorithm::Elk {
         12.0
     } else {
-        8.0
+        0.0
     };
     let mut elements: Vec<Element> = vec![
         Element::group("clusters", cluster_els),

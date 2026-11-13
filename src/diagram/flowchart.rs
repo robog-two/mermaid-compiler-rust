@@ -138,6 +138,7 @@ impl Builder {
                 if let (Some(&c), Some(d)) = (self.stack.last(), Direction::parse(rest)) {
                     if !self.closed[c.0] {
                         self.clusters[c.0].direction = Some(d);
+                        self.clusters[c.0].direction_td = rest.trim() == "TD";
                     }
                 }
                 Ok(())
@@ -626,6 +627,17 @@ fn collapse(g: GraphDiagram, collapsed: &[bool]) -> GraphDiagram {
     for c in &mut clusters {
         c.parent = c.parent.and_then(|p| cluster_map[p.0]).map(ClusterId);
     }
+    // getData walks the subgraphs last closed first, pushing an expanded one as
+    // a group and a collapsed one as a node: how many groups precede each node.
+    let mut group_seq: Vec<Option<usize>> = vec![None; n_clusters];
+    let mut groups = 0;
+    for ci in super::graph::closing_order(&g.clusters).into_iter().rev() {
+        match folded_into[ci] {
+            None => groups += 1,
+            Some(a) if a == ci => group_seq[ci] = Some(groups),
+            Some(_) => {}
+        }
+    }
     // getData pushes subgraph nodes (last declared first) before the vertices.
     let mut nodes = Vec::new();
     let mut collapsed_node: Vec<Option<usize>> = vec![None; n_clusters];
@@ -638,6 +650,7 @@ fn collapse(g: GraphDiagram, collapsed: &[bool]) -> GraphDiagram {
         n.cluster = c.parent.and_then(|p| cluster_map[p.0]).map(ClusterId);
         n.style = c.style.clone();
         n.color_slot = c.color_slot;
+        n.group_seq = group_seq[ci];
         collapsed_node[ci] = Some(nodes.len());
         nodes.push(n);
     }
@@ -1630,6 +1643,25 @@ one@{ view: collapsed }");
         assert!(node(&g, "A").is_none() && node(&g, "B").is_none());
         // C --> A is redirected, A --> B (internal) is dropped.
         assert_eq!(edge_ids(&g), [("C".to_string(), "one".to_string())]);
+    }
+
+    #[test]
+    fn collapsed_subgraph_knows_its_place_among_the_groups() {
+        // getData walks the subgraphs last closed first: `c` (collapsed) comes
+        // after the expanded `d` and before `a`.
+        let g = p("flowchart LR
+subgraph a
+A
+end
+subgraph c
+C
+end
+subgraph d
+D
+end
+c@{ view: collapsed }");
+        assert_eq!(node(&g, "c").and_then(|n| n.group_seq), Some(1));
+        assert_eq!(node(&g, "D").and_then(|n| n.group_seq), None);
     }
 
     #[test]
