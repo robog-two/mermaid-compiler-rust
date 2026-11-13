@@ -1309,7 +1309,7 @@ fn finish_rng(
             &label_across,
             &is_ext,
             &hier.ports,
-            &hier.port_rank,
+            (&hier.port_rank, &hier.inl_rank),
             &inl,
             &end_labels,
             elk_spacing(graph, input.node_sep),
@@ -2042,7 +2042,7 @@ fn elk_place(
     label_across: &[(f64, f64)],
     is_ext: &[bool],
     fixed: &[(Option<f64>, Option<f64>)],
-    port_rank: &[(Option<usize>, Option<usize>)],
+    (port_rank, inl_rank): ListRanks,
     inl: &[InLayer],
     end_labels: &[[Option<f64>; 2]],
     spacing: elkbk::Spacing,
@@ -2272,7 +2272,37 @@ fn elk_place(
             });
         }
     }
-    let top = elkbk::place(&elk_layers, &nodes, &edges, spacing);
+    // An inverted port's in-layer edge, from its node's port to its dummy
+    // (on the node's side towards the previous layer) or back: BK's
+    // threshold strategy may straighten it where the dummy's block holds
+    // nothing but dummies.
+    let in_layer: Vec<elkbk::Edge> = inl
+        .iter()
+        .enumerate()
+        .map(|(k, l)| {
+            let (f, t) = fixed.get(l.edge).copied().unwrap_or((None, None));
+            let node_port = verts[l.node].w / 2.0 + if l.before { t } else { f }.unwrap_or(0.0);
+            let order = inl_rank
+                .get(k)
+                .copied()
+                .flatten()
+                .map_or(node_port, |r| r as f64);
+            let (from, to, from_port, to_port) = if l.before {
+                (l.node, l.dummy, node_port, port_of(l.dummy))
+            } else {
+                (l.dummy, l.node, port_of(l.dummy), node_port)
+            };
+            elkbk::Edge {
+                from,
+                to,
+                from_port,
+                to_port,
+                from_order: order,
+                to_order: order,
+            }
+        })
+        .collect();
+    let top = elkbk::place(&elk_layers, &nodes, &edges, &in_layer, spacing);
     let mut x: Vec<f64> = (0..nv)
         .map(|v| match nodes[v].kind {
             elkbk::NodeType::Normal => top[v] + verts[v].w / 2.0,

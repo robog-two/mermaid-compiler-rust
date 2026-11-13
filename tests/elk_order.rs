@@ -1857,3 +1857,36 @@ fn inverted_ports_feed_their_channel_in_their_containers_port_list_order() {
     let (near, _) = edge_x_range(&svg, "C0", "c0an1");
     assert!((deep - near - 12.0).abs() < 0.5, "{deep} {near}");
 }
+
+#[test]
+fn an_inverted_ports_dummy_block_straightens_towards_its_in_layer_edge() {
+    // `C0 --> c0an0` leaves C0's bottom and runs back up beside C0A to its
+    // inverted port on top. Laid out leftwards and upwards, the block of the
+    // port's dummy and C0's port dummy holds only dummies (ELK's `od` never
+    // looks at the block's root), so BK's threshold strategy takes the
+    // in-layer edge to C0A into account and moves the block up against C0A:
+    // the balanced layout keeps the edge's leg the edge-node spacing right
+    // of C0A (mermaid 12.3.0), not midway to the next dummy.
+    let src = "flowchart TD
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C0A
+      c0an0
+    end
+  end
+  x0
+  C0 --> c0an0
+  c0an0 --> C0
+  c0an0 --> C0
+  x1 --> c0n1
+  x1 --> x0
+  c0n1 --> C0A
+  x1 --> c0n0
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let (x, _, w, _) = frame_of(&svg, "C0A");
+    let (_, leg) = edge_x_range(&svg, "C0", "c0an0");
+    assert!((leg - (x + w) - 12.0).abs() < 0.5, "{leg} {}", x + w);
+}

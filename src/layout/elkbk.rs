@@ -91,7 +91,10 @@ enum HDir {
 struct Graph<'a> {
     layers: &'a [Vec<usize>],
     nodes: &'a [Node],
-    edges: &'a [Edge],
+    /// The edges between layers, then the in-layer edges of inverted ports.
+    edges: Vec<Edge>,
+    /// The first in-layer edge.
+    first_in_layer: usize,
     sp: Spacing,
     layer_of: Vec<usize>,
     index: Vec<usize>,
@@ -99,14 +102,26 @@ struct Graph<'a> {
     /// outgoing top to bottom, incoming bottom to top).
     incoming: Vec<Vec<usize>>,
     outgoing: Vec<Vec<usize>>,
+    /// The same with the in-layer edges in their places (a node's in-layer
+    /// edges leave the west side, after its other outgoing ones, and enter
+    /// the east side, before its other incoming ones).
+    incoming_all: Vec<Vec<usize>>,
+    outgoing_all: Vec<Vec<usize>>,
     /// (neighbour, edge), sorted by the neighbour's index in its layer.
     left: Vec<Vec<(usize, usize)>>,
     right: Vec<Vec<(usize, usize)>>,
 }
 
 impl<'a> Graph<'a> {
-    fn new(layers: &'a [Vec<usize>], nodes: &'a [Node], edges: &'a [Edge], sp: Spacing) -> Self {
+    fn new(
+        layers: &'a [Vec<usize>],
+        nodes: &'a [Node],
+        (between, in_layer): (&[Edge], &[Edge]),
+        sp: Spacing,
+    ) -> Self {
         let n = nodes.len();
+        let first_in_layer = between.len();
+        let edges: Vec<Edge> = between.iter().chain(in_layer).copied().collect();
         let mut layer_of = vec![usize::MAX; n];
         let mut index = vec![0; n];
         for (l, layer) in layers.iter().enumerate() {
@@ -117,7 +132,7 @@ impl<'a> Graph<'a> {
         }
         let mut incoming: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut outgoing: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (ei, e) in edges.iter().enumerate() {
+        for (ei, e) in edges.iter().enumerate().take(first_in_layer) {
             outgoing[e.from].push(ei);
             incoming[e.to].push(ei);
         }
@@ -126,6 +141,25 @@ impl<'a> Graph<'a> {
         }
         for list in &mut incoming {
             list.sort_by(|&a, &b| edges[b].to_order.total_cmp(&edges[a].to_order));
+        }
+        let mut incoming_all = incoming.clone();
+        let mut outgoing_all = outgoing.clone();
+        let mut inl: Vec<usize> = (first_in_layer..edges.len()).collect();
+        // In the node's port list order (clockwise: the east side top down,
+        // the west bottom up).
+        inl.sort_by(|&a, &b| {
+            let key = |e: usize| edges[e].from_order.min(edges[e].to_order);
+            key(a).total_cmp(&key(b))
+        });
+        let mut east_in: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &ei in &inl {
+            let e = &edges[ei];
+            outgoing_all[e.from].push(ei);
+            east_in[e.to].push(ei);
+        }
+        for (v, mut list) in east_in.into_iter().enumerate() {
+            list.extend(&incoming_all[v]);
+            incoming_all[v] = list;
         }
         let left: Vec<Vec<(usize, usize)>> = incoming
             .iter()
@@ -147,11 +181,14 @@ impl<'a> Graph<'a> {
             layers,
             nodes,
             edges,
+            first_in_layer,
             sp,
             layer_of,
             index,
             incoming,
             outgoing,
+            incoming_all,
+            outgoing_all,
             left,
             right,
         }
@@ -479,12 +516,17 @@ impl Threshold {
             bal.hdir == HDir::Left
         };
         let edges = if incoming {
-            &g.incoming[free]
+            &g.incoming_all[free]
         } else {
-            &g.outgoing[free]
+            &g.outgoing_all[free]
         };
         let mut has = false;
         for &e in edges {
+            // In-layer edges count only for a block of nothing but dummies
+            // (ELK's `od`, which never looks at the block's root).
+            if e >= g.first_in_layer && !bal.od[bal.root[free]] {
+                continue;
+            }
             if bal.su[bal.root[free]] {
                 continue;
             }
@@ -802,9 +844,10 @@ pub(super) fn place(
     layers: &[Vec<usize>],
     nodes: &[Node],
     edges: &[Edge],
+    in_layer: &[Edge],
     sp: Spacing,
 ) -> Vec<f64> {
-    let g = Graph::new(layers, nodes, edges, sp);
+    let g = Graph::new(layers, nodes, (edges, in_layer), sp);
     let n = nodes.len();
     let marked = g.mark_conflicts();
     let mut layouts = vec![
@@ -912,11 +955,92 @@ mod tests {
         }
     }
 
+    /// The graph of a container (mermaid 12.3.0's `C0` of `C0 --> c0an0`,
+    /// `c0an0 --> C0` twice, `c0n1 --> C0A` and edges from outside into
+    /// `C0`, top down): `C0 --> c0an0` leaves `C0`'s port dummy 3 and runs
+    /// back through the dummy 11 of `C0A`'s (0) inverted port, an in-layer
+    /// edge away. Laid out leftwards the dummies' block has 3 as its root and
+    /// nothing but dummies, so upwards the threshold strategy straightens the
+    /// in-layer edge as far as `C0A` lets it: the balanced layout keeps the
+    /// block the edge-node spacing below `C0A`, as ELK does.
+    #[test]
+    fn a_dummy_block_straightens_its_in_layer_edge() {
+        let mut nodes = vec![
+            node(200.0),
+            node(152.0),
+            node(152.0),
+            ext(),
+            ext(),
+            ext(),
+            ext(),
+            ext(),
+        ];
+        nodes.resize(21, dummy(1.0));
+        for v in [11, 15, 19] {
+            nodes[v] = dummy(0.0);
+        }
+        let layers = [
+            vec![5, 7, 6, 4],
+            vec![17, 2, 1, 13],
+            vec![19, 0, 11, 15],
+            vec![3],
+        ];
+        let edges = [
+            edge(7, 2, 0.0, 76.0),
+            edge(6, 1, 0.0, 76.0),
+            edge(11, 3, 0.0, 0.0),
+            edge(4, 13, 0.0, 0.0),
+            edge(13, 15, 0.0, 0.0),
+            edge(5, 17, 0.0, 0.0),
+            edge(17, 19, 0.0, 0.0),
+            Edge {
+                to_order: 0.0,
+                ..edge(2, 0, 76.0, 88.0)
+            },
+        ];
+        let in_layer = [
+            edge(0, 11, 100.0, 0.0),
+            edge(15, 0, 0.0, 135.7),
+            edge(19, 0, 0.0, 92.3),
+        ];
+        let y = place(&layers, &nodes, &edges, &in_layer, SP_C0);
+        assert_eq!(y[0], 12.0);
+        assert_eq!(y[11], 224.0);
+        assert_eq!(y[3], 224.0);
+        // Without the in-layer edges it ends up midway to the next dummy.
+        let y = place(&layers, &nodes, &edges, &[], SP_C0);
+        assert_eq!(y[11], 297.0);
+    }
+
+    /// `C0`'s spacings (a container's graph: `spacing.baseValue` 24).
+    const SP_C0: Spacing = Spacing {
+        node_node: 50.0,
+        edge_node: 12.0,
+        edge_edge: 20.0,
+        port_port: 12.0,
+    };
+
+    fn ext() -> Node {
+        Node {
+            kind: NodeType::ExternalPort,
+            size: 0.0,
+            ..node(0.0)
+        }
+    }
+
+    fn dummy(size: f64) -> Node {
+        Node {
+            kind: NodeType::LongEdge,
+            size,
+            ..node(0.0)
+        }
+    }
+
     /// Nodes of a layer keep their order and the node spacing.
     #[test]
     fn layer_keeps_order_and_spacing() {
         let nodes = vec![node(45.0), node(45.0), node(45.0)];
-        let y = place(&[vec![0, 1, 2]], &nodes, &[], SP);
+        let y = place(&[vec![0, 1, 2]], &nodes, &[], &[], SP);
         assert_eq!(y[1] - y[0], 85.0);
         assert_eq!(y[2] - y[1], 85.0);
     }
@@ -926,7 +1050,13 @@ mod tests {
     #[test]
     fn chain_aligns_ports() {
         let nodes = vec![node(45.0), node(80.0)];
-        let y = place(&[vec![0], vec![1]], &nodes, &[edge(0, 1, 22.5, 40.0)], SP);
+        let y = place(
+            &[vec![0], vec![1]],
+            &nodes,
+            &[edge(0, 1, 22.5, 40.0)],
+            &[],
+            SP,
+        );
         assert!((y[0] + 22.5 - (y[1] + 40.0)).abs() < 1e-9, "{y:?}");
     }
 
@@ -940,7 +1070,7 @@ mod tests {
             margin_bottom: 0.0,
         };
         let nodes = vec![node(45.0), dummy];
-        let y = place(&[vec![0, 1]], &nodes, &[], SP);
+        let y = place(&[vec![0, 1]], &nodes, &[], &[], SP);
         assert_eq!(y[1] - (y[0] + 45.0), 20.0);
     }
 
@@ -952,6 +1082,7 @@ mod tests {
             &[vec![0], vec![1, 2]],
             &nodes,
             &[edge(0, 1, 16.0, 22.5), edge(0, 2, 29.0, 22.5)],
+            &[],
             SP,
         );
         let mid = (y[1] + y[2]) / 2.0;
