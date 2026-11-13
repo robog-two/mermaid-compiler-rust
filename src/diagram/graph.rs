@@ -401,6 +401,8 @@ struct Look {
     node_stroke_width: f64,
     /// Corner radius of `Shape::Rounded` (mermaid's `roundedRect`: theme `radius` ?? 5).
     rounded_rx: f64,
+    /// Whether the diagram is drawn in the neo look.
+    neo: bool,
 }
 
 fn look(kind: DiagramKind) -> Look {
@@ -421,6 +423,7 @@ fn look(kind: DiagramKind) -> Look {
         dashed_dash,
         node_stroke_width: 1.0,
         rounded_rx: 5.0,
+        neo: false,
     }
 }
 
@@ -429,6 +432,7 @@ fn look(kind: DiagramKind) -> Look {
 /// for both; ER and requirement use `strokeWidth` only under the neo look (1px otherwise).
 /// `radius` reaches flowchart rounded nodes (`roundedRect.ts`).
 fn themed_look(mut lk: Look, kind: DiagramKind, look: ConfigLook, pal: &Palette) -> Look {
+    lk.neo = look == ConfigLook::Neo;
     let Some(sw) = pal.stroke_width else {
         if matches!(kind, DiagramKind::Flowchart | DiagramKind::Agentflow) {
             lk.rounded_rx = pal.radius.unwrap_or(lk.rounded_rx);
@@ -2989,7 +2993,13 @@ fn node_elements(
             Shape::EntityTable => {
                 let colors = TableColors {
                     paint: &paint,
-                    line_width: lk.node_stroke_width,
+                    // erBox's dividers are rough.js polygons stroked at rough's 1.3;
+                    // only neo's `.node path { stroke-width }` rule restyles them.
+                    line_width: if lk.neo {
+                        lk.node_stroke_width
+                    } else {
+                        ROUGH_STROKE_WIDTH
+                    },
                     stroke: &stroke,
                     text: &text_color,
                     // Rows are striped with `rowOdd`; the colour themes paint every row
