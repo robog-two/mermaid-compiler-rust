@@ -1708,6 +1708,18 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
                 bbox = Rect::new(x0, bbox.y, x1 - x0, bbox.h);
             }
         }
+        // Their layers count along the flow too: a layer of them past a
+        // routing channel stands the channel's spacing beyond it.
+        for k in &ext_kinds {
+            let p = out.nodes[k.0];
+            let (x0, y0) = (bbox.x.min(p.x), bbox.y.min(p.y));
+            let (x1, y1) = (bbox.right().max(p.x), bbox.bottom().max(p.y));
+            if horizontal {
+                bbox = Rect::new(x0, bbox.y, x1 - x0, bbox.h);
+            } else {
+                bbox = Rect::new(bbox.x, y0, bbox.w, y1 - y0);
+            }
+        }
     }
     Level {
         items,

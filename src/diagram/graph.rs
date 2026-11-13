@@ -3606,6 +3606,22 @@ mod tests {
     }
 
     #[test]
+    fn elk_container_holds_its_last_layer_of_port_dummies() {
+        // mermaid 12.3.0 (ELK): c1n0 --> C0 runs back up inside C0 through a
+        // channel below C1; a loop on C0 gives C0 a port dummy in a last
+        // layer of its own, 30 past that channel: C0 is 259 tall (its frame
+        // drawn 189 without the loop, pulled in to its contents).
+        let src = "flowchart TD\n  subgraph C0\n    c0n0\n    subgraph C1\n      c1n0\n    end\n  end\n  x0\n  c1n0 --> C0\n";
+        let h = |src: &str| {
+            let r = crate::render::render(src, &crate::config::MermaidConfig::default())
+                .expect("renders");
+            frame_of(&r.scene, "C0").h
+        };
+        let looped = format!("{src}  C0 --> C0\n");
+        assert_eq!((h(&looped), h(src)), (259.0, 189.0));
+    }
+
+    #[test]
     fn elk_antiparallel_edges_take_their_ports_from_crossing_minimisation() {
         // Between two nodes, a --> b and b --> a leave and reach the same
         // nodes; ELK orders their ports by barycentre, a tie keeping the
