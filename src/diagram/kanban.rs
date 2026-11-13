@@ -3,19 +3,16 @@
 //! Columns are the least-indented nodes, items are the nodes indented below
 //! them. Items may carry `@{ ticket: X, assigned: 'name', priority: 'High' }`
 //! metadata. Rendering follows mermaid's kanban look (coloured section columns,
-//! white cards with ticket / assignee footer and a priority stripe); the board is
-//! laid out with Taffy: a stretched row of fixed-width flex columns, so every
-//! column has the height of the tallest one.
+//! white cards with ticket / assignee footer and a priority stripe), laid out as
+//! `kanbanRenderer.ts` does: fixed-width columns, each as tall as its own cards.
 
 use super::timeline::{shade, wrap_text};
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, Point, Rect};
-use crate::layout::boxes::{self, BoxNode};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::{line_width, normalize_label};
 use crate::theme::Palette;
-use boxes::taffy::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
@@ -251,86 +248,32 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Kanban> {
     Ok(k)
 }
 
-const PAD: f64 = 10.0;
-const FONT: f64 = 14.0;
-const SMALL: f64 = 12.0;
-
-fn card_style(h: f64) -> Style {
-    Style {
-        size: Size {
-            width: auto(),
-            height: length(h as f32),
-        },
-        flex_shrink: 0.0,
-        ..Default::default()
-    }
-}
-
-/// Lay out and draw a parsed board.
+/// Lay out and draw a parsed board: a port of `kanbanRenderer.ts` and the
+/// `kanbanItem` shape.
 pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let col_w = cfg.section_f64("kanban", "sectionWidth", 200.0);
-    let pad = cfg.section_f64("kanban", "padding", 8.0);
     let linked_tickets = cfg
         .section("kanban", "ticketBaseUrl")
         .and_then(|j| j.as_str())
         .is_some_and(|u| !u.is_empty());
-    let lh = FONT * 1.3;
-    let text_w = col_w - 2.0 * pad - 2.0 * PAD;
+    let font = pal.font_size;
+    let lh = font * 1.5;
+    let padding = 10.0;
+    // Items are `sectionWidth - 1.5·padding` wide, their title wraps 10px narrower.
+    let item_w = col_w - 1.5 * padding;
+    let text_w = item_w - 10.0;
 
     let col_titles: Vec<Vec<String>> = k
         .columns
         .iter()
-        .map(|c| wrap_text(&c.label, col_w - 2.0 * pad, FONT, false))
+        .map(|c| crate::text::label_lines(&normalize_label(&c.label)))
         .collect();
-    let title_h = col_titles
+    let max_label_h = col_titles
         .iter()
         .map(|l| l.len() as f64 * lh)
-        .fold(lh, f64::max)
-        + 6.0;
-    let cards: Vec<Vec<(Vec<String>, f64)>> = k
-        .columns
-        .iter()
-        .map(|c| {
-            c.items
-                .iter()
-                .map(|it| {
-                    let lines = wrap_text(&it.label, text_w, FONT, false);
-                    let footer = if it.ticket.is_some() || it.assigned.is_some() {
-                        SMALL * 1.4 + 4.0
-                    } else {
-                        0.0
-                    };
-                    let h = 2.0 * PAD + lines.len() as f64 * lh + footer;
-                    (lines, h)
-                })
-                .collect()
-        })
-        .collect();
-
-    let columns: Vec<BoxNode> = cards
-        .iter()
-        .map(|cs| {
-            let mut st =
-                boxes::stretched(boxes::padded_with_title(boxes::column(pad), pad, title_h));
-            st.size.width = length(col_w as f32);
-            st = boxes::min_size(st, col_w, title_h + 3.0 * pad + 30.0);
-            st.size.width = length(col_w as f32);
-            BoxNode::new(
-                st,
-                cs.iter()
-                    .map(|(_, h)| BoxNode::new(card_style(*h), vec![]))
-                    .collect(),
-            )
-        })
-        .collect();
-    let placed = boxes::compute(&BoxNode::new(boxes::stretched(boxes::row(10.0)), columns));
-
-    let has_title = k.title.as_ref().is_some_and(|t| !t.trim().is_empty());
-    let off = Point::new(0.0, if has_title { 40.0 } else { 0.0 });
-    let shift = |r: Rect| Rect::new(r.x + off.x, r.y + off.y, r.w, r.h);
+        .fold(25.0, f64::max);
 
     let mut bounds = Bounds::default();
-    bounds.add_rect(shift(placed.rect));
     let mut els = Vec::new();
     let card_fill = pal.background.clone();
     let dark_mode = cfg
@@ -340,120 +283,125 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .find(|(k, _)| k == "darkMode")
         .is_some_and(|(_, v)| v.trim() == "true");
     let card_text = pal.text_color.clone();
-    for (ci, (col, cp)) in k.columns.iter().zip(&placed.children).enumerate() {
-        let cr = shift(cp.rect);
-        // Column `ci` is `.section-(ci+1)`: fill and stroke `cScale(ci+2)` lightened by
-        // 10 (darkened under `darkMode`); the title is an HTML label in regular weight,
-        // coloured by `.cluster-label, .label { color: textColor }`; cards are `.node`
-        // (`background` fill, `nodeBorder` stroke).
-        let fill = shade(pal.scale_color(ci + 2), !dark_mode, 10.0);
-        let mut g = vec![
-            Element::classed_shape(
-                Geometry::Rect { rect: cr, rx: 5.0 },
-                Paint::both(&fill, &fill, 1.0),
-                "kanban-section",
-            ),
-            Element::classed_text(
-                Text::centered(
-                    Point::new(cr.center().x, cr.y + pad + title_h / 2.0),
-                    &col_titles[ci],
-                    FONT,
-                    lh,
-                    &pal.text_color,
-                ),
-                "kanban-section-title",
-            ),
-        ];
-        for ((item, (lines, _)), ip) in col.items.iter().zip(&cards[ci]).zip(&cp.children) {
-            let r = shift(ip.rect);
+    let top = -col_w * 3.0 / 2.0 + max_label_h;
+    for (ci, col) in k.columns.iter().enumerate() {
+        let cnt = (ci + 1) as f64;
+        let cx = col_w * cnt + (cnt - 1.0) * padding / 2.0;
+        let mut g = Vec::new();
+        let mut y = top;
+        for item in &col.items {
+            let lines = wrap_text(&item.label, text_w, font, false);
+            let bh = lines.len().max(1) as f64 * lh;
+            let has_footer = item.ticket.is_some() || item.assigned.is_some();
+            let adj = if has_footer { lh / 2.0 } else { 0.0 };
+            let h = bh + 2.0 * padding + adj;
+            let cy = y + h / 2.0;
+            let r = Rect::new(cx - item_w / 2.0, y, item_w, h);
+            bounds.add_rect(r);
             g.push(Element::classed_shape(
                 Geometry::Rect { rect: r, rx: 5.0 },
                 Paint::both(&card_fill, &pal.node_border, 1.0),
                 "kanban-item",
             ));
             if let Some(c) = item.priority.and_then(Priority::color) {
-                g.push(Element::classed_shape(
-                    Geometry::Rect {
-                        rect: Rect::new(r.x + 2.0, r.y + 2.0, 4.0, r.h - 4.0),
-                        rx: 2.0,
-                    },
-                    Paint::fill(&c),
-                    "kanban-priority",
+                g.push(Element::line(
+                    Point::new(r.x + 2.0, r.y + 2.0),
+                    Point::new(r.x + 2.0, r.bottom() - 2.0),
+                    Paint::stroke(&c, 4.0),
                 ));
             }
+            let lx = r.x + padding;
+            let label_top = cy - adj - bh / 2.0;
             g.push(Element::classed_text(
-                Text {
-                    x: r.x + PAD,
-                    y: r.y + PAD + FONT,
-                    lines: lines.clone(),
-                    line_height: lh,
-                    font_size: FONT,
-                    bold: false,
-                    anchor: Anchor::Start,
-                    fill: card_text.clone(),
-                },
+                Text::centered(
+                    Point::new(0.0, label_top + bh / 2.0),
+                    &lines,
+                    font,
+                    lh,
+                    &card_text,
+                )
+                .anchored(Anchor::Start, lx),
                 "kanban-label",
             ));
-            let fy = r.bottom() - PAD - 2.0;
+            let fy = cy - adj + bh / 2.0 + lh / 2.0;
             if let Some(t) = &item.ticket {
                 g.push(Element::classed_text(
-                    Text {
-                        x: r.x + PAD,
-                        y: fy,
-                        lines: vec![t.clone()],
-                        line_height: SMALL * 1.2,
-                        font_size: SMALL,
-                        bold: false,
-                        anchor: Anchor::Start,
-                        // An HTML label: the card's text colour, underlined inside the
-                        // `.kanban-ticket-link` anchor when `ticketBaseUrl` is set.
-                        fill: card_text.clone(),
-                    },
+                    Text::centered(
+                        Point::new(0.0, fy),
+                        std::slice::from_ref(t),
+                        font,
+                        lh,
+                        &card_text,
+                    )
+                    .anchored(Anchor::Start, lx),
                     "kanban-ticket",
                 ));
                 if linked_tickets {
-                    let w = line_width(t, SMALL, false);
+                    // An HTML label underlined inside the `.kanban-ticket-link` anchor.
+                    let w = line_width(t, font, false);
+                    let base = fy + 0.35 * font + 2.0;
                     g.push(Element::line(
-                        Point::new(r.x + PAD, fy + 1.5),
-                        Point::new(r.x + PAD + w, fy + 1.5),
+                        Point::new(lx, base),
+                        Point::new(lx + w, base),
                         Paint::stroke(&card_text, 1.0),
                     ));
                 }
             }
             if let Some(a) = &item.assigned {
                 let a = normalize_label(a);
-                let tw = line_width(&a, SMALL, false);
-                bounds.add_rect(Rect::new(r.right() - PAD - tw, fy - SMALL, tw, SMALL));
+                let tw = line_width(&a, font, false);
+                let ax = padding + r.right() - tw - 2.0 * padding;
+                bounds.add_rect(Rect::new(ax, fy - lh / 2.0, tw, lh));
                 g.push(Element::classed_text(
-                    Text {
-                        x: r.right() - PAD,
-                        y: fy,
-                        lines: vec![a],
-                        line_height: SMALL * 1.2,
-                        font_size: SMALL,
-                        bold: false,
-                        anchor: Anchor::End,
-                        fill: shade(&card_text, !pal.dark, 15.0),
-                    },
+                    Text::centered(
+                        Point::new(0.0, fy),
+                        &[a],
+                        font,
+                        lh,
+                        &shade(&card_text, !pal.dark, 15.0),
+                    )
+                    .anchored(Anchor::Start, ax),
                     "kanban-assigned",
                 ));
             }
+            y = cy + h / 2.0 + padding / 2.0;
         }
+        // Column `ci` is `.section-(ci+1)`: fill and stroke `cScale(ci+2)` lightened by
+        // 10 (darkened under `darkMode`); the title is an HTML label in regular weight,
+        // coloured by `.cluster-label, .label { color: textColor }`, at the top centre.
+        let height = (y - top + 3.0 * padding).max(50.0) + (max_label_h - 25.0);
+        let cr = Rect::new(cx - col_w / 2.0, -col_w * 3.0 / 2.0, col_w, height);
+        bounds.add_rect(cr);
+        let fill = shade(pal.scale_color(ci + 2), !dark_mode, 10.0);
+        let title_h = col_titles[ci].len() as f64 * lh;
+        g.insert(
+            0,
+            Element::classed_text(
+                Text::centered(
+                    Point::new(cx, cr.y + title_h / 2.0),
+                    &col_titles[ci],
+                    font,
+                    lh,
+                    &pal.text_color,
+                ),
+                "kanban-section-title",
+            ),
+        );
+        g.insert(
+            0,
+            Element::classed_shape(
+                Geometry::Rect { rect: cr, rx: 5.0 },
+                Paint::both(&fill, &fill, 1.0),
+                "kanban-section",
+            ),
+        );
         els.push(Element::group("kanban-column", g));
     }
-    if let Some(t) = k.title.as_ref().filter(|t| !t.trim().is_empty()) {
-        let t = normalize_label(t);
-        let tw = line_width(&t, 20.0, true);
-        let cx = placed.rect.w.max(tw) / 2.0;
-        bounds.add_rect(Rect::new(cx - tw / 2.0, 5.0, tw, 25.0));
-        els.push(Element::classed_text(
-            Text::centered(Point::new(cx, 18.0), &[t], 20.0, 24.0, &pal.title_color).bold(),
-            "titleText",
-        ));
-    }
+    // setupGraphViewbox with the (mindmap) padding, 10.
+    let pad = cfg.section_f64("mindmap", "padding", 10.0);
     Scene {
         kind: DiagramKind::Kanban,
-        view_box: bounds.rect().pad(10.0),
+        view_box: bounds.rect().pad(pad),
         elements: vec![Element::group("kanban", els)],
         acc_title: None,
         acc_descr: None,
@@ -537,7 +485,10 @@ mod tests {
     }
 
     #[test]
-    fn columns_share_height() {
+    fn columns_fit_their_cards() {
+        // kanbanRenderer: each column is its cards (title + 2·padding tall, 5
+        // apart) plus 3·padding, at least 50; mermaid 12.3.0's gallery board
+        // matches its viewBox exactly.
         let cfg = MermaidConfig::default();
         let pal = cfg.palette();
         let k = parse(SRC, None).unwrap();
@@ -559,6 +510,11 @@ mod tests {
             _ => vec![],
         };
         assert_eq!(heights.len(), 4);
-        assert!(heights.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-6));
+        assert!(heights.iter().all(|h| *h >= 50.0));
+        let src = include_str!("../../examples/diagrams/kanban.mmd");
+        // Past the front matter (its `ticketBaseUrl` only underlines tickets).
+        let src = src.splitn(3, "---").nth(2).unwrap();
+        let g = draw(&parse(src, None).unwrap(), &cfg, &pal).view_box;
+        assert_eq!((g.x, g.y, g.w, g.h), (90.0, -310.0, 1245.0, 293.0));
     }
 }
