@@ -794,6 +794,8 @@ fn edge_label_block(label: &str, font: f64) -> TextBlock {
 /// Padding of an SVG edge label's background on each side (`createFormattedText`):
 /// the label's bounding box, and so its size in the layout, includes it.
 const SVG_EDGE_LABEL_PAD: f64 = 2.0;
+/// Where ELK's coordinates start in ours: the root's 12px padding.
+const ELK_ORIGIN: f64 = 12.0;
 
 /// [`edge_label_block`] for `htmlLabels: false`: SVG text wrapped at the same 200px.
 fn svg_edge_label_block(label: &str, font: f64) -> TextBlock {
@@ -1347,7 +1349,7 @@ pub fn render_with(
                 })
             })
             .collect();
-        elkedges::straighten_edge_terminals(&mut routes, &mut labels);
+        elkedges::straighten_edge_terminals(&mut routes, &mut labels, ELK_ORIGIN);
         let pairs: Vec<(String, String)> = g
             .edges
             .iter()
@@ -1641,7 +1643,7 @@ pub fn render_with(
     // The layout's origin: mermaid's ELK layout puts the root's contents inside
     // its 12px padding, dagre inside its 8px `marginx` / `marginy`; the viewBox
     // (`setupViewPortForSVG`) then starts at the drawing's bbox less the padding.
-    let origin = if elk { 12.0 } else { 8.0 };
+    let origin = if elk { ELK_ORIGIN } else { 8.0 };
     let shift = |els: Vec<Element>| -> Vec<Element> {
         els.into_iter()
             .map(|e| e.translated(origin, origin))

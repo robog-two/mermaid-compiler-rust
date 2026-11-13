@@ -202,7 +202,30 @@ fn covers(route: &[Point], label: Option<&Label>) -> bool {
 /// `straightenEdgeTerminals` over every edge's route (`None`: not drawn), in
 /// order: an edge is straightened only where that adds no crossing with, and no
 /// label over, the others. Labels on a moved run move with it.
-pub fn straighten_edge_terminals(routes: &mut [Option<Vec<Point>>], labels: &mut [Option<Label>]) {
+///
+/// mermaid works in ELK's coordinates, which start `origin` before ours (the
+/// root's padding); the routes are measured there, so that a step of exactly
+/// `TERMINAL_JOG_MAX` is one as it is for mermaid and not a hair over (or under)
+/// it by rounding.
+pub fn straighten_edge_terminals(
+    routes: &mut [Option<Vec<Point>>],
+    labels: &mut [Option<Label>],
+    origin: f64,
+) {
+    let shift = |routes: &mut [Option<Vec<Point>>], labels: &mut [Option<Label>], d: f64| {
+        for p in routes.iter_mut().flatten().flatten() {
+            *p = Point::new(p.x + d, p.y + d);
+        }
+        for l in labels.iter_mut().flatten() {
+            l.center = Point::new(l.center.x + d, l.center.y + d);
+        }
+    };
+    shift(routes, labels, origin);
+    straighten_in_frame(routes, labels);
+    shift(routes, labels, -origin);
+}
+
+fn straighten_in_frame(routes: &mut [Option<Vec<Point>>], labels: &mut [Option<Label>]) {
     for i in 0..routes.len() {
         let Some(original) = routes[i].clone().filter(|r| r.len() >= 5) else {
             continue;
@@ -557,7 +580,7 @@ mod tests {
                 height: 21.0,
             }),
         ];
-        straighten_edge_terminals(&mut routes, &mut labels);
+        straighten_edge_terminals(&mut routes, &mut labels, 0.0);
         for r in routes.iter().flatten() {
             assert!(
                 r.windows(2).all(|w| (w[0].x - w[1].x).abs() < 1e-9),
@@ -573,6 +596,28 @@ mod tests {
         assert!((b.center.x - 98.06).abs() < 0.3, "{b:?}");
     }
 
+    /// A step of exactly 16 in ELK's coordinates (mermaid's rnd4 g045: n1 --> n4
+    /// from x 518.1453125 to 534.1453125) is straightened, as mermaid does; 12
+    /// before that, as we lay it out, the difference rounds to a hair over 16.
+    #[test]
+    fn measures_the_step_in_elk_coordinates() {
+        let route = vec![
+            p(506.1453125, 45.0),
+            p(506.1453125, 65.0),
+            p(522.1453125, 65.0),
+            p(522.1453125, 150.0),
+            p(542.04375, 150.0),
+            p(542.04375, 190.0),
+        ];
+        let mut routes = vec![Some(route.clone())];
+        straighten_edge_terminals(&mut routes, &mut [None], 0.0);
+        assert_eq!(routes[0].as_ref(), Some(&route));
+        straighten_edge_terminals(&mut routes, &mut [None], 12.0);
+        let r = routes[0].as_ref().expect("route");
+        assert_eq!(r.len(), 4, "{r:?}");
+        assert!((r[1].x - 506.1453125).abs() < 1e-9 && (r[1].y - 150.0).abs() < 1e-9);
+    }
+
     #[test]
     fn keeps_a_step_wider_than_the_limit_or_one_that_would_cross() {
         let wide = vec![
@@ -584,7 +629,7 @@ mod tests {
             p(40.0, 100.0),
         ];
         let mut routes = vec![Some(wide.clone())];
-        straighten_edge_terminals(&mut routes, &mut [None]);
+        straighten_edge_terminals(&mut routes, &mut [None], 0.0);
         assert_eq!(routes[0].as_ref(), Some(&wide));
         // A small step that, straightened, would cross a vertical edge between.
         let small = vec![
@@ -597,7 +642,7 @@ mod tests {
         ];
         let other = vec![p(-5.0, 50.0), p(5.0, 50.0)];
         let mut routes = vec![Some(small.clone()), Some(other)];
-        straighten_edge_terminals(&mut routes, &mut [None, None]);
+        straighten_edge_terminals(&mut routes, &mut [None, None], 0.0);
         assert_eq!(routes[0].as_ref(), Some(&small));
     }
 
