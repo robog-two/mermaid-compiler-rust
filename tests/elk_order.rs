@@ -957,3 +957,52 @@ fn a_containers_east_ports_start_in_the_order_elk_makes_them() {
         ],
     );
 }
+
+#[test]
+fn external_port_dummies_of_a_childs_ports_follow_their_import_order() {
+    // In C3, the dummies of `c1n0 --> c3n1` and `c2n0 --> c3n1` follow
+    // c3n1's ports, made as ELK imports the edges: the first edge is the
+    // root graph's, so it comes first, though the second comes earlier in
+    // the source (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+    subgraph C1
+      c1n0
+    end
+  end
+  subgraph C2
+    c2n0
+    c2n1
+    c2n2
+    subgraph C3
+      c3n0
+      c3n1
+      c3n0 --> c3n1
+    end
+    c2n0 --> c2n1
+    c2n1 --> c2n2
+  end
+  x0
+  x1
+  c1n0 --> c2n1
+  c2n0 --> c3n1
+  c2n1 --> C3
+  c1n0 -->|a label| c3n1
+  c2n2 --> C0
+  C2 --> c0n0
+",
+        &[
+            ("c0n0", 175.6, 24.0),
+            ("c1n0", 401.6, 0.0),
+            ("c2n0", 292.27, 352.0),
+            ("c2n1", 55.37, 457.0),
+            ("c2n2", 0.0, 572.0),
+            ("c3n0", 226.0, 620.0),
+            ("c3n1", 288.5, 725.0),
+            ("x0", 641.6, 16.0),
+            ("x1", 833.6, 16.0),
+        ],
+    );
+}

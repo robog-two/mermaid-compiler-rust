@@ -976,7 +976,8 @@ fn segments(tree: &Tree, ends: &[(Member, Member)]) -> Vec<Seg> {
 /// those passing on from the containers within (`processInnerHierarchicalEdgeSegments`:
 /// container by container, in the order each made its own), then those of the
 /// level's own children (`processOuterHierarchicalEdgeSegments`: child by
-/// child, port by port, a port being an edge end, made in edge order). The
+/// child, port by port, a port being an edge end, made as the edges are
+/// imported: breadth-first by the graph containing each, then in edge order). The
 /// level's unconnected ports (edges to the container itself) come after these.
 fn ext_order(
     tree: &Tree,
@@ -995,7 +996,17 @@ fn ext_order(
             })
             .unwrap_or(usize::MAX)
     };
-    let mut keyed: Vec<(bool, usize, usize, usize)> = Vec::new();
+    // When a port was made on its node: as ELK imports the edges,
+    // breadth-first by the graph containing each (the two ends' common
+    // ancestor), then edge by edge.
+    let made = |e: usize| {
+        let (a, b) = ends[e];
+        let depth = tree
+            .common_ancestor(a, b)
+            .map_or(0, |c| tree.chains[c].len());
+        (depth, e)
+    };
+    let mut keyed: Vec<(bool, usize, (usize, usize), usize)> = Vec::new();
     let mut inner: HashMap<usize, Vec<usize>> = HashMap::new();
     for s in all.iter().filter(|s| s.scope == scope) {
         let (inside, out) = match (s.from, s.to) {
@@ -1005,8 +1016,8 @@ fn ext_order(
         };
         let own_end = if out { ends[s.edge].0 } else { ends[s.edge].1 };
         let key = match inside {
-            SegEnd::Node(v) => (true, v, s.edge),
-            SegEnd::Box(c) if own_end == Member::Cluster(c) => (true, child_key(c), s.edge),
+            SegEnd::Node(v) => (true, v, made(s.edge)),
+            SegEnd::Box(c) if own_end == Member::Cluster(c) => (true, child_key(c), made(s.edge)),
             SegEnd::Box(c) => {
                 let order = inner
                     .entry(c)
@@ -1015,7 +1026,7 @@ fn ext_order(
                     .iter()
                     .position(|&e| e == s.edge)
                     .unwrap_or(usize::MAX);
-                (false, child_key(c), r)
+                (false, child_key(c), (r, 0))
             }
             SegEnd::Ext => continue,
         };
