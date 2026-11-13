@@ -251,3 +251,26 @@ fn rounded_node_radius_follows_the_theme() {
     let classic = svg_with(&MermaidConfig::default().with_cli_theme(ThemeName::Default));
     assert!(classic.contains("rx=\"5\"") && !classic.contains("rx=\"12\""));
 }
+
+#[test]
+fn er_table_lines_take_the_neo_stroke_width() {
+    // `[data-look="neo"].node path { stroke-width: strokeWidth }` reaches the
+    // rows' and columns' lines as well as the outline (2px in mermaid 12.3.0's
+    // default theme); the classic look keeps them at 1px.
+    let src = "erDiagram\n  CUSTOMER {\n    string id PK\n    string name\n  }\n";
+    let widths = |src: &str| {
+        let r = render::render(src, &MermaidConfig::default()).expect("renders");
+        let svg = mmdc::output::encode_svg(&r, &mmdc::output::EncodeOptions::default());
+        svg.split("<path ")
+            .skip(1)
+            .map(|p| {
+                let at = p.find("stroke-width=\"").expect("width") + 14;
+                p[at..at + p[at..].find('"').unwrap()].to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+    let neo = widths(src);
+    assert!(!neo.is_empty() && neo.iter().all(|w| w == "2"), "{neo:?}");
+    let classic = widths(&format!("---\nconfig:\n  look: classic\n---\n{src}"));
+    assert!(classic.iter().all(|w| w == "1"), "{classic:?}");
+}

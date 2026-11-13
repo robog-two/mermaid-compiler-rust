@@ -2989,6 +2989,7 @@ fn node_elements(
             Shape::EntityTable => {
                 let colors = TableColors {
                     paint: &paint,
+                    line_width: lk.node_stroke_width,
                     stroke: &stroke,
                     text: &text_color,
                     // Rows are striped with `rowOdd`; the colour themes paint every row
@@ -3140,6 +3141,9 @@ fn corrects_glyph_offset(shape: Shape) -> bool {
 /// Paints of an entity table.
 struct TableColors<'a> {
     paint: &'a Paint,
+    /// The rows' and columns' lines: `[data-look="neo"].node path` gives them
+    /// the theme's stroke width, as the outline; otherwise 1px.
+    line_width: f64,
     stroke: &'a Color,
     text: &'a Color,
     odd_row: Option<&'a Color>,
@@ -3178,7 +3182,7 @@ fn entity_table_elements(
         ),
         "nodeLabel",
     ));
-    let line_paint = Paint::stroke(colors.stroke, 1.0);
+    let line_paint = Paint::stroke(colors.stroke, colors.line_width);
     for (i, row) in n.sections.iter().enumerate() {
         let ry = y0 + t.header_h + t.row_h * i as f64;
         let (row_fill, class) = if i % 2 == 0 {
