@@ -2672,6 +2672,8 @@ const CELL_PAD_X: f64 = 8.0;
 const CELL_PAD_Y: f64 = 4.0;
 /// `.relationship-label, .edgeLabel { font-size: 10px }`.
 const EDGE_LABEL_FONT: f64 = 10.0;
+/// `.labelBkg { padding: 0 2px }` (usecase `styles.ts`).
+const LABEL_BKG_PAD_X: f64 = 2.0;
 
 const STICK_FIGURE: &str = "M 0 -12 C 6.627 -12 12 -17.373 12 -24 C 12 -30.627 6.627 -36 0 -36 \
     C -6.627 -36 -12 -30.627 -12 -24 C -12 -17.373 -6.627 -12 0 -12 Z M 0 -12 V 8 M -17 -5 H 17 \
@@ -3597,7 +3599,12 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         }
     }
 
+    let elk = o.layout == LayoutAlgorithm::Elk;
+    // Under ELK the boundary is a subgraph like any other: its title strip is the
+    // label's height less 2 (`getMeasuredLabelData`) plus ELK's 5px label
+    // padding, inside the subgraph padding (24); the tab is painted within it.
     let title_band = |c: &VCluster| match c.kind {
+        _ if elk => c.title.h + 3.0,
         BoundaryType::Rect => c.title.h + 8.0,
         BoundaryType::Package => c.title.h + 10.0 + 8.0,
     };
@@ -3616,20 +3623,36 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
                 LayoutEdge::new(
                     e.from,
                     e.to,
-                    e.minlen,
-                    e.label.as_ref().map(|b| (b.w + 8.0, b.h + 4.0)),
+                    if elk { 1 } else { e.minlen },
+                    // `insertEdgeLabel` sizes the edge by the label's bbox,
+                    // which takes in `.labelBkg`'s `padding: 0 2px`; the ELK
+                    // adapter hands ELK no edge length.
+                    e.label.as_ref().map(|b| (b.w + 2.0 * LABEL_BKG_PAD_X, b.h)),
                 )
             })
             .collect(),
         clusters: clusters
             .iter()
-            .map(|c| LayoutCluster::new(None, title_band(c)))
+            .map(|c| LayoutCluster {
+                // `groupTitleSizeOptions`: no narrower than the title plus the
+                // boundary's padding.
+                min_width: if elk {
+                    c.title.w + BOUNDARY_PADDING
+                } else {
+                    0.0
+                },
+                ..LayoutCluster::new(None, title_band(c))
+            })
             .collect(),
         direction: d.direction,
         node_sep: super::graph::layer_spacing(o.layout, o.node_spacing),
         rank_sep: super::graph::layer_spacing(o.layout, o.rank_spacing),
         edge_sep: 20.0,
-        cluster_padding: BOUNDARY_PADDING,
+        cluster_padding: if elk {
+            super::graph::CLUSTER_PADDING
+        } else {
+            BOUNDARY_PADDING
+        },
         // A boundary with no crossing edge is laid out on its own with ELK's
         // subgraph spacing, as for flowchart subgraphs.
         inner_node_sep: super::graph::CLUSTER_NODE_SPACING,
@@ -3842,7 +3865,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             children,
         });
         if let (Some(b), Some(at)) = (&e.label, route.label) {
-            let r = Rect::centered(at, b.w + 4.0, b.h);
+            let r = Rect::centered(at, b.w + 2.0 * LABEL_BKG_PAD_X, b.h);
             bounds.add_rect(r);
             let color = e
                 .style
@@ -3869,19 +3892,47 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         }
     }
 
-    let mut elements = vec![
+    // The layout's origin: ELK's 12px root padding, dagre's 8px margins.
+    let origin = if o.layout == LayoutAlgorithm::Elk {
+        12.0
+    } else {
+        8.0
+    };
+    let mut elements: Vec<Element> = vec![
         Element::group("clusters", cluster_els),
         Element::group("edgePaths", edge_els),
         Element::group("edgeLabels", label_els),
         Element::group("nodes", node_els),
-    ];
+    ]
+    .into_iter()
+    .map(|e| e.translated(origin, origin))
+    .collect();
+    let mut bounds = {
+        let r = bounds.rect();
+        let mut b = Bounds::default();
+        b.add_rect(Rect::new(r.x + origin, r.y + origin, r.w, r.h));
+        b
+    };
+    // `insertTitle` with a top margin of 0: an unstyled `<text>` (root font)
+    // with its baseline at y = 0, centred on the drawing's bbox.
     if let Some(t) = d.title.as_ref().filter(|t| !t.trim().is_empty()) {
         let content = bounds.rect();
-        let tb = Block::new(vec![t.clone()], font * 1.125, false);
-        let center = Point::new(content.x + content.w / 2.0, content.y - tb.h / 2.0 - 10.0);
-        bounds.add_rect(Rect::centered(center, tb.w, tb.h));
-        let mut text = Text::centered(center, &tb.lines, tb.font, tb.font * 1.5, &pal.title_color);
-        text.bold = false;
+        let tw = crate::text::line_width(t, font, false);
+        let cx = content.x + content.w / 2.0;
+        bounds.add_rect(Rect::new(
+            cx - tw / 2.0,
+            -(0.905 * font).round(),
+            tw,
+            crate::text::svg_line_box(font, t),
+        ));
+        let lines = vec![t.clone()];
+        let text = Text::centered(
+            Point::new(cx, -font * 0.35),
+            &lines,
+            font,
+            font,
+            &pal.title_color,
+        );
         elements.push(Element::classed_text(text, "usecaseDiagramTitleText"));
     }
     Scene {
@@ -4350,6 +4401,26 @@ mod tests {
             );
         }
         assert!(!store.intersects(&fulfil));
+    }
+
+    /// Under ELK a boundary is a subgraph: 24px padding round its contents, a
+    /// title strip of the label's height less 2 plus ELK's 5px label padding,
+    /// and labelled edges sized with `.labelBkg`'s 2px side padding. Reference
+    /// (mermaid 12.3.0): the boundary at (138, 12), 462.8125 × 130.
+    #[test]
+    fn elk_boundaries_are_subgraphs() {
+        let s = scene(
+            "usecase-beta\ndirection LR\nactor X\nsystemBoundary S[\"Sys\"]\n  A(\"Alpha\")\n  B(\"Beta\")\nend\nX --> A\nA ..> : include B",
+        );
+        let r = extent(find_group(&s.elements, "usecase-S").unwrap());
+        assert!(
+            (r.x - 138.0).abs() < 1e-6 && (r.y - 12.0).abs() < 1e-6,
+            "{r:?}"
+        );
+        assert!(
+            (r.w - 462.8125).abs() < 0.01 && (r.h - 130.0).abs() < 1e-6,
+            "{r:?}"
+        );
     }
 
     #[test]

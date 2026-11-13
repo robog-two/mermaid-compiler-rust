@@ -246,7 +246,6 @@ impl GraphConfig {
     fn state() -> Self {
         GraphConfig {
             padding: 8.0,
-            rank_spacing: 70.0,
             ..Self::flowchart()
         }
     }
