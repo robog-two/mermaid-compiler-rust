@@ -23,7 +23,7 @@
 use super::{
     Direction, EdgeRoute, EdgeRouting, ElkGraph, ElkLayers, Hierarchy, LayoutCluster, LayoutEdge,
     LayoutInput, LayoutNode, LayoutOutput, OrderCtx, OrthoSpacing, Prepared, cluster_chains,
-    elk_options, elkorder, finish, layout_flat, layout_flat_in, prepare,
+    elk_options, elkorder, finish, finish_rng, layout_flat, layout_flat_in, prepare,
 };
 use crate::geom::{Point, Rect};
 use std::collections::HashMap;
@@ -638,7 +638,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 )
             })
             .collect();
-        for (&scope, done) in scopes.iter().zip(order_runs(&tree, &scopes, &inputs)) {
+        for (&scope, done) in scopes.iter().zip(order_runs(&tree, &scopes, &inputs, None)) {
             ordered[slot(scope)] = Some(done);
         }
     }
@@ -652,8 +652,18 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             &stubs,
             &ext_off,
         );
-        let out = match ordered[slot(scope)].take() {
-            Some((prep, layers, port_rank, rng)) => {
+        // A container whose run holds no other graph may be split.
+        let alone = !scopes
+            .iter()
+            .any(|s| s.is_some_and(|c| tree.hierarchical(c) && tree.owner_of_cluster(c) == scope));
+        let packed = if alone {
+            layout_components(&tree, scope, &li)
+        } else {
+            None
+        };
+        let out = match (packed, ordered[slot(scope)].take()) {
+            (Some(out), _) => out,
+            (None, Some((prep, layers, port_rank, rng))) => {
                 let hier = Hierarchy {
                     port_rank,
                     route_rng: rng,
@@ -661,7 +671,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 };
                 finish(&li.flat, li.graph, &hier, prep, layers)
             }
-            None => layout_flat_in(&li.flat, li.graph, &li.hier),
+            (None, None) => layout_flat_in(&li.flat, li.graph, &li.hier),
         };
         let level = level_output(li, out);
         if let Some(c) = scope {
@@ -1367,11 +1377,20 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
             add(Rect::centered(*p, nd.width, nd.height));
         }
     }
-    // ELK sizes a graph by everything in its layers, edges included.
+    // ELK sizes a graph by everything in its layers, edges included: an edge
+    // runs through a layer as a dummy node as thick as the edge, its port (so
+    // the edge) on the dummy's side towards the lower cross coordinate
+    // (`LongEdgeSplitter`: at the floor of half the thickness).
     if elk {
-        for route in &out.edges {
+        let thick = if flat.direction.is_horizontal() {
+            (0.0, super::ELK_EDGE_THICKNESS)
+        } else {
+            (super::ELK_EDGE_THICKNESS, 0.0)
+        };
+        for (e, route) in flat.edges.iter().zip(&out.edges) {
+            let (w, h) = if e.from == e.to { (0.0, 0.0) } else { thick };
             for p in &route.points {
-                add(Rect::new(p.x, p.y, 0.0, 0.0));
+                add(Rect::new(p.x, p.y, w, h));
             }
         }
     }
@@ -1433,11 +1452,230 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
 /// mermaid's `elk.spacing.portsSurrounding` (12 on every side).
 const ELK_PORTS_SURROUNDING: f64 = 12.0;
 
+/// ELK's `spacing.componentComponent` in a container: derived (factor 1) from
+/// the `spacing.baseValue: 24` mermaid gives every container.
+const ELK_COMPONENT_SPACING: f64 = 24.0;
+
+/// ELK Layered's default `aspectRatio` (a float option).
+const ELK_ASPECT_RATIO: f32 = 1.6;
+
+/// The connected components of a level's pass, as ELK's `ComponentsProcessor`
+/// finds them: a depth-first search from each node in turn (in the graph's node
+/// order), following each node's ports in the order the importer made them (by
+/// the edge's source, then the edge), so each component lists its nodes in the
+/// order the search reached them, which is the order ELK lays it out in.
+/// Per component: its nodes and its edges (in their order).
+fn components(flat: &LayoutInput) -> Vec<(Vec<usize>, Vec<usize>)> {
+    let n = flat.nodes.len();
+    let mut ports: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut by_source: Vec<usize> = (0..flat.edges.len()).collect();
+    by_source.sort_by_key(|&e| flat.edges[e].from);
+    for e in by_source {
+        let edge = &flat.edges[e];
+        ports[edge.from].push(e);
+        ports[edge.to].push(e);
+    }
+    let mut seen = vec![false; n];
+    let mut comp_of = vec![usize::MAX; n];
+    let mut out: Vec<(Vec<usize>, Vec<usize>)> = Vec::new();
+    for start in 0..n {
+        if seen[start] {
+            continue;
+        }
+        let k = out.len();
+        let mut nodes = Vec::new();
+        // (node, next port to follow)
+        let mut stack = vec![(start, 0usize)];
+        seen[start] = true;
+        nodes.push(start);
+        comp_of[start] = k;
+        while let Some(top) = stack.last_mut() {
+            let (v, i) = *top;
+            let Some(&e) = ports[v].get(i) else {
+                stack.pop();
+                continue;
+            };
+            top.1 += 1;
+            let edge = &flat.edges[e];
+            for w in [edge.from, edge.to] {
+                if w != v || edge.from == edge.to {
+                    if !seen[w] {
+                        seen[w] = true;
+                        nodes.push(w);
+                        comp_of[w] = k;
+                        stack.push((w, 0));
+                    }
+                    break;
+                }
+            }
+        }
+        out.push((nodes, Vec::new()));
+    }
+    for (e, edge) in flat.edges.iter().enumerate() {
+        out[comp_of[edge.from]].1.push(e);
+    }
+    out
+}
+
+/// ELK's `SimpleRowGraphPlacer`: components (sizes `(w, h)`) sorted by area,
+/// smallest first (a stable sort: mermaid gives no node a priority), then put
+/// left to right in rows no wider than the widest component or the square root
+/// of their total area times the aspect ratio, `spacing.componentComponent`
+/// apart. Per component (in the input order): the top left corner of its box.
+fn place_components(sizes: &[(f64, f64)]) -> Vec<Point> {
+    let mut order: Vec<usize> = (0..sizes.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (sa, sb) = (sizes[a].0 * sizes[a].1, sizes[b].0 * sizes[b].1);
+        sa.total_cmp(&sb)
+    });
+    let widest = sizes.iter().map(|s| s.0).fold(0.0, f64::max);
+    let area: f64 = sizes.iter().map(|s| s.0 * s.1).sum();
+    let max_row = widest.max(f64::from(area.sqrt() as f32) * f64::from(ELK_ASPECT_RATIO));
+    let mut at = vec![Point::new(0.0, 0.0); sizes.len()];
+    let (mut x, mut y, mut highest) = (0.0, 0.0, 0.0f64);
+    for i in order {
+        let (w, h) = sizes[i];
+        if x + w > max_row {
+            x = 0.0;
+            y += highest + ELK_COMPONENT_SPACING;
+            highest = 0.0;
+        }
+        at[i] = Point::new(x, y);
+        highest = highest.max(h);
+        x += w + ELK_COMPONENT_SPACING;
+    }
+    at
+}
+
+/// A container laid out on its own (`SEPARATE_CHILDREN`) is laid out by ELK one
+/// connected component at a time (`ElkLayered.doLayout`: `ComponentsProcessor`
+/// splits it, each component is a graph of its own, and `SimpleRowGraphPlacer`
+/// packs them). `None` where the level is one component (or not such a graph).
+fn layout_components(tree: &Tree, scope: Option<usize>, li: &LevelInput) -> Option<LayoutOutput> {
+    if !li.elk
+        || li.graph != (ElkGraph::Container { separate: true })
+        || !li.flat.clusters.is_empty()
+        || !li.hier.ext.is_empty()
+        || li.items.iter().any(|it| matches!(it, Item::Ext(_)))
+    {
+        return None;
+    }
+    let comps = components(&li.flat);
+    if comps.len() < 2 {
+        return None;
+    }
+    let subs: Vec<LevelInput> = comps
+        .iter()
+        .map(|(nodes, edges)| {
+            let mut index = vec![usize::MAX; li.flat.nodes.len()];
+            for (k, &v) in nodes.iter().enumerate() {
+                index[v] = k;
+            }
+            let pick = |v: &[(f64, f64)]| -> Vec<(f64, f64)> {
+                if v.is_empty() {
+                    Vec::new()
+                } else {
+                    nodes.iter().map(|&i| v[i]).collect()
+                }
+            };
+            let hier = Hierarchy {
+                ports: edges
+                    .iter()
+                    .map(|&e| li.hier.ports.get(e).copied().unwrap_or((None, None)))
+                    .collect(),
+                margins: pick(&li.hier.margins),
+                side_fixed: nodes
+                    .iter()
+                    .map(|&i| li.hier.side_fixed.get(i).copied().unwrap_or(false))
+                    .collect(),
+                ..Hierarchy::default()
+            };
+            LevelInput {
+                items: nodes.iter().map(|&i| li.items[i]).collect(),
+                flat: LayoutInput {
+                    nodes: nodes.iter().map(|&i| li.flat.nodes[i].clone()).collect(),
+                    edges: edges
+                        .iter()
+                        .map(|&e| LayoutEdge {
+                            from: index[li.flat.edges[e].from],
+                            to: index[li.flat.edges[e].to],
+                            ..li.flat.edges[e].clone()
+                        })
+                        .collect(),
+                    ..li.flat.clone()
+                },
+                hier,
+                graph: li.graph,
+                flat_clusters: Vec::new(),
+                edge_ids: edges.iter().map(|&e| li.edge_ids[e]).collect(),
+                seg_of: edges.iter().map(|&e| li.seg_of[e]).collect(),
+                ext_kinds: Vec::new(),
+                elk: true,
+            }
+        })
+        .collect();
+    // The components share the graph's random generator (`GraphConfigurator`
+    // makes it before the split), each drawing on where the last left it.
+    let mut rng = elkorder::JavaRandom::new(1);
+    let mut levels = Vec::with_capacity(subs.len());
+    for sub in subs {
+        let (prep, layers, port_rank, ordered) =
+            order_runs(tree, &[scope], std::slice::from_ref(&sub), Some(&rng))
+                .pop()
+                .expect("one level");
+        let hier = Hierarchy {
+            port_rank,
+            route_rng: ordered,
+            ..sub.hier.clone()
+        };
+        let (out, after) = finish_rng(&sub.flat, sub.graph, &hier, prep, layers);
+        // A lone node is not ordered at all (`LayerSweepCrossingMinimizer`'s
+        // short cut for a graph laid out on its own), so draws nothing.
+        if sub.flat.nodes.len() > 1 {
+            rng = after;
+        }
+        levels.push(level_output(sub, out));
+    }
+    let sizes: Vec<(f64, f64)> = levels.iter().map(|l| (l.bbox.w, l.bbox.h)).collect();
+    let at = place_components(&sizes);
+    let mut out = LayoutOutput {
+        nodes: vec![Point::new(0.0, 0.0); li.flat.nodes.len()],
+        edges: vec![
+            EdgeRoute {
+                points: Vec::new(),
+                label: None,
+            };
+            li.flat.edges.len()
+        ],
+        clusters: Vec::new(),
+        cluster_directions: Vec::new(),
+    };
+    for ((level, (nodes, edges)), corner) in levels.iter().zip(&comps).zip(at) {
+        let shift =
+            |p: Point| Point::new(p.x - level.bbox.x + corner.x, p.y - level.bbox.y + corner.y);
+        for (&v, &p) in nodes.iter().zip(&level.out.nodes) {
+            out.nodes[v] = shift(p);
+        }
+        for (&e, r) in edges.iter().zip(&level.out.edges) {
+            out.edges[e] = EdgeRoute {
+                points: r.points.iter().map(|&p| shift(p)).collect(),
+                label: r.label.map(shift),
+            };
+        }
+    }
+    Some(out)
+}
+
 /// ELK's crossing minimisation for every level, the levels of one ELK run
 /// (the root, or a container laid out on its own, with the containers laid out
 /// within it: `INCLUDE_CHILDREN`) ordered together (`elkorder::minimize_run`).
 /// Per level (in `scopes`' order): its prepared pass and its ordered layers.
-fn order_runs(tree: &Tree, scopes: &[Option<usize>], inputs: &[LevelInput]) -> Vec<RunLevel> {
+fn order_runs(
+    tree: &Tree,
+    scopes: &[Option<usize>],
+    inputs: &[LevelInput],
+    rng: Option<&elkorder::JavaRandom>,
+) -> Vec<RunLevel> {
     let k = scopes.len();
     let preps: Vec<Prepared> = inputs
         .iter()
@@ -1509,7 +1747,11 @@ fn order_runs(tree: &Tree, scopes: &[Option<usize>], inputs: &[LevelInput]) -> V
                 }
             })
             .collect();
-        for (&i, o) in members.iter().zip(elkorder::minimize_run(graphs)) {
+        let run = match rng {
+            Some(r) => elkorder::minimize_run_from(graphs, r.clone()),
+            None => elkorder::minimize_run(graphs),
+        };
+        for (&i, o) in members.iter().zip(run) {
             ordered[i] = Some(o);
         }
     }
@@ -1559,7 +1801,10 @@ type RunLevel = (
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use super::{even_group_frames, subgraph_feedback_edges};
+    use super::{
+        Item, LevelInput, components, even_group_frames, level_output, place_components,
+        subgraph_feedback_edges,
+    };
 
     fn node(cluster: Option<usize>) -> LayoutNode {
         LayoutNode {
@@ -1603,6 +1848,136 @@ mod tests {
             && outer.y <= inner.y + 1e-6
             && outer.right() >= inner.right() - 1e-6
             && outer.bottom() >= inner.bottom() - 1e-6
+    }
+
+    #[test]
+    fn components_follow_ports_depth_first() {
+        // 1 -> 0, 0 -> 2, 3 alone, 4 -> 1: from node 0 the search takes its
+        // ports in the order they were made (by the edge's source): 0 -> 2
+        // first, so 2 before 1 (and then 4).
+        let inp = input(
+            vec![node(None); 5],
+            vec![
+                LayoutEdge::new(1, 0, 1, None),
+                LayoutEdge::new(0, 2, 1, None),
+                LayoutEdge::new(4, 1, 1, None),
+            ],
+            vec![],
+            Direction::TopBottom,
+        );
+        let comps = components(&inp);
+        assert_eq!(comps.len(), 2);
+        assert_eq!(comps[0].0, vec![0, 2, 1, 4]);
+        assert_eq!(comps[0].1, vec![0, 1, 2]);
+        assert_eq!(comps[1], (vec![3], vec![]));
+    }
+
+    #[test]
+    fn components_pack_in_rows_smallest_first() {
+        // Areas 400x100, 100x50, 300x100: the smallest first, then the
+        // others while a row stays within max(400, sqrt(75000) * 1.6 = 438).
+        let at = place_components(&[(400.0, 100.0), (100.0, 50.0), (300.0, 100.0)]);
+        assert_eq!(at[1], Point::new(0.0, 0.0));
+        assert_eq!(at[2], Point::new(124.0, 0.0));
+        assert_eq!(at[0], Point::new(0.0, 124.0));
+        // Equal areas keep their order; rows wrap past sqrt(8000) * 1.6 = 143.
+        let at = place_components(&[(100.0, 40.0), (40.0, 100.0)]);
+        assert_eq!(at, vec![Point::new(0.0, 0.0), Point::new(0.0, 64.0)]);
+    }
+
+    #[test]
+    fn elk_container_lays_out_its_components_apart() {
+        // An LR container (no edge crosses it) holding a chain of three and a
+        // chain of two: ELK lays each out on its own and stacks the rows, the
+        // smaller first, `spacing.componentComponent` (24) apart.
+        let mut inp = input(
+            vec![node(Some(0)); 5],
+            vec![
+                LayoutEdge::new(0, 1, 1, None),
+                LayoutEdge::new(1, 2, 1, None),
+                LayoutEdge::new(3, 4, 1, None),
+            ],
+            vec![with_dir(None, Some(Direction::LeftRight))],
+            Direction::TopBottom,
+        );
+        inp.routing = EdgeRouting::Orthogonal(OrthoSpacing::ROOT);
+        let out = layout(&inp);
+        let n = &out.nodes;
+        // Each chain is a row, the two-node chain on top.
+        assert!((n[0].y - n[1].y).abs() < 1e-6 && (n[1].y - n[2].y).abs() < 1e-6);
+        assert!((n[3].y - n[4].y).abs() < 1e-6);
+        assert!((n[0].y - n[3].y - (40.0 + 24.0)).abs() < 1e-6, "{n:?}");
+        // Both rows start at the container's left.
+        assert!((n[0].x - n[3].x).abs() < 1e-6);
+    }
+
+    #[test]
+    fn elk_graph_size_takes_in_long_edge_dummies() {
+        // A TB graph whose edge runs right of both nodes (through a layer as a
+        // dummy one unit thick, the edge on its left side): the graph reaches
+        // one unit past the edge. A self-loop stands off its node, no dummy.
+        let mut flat = input(
+            vec![node(None), node(None)],
+            vec![
+                LayoutEdge::new(0, 1, 1, None),
+                LayoutEdge::new(1, 1, 1, None),
+            ],
+            vec![],
+            Direction::TopBottom,
+        );
+        flat.routing = EdgeRouting::Orthogonal(OrthoSpacing::CONTAINER);
+        let route = |pts: &[(f64, f64)]| EdgeRoute {
+            points: pts.iter().map(|&(x, y)| Point::new(x, y)).collect(),
+            label: None,
+        };
+        let out = LayoutOutput {
+            nodes: vec![Point::new(40.0, 20.0), Point::new(40.0, 200.0)],
+            edges: vec![
+                route(&[(60.0, 40.0), (100.0, 40.0), (100.0, 180.0), (60.0, 180.0)]),
+                route(&[(80.0, 190.0), (130.0, 190.0), (130.0, 210.0), (80.0, 210.0)]),
+            ],
+            clusters: vec![],
+            cluster_directions: vec![],
+        };
+        let li = LevelInput {
+            items: vec![Item::Node(0), Item::Node(1)],
+            flat,
+            hier: Hierarchy::default(),
+            graph: ElkGraph::Container { separate: true },
+            flat_clusters: vec![],
+            edge_ids: vec![0, 1],
+            seg_of: vec![None, None],
+            ext_kinds: vec![],
+            elk: true,
+        };
+        let level = level_output(li, out);
+        assert_eq!(level.bbox.right(), 130.0);
+        let mut out2 = level.out.clone();
+        out2.edges[1] = route(&[(80.0, 190.0), (90.0, 190.0), (90.0, 210.0), (80.0, 210.0)]);
+        let li = LevelInput {
+            items: level.items.clone(),
+            flat: {
+                let mut f = input(
+                    vec![node(None), node(None)],
+                    vec![
+                        LayoutEdge::new(0, 1, 1, None),
+                        LayoutEdge::new(1, 1, 1, None),
+                    ],
+                    vec![],
+                    Direction::TopBottom,
+                );
+                f.routing = EdgeRouting::Orthogonal(OrthoSpacing::CONTAINER);
+                f
+            },
+            hier: Hierarchy::default(),
+            graph: ElkGraph::Container { separate: true },
+            flat_clusters: vec![],
+            edge_ids: vec![0, 1],
+            seg_of: vec![None, None],
+            ext_kinds: vec![],
+            elk: true,
+        };
+        assert_eq!(level_output(li, out2).bbox.right(), 101.0);
     }
 
     #[test]

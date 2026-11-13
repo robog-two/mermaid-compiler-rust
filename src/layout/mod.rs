@@ -969,9 +969,21 @@ fn finish(
     input: &LayoutInput,
     graph: ElkGraph,
     hier: &Hierarchy,
-    mut prep: Prepared,
+    prep: Prepared,
     layers: Vec<Vec<usize>>,
 ) -> LayoutOutput {
+    finish_rng(input, graph, hier, prep, layers).0
+}
+
+/// `finish`, also giving back the graph's random generator as the edge router
+/// leaves it (the next component of the same ELK graph draws on from there).
+fn finish_rng(
+    input: &LayoutInput,
+    graph: ElkGraph,
+    hier: &Hierarchy,
+    mut prep: Prepared,
+    layers: Vec<Vec<usize>>,
+) -> (LayoutOutput, elkorder::JavaRandom) {
     switch_labels(&mut prep);
     let Prepared {
         n,
@@ -1132,6 +1144,10 @@ fn finish(
         Some((x, start, end)) => (x, Some((start, end))),
         None => (assign_x(&layers, &verts, &links, &borders, &gap), None),
     };
+    let mut route_rng = hier
+        .route_rng
+        .clone()
+        .unwrap_or_else(|| elkorder::JavaRandom::new(1));
     let plan = match input.routing {
         EdgeRouting::Orthogonal(s) => Some(ortho_plan(
             &verts,
@@ -1145,10 +1161,7 @@ fn finish(
             &inl,
             &hier.ports,
             &hier.port_rank,
-            &mut hier
-                .route_rng
-                .clone()
-                .unwrap_or_else(|| elkorder::JavaRandom::new(1)),
+            &mut route_rng,
         )),
         EdgeRouting::Splines => None,
     };
@@ -1488,12 +1501,15 @@ fn finish(
         .enumerate()
         .map(|(c, r)| if span[c].is_some() { rect_out(r) } else { r })
         .collect();
-    LayoutOutput {
-        nodes,
-        edges,
-        clusters,
-        cluster_directions: vec![input.direction; nc],
-    }
+    (
+        LayoutOutput {
+            nodes,
+            edges,
+            clusters,
+            cluster_directions: vec![input.direction; nc],
+        },
+        route_rng,
+    )
 }
 
 /// ELK's crossing minimisation (see `elkorder`) on ELK's own layers: the ranks of

@@ -312,8 +312,13 @@ type RunExtra = (
 /// dummies, and its last layer then orders the ports on the far side).
 /// `graphs[0]` is the root. Returns each graph's order.
 pub(super) fn minimize_run(graphs: Vec<RunGraph>) -> Vec<RunOrder> {
+    minimize_run_from(graphs, JavaRandom::new(1))
+}
+
+/// `minimize_run` drawing on the root graph's random generator as given (a
+/// connected component of a graph shares the graph's generator).
+pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> Vec<RunOrder> {
     let ng = graphs.len();
-    let mut rng = JavaRandom::new(1);
     // `LayerSweepCrossingMinimizer.initialize`: the seed every run restarts from,
     // then each graph's port distributor, by a coin flip of its own generator.
     let seed = rng.next_long();
