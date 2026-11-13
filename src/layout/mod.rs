@@ -493,12 +493,12 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
             }
         })
         .collect();
-    let (mut ranks, mut layered, mut created, label_layer) =
+    let (mut ranks, mut layered, mut created, mut label_layer) =
         rank_with_clusters(n, &mut oriented, input, (&is_ext, &hidden), &hier.port_made);
     if elk && !hier.ext.is_empty() {
         let moved = pin_ext_neighbours(
             (&mut ranks, &mut layered, &created),
-            &label_layer,
+            &mut label_layer,
             input,
             &oriented,
             &hidden,
@@ -849,7 +849,7 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
 /// the order of `created`).
 fn pin_ext_neighbours(
     (ranks, layered, created): (&mut [usize], &mut [usize], &[usize]),
-    label_layer: &[Option<usize>],
+    label_layer: &mut [Option<usize>],
     input: &LayoutInput,
     oriented: &[Option<Oriented>],
     hidden: &[Option<Oriented>],
@@ -918,8 +918,10 @@ fn pin_ext_neighbours(
         ranks[v] = last;
         layered[v] = last;
         // The layer it left may now be empty (a label dummy's layer lies between
-        // the ends of a labelled edge).
+        // the ends of a labelled edge; that of an edge to an external port is
+        // where its layering left it).
         let used = real.iter().any(|&w| ranks[w] == old)
+            || label_layer.iter().flatten().any(|&l| l == old)
             || oriented.iter().zip(&input.edges).any(|(o, e)| {
                 o.as_ref()
                     .is_some_and(|o| e.label.is_some() && ranks[o.from] < old && old < ranks[o.to])
@@ -930,6 +932,9 @@ fn pin_ext_neighbours(
                     ranks[w] -= 1;
                     layered[w] = layered[w].saturating_sub(1);
                 }
+            }
+            for l in label_layer.iter_mut().flatten().filter(|l| **l > old) {
+                *l -= 1;
             }
             last -= 1;
         }

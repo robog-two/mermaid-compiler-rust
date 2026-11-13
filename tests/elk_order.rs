@@ -1690,3 +1690,32 @@ fn a_containers_loops_take_the_lowest_free_slot_on_each_side_with_ports() {
         ],
     );
 }
+
+#[test]
+fn a_label_dummy_left_by_a_hidden_port_edge_keeps_its_layer() {
+    // `d0n0 -->|lab1| C0` runs back to C0's port in its first layer; with
+    // that port hidden for the layering its label dummy, tied to D0 alone,
+    // takes a layer of its own above D0. c0n0 (joined only to ports where
+    // edges leave) then moves to the last layer, and the label's layer stays
+    // (`LayerConstraintPostprocessor` drops only empty layers): C0 is
+    // 462x304, the label above D0, not beside it (mermaid 12.3.0).
+    let (_, _, w, h) = frame(
+        "flowchart TD
+  subgraph C0
+    c0n0
+    subgraph D0
+      d0n0
+    end
+  end
+  x0
+  C0 --> x0
+  x0 --> c0n0
+  d0n0 -->|lab1| C0
+",
+        "C0",
+    );
+    assert!(
+        (w - 462.0).abs() < 0.5 && (h - 304.0).abs() < 0.5,
+        "{w}x{h}"
+    );
+}
