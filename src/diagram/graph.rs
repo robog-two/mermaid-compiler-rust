@@ -535,18 +535,26 @@ fn compartment_layout(
         return (layout, max_w + pad, h);
     }
     // classBox.ts / shapeUtil.ts: every compartment is its text plus PADDING
-    // above and below; an empty members box is GAP/2 + 2·GAP (2·GAP for empty
-    // methods), and a class with neither gets two 1.5·GAP boxes.
+    // above and below; an empty members box is 2·GAP (also for empty methods),
+    // the methods below it moved down another GAP/2 (`membersGroupHeightForMethods`;
+    // the divider between stays at the empty group's height), and a class with
+    // neither gets two 1.5·GAP boxes.
     let all_empty = blocks.iter().skip(1).all(|b| b.is_empty());
+    let methods_shift = |i: usize| {
+        if i == 2 && !all_empty && blocks[1].is_empty() {
+            pad / 2.0
+        } else {
+            0.0
+        }
+    };
     let annotation_h = annotation.map(content).unwrap_or(0.0);
     let heights: Vec<f64> = blocks
         .iter()
         .enumerate()
         .map(|(i, b)| match (i, b.is_empty()) {
             (0, _) => annotation_h + content(b) + 2.0 * pad,
-            (_, false) => content(b) + 2.0 * pad,
+            (_, false) => content(b) + 2.0 * pad + methods_shift(i),
             _ if all_empty => 1.5 * pad,
-            (1, true) => 2.5 * pad,
             _ => 2.0 * pad,
         })
         .collect();
@@ -557,12 +565,14 @@ fn compartment_layout(
         // 14px). SVG text keeps PADDING (its `-4` and line box cancel out).
         text_top: blocks
             .iter()
-            .map(|b| {
-                if b.svg || b.is_empty() {
-                    pad
-                } else {
-                    2.0 * pad - b.line_height / 2.0
-                }
+            .enumerate()
+            .map(|(i, b)| {
+                methods_shift(i)
+                    + if b.svg || b.is_empty() {
+                        pad
+                    } else {
+                        2.0 * pad - b.line_height / 2.0
+                    }
             })
             .collect(),
         heights,
@@ -3235,6 +3245,23 @@ fn entity_table_elements(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_members_keep_their_divider_two_gaps_down() {
+        // mermaid 12.3.0, `class Keeper { <<interface>> +feed(Animal a) }`: box
+        // 141 high, dividers at -4.5 and 19.5 from its centre, the method's
+        // label 19.5 below the second.
+        let t = |s: &str| TextBlock::new(vec![s.into()], 14.0, false).html();
+        let blocks = [
+            t("Keeper"),
+            TextBlock::new(vec![], 14.0, false),
+            t("+feed(Animal a)"),
+        ];
+        let (l, _, h) = compartment_layout(DiagramKind::Class, &blocks, Some(&t("x")), 12.0);
+        assert_eq!(h, 141.0);
+        assert_eq!(l.heights, vec![66.0, 24.0, 51.0]);
+        assert_eq!(l.text_top[2], 19.5);
+    }
 
     #[test]
     fn parses_styles() {
