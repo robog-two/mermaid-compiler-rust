@@ -1037,8 +1037,10 @@ fn is_excluded(g: &Gantt, t: i64) -> bool {
     g.excludes.contains(&name) || on_day(&g.excludes)
 }
 
-/// mermaid's `fixTaskDates`: push `end` past excluded days; returns `(end, render_end)`.
-fn fix_task_dates(g: &Gantt, mut start: i64, mut end: i64) -> (i64, i64) {
+/// mermaid's `checkTaskDates` + `fixTaskDates`: from the day after `start`,
+/// push `end` past excluded days; returns `(end, render_end)`.
+fn fix_task_dates(g: &Gantt, start: i64, mut end: i64) -> (i64, i64) {
+    let mut start = start + DAY_MS;
     let mut invalid = false;
     let mut render_end = end;
     let mut guard = 0;
@@ -1123,7 +1125,9 @@ fn resolve(g: &Gantt, raws: Vec<RawTask>) -> Result<Vec<Task>> {
                             }
                         }
                     }
-                    (if ready { earliest } else { None }, true)
+                    // `manualEndTime` is only set for a literal YYYY-MM-DD end,
+                    // so `until` ends are pushed past excluded days too.
+                    (if ready { earliest } else { None }, false)
                 }
             };
             let Some(end) = end else { continue };
@@ -1184,7 +1188,6 @@ struct Colors {
     /// `.section0..3`: `sectionBkgColor`, `altSectionBkgColor`, `sectionBkgColor2`,
     /// `altSectionBkgColor`, each at opacity 0.2.
     sections: [(Color, f64); 4],
-    grid: Color,
     exclude: Color,
     vert: Color,
     /// `textColor`: axis labels.
@@ -1399,7 +1402,6 @@ impl Colors {
                 (alt, 0.2),
             ],
             exclude: var("excludeBkgColor", 11),
-            grid: var("gridColor", 12),
             vert: var("vertLineColor", 13),
             task_text: var("taskTextColor", 14),
             task_text_dark: var("taskTextDarkColor", 15),
@@ -1452,7 +1454,8 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let font = cfg.section_f64("gantt", "fontSize", 11.0);
     let sec_font = cfg.section_f64("gantt", "sectionFontSize", 11.0);
     let title_margin = cfg.section_f64("gantt", "titleTopMargin", 25.0);
-    let total_w = cfg.section_f64("gantt", "useWidth", 1000.0);
+    // The svg's parent width: mmdc's 800px page less the body's 8px margins.
+    let total_w = cfg.section_f64("gantt", "useWidth", 784.0);
     let compact = cfg
         .section("gantt", "displayMode")
         .and_then(|j| j.as_str())
@@ -1482,17 +1485,19 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let axis_y = h - 50.0;
     let row_y = |r: usize| oy + r as f64 * gap + top_pad;
 
+    // `scaleTime().domain([min startTime, max endTime]).rangeRound(...)`: the
+    // domain ends at the latest (excludes-extended) end, not the drawn one.
     let t0 = g.tasks.iter().map(|t| t.start).min().unwrap_or(0);
     let mut t1 = g
         .tasks
         .iter()
-        .map(|t| t.render_end.max(t.start))
+        .map(|t| t.end.max(t.start))
         .max()
         .unwrap_or(DAY_MS);
     if t1 <= t0 {
         t1 = t0 + DAY_MS;
     }
-    let x_of = |t: i64| left_pad + (t - t0) as f64 / (t1 - t0) as f64 * inner;
+    let x_of = |t: i64| left_pad + ((t - t0) as f64 / (t1 - t0) as f64 * inner).round();
 
     let mut bounds = Bounds::default();
     bounds.add_rect(Rect::new(0.0, 0.0, w, h));
@@ -1568,7 +1573,9 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 geom::PathCmd::MoveTo(Point::new(x, grid_top)),
                 geom::PathCmd::LineTo(Point::new(x, axis_y)),
             ]),
-            Paint::stroke(&c.grid, 1.0).with_opacity(0.8),
+            // d3's tick line has `stroke="currentColor"` (black on mmdc's page);
+            // `.grid .tick`'s `gridColor` stroke only reaches the group.
+            Paint::stroke(&Color::new("#000000"), 1.0).with_opacity(0.8),
             "tick",
         ));
         let label = format_time(t, &axis_format);
@@ -1723,14 +1730,16 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
 
     // Vertical markers.
+    let non_vert = g.tasks.iter().filter(|t| !t.vert).count() as f64;
     for t in g.tasks.iter().filter(|t| t.vert) {
         let x = x_of(t.start);
-        // A `0.08 * barHeight` wide task rect classed `vert task{n}`: `taskBkgColor`
-        // fill, 2px `vertLineColor` outline.
+        // A `0.08 * barHeight` wide task rect classed `vert task{n}` from
+        // `gridLineStartPadding`, as tall as the non-marker tasks' rows plus two
+        // bars: `taskBkgColor` fill, 2px `vertLineColor` outline.
         let vw = 0.08 * bar_h;
         grid.push(Element::classed_shape(
             Geometry::Rect {
-                rect: Rect::new(x - vw / 2.0, grid_top, vw, axis_y - grid_top),
+                rect: Rect::new(x, grid_pad, vw, non_vert * gap + 2.0 * bar_h),
                 rx: 3.0_f64.min(vw / 2.0),
             },
             Paint::both(&c.task, &c.vert, 2.0),
@@ -1738,7 +1747,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         ));
         let label = normalize_label(&t.label);
         let tw = line_width(&label, VERT_FONT, false);
-        let y = axis_y + 3.0 + axis_font + 16.0;
+        let y = grid_pad + non_vert * gap + 60.0;
         bounds.add_rect(Rect::new(x - tw / 2.0, y - font, tw, font * 1.4));
         overlay.push(Element::classed_text(
             Text {
@@ -1947,6 +1956,52 @@ mod tests {
         // Wed 10 is excluded, so the 1-day task runs through Thu 11.
         assert_eq!(g.tasks[1].start, d(2024, 1, 9));
         assert_eq!(g.tasks[1].end, d(2024, 1, 10) + DAY_MS);
+        // `until` ends are not manual end times: they move past the weekend too
+        // (Thu 4 until Mon 8 spans Sat and Sun, so it ends Wed 10).
+        let src = "gantt\ndateFormat YYYY-MM-DD\nexcludes weekends\nsection S\nC :c, 2024-01-08, 1d\nB :b, 2024-01-04, until c";
+        let g = parse(src, None).unwrap();
+        assert_eq!(g.tasks[1].end, d(2024, 1, 10));
+        assert_eq!(g.tasks[1].render_end, d(2024, 1, 10));
+    }
+
+    #[test]
+    fn chart_spans_mmdcs_container_and_the_latest_end() {
+        // mermaid 12.3 in mmdc: `viewBox="0 0 784 h"` (the page's 800px less
+        // the body margins); the time scale runs to the latest `endTime`, and a
+        // `vert` marker starts at `gridLineStartPadding`, is as tall as the
+        // other tasks' rows plus two bars and labelled 60px below them.
+        let src = "gantt\ndateFormat YYYY-MM-DD\nexcludes weekends\nsection S\nA :a, 2024-01-01, 2024-01-03\nB :b, 2024-01-04, 2d\nM :vert, v, 2024-01-02, 0d";
+        let cfg = MermaidConfig::default();
+        let s = render(src, None, &cfg, &cfg.palette()).unwrap();
+        assert_eq!(s.view_box.w, 784.0 + 16.0);
+        let mut vert = None;
+        let mut label = None;
+        fn walk<'a>(els: &'a [Element], v: &mut Option<Rect>, l: &mut Option<&'a Text>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, v, l),
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        class: Some(c),
+                        ..
+                    } if c == "vert" => *v = Some(*rect),
+                    Element::Text {
+                        text,
+                        class: Some(c),
+                    } if c == "vertText" => *l = Some(text),
+                    _ => {}
+                }
+            }
+        }
+        walk(&s.elements, &mut vert, &mut label);
+        let v = vert.unwrap();
+        assert_eq!((v.y, v.h), (35.0, 2.0 * 24.0 + 40.0));
+        assert_eq!(label.unwrap().y, 35.0 + 2.0 * 24.0 + 60.0);
+        // B (Thu 4, 2 days) is pushed over the weekend to Mon 8, the scale's
+        // end, while its bar is drawn to Sat 6.
+        let g = parse(src, None).unwrap();
+        assert_eq!(g.tasks[1].end, d(2024, 1, 8));
+        assert_eq!(g.tasks[1].render_end, d(2024, 1, 6));
     }
 
     #[test]
@@ -1995,7 +2050,7 @@ mod tests {
         let b = render(SAMPLE, None, &cfg, &pal).unwrap();
         assert_eq!(a, b);
         assert!(a.element_count() > 20);
-        assert!(a.view_box.w > 900.0);
+        assert!(a.view_box.w > 780.0);
     }
 
     #[test]
