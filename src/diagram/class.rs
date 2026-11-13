@@ -397,6 +397,77 @@ fn generic_text(s: &str) -> String {
     out
 }
 
+/// ClassMember's display text of an attribute: its classifier (one trailing
+/// `$` or `*`) dropped.
+fn attribute_text(m: &str) -> String {
+    let m = m.strip_suffix(['$', '*']).unwrap_or(m);
+    let (vis, id) = match m.strip_prefix(['#', '+', '~', '-']) {
+        Some(rest) => (&m[..1], rest),
+        None => ("", m),
+    };
+    format!("{vis}{}", generic_text(&keep_one_leading_space(id)))
+        .trim()
+        .to_string()
+}
+
+/// ClassMember's display text of a method, as `parseMember` splits it with
+/// `/([#+~-])?(.+)\((.*)\)([\s$*])?(.*)([$*])?/`: visibility, name up to the
+/// last `(`, parameters up to the last `)`, then a classifier and a return
+/// type shown after ` : ` (`+area() double` → `+area() : double`).
+fn method_text(m: &str) -> String {
+    let (vis, rest) = match m.strip_prefix(['#', '+', '~', '-']) {
+        Some(r) if method_open(r).is_some() => (&m[..1], r),
+        _ => ("", m),
+    };
+    let Some(open) = method_open(rest) else {
+        // No match: the member keeps empty parts.
+        return "()".to_string();
+    };
+    let close = open + rest[open..].rfind(')').expect("checked above");
+    let id = &rest[..open];
+    let params = rest[open + 1..close].trim();
+    let mut tail = &rest[close + 1..];
+    let mut classifier = false;
+    if let Some(c) = tail
+        .chars()
+        .next()
+        .filter(|c| c.is_whitespace() || *c == '$' || *c == '*')
+    {
+        classifier = c == '$' || c == '*';
+        tail = &tail[c.len_utf8()..];
+    }
+    let mut ret = tail.trim();
+    if !classifier {
+        ret = ret.strip_suffix(['$', '*']).unwrap_or(ret);
+    }
+    let mut text = format!(
+        "{vis}{}({})",
+        generic_text(&keep_one_leading_space(id)),
+        generic_text(params)
+    );
+    if !ret.is_empty() {
+        text.push_str(" : ");
+        text.push_str(&generic_text(ret));
+    }
+    text.trim().to_string()
+}
+
+/// The `(` that `(.+)\((.*)\)` stops at: the last one past the first
+/// character with a `)` after it.
+fn method_open(s: &str) -> Option<usize> {
+    let close = s.rfind(')')?;
+    s[..close].rfind('(').filter(|&i| i > 0)
+}
+
+/// ClassMember: "Preserve one space only" at the front of a member's name.
+fn keep_one_leading_space(id: &str) -> String {
+    if id.starts_with(' ') {
+        format!(" {}", id.trim())
+    } else {
+        id.trim().to_string()
+    }
+}
+
 /// `A "1" <|-- "*" B : label`
 fn parse_relation(s: &str) -> Option<(String, String, Edge)> {
     let (op_pos, dotted) = find_operator(s)?;
@@ -560,12 +631,12 @@ impl Builder {
         if m.is_empty() {
             return;
         }
-        let text = generic_text(m.trim_end_matches(['$', '*']));
         let info = self.class(cls);
-        if m.contains('(') {
-            info.methods.push(text);
+        // classDb.addMember: a `)` past the first character makes a method.
+        if m.find(')').is_some_and(|i| i > 0) {
+            info.methods.push(method_text(m));
         } else {
-            info.attributes.push(text);
+            info.attributes.push(attribute_text(m));
         }
     }
 
@@ -676,7 +747,7 @@ mod tests {
         assert_eq!(animal.annotation.as_deref(), Some("«abstract»"));
         assert_eq!(animal.sections[0].lines, vec!["Animal"]);
         assert_eq!(animal.sections[1].lines, vec!["+String name"]);
-        assert_eq!(animal.sections[2].lines, vec!["+makeSound() void"]);
+        assert_eq!(animal.sections[2].lines, vec!["+makeSound() : void"]);
         assert_eq!(g.edges[0].start, Head::Triangle);
         let zoo = &g.edges[1];
         assert_eq!(zoo.start, Head::DiamondFilled);
@@ -688,6 +759,29 @@ mod tests {
             (LineKind::Dashed, Head::Dependency)
         );
         assert_eq!(g.edges[3].start, Head::Diamond);
+    }
+
+    #[test]
+    fn member_display_text_follows_class_member() {
+        assert_eq!(method_text("+makeSound() void"), "+makeSound() : void");
+        assert_eq!(method_text("+area()double"), "+area() : double");
+        assert_eq!(method_text("+getX()$"), "+getX()");
+        assert_eq!(method_text("+count() int$"), "+count() : int");
+        assert_eq!(
+            method_text("-sum( List~int~ xs ) int*"),
+            "-sum(List<int> xs) : int"
+        );
+        assert_eq!(method_text("call(f(x)) bool"), "call(f(x)) : bool");
+        assert_eq!(method_text("+()"), "+()");
+        assert_eq!(attribute_text("+String name$"), "+String name");
+        assert_eq!(attribute_text("-List~int~ ids"), "-List<int> ids");
+        let g = parse(
+            "classDiagram\nclass A {\n  +run() bool\n  +String id*\n}",
+            None,
+        )
+        .unwrap();
+        assert_eq!(g.nodes[0].sections[1].lines, vec!["+String id"]);
+        assert_eq!(g.nodes[0].sections[2].lines, vec!["+run() : bool"]);
     }
 
     #[test]
