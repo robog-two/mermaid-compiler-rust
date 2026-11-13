@@ -486,9 +486,14 @@ pub fn clip_rect(r: &Rect, toward: Point) -> Point {
 /// mermaid's `intersectRect` (as dagre's): where the line from the centre of
 /// `r` towards `p` crosses its border, in that code's arithmetic.
 pub fn intersect_rect(r: &Rect, p: Point) -> Point {
-    let c = r.center();
+    intersect_box(r.center(), r.w, r.h, p)
+}
+
+/// [`intersect_rect`] for the `w` × `h` box centred on `c` (mermaid's node
+/// `x`, `y`, `width`, `height`, taken as they are).
+pub fn intersect_box(c: Point, w: f64, h: f64, p: Point) -> Point {
     let (dx, dy) = (p.x - c.x, p.y - c.y);
-    let (mut w, mut h) = (r.w / 2.0, r.h / 2.0);
+    let (mut w, mut h) = (w / 2.0, h / 2.0);
     let (sx, sy) = if dy.abs() * w > dx.abs() * h {
         if dy < 0.0 {
             h = -h;

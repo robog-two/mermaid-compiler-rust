@@ -1355,6 +1355,18 @@ pub fn render_with(
             }
         }
         let raw = extras.raw_points.get(ei).filter(|p| p.len() >= 2);
+        // A cluster's node as mermaid cuts against it: dagre's centre, the
+        // frame's size.
+        let frame = |c: usize| {
+            let r = cluster_rects[c];
+            let centre = extras
+                .cluster_centres
+                .get(c)
+                .copied()
+                .flatten()
+                .unwrap_or_else(|| r.center());
+            (centre, r.w, r.h)
+        };
         let to_cluster = matches!(e.to, Endpoint::Cluster(_));
         let from_cluster = matches!(e.from, Endpoint::Cluster(_));
         if let (true, false, Some(raw)) = (dagre_engine, is_loop, raw) {
@@ -1368,7 +1380,8 @@ pub fn render_with(
                 match e.from {
                     Endpoint::Node(NodeId(i)) => pts[0] = clip_end(&boundaries[i], &pts, false),
                     Endpoint::Cluster(c) => {
-                        pts[0] = geom::intersect_rect(&cluster_rects[c.0], pts[1])
+                        let (centre, w, h) = frame(c.0);
+                        pts[0] = geom::intersect_box(centre, w, h, pts[1]);
                     }
                 }
                 if let Endpoint::Node(NodeId(i)) = e.to {
@@ -1378,11 +1391,11 @@ pub fn render_with(
                     pts[n - 1] = raw[raw.len() - 1];
                 }
                 if let Endpoint::Cluster(c) = e.to {
-                    pts = cut_path_at_intersect(raw, &cluster_rects[c.0]);
+                    pts = cut_path_at_intersect(raw, frame(c.0));
                 }
                 if let Endpoint::Cluster(c) = e.from {
                     pts.reverse();
-                    pts = cut_path_at_intersect(&pts, &cluster_rects[c.0]);
+                    pts = cut_path_at_intersect(&pts, frame(c.0));
                     pts.reverse();
                 }
                 // A route cut down to one point is drawn as that point (an
@@ -1618,6 +1631,8 @@ pub fn render_with(
             }
         }
         let cmds = match cfg.curve {
+            // d3's line through a single point.
+            _ if degenerate => vec![geom::PathCmd::MoveTo(pts[0]), geom::PathCmd::Close],
             // The ELK adapter overrides every routed edge's curve with `rounded`.
             _ if elk => geom::rounded_path(&pts, EDGE_CORNER_RADIUS),
             Curve::Basis => geom::basis_curve(&pts),
@@ -1940,12 +1955,15 @@ pub(crate) fn edge_routing(layout: LayoutAlgorithm) -> EdgeRouting {
     }
 }
 
-/// mermaid's `cutPathAtIntersect`: `points` up to where they first enter `r`,
-/// ending at that crossing (by `intersection`).
-fn cut_path_at_intersect(points: &[Point], r: &Rect) -> Vec<Point> {
-    let c = r.center();
-    let (w, h) = (r.w / 2.0, r.h / 2.0);
-    let outside = |p: Point| (p.x - c.x).abs() >= w || (p.y - c.y).abs() >= h;
+/// mermaid's `cutPathAtIntersect`: `points` up to where they first enter the
+/// `width` × `height` box centred on `c`, ending at that crossing (by
+/// `intersection`).
+fn cut_path_at_intersect(points: &[Point], (c, width, height): (Point, f64, f64)) -> Vec<Point> {
+    let (w, h) = (width / 2.0, height / 2.0);
+    // On the border is outside (give or take the last bits, which our text
+    // widths do not reproduce anyway).
+    const ULP: f64 = 1e-9;
+    let outside = |p: Point| (p.x - c.x).abs() >= w - ULP || (p.y - c.y).abs() >= h - ULP;
     let mut out: Vec<Point> = Vec::new();
     let Some(&first) = points.first() else {
         return out;
@@ -1972,14 +1990,17 @@ fn cut_path_at_intersect(points: &[Point], r: &Rect) -> Vec<Point> {
 /// mermaid's `intersection(node, outsidePoint, insidePoint)` for the box of
 /// half-size `w` × `h` centred on `c`.
 fn rect_intersection(c: Point, w: f64, h: f64, outside: Point, inside: Point) -> Point {
+    // An outside point on the border gives an offset of exactly 0 (and then
+    // the outside point itself); rounding noise in the last bits counts as 0.
+    let snap = |v: f64| if v.abs() < 1e-9 { 0.0 } else { v };
     let q_full = (outside.y - inside.y).abs();
     let r_full = (outside.x - inside.x).abs();
     if (c.y - outside.y).abs() * w > (c.x - outside.x).abs() * h {
-        let q = if inside.y < outside.y {
+        let q = snap(if inside.y < outside.y {
             outside.y - h - c.y
         } else {
             c.y - h - outside.y
-        };
+        });
         let r = r_full * q / q_full;
         let mut res = Point::new(
             if inside.x < outside.x {
@@ -2004,11 +2025,11 @@ fn rect_intersection(c: Point, w: f64, h: f64, outside: Point, inside: Point) ->
         }
         res
     } else {
-        let r = if inside.x < outside.x {
+        let r = snap(if inside.x < outside.x {
             outside.x - w - c.x
         } else {
             c.x - w - outside.x
-        };
+        });
         let q = q_full * r / r_full;
         let mut res = Point::new(
             if inside.x < outside.x {
@@ -3725,16 +3746,16 @@ mod tests {
     #[test]
     fn cut_path_stops_at_the_frame() {
         let p = Point::new;
-        let r = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let r = (p(50.0, 50.0), 100.0, 100.0);
         // `intersection` measures its offset from the inside point's side.
-        let cut = cut_path_at_intersect(&[p(80.0, 160.0), p(50.0, 50.0)], &r);
+        let cut = cut_path_at_intersect(&[p(80.0, 160.0), p(50.0, 50.0)], r);
         assert_eq!(cut[0], p(80.0, 160.0));
         assert!((cut[1].x - (50.0 + 30.0 * 60.0 / 110.0)).abs() < 1e-9 && cut[1].y == 100.0);
         // Met straight on, it returns the outside point (`r === 0`): no new one.
-        let cut = cut_path_at_intersect(&[p(50.0, 200.0), p(50.0, 150.0), p(50.0, 50.0)], &r);
+        let cut = cut_path_at_intersect(&[p(50.0, 200.0), p(50.0, 150.0), p(50.0, 50.0)], r);
         assert_eq!(cut, vec![p(50.0, 200.0), p(50.0, 150.0)]);
         // A point on the border counts as outside.
-        let cut = cut_path_at_intersect(&[p(50.0, 150.0), p(50.0, 100.0), p(50.0, 50.0)], &r);
+        let cut = cut_path_at_intersect(&[p(50.0, 150.0), p(50.0, 100.0), p(50.0, 50.0)], r);
         assert_eq!(cut, vec![p(50.0, 150.0), p(50.0, 100.0)]);
     }
 

@@ -312,3 +312,24 @@ fn dagre_routes_leave_cylinders_as_mermaid_clips_them() {
     let svg = output::encode_svg(&r, &EncodeOptions::default());
     assert!(svg.contains("d=\"M442,191.155L452.167,184.011"), "{svg}");
 }
+
+#[test]
+fn dagre_loop_on_a_cluster_goes_round_its_frame() {
+    // `getEdgesToRender` builds the loop round the subgraph's own node (its
+    // segments were laid out on its anchor), below it, as wide as the frame.
+    let r = render::render(
+        &format!(
+            "{DAGRE}flowchart TD\n  subgraph C0\n    direction RL\n    C0_0\n    C0_1{{\"ok\"}}\n  end\n  \
+             subgraph C1\n    C1_0[(\"Process data\")]\n    C1_0 --> C0_1\n  end\n  subgraph C2\n    \
+             C2_0[[\"ok\"]]\n    subgraph C2s\n      C2s_0\n      C2s_1\n      C2s_2>\"ok\"]\n      \
+             C2s_2 --> C2s_0\n    end\n  end\n  x0\n  x1\n  x2\n  x3\n  C0 --> C0\n  C2s_2 -.-> x2\n"
+        ),
+        &MermaidConfig::default(),
+    )
+    .expect("diagram renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    assert!(
+        svg.contains("1275.594,509.868C1276.427,510.701,1277.37,511.425,1292.841,511.787"),
+        "{svg}"
+    );
+}

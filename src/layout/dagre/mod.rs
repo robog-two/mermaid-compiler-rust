@@ -155,6 +155,10 @@ pub struct Extras {
     /// the node boxes, or a self-loop's merged corners), against which
     /// `positionEdgeLabel` measures how far a cut path moved the label.
     pub raw_points: Vec<Vec<Point>>,
+    /// Per cluster: its node's centre as dagre computed it (a frame's corner
+    /// plus half its size is not always the same float), which mermaid cuts
+    /// routes against.
+    pub cluster_centres: Vec<Option<Point>>,
 }
 
 /// [`layout`], with its [`Extras`].
@@ -277,11 +281,16 @@ pub fn layout_full(input: &LayoutInput, model: &DagreModel) -> (LayoutOutput, Ex
     for (i, pts) in r.raw {
         raw_points[i] = pts;
     }
+    let mut cluster_centres = vec![None; input.clusters.len()];
+    for (c, p) in r.centres {
+        cluster_centres[c] = Some(p);
+    }
     (
         out,
         Extras {
             hidden: r.hidden,
             raw_points,
+            cluster_centres,
         },
     )
 }
@@ -550,6 +559,8 @@ struct Rendered {
     hidden: Vec<Rect>,
     /// Per edge: dagre's own points (see [`Extras::raw_points`]).
     raw: Vec<(usize, Vec<Point>)>,
+    /// Per cluster: dagre's centre (see [`Extras::cluster_centres`]).
+    centres: Vec<(usize, Point)>,
     /// The `diff` of the last group in the graph (`positionNode`'s offset).
     diff: f64,
 }
@@ -580,6 +591,9 @@ impl Rendered {
         }
         for (i, pts) in inner.raw {
             self.raw.push((i, pts.into_iter().map(shift).collect()));
+        }
+        for (c, p) in inner.centres {
+            self.centres.push((c, shift(p)));
         }
         if let Some(b) = inner.bbox {
             self.add_box(Rect::new(b.x + dx, b.y + dy, b.w, b.h));
@@ -708,6 +722,7 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
                 let rect = Rect::new(n.x - width / 2.0, n.y - n.height / 2.0, width, n.height);
                 res.add_box(rect);
                 res.clusters.push((*c, rect, sub.dir));
+                res.centres.push((*c, Point::new(n.x, n.y)));
                 diffs.push((v.clone(), diff));
             }
             Some(MNode::Leaf { idx }) => {
@@ -767,14 +782,27 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
         let (Some(s0), Some(s1), Some(s2)) = (&segs[0], &segs[1], &segs[2]) else {
             continue;
         };
-        let node_name = &s0.0;
-        let Some(n) = out.nodes.get(node_name).copied() else {
+        // The loop goes round the node it was written on (a cluster's own
+        // node, though its segments were moved onto its anchor), as wide as
+        // drawn.
+        let src = &input.edges[key];
+        let node_name = match src.from_cluster {
+            Some(c) => &ctx.model.cluster_names[c],
+            None => &ctx.model.node_names[src.from],
+        };
+        let Some(mut n) = out.nodes.get(node_name).copied() else {
             continue;
         };
+        if let Some(&(_, r, _)) = src
+            .from_cluster
+            .and_then(|c| res.clusters.iter().find(|k| k.0 == c))
+        {
+            n.width = r.w;
+        }
         let (lw, lh) = input.edges[key].label.unwrap_or((0.0, 0.0));
-        // getSelfLoopSide: from the dummies' centre.
+        // getSelfLoopSide: from the centre of the segments' other ends.
         let mut hints = Vec::new();
-        for id in [&s0.1, &s1.0, &s1.1, &s2.0] {
+        for id in [&s0.0, &s0.1, &s1.0, &s1.1, &s2.0, &s2.1] {
             if id != node_name && !hints.iter().any(|(h, _): &(&String, Pt)| *h == id) {
                 if let Some(d) = out.nodes.get(id) {
                     hints.push((id, Pt { x: d.x, y: d.y }));
