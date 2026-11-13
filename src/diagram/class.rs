@@ -818,8 +818,11 @@ mod tests {
             let n = g.nodes.iter().find(|n| n.id == id).unwrap();
             super::super::graph::node_size(n, DiagramKind::Class, &cfg.class, &pal, false).0
         };
-        let text =
-            |s: &str, bold: bool| crate::text::TextBlock::new(vec![s.into()], 14.0, bold).width;
+        let text = |s: &str, bold: bool| {
+            crate::text::TextBlock::new(vec![s.into()], 14.0, bold)
+                .html()
+                .width
+        };
         let expect = |half: f64, widest: f64| half + half.max(widest) + 24.0;
         let animal = expect(text("Animal", true) / 2.0, text("+String gender", false));
         assert!((width("Animal") - animal).abs() < 1e-6);

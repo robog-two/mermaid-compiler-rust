@@ -292,7 +292,8 @@ fn wrap(text: &str, font: f64, width: f64) -> (Vec<String>, f64) {
     let tw = if natural > width {
         width
     } else {
-        TextBlock::new(lines.clone(), font, false).width
+        // An HTML label's box: layout units (1/64 px).
+        TextBlock::new(lines.clone(), font, false).html().width
     };
     (lines, tw)
 }
@@ -706,6 +707,12 @@ mod tests {
     id4)Cloud(
     id5{{Hexagon}}
     :::large big";
+
+    #[test]
+    fn label_width_is_the_html_label_box() {
+        // mermaid 12.3.0 sizes this label's foreignObject 107.609375 wide.
+        assert_eq!(wrap("Origins of thing", 16.0, 200.0).1, 107.609375);
+    }
 
     #[test]
     fn parses_tree_and_shapes() {

@@ -602,7 +602,7 @@ fn measure_node(
     svg: bool,
     table_scale: f64,
 ) -> Measured {
-    let mut block = TextBlock::label(&node.label, font);
+    let mut block = TextBlock::label(&node.label, font).html();
     let bold = node.style.bold == Some(true);
     if svg {
         // createText's SVG path: wrapped (markdownAutoWrap or not) and cut inside
@@ -614,9 +614,9 @@ fn measure_node(
         };
         block = TextBlock::svg(lines, font, bold);
     } else if wrap_width > 0.0 && !block.is_empty() {
-        block = TextBlock::new(wrap_lines(&block.lines, wrap_width, font, bold), font, bold);
+        block = TextBlock::new(wrap_lines(&block.lines, wrap_width, font, bold), font, bold).html();
     } else if bold {
-        block = TextBlock::new(block.lines, font, true);
+        block = TextBlock::new(block.lines, font, true).html();
     }
     // labelHelper: `minWidth` widens non-empty labels; circles and collapsed
     // containers size without it.
@@ -662,7 +662,7 @@ fn measure_node(
                     .iter()
                     .enumerate()
                     .map(|(i, s)| match (svg, kind) {
-                        (false, _) => TextBlock::new(s.lines.clone(), font, s.bold),
+                        (false, _) => TextBlock::new(s.lines.clone(), font, s.bold).html(),
                         // shapeUtil's textHelper: one `<text>` per line, annotation and
                         // name box on box, members and methods 3px apart.
                         (true, DiagramKind::Class) => TextBlock::svg_stacked(
@@ -679,7 +679,7 @@ fn measure_node(
                     if svg {
                         TextBlock::svg_stacked(lines, font, false, Some(0.0))
                     } else {
-                        TextBlock::new(lines, font, false)
+                        TextBlock::new(lines, font, false).html()
                     }
                 });
                 let (layout, w, h) = compartment_layout(kind, &sections, annotation.as_ref(), pad);
@@ -757,6 +757,7 @@ fn edge_label_block(label: &str, font: f64) -> TextBlock {
         font,
         false,
     )
+    .html()
 }
 
 /// Padding of an SVG edge label's background on each side (`createFormattedText`):
@@ -837,7 +838,7 @@ pub fn render_with(
         .map(|c| {
             let t = TextBlock::label(&c.title, font);
             if cfg.html_edge_labels {
-                t
+                t.html()
             } else {
                 TextBlock::svg(t.lines, font, false)
             }
@@ -990,7 +991,7 @@ pub fn render_with(
                     if !cfg.html_edge_labels {
                         svg_edge_label_block(l, font)
                     } else if opts.markdown_no_wrap && crate::text::is_markdown_string(l) {
-                        TextBlock::label(l, font)
+                        TextBlock::label(l, font).html()
                     } else {
                         edge_label_block(l, font)
                     }

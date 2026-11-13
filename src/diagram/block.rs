@@ -724,7 +724,8 @@ pub struct Metrics {
 const NODE_PADDING: f64 = 8.0;
 
 fn node_size(label: &str, shape: BlockShape, font: f64) -> (f64, f64) {
-    let tb = TextBlock::label(label, font);
+    // An HTML label's box: layout units (1/64 px).
+    let tb = TextBlock::label(label, font).html();
     let (tw, th) = (tb.width, tb.height.max(font * 1.5));
     let pad = 16.0;
     let (w, h) = match shape {
@@ -1456,7 +1457,7 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         bounds.add_point(pa);
         bounds.add_point(pb);
         if let Some(l) = &e.label {
-            let tb = TextBlock::label(l, m.font);
+            let tb = TextBlock::label(l, m.font).html();
             let mid = pa.lerp(pb, 0.5);
             let bg = Rect::centered(mid, tb.width + 6.0, tb.height + 2.0);
             bounds.add_rect(bg);
@@ -1565,6 +1566,16 @@ class c hot
             font: 16.0,
             pad: 8.0,
         }
+    }
+
+    #[test]
+    fn node_width_is_the_html_label_box() {
+        // mermaid 12.3.0: the label's foreignObject is 135.171875 wide (layout
+        // units), the block 32 wider.
+        assert_eq!(
+            node_size("Gamma three wide", BlockShape::Rect, 16.0).0,
+            167.171875
+        );
     }
 
     #[test]

@@ -421,6 +421,12 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
         * font_size
 }
 
+/// `w` rounded up to Chromium's layout unit (1/64 px), as an HTML box's
+/// width from its text is (a hair of float error is not rounded up).
+pub fn layout_unit_ceil(w: f64) -> f64 {
+    ((w * 64.0) - 1e-6).ceil().max(0.0) / 64.0
+}
+
 /// Multi-line text with its measured extent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextBlock {
@@ -557,6 +563,14 @@ impl TextBlock {
     /// Normalise a raw mermaid label and measure it.
     pub fn label(raw: &str, font_size: f64) -> Self {
         Self::new(label_lines(raw), font_size, false)
+    }
+
+    /// The block as an HTML label's box measures it: Chromium sizes a box
+    /// in layout units (1/64 px), its content's width rounded up to one.
+    /// (SVG text's `getBBox` is not snapped.)
+    pub fn html(mut self) -> Self {
+        self.width = layout_unit_ceil(self.width);
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1091,6 +1105,26 @@ fn named_entity(name: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_labels_snap_up_to_layout_units() {
+        assert_eq!(layout_unit_ceil(10.0), 10.0);
+        assert_eq!(layout_unit_ceil(10.0 + 1e-9), 10.0);
+        assert_eq!(layout_unit_ceil(10.001), 10.015625);
+        // Edge and state labels as mermaid 12.3.0 sizes their foreignObjects.
+        for (s, w) in [
+            ("some edge", 69.28125),
+            ("yes indeed", 67.71875),
+            ("start moving now", 105.828125),
+            ("oh no wobble", 83.296875),
+        ] {
+            let b = TextBlock::label(s, 14.0).html();
+            assert_eq!(b.width, w, "{s}");
+        }
+        // SVG text is measured as is.
+        let svg = TextBlock::svg(vec!["some edge".into()], 14.0, false);
+        assert!(svg.width < 69.28125);
+    }
 
     #[test]
     fn svg_line_box_follows_chromium_get_bbox() {
