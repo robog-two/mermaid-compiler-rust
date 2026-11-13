@@ -1,7 +1,7 @@
 //! `Scene` → SVG text, shaped like mermaid's output (`<svg id="my-svg" ...>`).
 
 use crate::geom::PathCmd;
-use crate::scene::{Anchor, Element, Geometry, Paint, Scene, Text};
+use crate::scene::{Anchor, Element, Geometry, Paint, Scene, Shadow, Text};
 use std::fmt::Write as _;
 
 /// How the root `<svg>` element is sized.
@@ -76,6 +76,68 @@ pub fn path_data(cmds: &[PathCmd]) -> String {
         }
     }
     d
+}
+
+/// The drop-shadow filters of a document: its id, and the distinct shadows
+/// (`filter` ids `{id}-shadow-{index}`).
+struct Filters<'a> {
+    id: &'a str,
+    shadows: Vec<Shadow>,
+}
+
+impl Filters<'_> {
+    fn collect(&mut self, els: &[Element]) {
+        for el in els {
+            match el {
+                Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                    self.collect(children);
+                }
+                Element::Shape { paint, .. } => {
+                    if let Some(sh) = &paint.shadow
+                        && !self.shadows.contains(sh)
+                    {
+                        self.shadows.push(sh.clone());
+                    }
+                }
+                Element::Text { .. } => {}
+            }
+        }
+    }
+
+    fn attr(&self, p: &Paint) -> String {
+        p.shadow
+            .as_ref()
+            .and_then(|sh| self.shadows.iter().position(|s| s == sh))
+            .map(|k| format!(" filter=\"url(#{}-shadow-{k})\"", self.id))
+            .unwrap_or_default()
+    }
+
+    /// `<defs>` with a `feDropShadow` per shadow (the flood split into an
+    /// opaque colour and its opacity, which every renderer reads).
+    fn defs(&self) -> String {
+        if self.shadows.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("<defs>");
+        for (k, sh) in self.shadows.iter().enumerate() {
+            let (color, alpha) = match crate::color::parse(sh.color.css()) {
+                Some(c) => (format!("rgb({},{},{})", c.r, c.g, c.b), c.a),
+                None => (sh.color.css().to_string(), 1.0),
+            };
+            let _ = write!(
+                out,
+                "<filter id=\"{}-shadow-{k}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\"><feDropShadow dx=\"{}\" dy=\"{}\" stdDeviation=\"{}\" flood-color=\"{}\" flood-opacity=\"{}\"/></filter>",
+                self.id,
+                num(sh.dx),
+                num(sh.dy),
+                num(sh.std_dev),
+                esc(&color),
+                num(alpha)
+            );
+        }
+        out.push_str("</defs>");
+        out
+    }
 }
 
 fn paint_attrs(p: &Paint) -> String {
@@ -162,7 +224,7 @@ fn write_line(out: &mut String, line: &str, bold: bool) {
     }
 }
 
-fn write_element(out: &mut String, el: &Element) {
+fn write_element(out: &mut String, el: &Element, fx: &Filters) {
     match el {
         Element::Group {
             id,
@@ -179,12 +241,12 @@ fn write_element(out: &mut String, el: &Element) {
             out.push_str(&class_attr(class));
             out.push('>');
             for c in children {
-                write_element(out, c);
+                write_element(out, c, fx);
             }
             out.push_str("</g>");
         }
         Element::Shape { geom, paint, class } => {
-            let attrs = paint_attrs(paint);
+            let attrs = paint_attrs(paint) + &fx.attr(paint);
             let cls = class_attr(class);
             match geom {
                 Geometry::Rect { rect, rx } => {
@@ -232,7 +294,7 @@ fn write_element(out: &mut String, el: &Element) {
                 num(about.y)
             );
             for c in children {
-                write_element(out, c);
+                write_element(out, c, fx);
             }
             out.push_str("</g>");
         }
@@ -304,9 +366,15 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
         esc(&scene.css),
         opt.theme_css.map(esc).unwrap_or_default()
     );
+    let mut fx = Filters {
+        id: &id,
+        shadows: Vec::new(),
+    };
+    fx.collect(&scene.elements);
+    out.push_str(&fx.defs());
     out.push_str("<g>");
     for el in &scene.elements {
-        write_element(&mut out, el);
+        write_element(&mut out, el, &fx);
     }
     out.push_str("</g></svg>");
     out
@@ -345,5 +413,38 @@ mod tests {
         let mut out = String::new();
         write_line(&mut out, &crate::text::label_lines("<b>x</b>y")[0], true);
         assert_eq!(out, "xy");
+    }
+
+    #[test]
+    fn shadows_become_one_drop_shadow_filter_each() {
+        use crate::geom::Rect;
+        use crate::scene::Color;
+        let sh = Shadow {
+            dx: 1.0,
+            dy: 2.0,
+            std_dev: 1.0,
+            color: Color::new("rgba(185, 185, 185, 0.5)"),
+        };
+        let paint = Paint::fill(&Color::new("#fff")).with_shadow(Some(sh));
+        let els = vec![
+            Element::rect(Rect::new(0.0, 0.0, 10.0, 10.0), 0.0, paint.clone()),
+            Element::rect(Rect::new(20.0, 0.0, 10.0, 10.0), 0.0, paint),
+        ];
+        let mut out = String::new();
+        let mut fx = Filters {
+            id: "d",
+            shadows: Vec::new(),
+        };
+        fx.collect(&els);
+        for e in &els {
+            write_element(&mut out, e, &fx);
+        }
+        assert_eq!(out.matches("filter=\"url(#d-shadow-0)\"").count(), 2);
+        assert_eq!(
+            fx.defs(),
+            "<defs><filter id=\"d-shadow-0\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\">\
+             <feDropShadow dx=\"1\" dy=\"2\" stdDeviation=\"1\" flood-color=\"rgb(185,185,185)\" \
+             flood-opacity=\"0.5\"/></filter></defs>"
+        );
     }
 }

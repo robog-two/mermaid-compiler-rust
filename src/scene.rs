@@ -33,6 +33,19 @@ pub struct Paint {
     pub stroke_width: f64,
     pub dash: Option<Vec<f64>>,
     pub opacity: Option<f64>,
+    /// A blurred drop shadow behind the shape (CSS `filter: drop-shadow()`).
+    pub shadow: Option<Shadow>,
+}
+
+/// A CSS `drop-shadow(dx dy blur color)`: the shape's silhouette offset and
+/// blurred with a Gaussian of standard deviation `blur / 2`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shadow {
+    pub dx: f64,
+    pub dy: f64,
+    /// The standard deviation of the blur.
+    pub std_dev: f64,
+    pub color: Color,
 }
 
 impl Paint {
@@ -43,6 +56,7 @@ impl Paint {
             stroke_width: 0.0,
             dash: None,
             opacity: None,
+            shadow: None,
         }
     }
     pub fn stroke(c: &Color, w: f64) -> Self {
@@ -52,6 +66,7 @@ impl Paint {
             stroke_width: w,
             dash: None,
             opacity: None,
+            shadow: None,
         }
     }
     pub fn both(fill: &Color, stroke: &Color, w: f64) -> Self {
@@ -61,6 +76,7 @@ impl Paint {
             stroke_width: w,
             dash: None,
             opacity: None,
+            shadow: None,
         }
     }
     pub fn dashed(mut self, d: Vec<f64>) -> Self {
@@ -69,6 +85,10 @@ impl Paint {
     }
     pub fn with_opacity(mut self, o: f64) -> Self {
         self.opacity = Some(o);
+        self
+    }
+    pub fn with_shadow(mut self, s: Option<Shadow>) -> Self {
+        self.shadow = s;
         self
     }
 }
