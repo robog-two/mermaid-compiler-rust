@@ -475,10 +475,11 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         })
         .collect();
     let (mut ranks, mut layered, mut created, label_layer) =
-        rank_with_clusters(n, &mut oriented, input, (&is_ext, &hidden));
+        rank_with_clusters(n, &mut oriented, input, (&is_ext, &hidden), &hier.port_made);
     if elk && !hier.ext.is_empty() {
         let moved = pin_ext_neighbours(
             (&mut ranks, &mut layered, &created),
+            &label_layer,
             input,
             &oriented,
             &hidden,
@@ -829,6 +830,7 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
 /// the order of `created`).
 fn pin_ext_neighbours(
     (ranks, layered, created): (&mut [usize], &mut [usize], &[usize]),
+    label_layer: &[Option<usize>],
     input: &LayoutInput,
     oriented: &[Option<Oriented>],
     hidden: &[Option<Oriented>],
@@ -869,7 +871,14 @@ fn pin_ext_neighbours(
         }
     }
     let real: Vec<usize> = (0..n).filter(|&v| !is_ext[v]).collect();
-    let Some(mut last) = real.iter().map(|&v| ranks[v]).max() else {
+    // The last layer may hold just a label dummy (of an edge to an external
+    // port, tied to its other end only).
+    let Some(mut last) = real
+        .iter()
+        .map(|&v| ranks[v])
+        .chain(label_layer.iter().flatten().copied())
+        .max()
+    else {
         return moved;
     };
     let mut pinned: Vec<usize> = real
@@ -2853,6 +2862,7 @@ fn rank_with_label_nodes(
     oriented: &[Option<Oriented>],
     input: &LayoutInput,
     (hidden, hidden_edges): (&[bool], &[Option<Oriented>]),
+    made: &[[(usize, usize); 2]],
 ) -> Ranking {
     // Every edge end is a port of its own, in the order the edges were imported;
     // a label dummy has its input port, then its output port.
@@ -2877,15 +2887,21 @@ fn rank_with_label_nodes(
             _ => None,
         }
     };
-    let mut by_source: Vec<(usize, usize)> = (0..oriented.len())
-        .filter_map(|ei| edge_of(ei).map(|(o, _)| (o.from, ei)))
-        .collect();
-    by_source.sort_unstable();
-    // Port keys at the edge's (oriented) source and target.
+    // Port keys at the edge's (oriented) source and target: in the order the
+    // ports were made (a laid out container's ports for edges crossing its
+    // border come after those for edges to itself, see `Hierarchy::port_made`).
     let key = |ei: usize, o: &Oriented| {
-        let (a, b) = (2 * ei, 2 * ei + 1);
+        let at = |side: usize| {
+            let (tier, k) = made.get(ei).map_or((0, ei), |m| m[side]);
+            tier * (usize::MAX / 4) + 2 * k.min(usize::MAX / 16) + side
+        };
+        let (a, b) = (at(0), at(1));
         if o.reversed { (b, a) } else { (a, b) }
     };
+    let mut by_source: Vec<(usize, usize, usize)> = (0..oriented.len())
+        .filter_map(|ei| edge_of(ei).map(|(o, _)| (o.from, key(ei, o).0, ei)))
+        .collect();
+    by_source.sort_unstable();
     for (ei, o) in oriented.iter().enumerate() {
         let Some(o) = o.as_ref() else { continue };
         if input.edges[ei].label.is_none() || o.from == o.to {
@@ -2899,7 +2915,7 @@ fn rank_with_label_nodes(
     }
     // `LabelDummyInserter` makes the dummies in node order, per node in the order
     // of its outgoing edges, and appends them to the nodes.
-    for (_, ei) in by_source {
+    for (_, _, ei) in by_source {
         if let Some((o, hid)) = edge_of(ei) {
             if input.edges[ei].label.is_some() && o.from != o.to {
                 let (ks, kt) = key(ei, o);
@@ -2967,6 +2983,7 @@ fn rank_with_clusters(
     oriented: &mut [Option<Oriented>],
     input: &LayoutInput,
     (hidden, hidden_edges): (&[bool], &[Option<Oriented>]),
+    made: &[[(usize, usize); 2]],
 ) -> Ranking {
     let mut slot: Vec<Option<usize>> = vec![None; input.clusters.len()];
     let mut used = Vec::new();
@@ -2988,7 +3005,7 @@ fn rank_with_clusters(
     }
     let elk = matches!(input.routing, EdgeRouting::Orthogonal(_));
     if used.is_empty() && elk {
-        return rank_with_label_nodes(n, oriented, input, (hidden, hidden_edges));
+        return rank_with_label_nodes(n, oriented, input, (hidden, hidden_edges), made);
     }
     if used.is_empty() {
         let mut ranks = rank_nodes(n, oriented);
@@ -4672,7 +4689,7 @@ mod tests {
                 Direction::TopBottom,
             ));
             let oriented = orient_edges(n, &inp.edges, 1, true, &[]);
-            let (ranks, _, _, _) = rank_with_label_nodes(n, &oriented, &inp, (&[], &[]));
+            let (ranks, _, _, _) = rank_with_label_nodes(n, &oriented, &inp, (&[], &[]), &[]);
             let mut used: Vec<usize> = ranks.clone();
             for (o, e) in oriented.iter().zip(&inp.edges) {
                 if let (Some(o), Some(_)) = (o, e.label) {

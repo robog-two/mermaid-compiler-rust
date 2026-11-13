@@ -184,6 +184,36 @@ impl Tree<'_> {
         true
     }
 
+    /// Per edge: when ELK imports it, breadth-first by the graph containing it
+    /// (the two ends' common ancestor), then in edge order.
+    fn import_order(&self) -> Vec<usize> {
+        let made: Vec<(usize, usize)> = self
+            .input
+            .edges
+            .iter()
+            .enumerate()
+            .map(|(e, edge)| {
+                let a = edge
+                    .from_cluster
+                    .map_or(Member::Node(edge.from), Member::Cluster);
+                let b = edge
+                    .to_cluster
+                    .map_or(Member::Node(edge.to), Member::Cluster);
+                let depth = self
+                    .common_ancestor(a, b)
+                    .map_or(0, |c| self.chains[c].len());
+                (depth, e)
+            })
+            .collect();
+        let mut by: Vec<usize> = (0..made.len()).collect();
+        by.sort_by_key(|&e| made[e]);
+        let mut rank = vec![0; made.len()];
+        for (r, e) in by.into_iter().enumerate() {
+            rank[e] = r;
+        }
+        rank
+    }
+
     /// How many graphs deep a separate cluster's own graph is (the root's: 0).
     fn depth(&self, scope: Option<usize>) -> usize {
         scope.map_or(0, |c| 1 + self.depth(self.owner_of_cluster(c)))
@@ -1746,6 +1776,7 @@ fn order_runs(
             chains: &p.cluster_chain,
         })
         .collect();
+    let import = tree.import_order();
     let mut ordered: Vec<Option<elkorder::RunOrder>> = (0..k).map(|_| None).collect();
     for root in (0..k).filter(|&i| parent[i].is_none()) {
         // The run: its root first, then every level whose chain of containers
@@ -1783,6 +1814,7 @@ fn order_runs(
                     opts: elk_options(li.graph, n),
                     ext_key,
                     seg_key,
+                    import: &import,
                     parent: up,
                 }
             })

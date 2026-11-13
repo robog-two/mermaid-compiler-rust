@@ -1038,3 +1038,145 @@ fn cycle_breaking_leaves_a_container_by_its_ports_in_their_made_order() {
         ],
     );
 }
+
+#[test]
+fn a_containers_port_without_edges_outside_holds_its_ports_in_their_made_order() {
+    // C0's ports, as made: `C0 --> x0`'s (imported), `c0n0 --> C0`'s (an edge
+    // from inside, so none at the root) and `c0n0 --> x0`'s (added by
+    // `CompoundGraphPreprocessor`). Sorting by model order would put the
+    // earlier edge `c0n0 --> x0` first, but the edgeless port between them
+    // compares as smaller than either and either as smaller than it, so the
+    // insertion sort leaves the list as made: `C0 --> x0`'s label goes on top
+    // and the two edges cross in the channel before the labels, which takes
+    // a second lane (mermaid 12.3.0).
+    expect_centres(
+        "flowchart LR
+  subgraph C0
+    c0n0
+  end
+  x0
+  x1
+  x0 --> x1
+  C0 -->|a label| x0
+  c0n0 --> C0
+  c0n0 -->|yes| x0
+",
+        &[("c0n0", 0.0, 0.0), ("x0", 387.27, 6.0), ("x1", 579.27, 6.0)],
+    );
+}
+
+#[test]
+fn a_node_tied_only_to_ports_where_edges_leave_goes_past_a_label_layer() {
+    // In C0, C1 meets nothing but the port where `c2n2 --> c3n0` leaves, so
+    // ELK layers it on its own and moves it to the last layer: that of the
+    // label of `c0n1 --> C0` (an edge to C0's own port, tied to c0n1 only),
+    // below c0n1 rather than beside it (mermaid 12.3.0).
+    expect_centres(
+        "flowchart TD
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C1
+      c1n0
+      subgraph C2
+        c2n0
+        c2n1
+        c2n2
+        c2n1 --> c2n2
+      end
+    end
+    c0n0 --> c0n1
+  end
+  subgraph C3
+    c3n0
+    c3n1
+  end
+  subgraph C4
+    c4n0
+    c4n1
+    c4n0 --> c4n1
+  end
+  x0
+  x1
+  c2n2 -->|x| c3n0
+  c0n1 -->|a label| C0
+",
+        &[
+            ("c0n0", 887.0, 0.0),
+            ("c0n1", 887.0, 69.0),
+            ("c1n0", 264.0, 261.5),
+            ("c2n0", 490.0, 234.0),
+            ("c2n1", 692.0, 234.0),
+            ("c2n2", 692.0, 303.0),
+            ("c3n0", 692.0, 609.0),
+            ("c3n1", 490.0, 609.0),
+            ("c4n0", 0.0, 156.0),
+            ("c4n1", 0.0, 225.0),
+            ("x0", 1103.0, 178.5),
+            ("x1", 1295.0, 178.5),
+        ],
+    );
+}
+
+#[test]
+fn an_edgeless_port_on_a_containers_west_side_splits_its_sort() {
+    // C2's west ports, as made: `c0n0 --> C2`'s, `C2 --> C3`'s (an edge to
+    // something inside, so none at the root) and `c0n2 --> c3n1`'s. The
+    // edgeless one keeps the other two in their made order, listed up the
+    // west side, so they start crossing the edges from C0; the sweep that
+    // undoes it puts c2n0 above C3 (mermaid 12.3.0).
+    expect_centres(
+        "flowchart LR
+  subgraph C0
+    c0n0
+    c0n1
+    c0n2
+    subgraph C1
+      c1n0
+    end
+    c0n0 --> c0n1
+  end
+  subgraph C2
+    c2n0
+    subgraph C3
+      c3n0
+      c3n1
+      c3n0 --> c3n1
+    end
+  end
+  subgraph C4
+    c4n0
+    c4n1
+    subgraph C5
+      c5n0
+      subgraph C6
+        c6n0
+        c6n1
+      end
+    end
+    c4n0 --> c4n1
+  end
+  x0
+  c0n0 --> C2
+  c6n1 --> x0
+  c0n2 --> c3n1
+  C3 --> C6
+  C2 --> C3
+",
+        &[
+            ("c0n0", 24.0, 241.38),
+            ("c0n1", 236.0, 259.12),
+            ("c0n2", 236.0, 354.12),
+            ("c1n0", 0.0, 384.38),
+            ("c2n0", 631.0, 156.0),
+            ("c3n0", 530.0, 299.0),
+            ("c3n1", 742.0, 316.25),
+            ("c4n0", 1142.0, 0.0),
+            ("c4n1", 1328.0, 0.0),
+            ("c5n0", 1089.0, 143.0),
+            ("c6n0", 1084.0, 286.0),
+            ("c6n1", 1084.0, 381.0),
+            ("x0", 1554.0, 381.0),
+        ],
+    );
+}
