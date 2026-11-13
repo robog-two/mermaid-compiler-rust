@@ -252,6 +252,12 @@ struct Hierarchy {
     /// constraints `FIXED_SIDE`), so that an edge reversed by cycle breaking
     /// meets it on its original side (see [`InLayer`]).
     side_fixed: Vec<bool>,
+    /// Per edge (empty: by the edge order): where its ports at its source and
+    /// at its target were made among their node's ports, as keys to sort by. A
+    /// laid out container makes its ports for edges to it as ELK imports
+    /// them, and those for edges crossing its border after, in the order of
+    /// their dummies inside (`CompoundGraphPreprocessor`).
+    port_made: Vec<[(usize, usize); 2]>,
 }
 
 /// ELK's `InvertedPortProcessor`: where cycle breaking reverses an edge at a node
@@ -400,6 +406,15 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         .iter()
         .map(|e| ext_first[e.to] == Some(true) || ext_first[e.from] == Some(false))
         .collect();
+    // Where each edge's port at its (search) source was made.
+    let source_made = |flip: bool| -> Vec<(usize, usize)> {
+        (0..input.edges.len())
+            .map(|i| {
+                let side = usize::from(flip && against[i]);
+                hier.port_made.get(i).map_or((0, i), |m| m[side])
+            })
+            .collect()
+    };
     let mut oriented = if against.iter().any(|&a| a) {
         let flipped: Vec<LayoutEdge> = input
             .edges
@@ -413,7 +428,13 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
                 e
             })
             .collect();
-        let mut o = orient_edges(n, &flipped, if elk { 1 } else { rank_scale }, elk);
+        let mut o = orient_edges(
+            n,
+            &flipped,
+            if elk { 1 } else { rank_scale },
+            elk,
+            &source_made(true),
+        );
         for (o, _) in o.iter_mut().zip(&against).filter(|(_, a)| **a) {
             if let Some(o) = o.as_mut() {
                 o.reversed = !o.reversed;
@@ -421,7 +442,13 @@ fn prepare(input: &LayoutInput, hier: &Hierarchy) -> Prepared {
         }
         o
     } else {
-        orient_edges(n, &input.edges, if elk { 1 } else { rank_scale }, elk)
+        orient_edges(
+            n,
+            &input.edges,
+            if elk { 1 } else { rank_scale },
+            elk,
+            &source_made(false),
+        )
     };
     if elk {
         for (o, e) in oriented.iter_mut().zip(&input.edges) {
@@ -2537,6 +2564,7 @@ fn orient_edges(
     edges: &[LayoutEdge],
     scale: usize,
     sources_first: bool,
+    made: &[(usize, usize)],
 ) -> Vec<Option<Oriented>> {
     let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut has_in = vec![false; n];
@@ -2544,6 +2572,12 @@ fn orient_edges(
         if e.from != e.to {
             out_edges[e.from].push(i);
             has_in[e.to] = true;
+        }
+    }
+    // A node's outgoing edges port by port, in the order its ports were made.
+    if !made.is_empty() {
+        for out in &mut out_edges {
+            out.sort_by_key(|&i| (made[i], i));
         }
     }
     let roots: Vec<usize> = if sources_first {
@@ -4506,6 +4540,18 @@ mod tests {
     }
 
     #[test]
+    fn cycle_breaking_follows_ports_in_the_order_they_were_made() {
+        // 0 -> 1, 1 -> 2, 2 -> 1, 0 -> 2: the search follows 0's ports in the
+        // order they were made. In edge order it enters the cycle at 1, so
+        // 2 -> 1 closes it; with 0 -> 2's port made first it enters at 2, and
+        // 1 -> 2 closes it.
+        let edges = edges_of(&[(0, 1), (1, 2), (2, 1), (0, 2)]);
+        assert_eq!(reversed(&orient_edges(3, &edges, 1, true, &[])), vec![2]);
+        let made = [(1, 0), (0, 1), (0, 2), (0, 3)];
+        assert_eq!(reversed(&orient_edges(3, &edges, 1, true, &made)), vec![1]);
+    }
+
+    #[test]
     fn elk_cycle_breaking_starts_at_the_sources() {
         let edges = edges_of(&[
             (0, 1),
@@ -4518,9 +4564,12 @@ mod tests {
             (3, 1),
             (4, 1),
         ]);
-        assert_eq!(reversed(&orient_edges(5, &edges, 2, false)), vec![3, 7]);
         assert_eq!(
-            reversed(&orient_edges(5, &edges, 2, true)),
+            reversed(&orient_edges(5, &edges, 2, false, &[])),
+            vec![3, 7]
+        );
+        assert_eq!(
+            reversed(&orient_edges(5, &edges, 2, true, &[])),
             vec![0, 1, 4, 8]
         );
 
@@ -4541,8 +4590,8 @@ mod tests {
     #[test]
     fn dagre_cycle_breaking_starts_at_the_first_node() {
         let edges = edges_of(&[(0, 1), (1, 0), (2, 1)]);
-        assert_eq!(reversed(&orient_edges(3, &edges, 2, false)), vec![1]);
-        assert_eq!(reversed(&orient_edges(3, &edges, 2, true)), vec![0]);
+        assert_eq!(reversed(&orient_edges(3, &edges, 2, false, &[])), vec![1]);
+        assert_eq!(reversed(&orient_edges(3, &edges, 2, true, &[])), vec![0]);
         let out = layout(&input(
             vec![node(None); 3],
             edges.clone(),
@@ -4622,7 +4671,7 @@ mod tests {
                 vec![],
                 Direction::TopBottom,
             ));
-            let oriented = orient_edges(n, &inp.edges, 1, true);
+            let oriented = orient_edges(n, &inp.edges, 1, true, &[]);
             let (ranks, _, _, _) = rank_with_label_nodes(n, &oriented, &inp, (&[], &[]));
             let mut used: Vec<usize> = ranks.clone();
             for (o, e) in oriented.iter().zip(&inp.edges) {

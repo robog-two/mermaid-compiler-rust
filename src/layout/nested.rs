@@ -1185,6 +1185,7 @@ fn level_input(
     let mut edge_ids = Vec::new();
     let mut seg_of = Vec::new();
     let mut hier = Hierarchy::default();
+    let mut inner_order: HashMap<usize, Vec<usize>> = HashMap::new();
     hier.ext.extend(stub_ext);
     // A container with external port dummies keeps its ports' sides
     // (`CompoundGraphPreprocessor` makes it `FIXED_SIDE`).
@@ -1224,6 +1225,26 @@ fn level_input(
             _ => None,
         };
         hier.ports.push((port(s.from), port(s.to)));
+        // A box's port for an edge crossing its border is made after those
+        // for edges to the box itself, in its dummy's order inside.
+        let k = edges.len();
+        let (a, b) = ends[s.edge];
+        let mut made = |x: SegEnd, m: Member| match x {
+            SegEnd::Box(c) if m != Member::Cluster(c) => {
+                let order = inner_order.entry(c).or_insert_with(|| {
+                    all_segs.map_or_else(Vec::new, |all| ext_order(tree, ends, all, Some(c)))
+                });
+                (
+                    1,
+                    order
+                        .iter()
+                        .position(|&e| e == s.edge)
+                        .unwrap_or(usize::MAX),
+                )
+            }
+            _ => (0, k),
+        };
+        hier.port_made.push([made(s.from, a), made(s.to, b)]);
         // A port of a container where the edge goes on inside it (not one on
         // the container itself) stands off its border.
         let (a, b) = ends[s.edge];

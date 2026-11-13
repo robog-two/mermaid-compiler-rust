@@ -1006,3 +1006,35 @@ fn external_port_dummies_of_a_childs_ports_follow_their_import_order() {
         ],
     );
 }
+
+#[test]
+fn cycle_breaking_leaves_a_container_by_its_ports_in_their_made_order() {
+    // C1's ports for `c1n1 --> c0n1` and `c1n0 --> c0n0` are made in the
+    // order of their dummies inside C1 (c1n0's first), so the depth-first
+    // cycle breaker in C0 reaches c0n0 first and turns `c0n1 --> c0n0`
+    // round (mermaid 12.3.0).
+    expect_centres(
+        "flowchart BT
+  subgraph C0
+    c0n0
+    c0n1
+    subgraph C1
+      c1n0
+      c1n1
+      c1n0 --> c1n1
+    end
+    c0n0 --> c0n1
+  end
+  c0n0 --> c0n1
+  c1n1 --> c0n1
+  c1n0 --> c0n0
+  c0n1 --> c0n0
+",
+        &[
+            ("c0n0", 0.0, 105.0),
+            ("c0n1", 13.04, 0.0),
+            ("c1n0", 44.0, 373.0),
+            ("c1n1", 88.5, 268.0),
+        ],
+    );
+}
