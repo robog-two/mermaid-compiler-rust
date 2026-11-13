@@ -943,8 +943,27 @@ pub fn render_with(
     // Anything deeper inside runs there too, through its own containers' ports,
     // to or from a port dummy of the container's, which takes the side against
     // the flow (its net flow): the route comes back around inside the frame.
+    // A container's edge to itself is ELK's self-loop on the container's node
+    // in its parent's graph: on its side across the flow, where its ports are
+    // free. (With external port dummies inside, its ports keep their sides and
+    // the loop runs around from one flow side to the other: not modelled, so
+    // drawn against the frame as before.)
+    let strictly_inside = |x: Endpoint, c: ClusterId| match x {
+        Endpoint::Node(NodeId(i)) => nodes[i]
+            .cluster
+            .is_some_and(|nc| is_within(&g.clusters, nc, c)),
+        Endpoint::Cluster(d) => d != c && is_within(&g.clusters, d, c),
+    };
+    let has_port_dummies = |c: ClusterId| {
+        g.edges
+            .iter()
+            .any(|e| strictly_inside(e.from, c) != strictly_inside(e.to, c))
+    };
     let deep_edge = |ne: Option<NestedEdge>| {
-        elk && !member_edge(ne) && ne.is_some_and(|ne| ne.inner != Endpoint::Cluster(ne.cluster))
+        elk && !member_edge(ne)
+            && ne.is_some_and(|ne| {
+                ne.inner != Endpoint::Cluster(ne.cluster) || !has_port_dummies(ne.cluster)
+            })
     };
     let layout_ends = |ei: usize, e: &Edge| -> ((usize, Option<usize>), (usize, Option<usize>)) {
         match nested[ei] {
@@ -3356,6 +3375,43 @@ mod tests {
                 PathCmd::Close => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn elk_loop_on_a_cluster_stands_off_its_side_across_the_flow() {
+        // As ELK's self-loop on the container's node (mermaid: frame 32,12
+        // 200x186, loop 32,78 -> 12,78 -> 12,132 -> 28,132): ports a third of
+        // the side apart inside the 12px surrounding, the leg 20 off the side,
+        // the frame no wider than without the loop.
+        let (_, scene) =
+            render_flowchart("flowchart TD\n  subgraph A\n    a --> b\n  end\n  A --> A\n");
+        let frame = frame_of(&scene, "A");
+        let (_, plain) = render_flowchart("flowchart TD\n  subgraph A\n    a --> b\n  end\n");
+        assert!(
+            (frame.w - frame_of(&plain, "A").w).abs() < 1e-6,
+            "{frame:?}"
+        );
+        let lp = edge_points(&scene, "L-A-A-1");
+        let gap = (frame.h - 24.0) / 3.0;
+        assert!((lp[0].x - frame.x).abs() < 1e-6, "{lp:?} {frame:?}");
+        assert!(
+            (lp[0].y - (frame.y + 12.0 + gap)).abs() < 0.5,
+            "{lp:?} {frame:?}"
+        );
+        let end = *lp.last().unwrap();
+        assert!((end.y - (frame.y + 12.0 + 2.0 * gap)).abs() < 0.5, "{lp:?}");
+        assert!(end.x < frame.x && end.x > frame.x - 10.0, "{lp:?}");
+        let out = lp.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        assert!((out - (frame.x - 20.0)).abs() < 0.5, "{lp:?}");
+        // Laid out to the right, it stands on the north side.
+        let (_, scene) =
+            render_flowchart("flowchart LR\n  subgraph A\n    a --> b\n  end\n  A --> A\n");
+        let frame = frame_of(&scene, "A");
+        let lp = edge_points(&scene, "L-A-A-1");
+        assert!((lp[0].y - frame.y).abs() < 1e-6, "{lp:?} {frame:?}");
+        let top = lp.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+        assert!((top - (frame.y - 20.0)).abs() < 0.5, "{lp:?}");
+        assert!(lp.last().unwrap().x > lp[0].x, "{lp:?}");
     }
 
     #[test]
