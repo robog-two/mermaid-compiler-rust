@@ -1279,7 +1279,11 @@ pub fn render_with(
                 if ne.inner_is_target {
                     pts.reverse();
                 }
-                pts[0] = clip_end(&boundaries[i], &pts, elk);
+                pts[0] = if ne.inner_is_target {
+                    clip_target_end(&boundaries[i], &pts, elk)
+                } else {
+                    clip_end(&boundaries[i], &pts, elk)
+                };
                 if ne.inner_is_target {
                     pts.reverse();
                 }
@@ -1326,9 +1330,10 @@ pub fn render_with(
         if elk && is_loop && nested[ei].is_none() {
             // An orthogonal self-loop leaves and re-enters through ports on the node's side.
             if let (Endpoint::Node(NodeId(a)), Endpoint::Node(NodeId(b))) = (e.from, e.to) {
-                let n = pts.len();
                 pts[0] = clip_along(&boundaries[a], pts[0], pts[1]);
-                pts[n - 1] = clip_along(&boundaries[b], pts[n - 1], pts[n - 2]);
+                pts.reverse();
+                pts[0] = clip_target_end(&boundaries[b], &pts, elk);
+                pts.reverse();
             }
         }
         if !is_loop {
@@ -1341,7 +1346,7 @@ pub fn render_with(
             pts.reverse();
             match e.to {
                 Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0], elk),
-                Endpoint::Node(NodeId(i)) => pts[0] = clip_end(&boundaries[i], &pts, elk),
+                Endpoint::Node(NodeId(i)) => pts[0] = clip_target_end(&boundaries[i], &pts, elk),
             }
             pts.reverse();
             if pts.len() < 2 {
@@ -1896,6 +1901,22 @@ fn clip_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
         b.clip(pts[1])
     }
 }
+
+/// [`clip_end`] at an edge's target (`pts` reversed: from the target's port
+/// back). Under ELK mermaid's `cutter2` puts the outline point after the port
+/// and then drops a last segment shorter than 2px, so an outline point that
+/// close to the port leaves the edge ending at the port, on the bounding box.
+pub(crate) fn clip_target_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
+    let p = clip_end(b, pts, elk);
+    if elk && p.minus(pts[0]).len() < ELK_MIN_LAST_SEGMENT {
+        pts[0]
+    } else {
+        p
+    }
+}
+
+/// `cutter2`'s shortest last segment it keeps (the tail point goes otherwise).
+const ELK_MIN_LAST_SEGMENT: f64 = 2.0;
 
 /// Where the line from `next` through `port` (a point on the node's bounding box)
 /// meets the node's outline, coming from outside: `port` itself for a rectangle,
@@ -4466,5 +4487,20 @@ mod tests {
         let rect = Boundary::Rect(Rect::new(-10.0, -5.0, 20.0, 10.0));
         let p = clip_along(&rect, Point::new(4.0, 5.0), Point::new(4.0, 20.0));
         assert!(p.dist(Point::new(4.0, 5.0)) < 1e-6, "{p:?}");
+    }
+
+    #[test]
+    fn elk_target_end_keeps_a_port_within_two_pixels_of_the_outline() {
+        // A 14px end circle entered 2px off its centre: the outline lies 0.29px
+        // inside the box, so the edge ends on the box (the port); 6px off
+        // centre it lies 3.4px in, and the edge ends on the circle. The source
+        // end is always clipped.
+        let circle = Boundary::Ellipse(Point::new(0.0, 0.0), 7.0, 7.0);
+        let near = [Point::new(2.0, -7.0), Point::new(2.0, -40.0)];
+        assert_eq!(clip_target_end(&circle, &near, true), near[0]);
+        assert!(clip_end(&circle, &near, true).dist(Point::new(2.0, -45f64.sqrt())) < 1e-9);
+        let far = [Point::new(6.0, -7.0), Point::new(6.0, -40.0)];
+        let p = clip_target_end(&circle, &far, true);
+        assert!(p.dist(Point::new(6.0, -13f64.sqrt())) < 1e-9, "{p:?}");
     }
 }

@@ -3766,9 +3766,10 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         let elk = o.layout == LayoutAlgorithm::Elk;
         if elk {
             // Orthogonal routes start and end at ports on the bounding boxes.
-            let last = pts.len() - 1;
             pts[0] = super::graph::clip_along(&clips[e.from], pts[0], pts[1]);
-            pts[last] = super::graph::clip_along(&clips[e.to], pts[last], pts[last - 1]);
+            pts.reverse();
+            pts[0] = super::graph::clip_target_end(&clips[e.to], &pts, true);
+            pts.reverse();
         } else if e.from != e.to {
             pts[0] = clips[e.from].clip(pts[1]);
             let last = pts.len() - 1;
