@@ -286,6 +286,12 @@ impl Tree<'_> {
         let mut owner = self.owner_of_cluster(c);
         for _ in 0..=self.parent.len() {
             let Some(o) = owner else { break };
+            // A container an edge crosses is part of a run that includes its
+            // children (`INCLUDE_CHILDREN`, which one without a direction
+            // inherits): its own direction no longer counts, theirs is the run's.
+            if self.crossed[o] {
+                return self.direction(Some(o));
+            }
             if self.input.clusters[o].direction.is_some() {
                 return Direction::LeftRight;
             }

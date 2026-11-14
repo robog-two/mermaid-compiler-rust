@@ -2202,3 +2202,32 @@ fn an_edge_from_a_cluster_keeps_the_port_beside_a_diamonds_outline_point() {
     assert!(near(&nums, n - 4, (645.722, 168.151)), "{nums:?}");
     assert!(near(&nums, n - 2, (653.444, 165.902)), "{nums:?}");
 }
+
+#[test]
+fn a_cluster_inside_a_crossed_one_with_a_direction_takes_the_runs_direction() {
+    // `x --> p` crosses G4, which ELK then lays out with the root
+    // (`INCLUDE_CHILDREN`), its `direction BT` dropped; G7 inherits that
+    // policy, so its unconnected a and b share a layer of the root's top to
+    // bottom flow, side by side (mermaid 12.3.0), not one under the other.
+    let src = "flowchart TD
+  subgraph G4
+    direction BT
+    subgraph G7
+      a[\"Done\"]
+      b[\"Load\"]
+    end
+    p --> q
+  end
+  x --> p
+";
+    expect_centres(
+        src,
+        &[
+            ("a", 0.0, 191.0),
+            ("b", 202.0, 191.0),
+            ("p", 428.0, 179.0),
+            ("q", 428.0, 284.0),
+            ("x", 428.0, 0.0),
+        ],
+    );
+}
