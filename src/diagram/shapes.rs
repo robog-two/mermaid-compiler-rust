@@ -257,8 +257,10 @@ pub fn size(
         Shape::Cylinder => {
             let w = tw + px;
             let ry = cyl_ry(w);
-            // Body `h = th + p + ry` plus both caps; the label sits p/1.5 below centre.
-            off(w, th + py + 3.0 * ry, 0.0, m.node_padding / 1.5)
+            // Body `h = th + p + ry` plus both caps, as the browser measures
+            // the drawn path; the label sits p/1.5 below centre.
+            let (bw, bh) = super::svgbbox::cylinder_box(w, th + py + ry, w / 2.0, ry);
+            off(bw, bh, 0.0, m.node_padding / 1.5)
         }
         Shape::Circle => {
             let d = tw.hypot(th) + px;
@@ -1828,10 +1830,11 @@ mod tests {
     #[test]
     fn cylinder_cap_matches_upstream() {
         let s = sized(Shape::Cylinder, 85.0, 24.0, 15.0);
-        // w = tw + p = 100 → ry = 50 / (2.5 + 2) = 11.11…; h = th + p + 3·ry.
+        // w = tw + p = 100 → ry = 50 / (2.5 + 2) = 11.11…; h = th + p + 3·ry,
+        // as the browser measures the path (single precision).
         assert_eq!(s.w, 100.0);
         let ry = 50.0 / 4.5;
-        assert!((s.h - (39.0 + 3.0 * ry)).abs() < 1e-9);
+        assert!((s.h - (39.0 + 3.0 * ry)).abs() < 1e-5);
         assert!((s.label_offset.y - 10.0).abs() < 1e-9);
     }
 

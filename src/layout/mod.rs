@@ -2008,15 +2008,31 @@ fn elk_port_inset(graph: ElkGraph) -> f64 {
 /// A lone port is centred, but on such a side it stays at the inset (the cram
 /// divides by `n - 1`, which leaves it at the start): a 14px start state's
 /// edge leaves 10 from its top.
-fn elk_port_offsets(n: usize, len: f64, inset: f64) -> impl Iterator<Item = f64> {
-    let free = len - 2.0 * inset;
-    (0..n).map(move |i| {
-        if n == 1 && free < 0.0 {
-            inset
-        } else {
-            inset + free * (i + 1) as f64 / (n + 1) as f64
-        }
-    })
+///
+/// The arithmetic is ELK's, step for step, so that the offsets come out as the
+/// same doubles (a routing decision can hang on the last bit): the room left
+/// `(len - inset) - inset`, the ports' own height `(n + 1) * port_port`, the
+/// step `port_port + (room - height) / (n + 1)`, and each port one step on
+/// from the one before, starting one step past the inset.
+fn elk_port_offsets(n: usize, len: f64, inset: f64, port_port: f64) -> impl Iterator<Item = f64> {
+    let room = len - inset - inset;
+    let (first, step) = if n == 1 {
+        // `DISTRIBUTED` turns `CENTER` for a lone port (its height less the
+        // two spacings: none).
+        (
+            if room < 0.0 {
+                inset
+            } else {
+                inset + room / 2.0
+            },
+            0.0,
+        )
+    } else {
+        let height = (n + 1) as f64 * port_port;
+        let step = port_port + (room - height) / (n + 1) as f64;
+        (inset + step, step)
+    };
+    std::iter::successors(Some(first), move |&at| Some(at + step)).take(n)
 }
 
 /// The spacings between the vertices of one ELK layer. The root graph derives
@@ -2203,7 +2219,7 @@ fn elk_place(
             } else {
                 port_inset
             };
-            let offs = elk_port_offsets(side.len(), verts[v].w, inset);
+            let offs = elk_port_offsets(side.len(), verts[v].w, inset, spacing.port_port);
             let crammed = verts[v].w < 2.0 * inset;
             for (&(_, _, _, ei), off) in side.iter().zip(offs) {
                 port[ei] = off;
@@ -5241,7 +5257,7 @@ mod tests {
     #[test]
     fn elk_port_offsets_on_short_sides() {
         let offs = |n: usize, len: f64, inset: f64| -> Vec<f64> {
-            elk_port_offsets(n, len, inset).collect()
+            elk_port_offsets(n, len, inset, 12.0).collect()
         };
         let close = |a: Vec<f64>, b: &[f64]| {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3)
@@ -5252,6 +5268,22 @@ mod tests {
         assert!(close(offs(3, 14.0, 10.0), &[8.5, 7.0, 5.5]));
         assert!(close(offs(2, 14.0, 10.8), &[8.267, 5.733]));
         assert!(close(offs(2, 37.0, 10.0), &[15.667, 21.333]));
+    }
+
+    #[test]
+    fn elk_port_offsets_are_elks_doubles() {
+        // Four ports on a 45px side in a container: ELK adds its step to the
+        // port before, which leaves each a bit above the exact spread.
+        let got: Vec<f64> = elk_port_offsets(4, 45.0, 10.8, 12.0).collect();
+        assert_eq!(
+            got,
+            [
+                15.480000000000002,
+                20.160000000000004,
+                24.840000000000003,
+                29.520000000000003
+            ]
+        );
     }
 
     #[test]

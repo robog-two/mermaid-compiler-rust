@@ -673,13 +673,41 @@ pub fn chromium_box(translate: (f64, f64), arcs: &[RelArc], label: (f64, f64)) -
 
 /// `SkPath::computeTightBounds()` of `M0 0 <arcs> H0 V0 Z`: its corners.
 fn path_bounds(arcs: &[RelArc]) -> ((f32, f32), (f32, f32)) {
-    let mut cur = (0.0_f32, 0.0_f32);
+    let segs: Vec<Segment> = arcs.iter().copied().map(Segment::Arc).collect();
+    let (mut lo, mut hi, cur) = segment_bounds((0.0, 0.0), &segs);
+    // H0 V0 Z.
+    for p in [(0.0, cur.1), (0.0, 0.0)] {
+        lo = (lo.0.min(p.0), lo.1.min(p.1));
+        hi = (hi.0.max(p.0), hi.1.max(p.1));
+    }
+    (lo, hi)
+}
+
+/// One relative command of a path: an arc, or a line `l dx,dy`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Segment {
+    Arc(RelArc),
+    Line(f64, f64),
+}
+
+/// `SkPath::computeTightBounds()` of a path from `start` through `segs`: its
+/// corners, and where the path ends.
+fn segment_bounds(start: (f32, f32), segs: &[Segment]) -> ((f32, f32), (f32, f32), (f32, f32)) {
+    let mut cur = start;
     let (mut lo, mut hi) = (cur, cur);
     let mut add = |p: (f32, f32)| {
         lo = (lo.0.min(p.0), lo.1.min(p.1));
         hi = (hi.0.max(p.0), hi.1.max(p.1));
     };
-    for a in arcs {
+    for seg in segs {
+        let a = match *seg {
+            Segment::Line(dx, dy) => {
+                cur = (cur.0 + js_f32(dx), cur.1 + js_f32(dy));
+                add(cur);
+                continue;
+            }
+            Segment::Arc(a) => a,
+        };
         let to = (cur.0 + js_f32(a.dx), cur.1 + js_f32(a.dy));
         match arc_conics(
             cur,
@@ -710,10 +738,35 @@ fn path_bounds(arcs: &[RelArc]) -> ((f32, f32), (f32, f32)) {
         }
         cur = to;
     }
-    // H0 V0 Z.
-    add((0.0, cur.1));
-    add((0.0, 0.0));
-    (lo, hi)
+    (lo, hi, cur)
+}
+
+/// `getBBox()` of the path `cylinder.ts` draws for a `w` wide, `h` tall
+/// cylinder with end caps of radii `rx`, `ry` (`createCylinderPathD`:
+/// `M0,ry a rx,ry 0,0,0 w,0 a rx,ry 0,0,0 -w,0 l0,h a rx,ry 0,0,0 w,0
+/// l0,-h`), as `(width, height)`: what `updateNodeBounds` makes the node's
+/// size, in single precision.
+pub fn cylinder_box(w: f64, h: f64, rx: f64, ry: f64) -> (f64, f64) {
+    let arc = |dx: f64| {
+        Segment::Arc(RelArc {
+            rx,
+            ry,
+            phi: 0.0,
+            large: false,
+            sweep: false,
+            dx,
+            dy: 0.0,
+        })
+    };
+    let segs = [
+        arc(w),
+        arc(-w),
+        Segment::Line(0.0, h),
+        arc(w),
+        Segment::Line(0.0, -h),
+    ];
+    let (lo, hi, _) = segment_bounds((0.0, js_f32(ry)), &segs);
+    (f64::from(span(lo.0, hi.0)), f64::from(span(lo.1, hi.1)))
 }
 
 #[cfg(test)]
@@ -730,6 +783,17 @@ mod tests {
             dx,
             dy,
         }
+    }
+
+    #[test]
+    fn cylinder_box_is_single_precision() {
+        // A 144 wide cylinder around a 21 tall label (cylinder.ts, neo
+        // padding 24): mermaid hands ELK the height the browser measures.
+        let ry = 72.0 / (2.5 + 144.0 / 50.0);
+        assert_eq!(
+            cylinder_box(144.0, 21.0 + 24.0 + ry, 72.0, ry),
+            (144.0, 85.14869689941406)
+        );
     }
 
     #[test]
