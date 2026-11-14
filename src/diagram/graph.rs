@@ -1094,8 +1094,8 @@ pub fn render_with(
         nodes: perm
             .iter()
             .map(|&i| LayoutNode {
-                width: browser_size(measured[i].w, elk),
-                height: browser_size(measured[i].h, elk),
+                width: browser_size(measured[i].w, elk, drawn_as_circle(&nodes[i], cfg.look)),
+                height: browser_size(measured[i].h, elk, drawn_as_circle(&nodes[i], cfg.look)),
                 cluster: nodes[i].cluster.map(|c| c.0),
             })
             .collect(),
@@ -1434,8 +1434,8 @@ pub fn render_with(
                 let offset = markers::pullback_for(head, neo).max(markers::hidden_end(head, true));
                 let k = usize::from(ne.inner_is_target);
                 let (w, h) = (
-                    browser_size(measured[i].w, true),
-                    browser_size(measured[i].h, true),
+                    browser_size(measured[i].w, true, drawn_as_circle(&nodes[i], cfg.look)),
+                    browser_size(measured[i].h, true, drawn_as_circle(&nodes[i], cfg.look)),
                 );
                 let leg = out
                     .elk_exact
@@ -1657,7 +1657,8 @@ pub fn render_with(
                         continue;
                     };
                     let (w, h) = (measured[i].w, measured[i].h);
-                    let size = (browser_size(w, true), browser_size(h, true));
+                    let circle = drawn_as_circle(&nodes[i], cfg.look);
+                    let size = (browser_size(w, true, circle), browser_size(h, true, circle));
                     if !port_inside(out.elk_exact.as_ref(), ei, k, i, size.0, size.1) {
                         continue;
                     }
@@ -2936,8 +2937,34 @@ fn port_inside(
 /// A node's extent as mermaid hands it to ELK: what `getBBox()` reports for
 /// the drawn shape (`updateNodeBounds`), which Chromium measures in single
 /// precision. (dagre gets the same; its layout does not hang on the last bit.)
-fn browser_size(v: f64, elk: bool) -> f64 {
-    if elk { f64::from(v as f32) } else { v }
+/// A `<circle>` (`circle`) reports twice its `r` attribute as Chromium reads
+/// it (see [`svg_length_attr`]).
+fn browser_size(v: f64, elk: bool, circle: bool) -> f64 {
+    match (elk, circle) {
+        (false, _) => v,
+        (true, false) => f64::from(v as f32),
+        (true, true) => 2.0 * svg_length_attr(v / 2.0),
+    }
+}
+
+/// Whether node `n` is drawn as a `<circle>` whose `r` sets its bounds.
+fn drawn_as_circle(n: &Node, look: ConfigLook) -> bool {
+    matches!(n.shape, Shape::Circle | Shape::DoubleCircle) && look != ConfigLook::HandDrawn
+}
+
+/// The single-precision value Chromium reads from an SVG length attribute
+/// mermaid writes as `v` (JS's shortest round-trip digits): as observed in
+/// Chromium (`r.baseVal.value`, bit for bit over thousands of samples), the
+/// digits past the seventh decimal are dropped before rounding to `f32`, so
+/// `52.937864350201764` reads as `52.93786239624023`, not the nearer
+/// `52.9378662109375`.
+fn svg_length_attr(v: f64) -> f64 {
+    let text = format!("{v}");
+    let cut = match text.find('.') {
+        Some(dot) => &text[..text.len().min(dot + 8)],
+        None => &text,
+    };
+    cut.parse::<f32>().map_or(v, f64::from)
 }
 
 /// Puts the cut [`cut_inside_port`] found before the port a route (`pts`,
@@ -4818,6 +4845,29 @@ mod tests {
             &d,
             Point::default()
         ));
+    }
+
+    /// Chromium reads an SVG length to seven decimals before rounding it to
+    /// single precision (values observed through `r.baseVal.value`).
+    #[test]
+    fn svg_length_attributes_read_as_chromium_does() {
+        // 52.9378662109375 is the nearer f32, 52.93786239624023 what Chromium reads.
+        assert_eq!(svg_length_attr(52.937864350201764), 52.937862396240234);
+        assert_eq!(svg_length_attr(27.2003488758791), 27.200347900390625);
+        // Even an f32 itself, past seven decimals, can read as the one below.
+        assert_eq!(svg_length_attr(1.5754345655441284), 1.5754344463348389);
+        assert_eq!(svg_length_attr(1.5754346013069154), 1.5754345655441284);
+        assert_eq!(svg_length_attr(66.87654520073568), 66.87654876708984);
+        assert_eq!(svg_length_attr(76.0), 76.0);
+        // A circle's bounds are twice its radius as read.
+        assert_eq!(
+            browser_size(105.87572870040353, true, true),
+            105.87572479248047
+        );
+        assert_eq!(
+            browser_size(105.87572870040353, true, false),
+            105.875732421875
+        );
     }
 
     /// The path's numbers are read as d3 wrote them, to 3 decimals: a

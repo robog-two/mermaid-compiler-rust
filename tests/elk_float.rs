@@ -355,3 +355,90 @@ fn threshold_block_with_rounding_room_counts_as_moved() {
     let (_, _, _, h) = cluster(&svg(src), "G10");
     assert!((h - 1216.0).abs() < 1e-3, "G10 height {h}");
 }
+
+/// `g10n1((Parse input))` is a circle of radius 52.937864350201764, which
+/// Chromium reads (and `getBBox()` reports) as 52.93786239624023, an f32 below
+/// the nearest: ELK gets it 105.87572479248047 wide, not 105.875732421875.
+/// With the wider circle, straightening leftwards and upwards, the block of
+/// `g11n0 ~~~ g8n1` below G11 finds exactly 0 room instead of
+/// 1.4210854715202004e-14, is retried once its neighbour moves, and moves
+/// too: G10 loses a channel slot (12) and shifts by 17.2.
+#[test]
+fn circle_bounds_are_read_as_chromium_reads_the_radius() {
+    let src = "flowchart TD
+  subgraph G0[\"`**Box** G0`\"]
+    subgraph G1
+      subgraph G2[\"`**Box** G2`\"]
+        g2n0
+          g3n0 ==> g3n1
+          g4n0
+      end
+      subgraph G5
+        subgraph G6[Group G6]
+            g7n0 --> g7n1
+            g7n1 --o g7n2
+          g6n0 --> g6n1
+          g6n1 --o g6n2
+        end
+            g9n0
+          g8n0 --> g8n1
+        g5n0 --o g5n1
+        g5n1 --> g5n2
+      end
+      g1n0 ==> g1n1
+      g1n1 --o g1n2
+    end
+    g0n0 ==> g0n1
+  end
+  subgraph G10[\"`**Box** G10`\"]
+    g10n1((\"Parse input\"))
+    subgraph G11[\"`**Box** G11`\"]
+      subgraph G12
+        subgraph G13
+          g13n0 --> g13n1
+        end
+        g12n0 --> g12n1
+      end
+      g11n0 --> g11n1
+    end
+    subgraph G14[Group G14]
+      g14n0>\"This is a rather long node label that should wrap onto several lines\"]
+    end
+    g10n0 --- g10n1
+    g10n1 --> g10n2
+  end
+  g10n2 ===|a label| g13n1
+  g11n0 ~~~ g8n1
+  g3n0 <--> g2n0
+  g6n2 ---> g1n2
+  G2 === G11
+  g9n0 ---> g12n1
+  G5 <--> g5n1
+  g3n0 -->|longer edge label text| g7n0
+  g1n1 ~~~ g4n2
+  g2n0 -.- g1n0
+  g12n1 --x x0
+  g3n0 & g1n1 -...-> g12n0 & g1n1
+  g11n0 --> g13n0 --> g6n0
+  g3n0 ==> g7n2
+  g6n1 ===> g6n0 & g0n0
+  g13n1 --> g14n0 --> g10n2
+  g8n0 ~~~ x1
+  g14n0 -.->|a label| g12n0
+  g4n0 --> g6n0 --> g7n0
+  g0n0 <--> G1
+  x0 -.-|longer edge label text| g11n1
+  g6n0 --> g13n1 --> g5n2
+  g1n0 -->|a label| g7n2
+  g11n0 <--> g1n1
+  g8n1 --- g4n0
+  g10n1 === g4n0
+  g11n0 ---> g4n0
+  g0n0 === g2n0
+  x1 -.->|x| g3n0
+  g7n2 -...->|a label| g12n1
+";
+    let (_, _, w, h) = cluster(&svg(src), "G10");
+    assert!((w - 975.5733).abs() < 1e-3, "G10 width {w}");
+    assert!((h - 1735.8757).abs() < 1e-3, "G10 height {h}");
+}
