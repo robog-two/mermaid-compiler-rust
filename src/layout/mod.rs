@@ -1816,7 +1816,13 @@ impl ElkLayers {
             .enumerate()
             .filter_map(|(ei, c)| Some((ei, c.as_ref()?)))
         {
-            let target = chain[chain.len() - 1];
+            // The real node the edge leads to (`LONG_EDGE_TARGET_NODE`): past
+            // the dummy of an inverted input port, the node with the port.
+            let end = chain[chain.len() - 1];
+            let target = inl
+                .iter()
+                .find(|l| l.dummy == end && !l.before)
+                .map_or(end, |l| l.node);
             let mut last = chain[0];
             let mut skipped = Vec::new();
             for &v in &chain[1..] {

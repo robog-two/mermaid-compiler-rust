@@ -2148,11 +2148,6 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
     }
 }
 
-/// ELK's `PORT_BORDER_OFFSET` of a container's external ports: half the
-/// graph's `spacing.edgeEdge` (mermaid's 20 in a container) outside its border
-/// (`CompoundGraphPreprocessor`).
-const ELK_EXT_PORT_BORDER_OFFSET: f64 = 10.0;
-
 /// Where ELK's turn of a right-to-left or bottom-to-top container's graph
 /// back to its direction puts contents of no extent along the flow (empty
 /// subgraphs' points, all in one layer): `GraphTransformer` mirrors the graph
@@ -2160,9 +2155,9 @@ const ELK_EXT_PORT_BORDER_OFFSET: f64 = 10.0;
 /// sized yet, and is mirrored around its nodes' furthest reach instead (a
 /// position, size and far margin). That takes in its external port dummies,
 /// the one on the side the flow leaves by (an edge leaving the container)
-/// outside the border by [`ELK_EXT_PORT_BORDER_OFFSET`], and, as it turns a
-/// bottom-to-top graph before mirroring it, a node's margins left as they are
-/// across the flow: a point's ports stand [`super::elk_port_inset`] off its
+/// outside the border by [`super::ELK_HIERARCHICAL_PORT_OFFSET`], and, as it
+/// turns a bottom-to-top graph before mirroring it, a node's margins left as
+/// they are across the flow: a point's ports stand [`super::elk_port_inset`] off its
 /// side. The contents move along the flow (right, or down) by that reach.
 /// Not where the container is larger along the flow than its padding, which
 /// sizes the graph.
@@ -2179,7 +2174,7 @@ fn unsized_flow_shift(
     match dir {
         Direction::RightLeft if no_width(level.bbox.w, w, 2.0 * pad) => {
             let reach = if leaving {
-                pad + ELK_EXT_PORT_BORDER_OFFSET
+                pad + super::ELK_HIERARCHICAL_PORT_OFFSET
             } else {
                 0.0
             };
@@ -2188,7 +2183,7 @@ fn unsized_flow_shift(
         Direction::BottomTop if no_width(level.bbox.h, h, 2.0 * pad + title) => {
             let mut reach: f64 = 0.0;
             if leaving {
-                reach = pad + title + ELK_EXT_PORT_BORDER_OFFSET;
+                reach = pad + title + super::ELK_HIERARCHICAL_PORT_OFFSET;
             }
             if !level.out.edges.is_empty() {
                 reach = reach.max(super::elk_port_inset(super::ElkGraph::Container {

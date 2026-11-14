@@ -4914,6 +4914,21 @@ mod tests {
         assert!(close(y, 58.8), "{y}");
     }
 
+    /// mermaid 12.3.0 (ELK): a feedback edge into a container's next-layer
+    /// side (an inverted port) leads, for `SortByInputModelProcessor`, to the
+    /// container past its dummy (`LONG_EDGE_TARGET_NODE`): its port on x1
+    /// sorts with x1's edge to G0, before the one to x2, and its dummy runs up
+    /// between G0 and x2, which stands to the right of x1 (mermaid: 304 and
+    /// 368.5).
+    #[test]
+    fn elk_inverted_port_dummy_leads_to_its_node() {
+        let scene = render_cli(
+            "flowchart TD\n  subgraph G0\n    a\n  end\n  x0\n  b --> a\n  x1 --> G0\n  x0 --> x1\n  x1 --> x2\n  G0 --> x1\n",
+        );
+        let (x1, x2) = (label_x(&scene, "x1"), label_x(&scene, "x2"));
+        assert!((x2 - x1 - 64.5).abs() < 1e-3, "{x1} {x2}");
+    }
+
     /// mermaid 12.3.0 (ELK): a container laid out on its own is as wide as its
     /// title label (`NODE_LABELS`, 5 either side), its contents at its left;
     /// `evenGroupFrames` then pulls the frame in to the title's floor (label +
