@@ -508,7 +508,7 @@ pub(super) fn minimize_run_from(graphs: Vec<RunGraph>, mut rng: JavaRandom) -> V
                 inl,
                 &other,
                 ctx,
-                (&edgeless[gi], &seg_made, &seg_made_in),
+                (&edgeless[gi], &seg_made, &seg_made_in, &inl_made),
             );
         } else {
             for layer in layers.iter_mut() {
@@ -1040,8 +1040,9 @@ impl Run<'_> {
 type Made = (usize, usize);
 
 /// Per vertex: when its ports without edges were made and whether each is on
-/// its east side; per segment: when its ports at its source and target were.
-type PortsMade<'a> = (&'a [Vec<(Made, bool)>], &'a [Made], &'a [Made]);
+/// its east side; per segment: when its ports at its source and target were;
+/// per in-layer edge of an inverted port: when that port was.
+type PortsMade<'a> = (&'a [Vec<(Made, bool)>], &'a [Made], &'a [Made], &'a [Made]);
 
 /// The in-layer edges of inverted ports, with when each one's port was made,
 /// and when each segment's port on its source was made.
@@ -1118,6 +1119,30 @@ fn west_parts(walls: &[Made], ports: &[usize], made: &[Made]) -> Vec<(usize, usi
         }
     }
     out
+}
+
+/// The part of a node's west side, counted in ELK's port list from its start,
+/// that a port made at `port` falls in between the side's ports without edges
+/// (made at `walls`; `others`: its other ports), as `PortListSorter` leaves the
+/// list (see [`port_list_sorter_west`]). `ModelOrderPortComparator` puts a port
+/// without edges before and after any other, so the insertion sort moves no
+/// port past one and each part is sorted on its own.
+fn west_side_part(walls: &[Made], others: &[Made], port: Made) -> usize {
+    // Ports by when they were made (ELK's list, clockwise: bottom to top).
+    let mut side: Vec<(Made, u8)> = walls
+        .iter()
+        .map(|&w| (w, 0))
+        .chain(others.iter().map(|&m| (m, 1)))
+        .chain([(port, 2)])
+        .collect();
+    side.sort();
+    side.reverse();
+    port_list_sorter_west(&mut side);
+    side.reverse();
+    side.iter()
+        .take_while(|&&(_, t)| t != 2)
+        .filter(|&&(_, t)| t == 0)
+        .count()
 }
 
 /// `PortListSorter.reverseWestAndSouthSide` on a node's west side (`west`, top
@@ -1255,7 +1280,7 @@ fn sort_by_model_order(
     inl: &[InLayer],
     other: &[bool],
     ctx: &OrderCtx,
-    (edgeless, seg_made, seg_made_in): PortsMade,
+    (edgeless, seg_made, seg_made_in, inl_made): PortsMade,
 ) {
     let nv = east.len();
     // An in-layer edge into a node's first port (clockwise) with an incoming
@@ -1270,9 +1295,10 @@ fn sort_by_model_order(
     // `ModelOrderPortComparator` orders that port among the node's others
     // there (by the model order of the first edge to the same target, if not
     // reversed, else its own): the dummies follow the ports, those ordered
-    // larger first (a west side's order is turned round).
-    let mut src_key: Vec<(usize, usize)> = vec![(0, 0); first_in.len()];
-    for l in inl {
+    // larger first (a west side's order is turned round), each part of the
+    // side between its ports without edges apart (see `west_side_part`).
+    let mut src_key: Vec<SourceKey> = vec![(0, 0, 0); first_in.len()];
+    for (k, l) in inl.iter().enumerate() {
         first_in[if l.before { l.dummy } else { l.node }] = Some(l.edge);
         if l.before {
             let target = east[l.dummy].first().map(|&s| info[s].target);
@@ -1282,7 +1308,21 @@ fn sort_by_model_order(
                 .map(|&s| info[s].edge)
                 .min()
                 .unwrap_or(l.edge);
-            src_key[l.dummy] = (mapped, l.edge);
+            let walls: Vec<Made> = edgeless.get(l.node).map_or_else(Vec::new, |w| {
+                w.iter().filter(|w| !w.1).map(|w| w.0).collect()
+            });
+            let others: Vec<Made> = west[l.node]
+                .iter()
+                .map(|&s| seg_made_in.get(s).copied().unwrap_or((0, info[s].edge)))
+                .chain(
+                    inl.iter()
+                        .enumerate()
+                        .filter(|&(j, o)| j != k && o.before && o.node == l.node)
+                        .map(|(j, _)| inl_made[j]),
+                )
+                .collect();
+            let part = west_side_part(&walls, &others, inl_made[k]);
+            src_key[l.dummy] = (part, mapped, l.edge);
         }
         let (into, from) = (&west[l.dummy], &east[l.dummy]);
         feedback[l.dummy] = if l.before {
@@ -1501,11 +1541,16 @@ fn model_order_sort_in(
                 // On one node: a source feedback dummy (of a port towards the
                 // previous layer) after a target one.
                 match (sa, sb) {
-                    (true, true) => Some(Rule::Decided(if src_key[a] > src_key[b] {
-                        Less
-                    } else {
-                        Greater
-                    })),
+                    (true, true) => {
+                        let (ka, kb) = (src_key[a], src_key[b]);
+                        Some(Rule::Decided(if ka.0 != kb.0 {
+                            ka.0.cmp(&kb.0)
+                        } else if (ka.1, ka.2) > (kb.1, kb.2) {
+                            Less
+                        } else {
+                            Greater
+                        }))
+                    }
                     (true, false) => Some(Rule::Decided(Greater)),
                     (false, true) => Some(Rule::Decided(Less)),
                     (false, false) => None,
@@ -1654,8 +1699,13 @@ type Feedback<'a> = (
     &'a [Option<usize>],
     &'a [Option<(usize, usize, bool)>],
     &'a [bool],
-    &'a [(usize, usize)],
+    &'a [SourceKey],
 );
+
+/// How `ModelOrderPortComparator` orders an inverted port on its node's
+/// previous layer's side: its part of the side (see [`west_side_part`]), then
+/// the edge model order it goes by and its edge's.
+type SourceKey = (usize, usize, usize);
 
 /// What `ModelOrderNodeComparator` makes of two nodes: an order, or the order
 /// of two others (a feedback dummy goes as the node beside it).
@@ -2732,7 +2782,7 @@ mod tests {
                 &first_in,
                 &feedback,
                 &vec![false; total],
-                &vec![(0, 0); total],
+                &vec![(0, 0, 0); total],
             ),
         );
         let first: Vec<usize> = layer.into_iter().filter(|&v| v == 0 || v > pad).collect();

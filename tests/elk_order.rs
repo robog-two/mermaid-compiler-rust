@@ -2101,3 +2101,48 @@ fn an_edge_from_a_cluster_meets_a_diamond_on_the_line_to_its_centre() {
     let (x, y) = (nums[nums.len() - 2], nums[nums.len() - 1]);
     assert!((x - 300.2).abs() < 1.0 && (y - 191.5).abs() < 1.0, "{d}");
 }
+
+#[test]
+fn inverted_ports_on_a_west_side_sort_apart_between_its_ports_without_edges() {
+    // g0n1's two inverted ports for `x1 & x0 -.- g0n1` and `x1 --> g0n1`
+    // (the cluster runs bottom to top) lie in different parts of its west
+    // side, split by its ports without edges, so `ModelOrderPortComparator`
+    // never compares them: the dotted edge ends 4px lower (mermaid 12.3.0
+    // ends the edges at (112.0, 280.0) and (79.4, 276.0)).
+    let src = "flowchart TD
+  subgraph G0[\"`**Box** G0`\"]
+    g0n0 --> g0n1
+  end
+  x1 & x0 -.- g0n1
+  x1 --> g0n1 --> x0
+  g0n0 ===> x1
+  G0 -->|a label| g0n0
+  x0 -...-> x1 & g0n0
+";
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let mut ends: Vec<(f64, f64)> = svg
+        .match_indices("<g id=\"L-x1-g0n1-")
+        .map(|(at, _)| {
+            let d = &svg[at..];
+            let d = &d[d.find(" d=\"").expect("path") + 4..];
+            let d = &d[..d.find('"').expect("end")];
+            let nums: Vec<f64> = d
+                .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+                .filter(|s| !s.is_empty())
+                .map(|s| s.parse().expect("number"))
+                .collect();
+            (nums[nums.len() - 2], nums[nums.len() - 1])
+        })
+        .collect();
+    ends.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert_eq!(ends.len(), 2, "{ends:?}");
+    assert!(
+        (ends[0].0 - 79.4).abs() < 1.0 && (ends[0].1 - 276.0).abs() < 0.5,
+        "{ends:?}"
+    );
+    assert!(
+        (ends[1].0 - 112.0).abs() < 1.0 && (ends[1].1 - 280.0).abs() < 0.5,
+        "{ends:?}"
+    );
+}
