@@ -2553,8 +2553,11 @@ fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> 
     // Both in the coordinates of the group the path is drawn in.
     let local = |q: Point| q.minus(origin);
     let p = local(p);
-    // The `d` d3 writes, each `\d+\.\d+` replaced by its rounded value.
+    // The `d` d3 writes (each coordinate rounded to 3 decimals,
+    // `Math.round(v * 1000) / 1000`), each `\d+\.\d+` in it then replaced by
+    // its rounded value: 1030.49995 is written 1030.5 and read as 1031.
     let n = |v: f64| {
+        let v = (v * 1000.0 + 0.5).floor() / 1000.0;
         if v.fract() == 0.0 {
             format!("{}", v as i64)
         } else if v < 0.0 {
@@ -4812,6 +4815,34 @@ mod tests {
         ));
         assert!(!label_coordinate_in_path(
             p(77.0, 99.0),
+            &d,
+            Point::default()
+        ));
+    }
+
+    /// The path's numbers are read as d3 wrote them, to 3 decimals: a
+    /// coordinate a hair below .5 is written as .5 and so rounds up there,
+    /// while the label's own coordinate rounds down (state `s25 --> s26 : x`
+    /// in a recursively laid out cluster).
+    #[test]
+    fn label_coordinate_is_looked_up_in_the_written_path() {
+        let p = Point::new;
+        let x = 1030.4999511707574;
+        let d = [
+            geom::PathCmd::MoveTo(p(1156.084, 2026.395)),
+            geom::PathCmd::LineTo(p(x, 2073.0999755859375)),
+            geom::PathCmd::LineTo(p(x, 2138.6)),
+        ];
+        // "M1156,2026L1031,2073L1031,2139": neither 1030 nor 2109.
+        assert!(!label_coordinate_in_path(
+            p(x, 2108.5999755859375),
+            &d,
+            Point::default()
+        ));
+        // Written to 3 decimals, -3.4996 is -3.5, read as -4.
+        let d = [geom::PathCmd::MoveTo(p(-3.4996, 7.0))];
+        assert!(label_coordinate_in_path(
+            p(-4.0, 99.0),
             &d,
             Point::default()
         ));
