@@ -787,6 +787,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
         } else {
             None
         };
+        let was_packed = packed.is_some();
         let out = match (packed, ordered[slot(scope)].take()) {
             (Some(out), _) => out,
             (None, Some((prep, layers, port_rank, rng, _))) => {
@@ -800,7 +801,13 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             }
             (None, None) => layout_flat_in(&li.flat, li.graph, &li.hier),
         };
-        let level = level_output(li, out);
+        let mut level = level_output(li, out);
+        if was_packed {
+            // `SimpleRowGraphPlacer` starts its broadest row at the component
+            // spacing: components of no width (empty subgraphs' points) still
+            // make a graph that wide.
+            level.bbox.w = level.bbox.w.max(ELK_COMPONENT_SPACING);
+        }
         if let Some(c) = scope {
             let cl = &input.clusters[c];
             let (w, h) = if input.dagre_groups {
@@ -842,8 +849,17 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                     (w.max(cl.label_width), h.max(need))
                 }
             } else {
+                // A container laid out on its own: ELK sizes it to its
+                // contents, its title's minimum width and its title label
+                // (`NODE_LABELS`, `spacing.labelNode` on either side), the
+                // contents at its left (see the composition below).
+                let label = if cl.label_width > 0.0 {
+                    cl.label_width + 2.0 * ELK_LABEL_NODE_SPACING
+                } else {
+                    0.0
+                };
                 (
-                    (level.bbox.w + 2.0 * pad).max(cl.min_width),
+                    (level.bbox.w + 2.0 * pad).max(cl.min_width).max(label),
                     level.bbox.h + 2.0 * pad + cl.title_height,
                 )
             };
@@ -922,10 +938,8 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                                 ),
                             }
                         } else {
-                            Point::new(
-                                r.x + pad + (r.w - 2.0 * pad - bb.w) / 2.0,
-                                r.y + pad + input.clusters[b].title_height,
-                            )
+                            // (ELK's default `contentAlignment`: left.)
+                            Point::new(r.x + pad, r.y + pad + input.clusters[b].title_height)
                         };
                         stack.push((Some(b), Point::new(origin.x - bb.x, origin.y - bb.y)));
                     }

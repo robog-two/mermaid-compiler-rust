@@ -1213,6 +1213,9 @@ pub fn render_with(
     }
     let (raw, extras) = match &input.dagre {
         Some(model) if dagre_engine => layout::dagre::layout_full(&input, model),
+        // To mermaid's ELK adapter an empty subgraph is no container at all,
+        // only its point (see the placeholders above).
+        _ if elk && flow_leaf => (layout_without_empty(&input, &empty_of), Default::default()),
         _ => (layout::layout(&input), Default::default()),
     };
     let mut out = layout::LayoutOutput {
@@ -2653,6 +2656,57 @@ fn terminal_sizes(e: &Edge) -> [Option<(f64, f64)>; 2] {
         (!b.is_empty()).then_some((b.width + pad, b.height + pad))
     };
     [size(&e.start_label, e.start), size(&e.end_label, e.end)]
+}
+
+/// Lays `input` out without its empty clusters (`empty_of`: their
+/// placeholders), which have no members and so nothing refers to: ELK gets an
+/// empty subgraph as a plain node (the placeholder), not as a container. The
+/// output has an (empty) rectangle and the root's direction for each of them.
+fn layout_without_empty(input: &LayoutInput, empty_of: &[Option<usize>]) -> layout::LayoutOutput {
+    if empty_of.iter().all(Option::is_none) {
+        return layout::layout(input);
+    }
+    let mut index = vec![None; input.clusters.len()];
+    let mut kept = Vec::new();
+    for (ci, slot) in index.iter_mut().enumerate() {
+        if empty_of.get(ci).copied().flatten().is_none() {
+            *slot = Some(kept.len());
+            kept.push(ci);
+        }
+    }
+    let re = |c: Option<usize>| c.and_then(|c| index[c]);
+    let mut reduced = input.clone();
+    reduced.clusters = kept
+        .iter()
+        .map(|&ci| {
+            let c = &input.clusters[ci];
+            LayoutCluster {
+                parent: re(c.parent),
+                ..c.clone()
+            }
+        })
+        .collect();
+    for n in &mut reduced.nodes {
+        n.cluster = re(n.cluster);
+    }
+    for e in &mut reduced.edges {
+        e.from_cluster = re(e.from_cluster);
+        e.to_cluster = re(e.to_cluster);
+    }
+    let out = layout::layout(&reduced);
+    let mut clusters = vec![Rect::default(); input.clusters.len()];
+    let mut directions = vec![input.direction; input.clusters.len()];
+    for (k, &ci) in kept.iter().enumerate() {
+        clusters[ci] = out.clusters[k];
+        if let Some(&d) = out.cluster_directions.get(k) {
+            directions[ci] = d;
+        }
+    }
+    layout::LayoutOutput {
+        clusters,
+        cluster_directions: directions,
+        ..out
+    }
 }
 
 /// mermaid's `alignDegenerateNodeToAnchor` (ELK): ELK keeps a port 10 from
@@ -4310,6 +4364,13 @@ mod tests {
         assert_eq!(mid, p(0.0, 0.0), "a zero-length step returns its start");
     }
 
+    /// `body` rendered as the command line does (mermaid's defaults: ELK).
+    fn render_cli(body: &str) -> crate::scene::Scene {
+        crate::render::render(body, &crate::config::MermaidConfig::default())
+            .unwrap()
+            .scene
+    }
+
     fn render_dagre(body: &str) -> crate::scene::Scene {
         let src = format!("---\nconfig:\n  layout: dagre\n---\n{body}");
         crate::render::render(&src, &crate::config::MermaidConfig::default())
@@ -4670,6 +4731,84 @@ mod tests {
             (top - (outer.bottom() - 24.0)).abs() < 1e-6,
             "{top} {outer:?}"
         );
+    }
+
+    /// The centre x of the text `label` (a node's label) in `scene`.
+    fn label_x(scene: &Scene, label: &str) -> f64 {
+        let mut all = Vec::new();
+        scene.elements.iter().for_each(|e| walk(e, &mut all));
+        all.iter()
+            .find_map(|e| match e {
+                Element::Text { text, .. } if text.lines.iter().any(|l| l == label) => Some(text.x),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no label {label}"))
+    }
+
+    /// mermaid 12.3.0 (ELK): an empty subgraph is a plain node of no size to
+    /// ELK, not a container: inside a container laid out on its own it is a
+    /// connected component of its own, packed in a row of its own (no row is
+    /// narrower than the component spacing, 24): above the node here (one
+    /// spacing over it), not laid out as a nested box.
+    #[test]
+    fn elk_empty_subgraph_is_a_component_of_its_parent() {
+        let scene =
+            render_cli("flowchart LR\nsubgraph G2\ndirection BT\ng2n0\nsubgraph G3\nend\nend");
+        let f = frame_of(&scene, "G2");
+        // The point under the title and padding; the node 24 below it; 24
+        // under that (mermaid's frame: 141 high).
+        let title = cluster_title_height(
+            ClusterKind::Group,
+            &TextBlock::label("G2", 14.0).html(),
+            true,
+        );
+        assert!(
+            (f.h - (24.0 + title + 24.0 + 45.0 + 24.0)).abs() < 1e-6,
+            "{f:?} {title}"
+        );
+        assert!((f.h - 141.0).abs() < 1e-6, "{f:?}");
+        // Two points only: one spacing wide between the paddings.
+        let scene = render_cli(
+            "flowchart BT\nsubgraph G1\ndirection LR\nsubgraph G2\nsubgraph G3\nend\nsubgraph G4\nend\nend\nend",
+        );
+        let f = frame_of(&scene, "G2");
+        assert!((f.w - 72.0).abs() < 1e-6, "{f:?}");
+    }
+
+    /// mermaid 12.3.0 (ELK): a container laid out on its own is as wide as its
+    /// title label (`NODE_LABELS`, 5 either side), its contents at its left;
+    /// `evenGroupFrames` then pulls the frame in to the title's floor (label +
+    /// 8) — unless it holds only points, which it does not pull in at all.
+    #[test]
+    fn elk_separate_container_holds_its_title_label() {
+        let long = "A really very much longer title for this subgraph here";
+        let title = TextBlock::label(long, 14.0).html();
+        let scene = render_cli(&format!(
+            "flowchart TD\nsubgraph S[{long}]\ndirection LR\na\nend\nb --> S"
+        ));
+        // (The frame itself, after its drop shadow.)
+        let f = cluster_group(&scene, "S")
+            .iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+            .next_back()
+            .expect("frame");
+        assert!(
+            (f.w - (title.width + CLUSTER_TITLE_PAD)).abs() < 1e-3,
+            "{f:?}"
+        );
+        let a = label_x(&scene, "a");
+        assert!((a - (f.x + 24.0 + 76.0)).abs() < 1.0, "{a} {f:?}");
+        let scene = render_cli(&format!(
+            "flowchart TD\nsubgraph S[{long}]\ndirection BT\nsubgraph T\nend\nend\nb --> S"
+        ));
+        let f = frame_of(&scene, "S");
+        assert!((f.w - (title.width + 10.0)).abs() < 1e-3, "{f:?}");
     }
 
     /// mermaid 12.3.0 (dagre): an empty subgraph is an ordinary `rect` node
