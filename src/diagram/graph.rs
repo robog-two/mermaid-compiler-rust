@@ -4929,6 +4929,19 @@ mod tests {
         assert!((x2 - x1 - 64.5).abs() < 1e-3, "{x1} {x2}");
     }
 
+    /// mermaid 12.3.0 (ELK): Brandes-Koepf's threshold strategy moves a free
+    /// block towards its edge's other end where its neighbour leaves room;
+    /// one with no room (rounding error aside) waits until its neighbour has
+    /// moved. Here G5's external port of g6n0 --> g13n1 lines up with G6's
+    /// port: no jog in G5's top channel, so G6 stands 58 below G5's top.
+    #[test]
+    fn elk_threshold_block_without_room_waits_for_its_neighbour() {
+        let src = "flowchart TD\n  subgraph G0\n    subgraph G1\n        g2n0\n      subgraph G5\n        g5n2[(\"Validate the incoming request payload against the schema\")]\n        subgraph G6\n          g6n0 --> g6n1\n          g8n0 --> g8n1\n        end\n        g5n0 --> g5n1\n        g5n1 --> g5n2\n      end\n    end\n    g0n0 --> g0n1\n  end\n    g10n1 --> g10n2\n  g10n2 --- g13n1\n  g11n0 --> g8n1\n  G5 <-->|no| g5n1\n  g6n1 & x0 --> g6n0 & g0n0\n  g13n1 --> g14n0 --> g10n2\n  g4n0 --> g6n0 --> g7n0\n  g6n0 --> g13n1 --> g5n2\n  g0n0 --- g2n0\n";
+        let scene = render_cli(src);
+        let (g5, g6) = (frame_of(&scene, "G5"), frame_of(&scene, "G6"));
+        assert!((g6.y - g5.y - 58.0).abs() < 1e-3, "{g5:?} {g6:?}");
+    }
+
     /// mermaid 12.3.0 (ELK): a container laid out on its own is as wide as its
     /// title label (`NODE_LABELS`, 5 either side), its contents at its left;
     /// `evenGroupFrames` then pulls the frame in to the title's floor (label +
