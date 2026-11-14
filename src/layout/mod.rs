@@ -1876,7 +1876,7 @@ fn finish_rng(
         .collect();
     let elk_frame = match (&elk_raw, &plan) {
         (Some(raw), Some(_)) => elk_frame(
-            input, &verts, n, &is_ext, &chains, &inl, raw, &rank_top, &nodes,
+            input, &verts, n, &is_ext, &chains, &inl, raw, &rank_top, extent_y, &nodes,
         ),
         _ => None,
     };
@@ -1893,11 +1893,10 @@ fn finish_rng(
     )
 }
 
-/// The graph as ELK holds it (see [`ElkFrame`]), for a layout down or right
-/// (one up or left ELK mirrors, in arithmetic of its own: `None`). `raw`:
-/// the cross-axis coordinates before the offset, `rank_top`: each node's
-/// corner along the flow; `nodes`: the centres laid out, which the frame
-/// must match (else `None`).
+/// The graph as ELK holds it (see [`ElkFrame`]). `raw`: the cross-axis
+/// coordinates before the offset, `rank_top`: each node's corner along the
+/// flow, `extent`: the graph's along it; `nodes`: the centres laid out,
+/// which the frame must match (else `None`).
 #[allow(clippy::too_many_arguments)]
 fn elk_frame(
     input: &LayoutInput,
@@ -1908,13 +1907,14 @@ fn elk_frame(
     inl: &[InLayer],
     raw: &ElkRaw,
     rank_top: &[f64],
+    extent: f64,
     nodes: &[Point],
 ) -> Option<ElkFrame> {
-    let down = match input.direction {
-        Direction::TopBottom => true,
-        Direction::LeftRight => false,
-        Direction::BottomTop | Direction::RightLeft => return None,
-    };
+    let down = !input.direction.is_horizontal();
+    // A graph laid out up or left ELK mirrors along the flow around its
+    // extent there (`GraphTransformer.mirrorX`: `(width - size) - x`),
+    // before turning it.
+    let mirrored = matches!(input.direction, Direction::BottomTop | Direction::RightLeft);
     let out = |cross: f64, rank: f64| {
         if down {
             Point::new(cross, rank)
@@ -1922,21 +1922,28 @@ fn elk_frame(
             Point::new(rank, cross)
         }
     };
+    let flow = |v: usize| {
+        if mirrored {
+            (extent - verts[v].h) - rank_top[v]
+        } else {
+            rank_top[v]
+        }
+    };
     // `LayerSizeAndGraphHeightCalculator`: `offset.y -= minY`, the least top
     // of the graph's nodes, an external port dummy's taken
     // `spacing.portsSurrounding` further out.
+    // (They are ELK nodes where any has an edge inside.)
+    let ext = |v: usize| is_ext.get(v).copied().unwrap_or(false);
+    let any_inside = chains
+        .iter()
+        .flatten()
+        .any(|(c, _, _)| ext(c[0]) || ext(c[c.len() - 1]));
     let mut min = raw.min;
-    for v in 0..n {
-        let connected = chains
-            .iter()
-            .flatten()
-            .any(|(c, _, _)| c[0] == v || c[c.len() - 1] == v);
-        if is_ext.get(v).copied().unwrap_or(false) && connected {
-            min = min.min(raw.top[v] - PORTS_SURROUNDING);
-        }
+    for v in (0..n).filter(|&v| any_inside && ext(v)) {
+        min = min.min(raw.top[v] - PORTS_SURROUNDING);
     }
     let offset = out(0.0 - min, 0.0);
-    let pos: Vec<Option<Point>> = (0..n).map(|v| Some(out(raw.top[v], rank_top[v]))).collect();
+    let pos: Vec<Option<Point>> = (0..n).map(|v| Some(out(raw.top[v], flow(v)))).collect();
     // The layout's frame starts at `raw.min`, ELK's at `min`.
     let shift = out(raw.min - min, 0.0);
     for v in 0..n {
@@ -1963,9 +1970,15 @@ fn elk_frame(
             }
             // `getAbsoluteAnchor`: the node's position plus the port's (on
             // the side towards the next layer at the upper end: the node's
-            // extent along the flow; at the lower end none).
-            let first = Some(out(raw.start[ei], rank_top[u] + verts[u].h));
-            let last = Some(out(raw.end[ei], rank_top[w]));
+            // extent along the flow; at the lower end none; mirrored, the
+            // other way round).
+            let (first, last) = if mirrored {
+                (flow(u), flow(w) + verts[w].h)
+            } else {
+                (flow(u) + verts[u].h, flow(w))
+            };
+            let first = Some(out(raw.start[ei], first));
+            let last = Some(out(raw.end[ei], last));
             if *reversed {
                 [last, first]
             } else {

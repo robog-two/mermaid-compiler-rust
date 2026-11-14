@@ -191,3 +191,87 @@ fn port_inside_a_node_of_a_turned_container() {
     let pts = edge_points(&svg(src), "b10n0", "c10n0");
     assert!(near(pts[0], 481.0, 345.704), "{pts:?}");
 }
+
+/// A graph laid out up ELK mirrors along its flow (`(width - size) - x`):
+/// g2n2's port at the bottom lands at 493.9999999999999, inside the node's
+/// 494, and mermaid cuts the edge on the line from the node's centre to
+/// the next corner.
+#[test]
+fn port_inside_a_node_of_a_graph_laid_out_up() {
+    let src = "flowchart BT
+  subgraph G2[Group G2]
+    g2n2>\"Validate the incoming request payload against the schema\"]
+      g3n0
+    g2n0 --> g2n1
+  end
+  subgraph G4[Group G4]
+    subgraph G5[Group G5]
+      g5n0[(\"`_italic_ text`\")]
+      g5n0 -.-> g5n1
+    end
+    subgraph G6[Group G6]
+      g6n0[(\"Merge\")]
+      g6n0 ==> g6n1
+      g6n1 --o g6n2
+    end
+  end
+  x0{\"Start\"}
+  g4n0 ~~~ g5n1
+  g2n0 e0@==> x0
+  g4n2 ==> g5n0
+  g3n0 ---->|x| G4
+  g2n1 <--> g2n2
+  g2n1 & g6n0 === g2n1 & g2n0
+  g4n0 --> g2n0
+  g2n2 --- g5n0 & g3n0
+";
+    let pts = edge_points(&svg(src), "g2n2", "g5n0");
+    assert!(near(pts[0], 266.902, 494.0), "{pts:?}");
+}
+
+/// The same, mirrored right to left, for an edge from a node to the
+/// container holding it (`applyStartIntersectionIfNeeded`).
+#[test]
+fn port_inside_a_node_with_an_edge_to_its_container() {
+    let src = "flowchart RL
+  subgraph G0[\"`**Box** G0`\"]
+    subgraph G1[\"`**Box** G1`\"]
+      g1n0 --> g1n1
+    end
+    subgraph G2[Group G2]
+      subgraph G3[\"`**Box** G3`\"]
+        g3n0
+      end
+      g2n1 -.-> g2n2
+    end
+  end
+  subgraph G4[\"`**Box** G4`\"]
+      g5n0 --- g5n1
+    subgraph G6
+      g6n0
+      subgraph G7[Group G7]
+      end
+    end
+  end
+  subgraph G8[\"`**Box** G8`\"]
+    subgraph G9[Group G9]
+      subgraph G10[\"`**Box** G10`\"]
+        g10n0[[\"Load\"]]
+        g10n1
+        g10n2
+      end
+    end
+  end
+  g5n1 & g3n0 ----> x0
+  x2 --o G0
+  g2n1 -...-> g1n1
+  g2n2 --> G0
+  g9n0 ---> g10n0
+  g1n0 --> g10n1 --> x1
+  g10n0 & g4n0 ===> g6n0
+  G7 ---|no| g2n2
+  g10n2 ---->|a label| g3n0
+";
+    let pts = edge_points(&svg(src), "g2n2", "G0");
+    assert!(near(pts[0], 2052.667, 301.794), "{pts:?}");
+}

@@ -931,7 +931,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     }
 
     let elk_exact = if elk {
-        compose_elk_exact(&tree, &levels)
+        compose_elk_exact(&tree, &levels, &box_size)
     } else {
         None
     };
@@ -1127,13 +1127,33 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
 /// ELK's `ElkGraphImporter` and `CompoundGraphPostprocessor` and mermaid's
 /// `applyElkNodePositions` and `calcOffset` add the parts up. `None` where a
 /// graph's frame is unknown (a direction ELK mirrors).
-fn compose_elk_exact(tree: &Tree, levels: &[Option<Level>]) -> Option<super::ElkExact> {
+fn compose_elk_exact(
+    tree: &Tree,
+    levels: &[Option<Level>],
+    box_size: &[(f64, f64)],
+) -> Option<super::ElkExact> {
     let input = tree.input;
     let nc = input.clusters.len();
     let slot = |s: Option<usize>| s.unwrap_or(nc);
-    let frame = |s: Option<usize>| -> Option<&super::ElkFrame> {
-        levels.get(slot(s))?.as_ref()?.out.elk_frame.as_ref()
-    };
+    // A container wider than its contents and padding (its title) centres
+    // them across a vertical flow (`resizeGraphNoReallyIMeanIt`:
+    // `offset.x += (newSize.x - oldSize.x) / 2`).
+    let frames: Vec<Option<super::ElkFrame>> = (0..=nc)
+        .map(|k| {
+            let level = levels.get(k)?.as_ref()?;
+            let mut f = level.out.elk_frame.clone()?;
+            if k < nc && !tree.direction(Some(k)).is_horizontal() {
+                let pad = input.cluster_padding;
+                let old = level.bbox.w + pad + pad;
+                let new = box_size[k].0;
+                if new > old {
+                    f.offset.x += (new - old) / 2.0;
+                }
+            }
+            Some(f)
+        })
+        .collect();
+    let frame = |s: Option<usize>| -> Option<&super::ElkFrame> { frames.get(slot(s))?.as_ref() };
     // Where each box stands: (its level's scope, its item).
     let mut box_at: Vec<Option<(Option<usize>, usize)>> = vec![None; nc];
     for (k, level) in levels.iter().enumerate() {

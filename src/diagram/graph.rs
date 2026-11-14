@@ -1428,17 +1428,37 @@ pub fn render_with(
                     pts.reverse();
                 }
                 let port = pts[0];
-                pts[0] = boundaries[i].clip(port);
                 let r = Rect::centered(out.nodes[i], measured[i].w, measured[i].h);
                 let neo = cfg.look == ConfigLook::Neo;
                 let head = if ne.inner_is_target { e.end } else { e.start };
                 let offset = markers::pullback_for(head, neo).max(markers::hidden_end(head, true));
                 let k = usize::from(ne.inner_is_target);
-                kept[ei][k] = kept_port(port, Some(pts[0]), offset, r, false);
-                if ne.inner_is_target {
-                    pts.reverse();
+                let (w, h) = (
+                    browser_size(measured[i].w, true),
+                    browser_size(measured[i].h, true),
+                );
+                let leg = out
+                    .elk_exact
+                    .as_ref()
+                    .and_then(|x| x.legs.get(ei))
+                    .and_then(|l| l[k]);
+                let cut = port_inside(out.elk_exact.as_ref(), ei, k, i, w, h)
+                    .then(|| cut_inside_port(&boundaries[i], r, &pts, leg, true))
+                    .flatten();
+                if let Some(cut) = cut {
+                    place_inside_cut(&mut pts, cut, k == 1, offset, r);
+                    kept[ei][k] = None;
+                    if ne.inner_is_target {
+                        pts.reverse();
+                    }
+                } else {
+                    pts[0] = boundaries[i].clip(port);
+                    kept[ei][k] = kept_port(port, Some(pts[0]), offset, r, false);
+                    if ne.inner_is_target {
+                        pts.reverse();
+                    }
+                    keep_ports_off_the_line(&mut pts, &mut kept[ei]);
                 }
-                keep_ports_off_the_line(&mut pts, &mut kept[ei]);
             }
         } else if let Some(ne) = nested[ei] {
             let frame = cluster_rects[ne.cluster.0];
@@ -1656,23 +1676,8 @@ pub fn render_with(
                         .and_then(|x| x.legs.get(ei))
                         .and_then(|l| l[k]);
                     if let Some(cut) = cut_inside_port(&boundaries[i], r, &route, leg, by_centre) {
-                        let port = route[0];
-                        pts[0] = port;
-                        let close = cut.dist(port);
-                        if k == 1 && close < ELK_MIN_LAST_SEGMENT {
-                            // `cutter2` trims a last segment this short.
-                        } else if close <= 1e-6
-                            || offset > 0.0
-                                && pts.len() >= 2
-                                && close < ELK_MIN_MARKER_SEGMENT.max(2.0 * offset)
-                                && on_border(r, port, 1.0)
-                        {
-                            // A duplicate, or too short a segment for the
-                            // marker (`ensureStart/EndMarkerSegmentLength`).
-                            pts[0] = cut;
-                        } else {
-                            pts.insert(0, cut);
-                        }
+                        pts[0] = route[0];
+                        place_inside_cut(&mut pts, cut, k == 1, offset, r);
                         kept[ei][k] = None;
                     }
                     if k == 1 {
@@ -2930,6 +2935,30 @@ fn port_inside(
 /// precision. (dagre gets the same; its layout does not hang on the last bit.)
 fn browser_size(v: f64, elk: bool) -> f64 {
     if elk { f64::from(v as f32) } else { v }
+}
+
+/// Puts the cut [`cut_inside_port`] found before the port a route (`pts`,
+/// from the port at `pts[0]`) leaves its node `r` by: the port stays, but
+/// for a duplicate, a last segment shorter than `cutter2` keeps at the
+/// target (`at_end`: the cut goes instead), or too short a segment for the
+/// end's marker (of `offset`) from a port on the border
+/// (`ensureStart/EndMarkerSegmentLength`).
+fn place_inside_cut(pts: &mut Vec<Point>, cut: Point, at_end: bool, offset: f64, r: Rect) {
+    let port = pts[0];
+    let close = cut.dist(port);
+    if at_end && close < ELK_MIN_LAST_SEGMENT {
+        return;
+    }
+    if close <= 1e-6
+        || offset > 0.0
+            && pts.len() >= 2
+            && close < ELK_MIN_MARKER_SEGMENT.max(2.0 * offset)
+            && on_border(r, port, 1.0)
+    {
+        pts[0] = cut;
+    } else {
+        pts.insert(0, cut);
+    }
 }
 
 /// mermaid's `onBorder`: `p` within `tol` of a side of `r`.
