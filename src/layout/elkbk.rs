@@ -493,10 +493,6 @@ impl Classes {
     }
 }
 
-/// Room to shift a block by that is rounding error only: none (a neighbour
-/// placed at the spacing from it, by a sum taken in another order).
-const SPACE_NOISE: f64 = 1e-9;
-
 /// `ThresholdStrategy.SimpleThresholdStrategy`.
 struct Threshold {
     finished: Vec<bool>,
@@ -618,11 +614,11 @@ impl Threshold {
         if delta > 0.0 && delta < f64::MAX {
             let avail = bal.space_above(g, node, delta);
             bal.shift_block(node, -avail);
-            avail > SPACE_NOISE
+            avail > 0.0
         } else if delta < 0.0 && -delta < f64::MAX {
             let avail = bal.space_below(g, node, -delta);
             bal.shift_block(node, avail);
-            avail > SPACE_NOISE
+            avail > 0.0
         } else {
             false
         }

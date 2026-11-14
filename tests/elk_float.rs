@@ -275,3 +275,83 @@ fn port_inside_a_node_with_an_edge_to_its_container() {
     let pts = edge_points(&svg(src), "g2n2", "G0");
     assert!(near(pts[0], 2052.667, 301.794), "{pts:?}");
 }
+
+/// Brandes-Koepf's threshold strategy (up, left) moves a free block towards
+/// its edge's other end by the room its neighbours leave, and retries one
+/// it could not move once the others have. ELK counts any room above 0 as
+/// moved: le10's block below G11 has 1.4210854715202004e-14 (the same sums
+/// in ours), so it is not retried when le9 moves away, and stays down by
+/// le14; G10 is then one channel slot (12) taller.
+#[test]
+fn threshold_block_with_rounding_room_counts_as_moved() {
+    let src = "flowchart TD
+  subgraph G0[\"`**Box** G0`\"]
+    subgraph G1
+      subgraph G2[\"`**Box** G2`\"]
+        g2n0
+          g3n0 ==> g3n1
+          g4n0
+      end
+      subgraph G5
+        subgraph G6[Group G6]
+            g7n0 --> g7n1
+            g7n1 --o g7n2
+          g6n0 --> g6n1
+          g6n1 --o g6n2
+        end
+            g9n0
+          g8n0 --> g8n1
+        g5n0 --o g5n1
+        g5n1 --> g5n2
+      end
+      g1n0 ==> g1n1
+      g1n1 --o g1n2
+    end
+    g0n0 ==> g0n1
+  end
+  subgraph G10[\"`**Box** G10`\"]
+    subgraph G11[\"`**Box** G11`\"]
+        subgraph G13
+          g13n0 --> g13n1
+        end
+        g12n0 --> g12n1
+      g11n0 --> g11n1
+    end
+      g14n0
+    g10n0 --- g10n1
+    g10n1 --> g10n2
+  end
+  g10n2 === g13n1
+  g11n0 ~~~ g8n1
+  g3n0 <--> g2n0
+  g6n2 ---> g1n2
+  G2 === G11
+  g9n0 ---> g12n1
+  G5 <--> g5n1
+  g3n0 -->|longer edge label text| g7n0
+  g1n1 ~~~ g4n2
+  g2n0 -.- g1n0
+  g12n1 --x x0
+  g3n0 & g1n1 -...-> g12n0 & g1n1
+  g11n0 --> g13n0 --> g6n0
+  g3n0 ==> g7n2
+  g6n1 ===> g6n0 & g0n0
+  g13n1 --> g14n0 --> g10n2
+  g8n0 ~~~ x1
+  g14n0 -.->|a label| g12n0
+  g4n0 --> g6n0 --> g7n0
+  g0n0 <--> G1
+  x0 -.-|longer edge label text| g11n1
+  g6n0 --> g13n1 --> g5n2
+  g1n0 -->|a label| g7n2
+  g11n0 <--> g1n1
+  g8n1 --- g4n0
+  g10n1 === g4n0
+  g11n0 ---> g4n0
+  g0n0 === g2n0
+  x1 -.->|x| g3n0
+  g7n2 -...->|a label| g12n1
+";
+    let (_, _, _, h) = cluster(&svg(src), "G10");
+    assert!((h - 1216.0).abs() < 1e-3, "G10 height {h}");
+}
