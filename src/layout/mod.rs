@@ -2171,6 +2171,13 @@ fn elk_place(
             let offs = elk_port_offsets(side.len(), verts[v].w, inset);
             for (&(_, _, _, ei), off) in side.iter().zip(offs) {
                 port[ei] = off;
+                // `NodeMarginCalculator` takes the ports into the node's
+                // margins: on a side shorter than the insets (an empty
+                // subgraph's point) a port stands off the node.
+                if !is_ext.get(v).copied().unwrap_or(false) {
+                    nodes[v].margin_top = nodes[v].margin_top.max(-off);
+                    nodes[v].margin_bottom = nodes[v].margin_bottom.max(off - verts[v].w);
+                }
             }
         }
     }
@@ -5016,6 +5023,34 @@ mod tests {
             Direction::TopBottom,
         )));
         assert!((out.nodes[4].y - out.nodes[0].y).abs() < 1.0, "{out:?}");
+    }
+
+    /// elkjs (mermaid 12.3.0's options): a node of no size (an empty
+    /// subgraph's point) keeps its lone port 10 from its side's start, below
+    /// the node, and the port counts in the node's margins: the next node of
+    /// the layer starts the node spacing from the port, not from the node
+    /// (`flowchart LR; subgraph G0; end; x0; x1; G0 --> x0`).
+    #[test]
+    fn elk_port_off_a_point_counts_in_its_margin() {
+        let point = LayoutNode {
+            width: 0.0,
+            height: 0.0,
+            cluster: None,
+        };
+        let out = layout(&elk(input(
+            vec![point, node(None), node(None)],
+            vec![edge(0, 1)],
+            vec![],
+            Direction::LeftRight,
+        )));
+        let route = &out.edges[0].points;
+        let port = route[0];
+        // The point is laid out 10 above its port.
+        assert!((out.nodes[0].y - (port.y - 10.0)).abs() < 1e-6, "{out:?}");
+        // The isolated node in the point's layer: below the port.
+        assert!((out.nodes[2].x - out.nodes[0].x).abs() < 41.0, "{out:?}");
+        let top = out.nodes[2].y - 20.0;
+        assert!((top - (port.y + 50.0)).abs() < 1e-6, "{top} {out:?}");
     }
 
     /// Under ELK a label is a node of its own layer: a labelled edge spans two
