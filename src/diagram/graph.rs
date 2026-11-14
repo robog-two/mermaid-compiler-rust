@@ -1239,12 +1239,21 @@ pub fn render_with(
             .iter()
             .zip(&out.edges)
             .enumerate()
-            .filter(|(ei, (_, r))| nested[*ei].is_none() && r.points.len() >= 2)
-            .flat_map(|(_, (e, r))| {
-                let ends = [(e.from, r.points[0]), (e.to, r.points[r.points.len() - 1])];
+            // A container's edge to something inside, laid out as it is, has
+            // its inner end where ELK put it.
+            .filter(|(ei, (_, r))| {
+                (nested[*ei].is_none() || member_edge(nested[*ei]) || deep_edge(nested[*ei]))
+                    && r.points.len() >= 2
+            })
+            .flat_map(|(ei, (e, r))| {
+                let mut ends = vec![(e.from, r.points[0]), (e.to, r.points[r.points.len() - 1])];
+                if let Some(ne) = nested[ei] {
+                    ends.retain(|&(end, _)| end == ne.inner);
+                }
                 ends.into_iter().filter_map(|(end, p)| match end {
                     Endpoint::Node(NodeId(i)) => Some((i, p)),
-                    Endpoint::Cluster(_) => None,
+                    // An empty subgraph is its point (of no size).
+                    Endpoint::Cluster(c) => empty_of[c.0].map(|i| (i, p)),
                 })
             })
             .collect();
@@ -1321,6 +1330,10 @@ pub fn render_with(
                 _ => r.y,
             };
             let center = Point::new(r.x + r.w / 2.0, top + t.height / 2.0);
+            if empty_of[ci].is_some() {
+                // The title is all there is of it to see.
+                bounds.add_rect(Rect::centered(center, t.width, t.height));
+            }
             children.push(Element::classed_text(
                 t.centered_text(center, &color),
                 "cluster-label",
@@ -4773,6 +4786,43 @@ mod tests {
         );
         let f = frame_of(&scene, "G2");
         assert!((f.w - 72.0).abs() < 1e-6, "{f:?}");
+    }
+
+    /// The title of empty subgraph `id`: its text element.
+    fn empty_title(scene: &Scene, id: &str) -> Text {
+        match cluster_group(scene, id) {
+            [Element::Text { text, .. }] => text.clone(),
+            other => panic!("title only: {other:?}"),
+        }
+    }
+
+    /// mermaid 12.3.0 (ELK): `alignDegenerateNodeToAnchor` moves an empty
+    /// subgraph's point (no size) onto the anchor of its first edge, its
+    /// container's edge to it included; its title is painted from there.
+    /// The diagram's bounds take the title in.
+    #[test]
+    fn elk_empty_subgraph_point_moves_onto_its_edge() {
+        let top = |t: &Text| t.y - t.font_size * 0.35 - t.line_height / 2.0;
+        // Across the flow: the container's edge enters the point from its side.
+        let scene =
+            render_cli("flowchart LR\nsubgraph G0[A title]\nsubgraph G1\nend\na\nend\nG0 --> G1");
+        let end = *edge_points(&scene, "L-G0-G1-0").last().expect("route");
+        let t = empty_title(&scene, "G1");
+        assert!((top(&t) - end.y).abs() < 1e-3, "{t:?} {end:?}");
+        // Along the flow: the edge leaves the point's bottom.
+        let scene = render_cli(
+            "flowchart TD\nsubgraph G1[Outer]\nsubgraph G2[Inner]\nend\na --> b\nend\nG2 --> b\nx --> G0\nsubgraph G0[Last]\nend",
+        );
+        let start = edge_points(&scene, "L-G2-b-1")[0];
+        let t = empty_title(&scene, "G2");
+        assert!((t.x - start.x).abs() < 1e-3, "{t:?} {start:?}");
+        let last = empty_title(&scene, "G0");
+        let bottom = top(&last) + last.line_height;
+        assert!(
+            scene.view_box.bottom() >= bottom + 8.0 - 1e-3,
+            "{:?} {last:?}",
+            scene.view_box
+        );
     }
 
     /// mermaid 12.3.0 (ELK): a container laid out on its own is as wide as its
