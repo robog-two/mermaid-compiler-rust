@@ -1349,18 +1349,26 @@ pub fn render_with(
             if pts.len() < 2 {
                 continue;
             }
+            // The other end is a cluster, so mermaid leaves `cutter2` out:
+            // the node end is cut where the line from the node's centre to
+            // its port leaves the outline (`applyStart/EndIntersectionIfNeeded`),
+            // the port kept beside it.
             if let Endpoint::Node(NodeId(i)) = ne.inner {
                 if ne.inner_is_target {
                     pts.reverse();
                 }
-                pts[0] = if ne.inner_is_target {
-                    clip_target_end(&boundaries[i], &pts, elk)
-                } else {
-                    clip_end(&boundaries[i], &pts, elk)
-                };
+                let port = pts[0];
+                pts[0] = boundaries[i].clip(port);
+                let r = Rect::centered(out.nodes[i], measured[i].w, measured[i].h);
+                let neo = cfg.look == ConfigLook::Neo;
+                let head = if ne.inner_is_target { e.end } else { e.start };
+                let offset = markers::pullback_for(head, neo).max(markers::hidden_end(head, true));
+                let k = usize::from(ne.inner_is_target);
+                kept[ei][k] = kept_port(port, Some(pts[0]), offset, r, false);
                 if ne.inner_is_target {
                     pts.reverse();
                 }
+                keep_ports_off_the_line(&mut pts, &mut kept[ei]);
             }
         } else if let Some(ne) = nested[ei] {
             let frame = cluster_rects[ne.cluster.0];
@@ -1546,6 +1554,9 @@ pub fn render_with(
                         r,
                         !by_centre,
                     );
+                }
+                if by_centre {
+                    keep_ports_off_the_line(&mut pts, &mut kept[ei]);
                 }
             }
         }
@@ -2691,6 +2702,36 @@ fn kept_port(
         || (port.y - bounds.bottom()).abs() <= tol;
     let short = port.dist(clip) < ELK_MIN_MARKER_SEGMENT.max(2.0 * offset);
     (!(offset > 0.0 && short && on_border)).then_some(port)
+}
+
+/// Puts the ports [`kept_port`] keeps into the route where the outline point
+/// beside one is off the line of its leg (an end cut on the line from the
+/// node's centre): mermaid draws the edge through it, its last leg slanted.
+fn keep_ports_off_the_line(pts: &mut Vec<Point>, kept: &mut [Option<Point>; 2]) {
+    let n = pts.len();
+    if n < 2 {
+        return;
+    }
+    if let Some(p) = kept[1]
+        && p.dist(pts[n - 1]) > 1e-3
+        && !collinear(pts[n - 2], p, pts[n - 1])
+    {
+        pts.insert(n - 1, p);
+        kept[1] = None;
+    }
+    if let Some(p) = kept[0]
+        && p.dist(pts[0]) > 1e-3
+        && !collinear(pts[0], p, pts[1])
+    {
+        pts.insert(1, p);
+        kept[0] = None;
+    }
+}
+
+/// Whether `b` lies on the line through `a` and `c` (to rounding).
+fn collinear(a: Point, b: Point, c: Point) -> bool {
+    let (u, v) = (b.minus(a), c.minus(b));
+    (u.x * v.y - u.y * v.x).abs() <= 1e-9 * (u.len() * v.len()).max(1.0)
 }
 
 /// A straightened route without the ports [`kept_port`] put in, where they

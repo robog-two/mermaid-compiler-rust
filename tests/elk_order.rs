@@ -2119,19 +2119,11 @@ fn inverted_ports_on_a_west_side_sort_apart_between_its_ports_without_edges() {
   G0 -->|a label| g0n0
   x0 -...-> x1 & g0n0
 ";
-    let r = render::render(src, &MermaidConfig::default()).expect("renders");
-    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let svg = svg_of(src);
     let mut ends: Vec<(f64, f64)> = svg
         .match_indices("<g id=\"L-x1-g0n1-")
         .map(|(at, _)| {
-            let d = &svg[at..];
-            let d = &d[d.find(" d=\"").expect("path") + 4..];
-            let d = &d[..d.find('"').expect("end")];
-            let nums: Vec<f64> = d
-                .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
-                .filter(|s| !s.is_empty())
-                .map(|s| s.parse().expect("number"))
-                .collect();
+            let nums = path_numbers(&svg[at..]);
             (nums[nums.len() - 2], nums[nums.len() - 1])
         })
         .collect();
@@ -2145,4 +2137,68 @@ fn inverted_ports_on_a_west_side_sort_apart_between_its_ports_without_edges() {
         (ends[1].0 - 112.0).abs() < 1.0 && (ends[1].1 - 280.0).abs() < 0.5,
         "{ends:?}"
     );
+}
+
+fn svg_of(src: &str) -> String {
+    let r = render::render(src, &MermaidConfig::default()).expect("renders");
+    output::encode_svg(&r, &EncodeOptions::default())
+}
+
+/// The numbers of the first path's `d` in `svg`.
+fn path_numbers(svg: &str) -> Vec<f64> {
+    let d = &svg[svg.find(" d=\"").expect("path") + 4..];
+    let d = &d[..d.find('"').expect("end")];
+    d.split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().expect("number"))
+        .collect()
+}
+
+fn near(nums: &[f64], at: usize, want: (f64, f64)) -> bool {
+    (nums[at] - want.0).abs() < 0.05 && (nums[at + 1] - want.1).abs() < 0.05
+}
+
+#[test]
+fn a_members_edge_to_its_own_cluster_leaves_on_the_line_from_its_centre() {
+    // The other end is a cluster, so mermaid skips `cutter2`: the circle's
+    // end is where the line from its centre to its port (off its middle)
+    // leaves the outline, and the edge runs through the port from there
+    // (mermaid 12.3.0: M232.756,212.61 L234.166,215.874 ... 235.577,239.138).
+    let src = "flowchart TD
+  subgraph G4
+    a((\"Validate the request payload\"))
+  end
+  a --> G4
+  a --> x & y
+";
+    let svg = svg_of(src);
+    let nums = path_numbers(&svg[svg.find("<g id=\"L-a-G4-").expect("edge")..]);
+    let n = nums.len();
+    assert!(near(&nums, 0, (232.756, 212.61)), "{nums:?}");
+    assert!(near(&nums, 2, (234.166, 215.874)), "{nums:?}");
+    assert!(near(&nums, n - 2, (235.577, 239.138)), "{nums:?}");
+}
+
+#[test]
+fn an_edge_from_a_cluster_keeps_the_port_beside_a_diamonds_outline_point() {
+    // The diamond's end is cut on the line from its centre to the port, and
+    // mermaid draws the edge on through the port (rounding the corner there)
+    // rather than slanting its whole last leg (mermaid 12.3.0:
+    // ... L629.957,170.4 Q638,170.4 645.722,168.151 L653.444,165.902).
+    let src = "flowchart LR
+  subgraph G6
+    p --> q
+  end
+  subgraph G7
+    r{\"Retry\"}
+    s --- r
+  end
+  G6 --> r --> x
+";
+    let svg = svg_of(src);
+    let nums = path_numbers(&svg[svg.find("<g id=\"L-G6-r-").expect("edge")..]);
+    let n = nums.len();
+    assert!(near(&nums, 2, (629.957, 170.4)), "{nums:?}");
+    assert!(near(&nums, n - 4, (645.722, 168.151)), "{nums:?}");
+    assert!(near(&nums, n - 2, (653.444, 165.902)), "{nums:?}");
 }
