@@ -954,7 +954,24 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                             // (ELK's default `contentAlignment`: left.)
                             Point::new(r.x + pad, r.y + pad + input.clusters[b].title_height)
                         };
-                        stack.push((Some(b), Point::new(origin.x - bb.x, origin.y - bb.y)));
+                        let shift = if elk && flush[b] {
+                            let level = levels[slot(Some(b))].as_ref();
+                            level.map_or(Point::new(0.0, 0.0), |l| {
+                                unsized_flow_shift(
+                                    l,
+                                    tree.direction(Some(b)),
+                                    box_size[b],
+                                    pad,
+                                    input.clusters[b].title_height,
+                                )
+                            })
+                        } else {
+                            Point::new(0.0, 0.0)
+                        };
+                        stack.push((
+                            Some(b),
+                            Point::new(origin.x - bb.x + shift.x, origin.y - bb.y + shift.y),
+                        ));
                     }
                 }
             }
@@ -2128,6 +2145,59 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
         segs: seg_of,
         ext_kinds,
         bbox,
+    }
+}
+
+/// ELK's `PORT_BORDER_OFFSET` of a container's external ports: half the
+/// graph's `spacing.edgeEdge` (mermaid's 20 in a container) outside its border
+/// (`CompoundGraphPreprocessor`).
+const ELK_EXT_PORT_BORDER_OFFSET: f64 = 10.0;
+
+/// Where ELK's turn of a right-to-left or bottom-to-top container's graph
+/// back to its direction puts contents of no extent along the flow (empty
+/// subgraphs' points, all in one layer): `GraphTransformer` mirrors the graph
+/// around its width along the flow, but a graph of width 0 counts as one not
+/// sized yet, and is mirrored around its nodes' furthest reach instead (a
+/// position, size and far margin). That takes in its external port dummies,
+/// the one on the side the flow leaves by (an edge leaving the container)
+/// outside the border by [`ELK_EXT_PORT_BORDER_OFFSET`], and, as it turns a
+/// bottom-to-top graph before mirroring it, a node's margins left as they are
+/// across the flow: a point's ports stand [`super::elk_port_inset`] off its
+/// side. The contents move along the flow (right, or down) by that reach.
+/// Not where the container is larger along the flow than its padding, which
+/// sizes the graph.
+fn unsized_flow_shift(
+    level: &Level,
+    dir: Direction,
+    (w, h): (f64, f64),
+    pad: f64,
+    title: f64,
+) -> Point {
+    let no_width =
+        |extent: f64, size: f64, padding: f64| extent == 0.0 && (size - padding).abs() < 1e-9;
+    let leaving = !level.ext_kinds.iter().all(|k| k.2) && level.ext_kinds.iter().any(|k| !k.1);
+    match dir {
+        Direction::RightLeft if no_width(level.bbox.w, w, 2.0 * pad) => {
+            let reach = if leaving {
+                pad + ELK_EXT_PORT_BORDER_OFFSET
+            } else {
+                0.0
+            };
+            Point::new(reach, 0.0)
+        }
+        Direction::BottomTop if no_width(level.bbox.h, h, 2.0 * pad + title) => {
+            let mut reach: f64 = 0.0;
+            if leaving {
+                reach = pad + title + ELK_EXT_PORT_BORDER_OFFSET;
+            }
+            if !level.out.edges.is_empty() {
+                reach = reach.max(super::elk_port_inset(super::ElkGraph::Container {
+                    separate: false,
+                }));
+            }
+            Point::new(0.0, reach)
+        }
+        _ => Point::new(0.0, 0.0),
     }
 }
 

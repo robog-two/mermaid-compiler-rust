@@ -4874,6 +4874,46 @@ mod tests {
         assert!((x1 - x2 - 12.5).abs() < 0.01, "{x1} {x2}");
     }
 
+    /// mermaid 12.3.0 (ELK): a right-to-left or bottom-to-top container
+    /// holding only a point (no width along the flow) is mirrored around its
+    /// nodes' furthest reach: the external port dummy of an edge leaving it
+    /// (padding and 10 beyond the border), or a bottom-to-top point's port
+    /// margin across the flow (10.8). The point moves past it along the flow.
+    #[test]
+    fn elk_unsized_mirrored_container_moves_its_point() {
+        let sub = "subgraph G1\nsubgraph G2\nend\nend\nb\n";
+        // (The frame, past its drop shadow.)
+        let frame = |scene: &Scene| {
+            let mut rects = cluster_group(scene, "G1").iter().filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    ..
+                } => Some(*rect),
+                _ => None,
+            });
+            rects.next_back().expect("frame")
+        };
+        // The point, where its title is painted from.
+        let at = |dir: &str, edge: &str| {
+            let scene = render_cli(&format!("flowchart {dir}\n{sub}{edge}"));
+            let t = empty_title(&scene, "G2");
+            let g1 = frame(&scene);
+            (
+                t.x - g1.x,
+                t.y - t.font_size * 0.35 - t.line_height / 2.0 - g1.y,
+            )
+        };
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
+        let (x, _) = at("RL", "G2 --> b");
+        assert!(close(x, 58.0), "{x}");
+        let (x, _) = at("RL", "b --> G2");
+        assert!(close(x, 24.0), "{x}");
+        let (_, y) = at("BT", "G2 --> b");
+        assert!(close(y, 106.0), "{y}");
+        let (_, y) = at("BT", "b --> G2");
+        assert!(close(y, 58.8), "{y}");
+    }
+
     /// mermaid 12.3.0 (ELK): a container laid out on its own is as wide as its
     /// title label (`NODE_LABELS`, 5 either side), its contents at its left;
     /// `evenGroupFrames` then pulls the frame in to the title's floor (label +
