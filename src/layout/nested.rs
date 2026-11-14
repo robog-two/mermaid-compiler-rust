@@ -323,17 +323,7 @@ pub(super) fn layout(input: &LayoutInput) -> LayoutOutput {
     if !matches!(input.routing, EdgeRouting::Orthogonal(_)) || input.clusters.is_empty() {
         return layout_tree(input);
     }
-    // mermaid's ELK adapter (`elk.orientFeedbackEdges`, on by default) turns round
-    // the feedback edges between whole clusters before ELK sees them; they are laid
-    // out the other way and drawn back from their own source.
-    let flags = subgraph_feedback_edges(input);
-    let mut turned = input.clone();
-    for (e, _) in turned.edges.iter_mut().zip(&flags).filter(|(_, f)| **f) {
-        std::mem::swap(&mut e.from, &mut e.to);
-        std::mem::swap(&mut e.from_cluster, &mut e.to_cluster);
-    }
-    // Then it hands ELK the edges in `orderNestedEdgeEnds`'s order.
-    let order = nested_edge_order(&turned);
+    let (order, flags, mut turned) = handover(input);
     if order.iter().enumerate().any(|(i, &k)| i != k) {
         turned.edges = order.iter().map(|&k| turned.edges[k].clone()).collect();
     }
@@ -357,6 +347,29 @@ pub(super) fn layout(input: &LayoutInput) -> LayoutOutput {
 /// its title band. ELK sizes a container around more (lanes of edges that
 /// leave it, the room around its port dummies), which stays laid out but
 /// unframed.
+/// The edges as mermaid's ELK adapter hands them to ELK: the feedback edges
+/// between whole clusters turned round (`elk.orientFeedbackEdges`, on by
+/// default: laid out the other way and drawn back from their own source), then
+/// in `orderNestedEdgeEnds`'s order. The order (input edge indices), which
+/// edges are turned, and the input with them turned (in input order).
+fn handover(input: &LayoutInput) -> (Vec<usize>, Vec<bool>, LayoutInput) {
+    let flags = subgraph_feedback_edges(input);
+    let mut turned = input.clone();
+    for (e, _) in turned.edges.iter_mut().zip(&flags).filter(|(_, f)| **f) {
+        std::mem::swap(&mut e.from, &mut e.to);
+        std::mem::swap(&mut e.from_cluster, &mut e.to_cluster);
+    }
+    let order = nested_edge_order(&turned);
+    (order, flags, turned)
+}
+
+/// [`handover`]'s order and turned edges, for what mermaid does with ELK's
+/// edges in their order (see `layout::elk_edge_handover`).
+pub(super) fn edge_handover(input: &LayoutInput) -> (Vec<usize>, Vec<bool>) {
+    let (order, flags, _) = handover(input);
+    (order, flags)
+}
+
 fn even_group_frames(input: &LayoutInput, out: &mut LayoutOutput) {
     let nc = input.clusters.len();
     let chains = cluster_chains(&input.clusters);

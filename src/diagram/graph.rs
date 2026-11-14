@@ -1234,19 +1234,23 @@ pub fn render_with(
     }
     if elk {
         let sizes: Vec<(f64, f64)> = measured.iter().map(|m| (m.w, m.h)).collect();
-        let anchors: Vec<(usize, Point)> = g
-            .edges
+        // In the order mermaid's ELK result lists the edges (as handed to
+        // ELK), each from the end ELK laid it out from.
+        let (handed, turned) = layout::elk_edge_handover(&input);
+        let anchors: Vec<(usize, Point)> = handed
             .iter()
-            .zip(&out.edges)
-            .enumerate()
+            .map(|&ei| (ei, &g.edges[ei], &out.edges[ei]))
             // A container's edge to something inside, laid out as it is, has
             // its inner end where ELK put it.
-            .filter(|(ei, (_, r))| {
-                (nested[*ei].is_none() || member_edge(nested[*ei]) || deep_edge(nested[*ei]))
+            .filter(|&(ei, _, r)| {
+                (nested[ei].is_none() || member_edge(nested[ei]) || deep_edge(nested[ei]))
                     && r.points.len() >= 2
             })
-            .flat_map(|(ei, (e, r))| {
+            .flat_map(|(ei, e, r)| {
                 let mut ends = vec![(e.from, r.points[0]), (e.to, r.points[r.points.len() - 1])];
+                if turned.get(ei).copied().unwrap_or(false) {
+                    ends.reverse();
+                }
                 if let Some(ne) = nested[ei] {
                     ends.retain(|&(end, _)| end == ne.inner);
                 }
@@ -4823,6 +4827,28 @@ mod tests {
             "{:?} {last:?}",
             scene.view_box
         );
+    }
+
+    /// mermaid 12.3.0 (ELK): two ports crammed onto a point's side (6.67
+    /// apart, in reverse past its middle) keep their port list's order for
+    /// Brandes–Köpf, so the four alignments differ and balance the point over
+    /// the middle of the node it has a two-cycle with. The point then moves
+    /// onto the anchor of its first edge as handed to ELK: an edge from inside
+    /// a subgraph goes before the one from that subgraph's border.
+    #[test]
+    fn elk_point_ports_keep_their_list_order() {
+        let scene = render_cli("flowchart TD\nsubgraph G0\nend\na\nG0 --> a\na --> G0");
+        let t = empty_title(&scene, "G0");
+        let a = label_x(&scene, "a");
+        let start = edge_points(&scene, "L-G0-a-0")[0];
+        assert!((t.x - start.x).abs() < 1e-3, "{t:?} {start:?}");
+        assert!((start.x - (a + 10.0 / 3.0)).abs() < 1e-3, "{start:?} {a}");
+        let scene = render_cli(
+            "flowchart TD\nsubgraph G0\nend\nsubgraph G1\ng1n0\nend\nG0 --> G1\ng1n0 --> G0",
+        );
+        let t = empty_title(&scene, "G0");
+        let end = *edge_points(&scene, "L-g1n0-G0-1").last().expect("route");
+        assert!((t.x - end.x).abs() < 1e-3, "{t:?} {end:?}");
     }
 
     /// mermaid 12.3.0 (ELK): a container laid out on its own is as wide as its

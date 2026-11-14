@@ -202,6 +202,19 @@ struct Oriented {
     weight: f64,
 }
 
+/// Under ELK: the order mermaid hands the edges to ELK in (input edge
+/// indices), and which it turned round (laid out from their target), as its
+/// ELK result lists them.
+pub fn elk_edge_handover(input: &LayoutInput) -> (Vec<usize>, Vec<bool>) {
+    if input.clusters.is_empty() {
+        return (
+            (0..input.edges.len()).collect(),
+            vec![false; input.edges.len()],
+        );
+    }
+    nested::edge_handover(input)
+}
+
 /// Run the full layout: clusters that no edge crosses are laid out on their own
 /// (with their own direction and spacing, as mermaid's ELK layout does), the
 /// rest in one layered pass with their parent (see `nested`).
@@ -2148,10 +2161,15 @@ fn elk_place(
     }
     let mut out_port = vec![0.0; ne];
     let mut in_port = vec![0.0; ne];
+    // Per edge: where its ports stand in their node's port list (positions,
+    // except on a side crammed past its middle, whose ports keep the list's
+    // order though their positions come out reversed).
+    let mut out_key: Vec<Option<f64>> = vec![None; ne];
+    let mut in_key: Vec<Option<f64>> = vec![None; ne];
     for v in 0..real {
-        for (side, port, at_end) in [
-            (&mut out_side[v], &mut out_port, false),
-            (&mut in_side[v], &mut in_port, true),
+        for (side, port, key, at_end) in [
+            (&mut out_side[v], &mut out_port, &mut out_key, false),
+            (&mut in_side[v], &mut in_port, &mut in_key, true),
         ] {
             side.sort_unstable();
             // Ports fixed by a laid out container stay where its contents put them.
@@ -2169,8 +2187,12 @@ fn elk_place(
                 port_inset
             };
             let offs = elk_port_offsets(side.len(), verts[v].w, inset);
+            let crammed = verts[v].w < 2.0 * inset;
             for (&(_, _, _, ei), off) in side.iter().zip(offs) {
                 port[ei] = off;
+                if crammed {
+                    key[ei] = Some(2.0 * inset - off);
+                }
                 // `NodeMarginCalculator` takes the ports into the node's
                 // margins: on a side shorter than the insets (an empty
                 // subgraph's point) a port stands off the node.
@@ -2223,8 +2245,11 @@ fn elk_place(
     // The order of a node's ports on a side: where a laid out container fixes
     // them all, the order crossing minimisation left them in (which its
     // contents' placement need not follow), else their positions.
-    let mut out_order = out_port.clone();
-    let mut in_order = in_port.clone();
+    let keyed = |port: &[f64], key: &[Option<f64>]| -> Vec<f64> {
+        port.iter().zip(key).map(|(&p, k)| k.unwrap_or(p)).collect()
+    };
+    let mut out_order = keyed(&out_port, &out_key);
+    let mut in_order = keyed(&in_port, &in_key);
     for (at_end, order) in [(false, &mut out_order), (true, &mut in_order)] {
         let mut by_node: Vec<Vec<usize>> = vec![Vec::new(); real];
         for (ei, s) in stops.iter().enumerate().filter(|(_, s)| s.len() >= 2) {
