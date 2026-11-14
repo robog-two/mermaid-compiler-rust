@@ -103,6 +103,9 @@ pub struct LayoutCluster {
     pub title_height: f64,
     /// Narrowest the cluster may be (its painted title plus padding).
     pub min_width: f64,
+    /// Width of the title as ELK's node label (0: none). ELK sizes a container
+    /// to hold it (`NODE_LABELS`) — see `nested`.
+    pub label_width: f64,
     /// The cluster's own `direction`, honoured when it is laid out on its own (see `nested`).
     pub direction: Option<Direction>,
 }
@@ -113,6 +116,7 @@ impl LayoutCluster {
             parent,
             title_height,
             min_width: 0.0,
+            label_width: 0.0,
             direction: None,
         }
     }

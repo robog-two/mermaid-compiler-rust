@@ -873,7 +873,13 @@ pub fn render_with(
     let elk = cfg.layout == LayoutAlgorithm::Elk;
 
     // A cluster with nothing in it is a plain leaf upstream: its title alone, with no
-    // visible box. A placeholder node (sized to the title) stands in for it.
+    // visible box. A placeholder node (sized to the title) stands in for it. A
+    // flowchart's ELK adapter hands ELK such a group with no size at all (it is not
+    // a parent, so it gets neither labels nor a size), and its painter draws the
+    // title from that point down; mermaid's dagre renderer paints it as an ordinary
+    // `rect` node labelled with the title.
+    let flow_leaf = g.kind == DiagramKind::Flowchart;
+    let dagre_leaf = flow_leaf && !elk;
     let mut nodes = g.nodes.clone();
     let mut empty_of: Vec<Option<usize>> = vec![None; g.clusters.len()];
     for (ci, c) in g.clusters.iter().enumerate() {
@@ -883,7 +889,13 @@ pub fn render_with(
                 .unwrap_or(false)
         }) || g.clusters.iter().any(|o| o.parent == Some(ClusterId(ci)));
         if !has_member {
-            let mut placeholder = Node::new(format!("__empty_{}", c.id), "", Shape::Invisible);
+            let mut placeholder = if dagre_leaf {
+                let mut n = Node::new(c.id.clone(), c.title.clone(), Shape::Rect);
+                n.style = c.style.clone();
+                n
+            } else {
+                Node::new(format!("__empty_{}", c.id), "", Shape::Invisible)
+            };
             placeholder.cluster = c.parent;
             empty_of[ci] = Some(nodes.len());
             nodes.push(placeholder);
@@ -929,9 +941,29 @@ pub fn render_with(
         .collect();
     for (ci, p) in empty_of.iter().enumerate() {
         if let Some(p) = *p {
-            let t = &cluster_titles[ci];
-            measured[p].w = t.width + CLUSTER_TITLE_PAD;
-            measured[p].h = t.height;
+            if dagre_leaf {
+                // A plain node, without the vertices' minimum label width.
+                measured[p] = measure_node(
+                    &nodes[p],
+                    g.kind,
+                    cfg.padding,
+                    cfg.diagram_padding,
+                    font,
+                    horizontal,
+                    cfg.look,
+                    0.0,
+                    cfg.wrapping_width,
+                    !cfg.html_labels,
+                    1.0,
+                );
+            } else if flow_leaf {
+                measured[p].w = 0.0;
+                measured[p].h = 0.0;
+            } else {
+                let t = &cluster_titles[ci];
+                measured[p].w = t.width + CLUSTER_TITLE_PAD;
+                measured[p].h = t.height;
+            }
         }
     }
     // ELK reserves the painted title width (label + the group's padding) as the
@@ -1116,6 +1148,11 @@ pub fn render_with(
                 } else {
                     t.width + title_pad
                 },
+                label_width: if t.is_empty() || c.kind == ClusterKind::NoteGroup {
+                    0.0
+                } else {
+                    t.width
+                },
                 direction: c.direction,
             })
             .collect(),
@@ -1151,6 +1188,7 @@ pub fn render_with(
             let t = wrapped_group_title(&c.title, cfg.wrapping_width, font);
             input.clusters[ci].title_height = cluster_title_height(c.kind, &t, elk);
             input.clusters[ci].min_width = t.width + title_pad;
+            input.clusters[ci].label_width = t.width;
         }
     }
     if er_groups && elk {
@@ -1161,6 +1199,7 @@ pub fn render_with(
             let t = wrapped_group_title(&c.title, opts.group_title_wrap, font);
             input.clusters[ci].title_height = cluster_title_height(c.kind, &t, elk);
             input.clusters[ci].min_width = t.width + title_pad;
+            input.clusters[ci].label_width = t.width;
         }
     } else if er_groups {
         wrap_er_cluster_titles(
@@ -1261,7 +1300,10 @@ pub fn render_with(
             }
             children.extend(shapes);
         }
-        if !t.is_empty() && c.kind != ClusterKind::NoteGroup {
+        if !t.is_empty()
+            && c.kind != ClusterKind::NoteGroup
+            && !(dagre_leaf && empty_of[ci].is_some())
+        {
             let color = c
                 .style
                 .color
@@ -4584,6 +4626,97 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no cluster {id}"))
+    }
+
+    fn frame_rect(els: &[Element]) -> Rect {
+        els.iter()
+            .find_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    ..
+                } => Some(*rect),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("frame rect: {els:?}"))
+    }
+
+    /// mermaid 12.3.0 (ELK): an empty subgraph is laid out as a point, its
+    /// title painted from there down: a frame around only that is 48 wide.
+    #[test]
+    fn elk_empty_nested_subgraph_is_a_point() {
+        let (_, scene) =
+            render_flowchart("flowchart TB\nsubgraph outer\nsubgraph inner\nend\nend\nA --> B");
+        let outer = frame_rect(cluster_group(&scene, "outer"));
+        let Some(Element::Text { text: ot, .. }) = cluster_group(&scene, "outer")
+            .iter()
+            .find(|e| matches!(e, Element::Text { .. }))
+        else {
+            panic!("outer title");
+        };
+        let font = ot.font_size;
+        let title = TextBlock::label("outer", font).html();
+        // Two paddings around a point; the title is narrower.
+        assert!(title.width + CLUSTER_TITLE_PAD < 48.0);
+        assert!((outer.w - 48.0).abs() < 1e-6, "{outer:?}");
+        let inner = cluster_group(&scene, "inner");
+        let Some(Element::Text { text: t, .. }) = inner.first() else {
+            panic!("title only: {inner:?}");
+        };
+        assert!((t.x - outer.center().x).abs() < 1e-6);
+        // The title's top on the point, the padding (24) above the frame's
+        // bottom.
+        let top = t.y - font * 0.35 - title.height / 2.0;
+        assert!(
+            (top - (outer.bottom() - 24.0)).abs() < 1e-6,
+            "{top} {outer:?}"
+        );
+    }
+
+    /// mermaid 12.3.0 (dagre): an empty subgraph is an ordinary `rect` node
+    /// labelled with its title (no minimum label width), its classes applied.
+    #[test]
+    fn dagre_empty_subgraph_is_a_plain_node() {
+        let scene = render_dagre(
+            "flowchart LR\nsubgraph outer\nsubgraph inner[Inner title]\nend\nX\nend\nA --> inner\nclassDef hot fill:#f96\nclass inner hot",
+        );
+        let mut all = Vec::new();
+        scene.elements.iter().for_each(|e| walk(e, &mut all));
+        let boxes: Vec<(Rect, &crate::scene::Paint)> = all
+            .iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    paint,
+                    ..
+                } => Some((*rect, paint)),
+                _ => None,
+            })
+            .collect();
+        let inner = boxes
+            .iter()
+            .find(|(_, p)| p.fill.0 == "#f96")
+            .unwrap_or_else(|| panic!("no node box for the subgraph: {boxes:?}"));
+        let label = all
+            .iter()
+            .find_map(|e| match e {
+                Element::Text { text, .. } if text.lines.iter().any(|l| l == "Inner title") => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("the title as the node's label");
+        let title = TextBlock::label("Inner title", label.font_size).html();
+        assert!((inner.0.w - (title.width + 32.0)).abs() < 1e-6, "{inner:?}");
+        assert!(
+            (inner.0.h - (title.height + 24.0)).abs() < 1e-6,
+            "{inner:?}"
+        );
+        assert_eq!(inner.1.fill.0, "#f96");
+        let labels = all
+            .iter()
+            .filter(|e| matches!(e, Element::Text { text, .. } if text.lines.iter().any(|l| l.contains("Inner title"))))
+            .count();
+        assert_eq!(labels, 1, "the title is the node's label, painted once");
     }
 
     #[test]

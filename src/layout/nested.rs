@@ -316,6 +316,9 @@ struct Level {
     bbox: Rect,
 }
 
+/// ELK's `spacing.labelNode` default: between a node's label and its border.
+const ELK_LABEL_NODE_SPACING: f64 = 5.0;
+
 pub(super) fn layout(input: &LayoutInput) -> LayoutOutput {
     if !matches!(input.routing, EdgeRouting::Orthogonal(_)) || input.clusters.is_empty() {
         return layout_tree(input);
@@ -667,6 +670,12 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
 
     let pad = input.cluster_padding;
     let mut box_size: Vec<(f64, f64)> = vec![(0.0, 0.0); nc];
+    // Per box: where its contents go when it is larger than they need: at the
+    // start of its run's flow (`true`), or centred across it.
+    let mut flush: Vec<bool> = vec![false; nc];
+    // Per box: its frame's width, when narrower than the room it takes in its
+    // layer (`box_size`).
+    let mut frame_w: Vec<Option<f64>> = vec![None; nc];
     let mut levels: Vec<Option<Level>> = (0..=nc).map(|_| None).collect();
     let slot = |s: Option<usize>| s.unwrap_or(nc);
     // Per (container, edge): the cross-axis offset of the edge's external port on
@@ -805,6 +814,33 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                     (level.bbox.w + 2.0 * px).max(cl.min_width),
                     level.bbox.h + 2.0 * py,
                 )
+            } else if tree.hierarchical(c) {
+                // A container of a hierarchical run is sized by ELK to its
+                // title too: the label (`NODE_LABELS`, `spacing.labelNode` 5 on
+                // either side) and the title's minimum width. ELK takes both
+                // along the run's flow, before turning the run to its direction:
+                // in a vertical run they make the container taller, not wider
+                // — though it keeps its label's width of room in its layer,
+                // around it. The contents stay where the flow starts.
+                let need = if cl.label_width > 0.0 {
+                    cl.min_width
+                        .max(cl.label_width + 2.0 * ELK_LABEL_NODE_SPACING)
+                } else {
+                    cl.min_width
+                };
+                let (w, h) = (
+                    level.bbox.w + 2.0 * pad,
+                    level.bbox.h + 2.0 * pad + cl.title_height,
+                );
+                flush[c] = true;
+                if tree.direction(Some(c)).is_horizontal() {
+                    (w.max(need), h)
+                } else {
+                    if cl.label_width > w {
+                        frame_w[c] = Some(w);
+                    }
+                    (w.max(cl.label_width), h.max(need))
+                }
             } else {
                 (
                     (level.bbox.w + 2.0 * pad).max(cl.min_width),
@@ -863,12 +899,28 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 Item::Ext(_) => {}
                 Item::Box(b) => {
                     let (w, h) = box_size[b];
-                    let r = Rect::centered(p, w, h);
+                    let r = Rect::centered(p, frame_w[b].unwrap_or(w), h);
                     clusters[b] = r;
                     let inner = levels[slot(Some(b))].as_ref().map(|l| l.bbox);
                     if let Some(bb) = inner {
                         let origin = if input.dagre_groups {
                             Point::new(r.x + (r.w - bb.w) / 2.0, r.y + (r.h - bb.h) / 2.0)
+                        } else if flush[b] {
+                            let top = input.clusters[b].title_height;
+                            match tree.direction(Some(b)) {
+                                Direction::LeftRight => Point::new(r.x + pad, r.y + pad + top),
+                                Direction::RightLeft => {
+                                    Point::new(r.right() - pad - bb.w, r.y + pad + top)
+                                }
+                                Direction::TopBottom => Point::new(
+                                    r.x + pad + (r.w - 2.0 * pad - bb.w) / 2.0,
+                                    r.y + pad + top,
+                                ),
+                                Direction::BottomTop => Point::new(
+                                    r.x + pad + (r.w - 2.0 * pad - bb.w) / 2.0,
+                                    r.bottom() - pad - bb.h,
+                                ),
+                            }
                         } else {
                             Point::new(
                                 r.x + pad + (r.w - 2.0 * pad - bb.w) / 2.0,
@@ -3160,6 +3212,71 @@ mod tests {
         let out = layout(&inp);
         let x = |v: usize| out.nodes[v].x;
         assert!(x(2) < x(1) && x(1) < x(3), "{out:?}");
+    }
+
+    /// mermaid 12.3.0 (elkjs): a container whose title is wider than its
+    /// contents. In a vertical run ELK takes the title along the flow: the
+    /// container comes out as tall as the title is wide (plus
+    /// `spacing.labelNode` either side), its frame no wider than its
+    /// contents, though its layer keeps the title's width of room for it. In
+    /// a horizontal run it is that wide, its contents at the flow's start.
+    #[test]
+    fn elk_container_takes_its_title_along_the_flow() {
+        let title = 300.0;
+        for direction in [
+            Direction::TopBottom,
+            Direction::BottomTop,
+            Direction::LeftRight,
+            Direction::RightLeft,
+        ] {
+            let mut cl = LayoutCluster::new(None, 24.0);
+            cl.label_width = title;
+            cl.min_width = title + 8.0;
+            // A node inside, one beside the container (same layer) and one
+            // after the node inside.
+            let mut inp = elk(input(
+                vec![node(Some(0)), node(None), node(None)],
+                vec![LayoutEdge::new(0, 2, 1, None)],
+                vec![cl],
+                direction,
+            ));
+            inp.node_sep = 40.0;
+            let out = layout(&inp);
+            let (f, n) = (out.clusters[0], &out.nodes);
+            let need = title + 10.0;
+            if direction.is_horizontal() {
+                // The next node: past the container's whole width.
+                let after = (n[2].x - n[0].x).abs() - 40.0;
+                assert!(after > need - 24.0 - 80.0, "{direction:?} {n:?}");
+                // (Its frame pulled in to the title's own floor.)
+                assert!((f.w - (title + 8.0)).abs() < 1e-6, "{direction:?} {f:?}");
+                assert!(
+                    (f.h - (40.0 + 48.0 + 24.0)).abs() < 1e-6,
+                    "{direction:?} {f:?}"
+                );
+                let at = if direction == Direction::LeftRight {
+                    f.x + 24.0 + 40.0
+                } else {
+                    f.right() - 24.0 - 40.0
+                };
+                assert!((n[0].x - at).abs() < 1e-6, "{direction:?} {n:?} {f:?}");
+            } else {
+                assert!((f.w - (80.0 + 48.0)).abs() < 1e-6, "{direction:?} {f:?}");
+                // The node beside it: half the title's room away.
+                let gap = (n[1].x - n[0].x).abs() - 40.0 - title / 2.0;
+                assert!((gap - 40.0).abs() < 1e-6, "{direction:?} {n:?}");
+                // The node after: past the container's whole height. The frame
+                // is pulled in from its far end to its contents (`evenGroupFrames`
+                // keeps its top).
+                if direction == Direction::TopBottom {
+                    assert!(f.h < need, "{f:?}");
+                    assert!(n[2].y - 20.0 > f.y + need, "{n:?} {f:?}");
+                } else {
+                    assert!((f.h - need).abs() < 1e-6, "{f:?}");
+                    assert!(n[2].y + 20.0 < f.y, "{n:?} {f:?}");
+                }
+            }
+        }
     }
 
     fn elk(mut inp: LayoutInput) -> LayoutInput {
