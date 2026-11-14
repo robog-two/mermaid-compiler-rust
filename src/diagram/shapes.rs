@@ -508,6 +508,19 @@ fn circle_points(cx: f64, cy: f64, r: f64, n: usize, a0: f64, a1: f64) -> Vec<Po
         .collect()
 }
 
+/// `intersect.polygon`'s placement of a shape's polygon (`local`, about the
+/// node's centre) in the `w`×`h` node box centred on `c`: its least x and y
+/// on the box's left and top sides.
+fn polygon_in_box(c: Point, w: f64, h: f64, local: Vec<Point>) -> Vec<Point> {
+    let min_x = local.iter().map(|q| q.x).fold(f64::INFINITY, f64::min);
+    let min_y = local.iter().map(|q| q.y).fold(f64::INFINITY, f64::min);
+    let (left, top) = (c.x - w / 2.0 - min_x, c.y - h / 2.0 - min_y);
+    local
+        .into_iter()
+        .map(|q| Point::new(left + q.x, top + q.y))
+        .collect()
+}
+
 /// Draw `shape` filling the `w`×`h` box centred on `c`. `None` for shapes the
 /// caller draws itself.
 pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Option<Outline> {
@@ -559,13 +572,19 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             cmds.push(PathCmd::LineTo(p(x0 + rad, y1)));
             cmds.extend(geom::arc_cubics(p(x0 + rad, c.y), rad, PI / 2.0, 1.5 * PI));
             cmds.push(PathCmd::Close);
-            let mut pts = vec![p(x0 + rad, y0), p(x1 - rad, y0)];
-            pts.extend(arc_points(p(x1 - rad, c.y), rad, -PI / 2.0, PI / 2.0));
-            pts.push(p(x0 + rad, y1));
-            pts.extend(arc_points(p(x0 + rad, c.y), rad, PI / 2.0, 1.5 * PI));
+            // stadium.ts's `intersect` polygon: 50-point arcs on the full
+            // width `w` the node's box (as wide as the polygon) was cut from.
+            let full = w + h - h * (PI / (2.0 * 49.0)).cos();
+            let mut local = vec![
+                p(-full / 2.0 + rad, -h / 2.0),
+                p(full / 2.0 - rad, -h / 2.0),
+            ];
+            local.extend(circle_points(-full / 2.0 + rad, 0.0, rad, 50, 90.0, 270.0));
+            local.push(p(full / 2.0 - rad, h / 2.0));
+            local.extend(circle_points(full / 2.0 - rad, 0.0, rad, 50, 270.0, 450.0));
             Outline {
                 parts: vec![body(Geometry::Path(cmds))],
-                boundary: Boundary::Polygon(c, pts),
+                boundary: Boundary::Polygon(c, polygon_in_box(c, w, h, local)),
                 glyphs: Vec::new(),
             }
         }
@@ -731,12 +750,14 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             cmds.extend(geom::arc_cubics(p(x1 - rad, c.y), rad, -PI / 2.0, PI / 2.0));
             cmds.push(PathCmd::LineTo(p(x0, y1)));
             cmds.push(PathCmd::Close);
-            let mut pts = vec![p(x0, y0)];
-            pts.extend(arc_points(p(x1 - rad, c.y), rad, -PI / 2.0, PI / 2.0));
-            pts.push(p(x0, y1));
+            // halfRoundedRectangle.ts's `intersect` polygon (a 50-point arc).
+            let mut local = vec![p(-w / 2.0, -h / 2.0), p(w / 2.0 - rad, -h / 2.0)];
+            local.extend(circle_points(-w / 2.0 + rad, 0.0, rad, 50, 90.0, 270.0));
+            local.push(p(w / 2.0 - rad, h / 2.0));
+            local.push(p(-w / 2.0, h / 2.0));
             Outline {
                 parts: vec![body(Geometry::Path(cmds))],
-                boundary: Boundary::Polygon(c, pts),
+                boundary: Boundary::Polygon(c, polygon_in_box(c, w, h, local)),
                 glyphs: Vec::new(),
             }
         }
@@ -853,17 +874,6 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
         }
         _ => return None,
     })
-}
-
-/// Points along a circular arc (screen angles), for clipping polygons.
-fn arc_points(c: Point, r: f64, a0: f64, a1: f64) -> Vec<Point> {
-    let n = 16;
-    (0..=n)
-        .map(|i| {
-            let a = a0 + (a1 - a0) * i as f64 / n as f64;
-            Point::new(c.x + r * a.cos(), c.y + r * a.sin())
-        })
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1965,5 +1975,22 @@ mod tests {
                 "{s:?}"
             );
         }
+    }
+
+    /// stadium.ts's `intersect`: a polygon of 50-point arcs on the full width,
+    /// left-aligned in the node's box (mermaid 12.3.0, a 200.15×108 neo
+    /// stadium with a wrapped label). The ray from the centre to a point on
+    /// the box's left side, 14.4 below the middle, meets it 1.88 inside.
+    #[test]
+    fn stadium_clips_on_mermaids_sampled_arcs() {
+        let m = ShapeMetrics::classic(Shape::Stadium, 15.0);
+        let c = Point::new(581.3021697998047, 370.061814626058);
+        let w = 2.0 * (46.1030328402379 + 54.0) - 108.0 * (1.0 - (PI / 98.0).cos());
+        let o = outline(Shape::Stadium, c, w, 108.0, &m).unwrap();
+        let hit = o
+            .boundary
+            .clip(Point::new(481.2268829345703, 384.46181462605796));
+        assert!((hit.x - 483.1072056532992).abs() < 1e-5, "{hit:?}");
+        assert!((hit.y - 384.19125185279137).abs() < 1e-5, "{hit:?}");
     }
 }
