@@ -1468,6 +1468,7 @@ fn model_order_sort_in(
         return;
     }
     let fb = |v: usize| feedback.get(v).copied().flatten();
+    let before_ports = matches!(ports, PortOrder::Created(_));
     // The layer's slots, then (as slots of their own, never placed) the
     // sources outside the layer of dummies of inverted ports on the next
     // layer's side, which ELK compares those dummies by.
@@ -1538,22 +1539,28 @@ fn model_order_sort_in(
                 if ra != rb {
                     return Some(Rule::Redirect(slot_of[&ra], slot_of[&rb]));
                 }
-                // On one node: a source feedback dummy (of a port towards the
-                // previous layer) after a target one.
-                match (sa, sb) {
-                    (true, true) => {
-                        let (ka, kb) = (src_key[a], src_key[b]);
-                        Some(Rule::Decided(if ka.0 != kb.0 {
-                            ka.0.cmp(&kb.0)
-                        } else if (ka.1, ka.2) > (kb.1, kb.2) {
-                            Less
-                        } else {
-                            Greater
-                        }))
-                    }
-                    (true, false) => Some(Rule::Decided(Greater)),
-                    (false, true) => Some(Rule::Decided(Less)),
-                    (false, false) => None,
+                // On one node. Before the ports are sorted: two source feedback
+                // dummies (of ports towards the previous layer) as
+                // `ModelOrderPortComparator` orders their ports, a source one
+                // after a target one; ELK records the opposite of what it
+                // returns first, then (in `compare`) what it returns. After:
+                // as their ports stand on the node, the source ones' first.
+                let (ka, kb) = (src_key[a], src_key[b]);
+                let by_ports = if ka.0 != kb.0 {
+                    ka.0.cmp(&kb.0)
+                } else if (ka.1, ka.2) > (kb.1, kb.2) {
+                    Less
+                } else {
+                    Greater
+                };
+                match (sa, sb, before_ports) {
+                    (true, true, true) => Some(Rule::Contradicted(by_ports)),
+                    (true, true, false) => Some(Rule::Decided(by_ports)),
+                    (true, false, true) => Some(Rule::Contradicted(Greater)),
+                    (false, true, true) => Some(Rule::Contradicted(Less)),
+                    (true, false, false) => Some(Rule::Decided(Less)),
+                    (false, true, false) => Some(Rule::Decided(Greater)),
+                    (false, false, _) => None,
                 }
             }
             _ => None,
@@ -1659,29 +1666,54 @@ fn model_order_sort_in(
             }
         }
     };
+    // `compare`: a redirect compares two other nodes (recording their order),
+    // and the pairs redirected from then record the same order, innermost first.
+    let mut redirected = Vec::new();
     let mut compare = |mut i: usize, mut j: usize| -> std::cmp::Ordering {
+        redirected.clear();
+        let mut o = None;
         for _ in 0..=all {
             if has(&bigger, i, j) {
-                return Greater;
+                o = Some(Greater);
+                break;
             }
             if has(&bigger, j, i) || has(&smaller, i, j) {
-                return Less;
+                o = Some(Less);
+                break;
             }
-            let o = match rule(i, j) {
+            let d = match rule(i, j) {
                 Rule::Decided(o) => o,
+                Rule::Contradicted(o) => {
+                    if o == Greater {
+                        associate(&mut bigger, &mut smaller, j, i);
+                    } else {
+                        associate(&mut bigger, &mut smaller, i, j);
+                    }
+                    o
+                }
                 Rule::Redirect(a, b) => {
+                    redirected.push((i, j));
                     (i, j) = (a, b);
                     continue;
                 }
             };
+            if d == Greater {
+                associate(&mut bigger, &mut smaller, i, j);
+            } else {
+                associate(&mut bigger, &mut smaller, j, i);
+            }
+            o = Some(d);
+            break;
+        }
+        let Some(o) = o else { return Less };
+        for &(i, j) in redirected.iter().rev() {
             if o == Greater {
                 associate(&mut bigger, &mut smaller, i, j);
             } else {
                 associate(&mut bigger, &mut smaller, j, i);
             }
-            return o;
         }
-        Less
+        o
     };
     // Sort slots, so that the sets are indexed by them.
     insertion_sort(&mut slots, |i, j| compare(i, j) == Greater);
@@ -1712,6 +1744,10 @@ type SourceKey = (usize, usize, usize);
 #[derive(Debug, Clone, Copy)]
 enum Rule {
     Decided(std::cmp::Ordering),
+    /// An order, with the opposite recorded first (ELK's
+    /// `handleHelperDummyNodes` on two dummies of one node before its ports
+    /// are sorted).
+    Contradicted(std::cmp::Ordering),
     Redirect(usize, usize),
 }
 
@@ -2743,7 +2779,9 @@ mod tests {
     /// to their edges' sources), `ModelOrderNodeComparator`'s remembered decisions
     /// and their transitive consequences settle the order, in a layer of any width:
     /// here five slots (real 0, dummies 151..=154 fed from 155 / 156) that the rules
-    /// alone sort `[151, 153, 0, 154, 152]`, beside 150 more real nodes.
+    /// alone sort `[151, 153, 0, 154, 152]`, beside 150 more real nodes. (With
+    /// the ports sorted, the dummy of a port out of node 0, 154, goes before the
+    /// one into it, 151, as they stand on the node.)
     #[test]
     fn wide_layers_keep_elks_transitive_bookkeeping() {
         let pad = 150;
@@ -2786,7 +2824,58 @@ mod tests {
             ),
         );
         let first: Vec<usize> = layer.into_iter().filter(|&v| v == 0 || v > pad).collect();
-        assert_eq!(first, vec![0, d(1), d(3), d(4), d(2)]);
+        assert_eq!(first, vec![0, d(4), d(1), d(3), d(2)]);
+    }
+
+    /// Before the ports are sorted, ELK's `handleHelperDummyNodes` records two
+    /// feedback dummies of one node both ways round (the opposite of what it
+    /// returns first), and a redirected comparison records the redirected pair
+    /// too: the remembered decisions then put the dummy of the edge made second
+    /// (14) right after its node's other dummies' predecessors, not after them.
+    /// (A root layer of mermaid's: container 1 fed from 0, a label dummy 6 and
+    /// long-edge dummies 7..=10 fed from the layer before, and the dummies
+    /// 11..=14 of 1's inverted ports.)
+    #[test]
+    fn feedback_dummies_of_one_node_keep_elks_contradictory_bookkeeping() {
+        let segs = [(0, 1), (0, 1), (2, 6), (4, 7), (5, 8), (3, 9), (0, 10)];
+        let mut info = info(&segs);
+        for (i, e) in info.iter_mut().zip([6, 13, 12, 5, 4, 10, 11]) {
+            i.edge = e;
+        }
+        let mut west = vec![Vec::new(); 15];
+        west[1] = vec![0, 1];
+        for (v, s) in (6..=10).zip(2..) {
+            west[v] = vec![s];
+        }
+        let mut pos = vec![usize::MAX; 15];
+        for (p, v) in [0, 2, 3, 4, 5].into_iter().enumerate() {
+            pos[v] = p;
+        }
+        let port_at = [0, 1, 0, 0, 0, 0, 2];
+        let made = [(1, 9), (1, 8), (0, 12), (0, 5), (0, 4), (0, 10), (0, 11)];
+        let mut first_in = vec![None; 15];
+        let mut feedback = vec![None; 15];
+        let mut src_key = vec![(0, 0, 0); 15];
+        for (v, e) in (11..=14).zip([14, 15, 1, 2]) {
+            first_in[v] = Some(e);
+            feedback[v] = Some((1, 15, true));
+            src_key[v] = (0, e, e);
+        }
+        let mut other = vec![false; 15];
+        other[6] = true;
+        let mut layer: Vec<usize> = std::iter::once(1).chain(6..=14).collect();
+        model_order_sort_in(
+            &mut layer,
+            &west,
+            &segs,
+            &info,
+            2,
+            &pos,
+            &port_at,
+            (&first_in, &feedback, &other, &src_key),
+            PortOrder::Created(&made),
+        );
+        assert_eq!(layer, vec![1, 10, 6, 14, 12, 11, 13, 9, 7, 8]);
     }
 
     /// A container with two ports on a side, whose paths all lead to its ports,
