@@ -4851,6 +4851,29 @@ mod tests {
         assert!((t.x - end.x).abs() < 1e-3, "{t:?} {end:?}");
     }
 
+    /// mermaid 12.3.0 (ELK): a self-loop's two ports crammed onto a point's
+    /// side come out the other way round, 4 either side of it (inside the
+    /// 12px surrounding): the loop leaves 4 past the point, which moves onto
+    /// that, and its legs count in the point's margins along the flow, which
+    /// hold the nodes of its layer that lean towards their edges' side.
+    #[test]
+    fn elk_loop_on_a_point_stands_beside_it() {
+        let scene = render_cli("flowchart TD\nsubgraph G0[A title]\nend\nx0\nG0 --> G0");
+        let route = edge_points(&scene, "L-G0-G0-0");
+        let t = empty_title(&scene, "G0");
+        let top = t.y - t.font_size * 0.35 - t.line_height / 2.0;
+        assert!((top - route[0].y).abs() < 1e-3, "{t:?} {route:?}");
+        assert!(
+            (route[0].y - route[route.len() - 1].y - 8.0).abs() < 1e-3,
+            "{route:?}"
+        );
+        let scene = render_cli(
+            "flowchart LR\nsubgraph G0\nend\nx1{\"Load\"}\nx2{{\"Done\"}}\nG0 -.-> G0\nx1 -.-> x0",
+        );
+        let (x1, x2) = (label_x(&scene, "Load"), label_x(&scene, "Done"));
+        assert!((x1 - x2 - 12.5).abs() < 0.01, "{x1} {x2}");
+    }
+
     /// mermaid 12.3.0 (ELK): a container laid out on its own is as wide as its
     /// title label (`NODE_LABELS`, 5 either side), its contents at its left;
     /// `evenGroupFrames` then pulls the frame in to the title's floor (label +

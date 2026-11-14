@@ -1142,6 +1142,9 @@ fn finish_rng(
     let mut loop_half = vec![0.0f64; input.edges.len()];
     let mut loop_reach = vec![0.0f64; n];
     let mut loop_reach_high = vec![0.0f64; n];
+    // Per node: how far its loops' outermost legs stand beyond it along the
+    // flow, on either side (they count in its margins).
+    let mut loop_beyond = vec![0.0f64; n];
     // Per node and side: how much of the reach is the room kept between the
     // outermost loop's label and the next loop, which its margin leaves out.
     let mut loop_trail = vec![[0.0f64; 2]; n];
@@ -1207,8 +1210,12 @@ fn finish_rng(
                 continue;
             }
             let v = e.from;
-            let gap = ((verts[v].h - 2.0 * PORTS_SURROUNDING) / (2 * loops[v] + 1) as f64).max(0.0);
+            // On a side shorter than the surrounding (an empty subgraph's
+            // point) the ports are crammed past its middle: the legs come out
+            // the other way round, beyond the node.
+            let gap = (verts[v].h - 2.0 * PORTS_SURROUNDING) / (2 * loops[v] + 1) as f64;
             loop_half[ei] = gap * (2 * seen[v] + 1) as f64 / 2.0;
+            loop_beyond[v] = loop_beyond[v].max(loop_half[ei].abs() - verts[v].h / 2.0);
             seen[v] += 1;
             let high = loop_high(ei);
             let reach = if high {
@@ -1382,7 +1389,11 @@ fn finish_rng(
     // and under ELK the room its end labels take beside their ports
     // (`EndLabelPreprocessor`: the edge-label spacing, then the label).
     let mut margins: Vec<(f64, f64)> = (0..verts.len())
-        .map(|v| hier.margins.get(v).copied().unwrap_or((0.0, 0.0)))
+        .map(|v| {
+            let (lo, hi) = hier.margins.get(v).copied().unwrap_or((0.0, 0.0));
+            let beyond = loop_beyond.get(v).copied().unwrap_or(0.0);
+            (lo.max(beyond), hi.max(beyond))
+        })
         .collect();
     if let Some(p) = &plan {
         // Per node side (node, after): the labels beside it, as (cross start,
