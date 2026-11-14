@@ -314,6 +314,8 @@ struct Level {
     /// Per external port: (item, entering, unconnected inside).
     ext_kinds: Vec<(usize, bool, bool)>,
     bbox: Rect,
+    /// Per routed edge: the items it runs from and to.
+    ends: Vec<(usize, usize)>,
 }
 
 /// ELK's `spacing.labelNode` default: between a node's label and its border.
@@ -327,13 +329,32 @@ pub(super) fn layout(input: &LayoutInput) -> LayoutOutput {
     if order.iter().enumerate().any(|(i, &k)| i != k) {
         turned.edges = order.iter().map(|&k| turned.edges[k].clone()).collect();
     }
-    let laid = layout_tree(&turned);
+    let mut laid = layout_tree(&turned);
     let mut edges = laid.edges.clone();
-    for (route, &k) in laid.edges.into_iter().zip(&order) {
-        edges[k] = route;
+    for (route, &k) in laid.edges.iter().zip(&order) {
+        edges[k] = route.clone();
     }
     for (r, _) in edges.iter_mut().zip(&flags).filter(|(_, f)| **f) {
         r.points.reverse();
+    }
+    // The exact ends go along (a turned edge's swapped back).
+    if let Some(x) = laid.elk_exact.as_mut() {
+        let mut ends = x.ends.clone();
+        for (e, &k) in x.ends.iter().zip(&order) {
+            ends[k] = *e;
+        }
+        for (e, _) in ends.iter_mut().zip(&flags).filter(|(_, f)| **f) {
+            e.swap(0, 1);
+        }
+        x.ends = ends;
+        let mut legs = x.legs.clone();
+        for (l, &k) in x.legs.iter().zip(&order) {
+            legs[k] = *l;
+        }
+        for (l, _) in legs.iter_mut().zip(&flags).filter(|(_, f)| **f) {
+            l.swap(0, 1);
+        }
+        x.legs = legs;
     }
     let mut out = LayoutOutput { edges, ..laid };
     even_group_frames(input, &mut out);
@@ -909,6 +930,11 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
         levels[slot(scope)] = Some(level);
     }
 
+    let elk_exact = if elk {
+        compose_elk_exact(&tree, &levels)
+    } else {
+        None
+    };
     // Compose: place every level at its box, top-down.
     let n = input.nodes.len();
     let mut nodes = vec![Point::new(0.0, 0.0); n];
@@ -1028,6 +1054,14 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             }
         }
     }
+    // Per edge: the points in from its ends before collinear ones go.
+    let mut legs: Vec<[Option<super::Leg>; 2]> = routes
+        .iter()
+        .map(|r| {
+            r.as_ref()
+                .map_or([None, None], |r| super::legs_of(&r.points))
+        })
+        .collect();
     // An edge crossing container borders: its segments from its source outwards,
     // then inwards to its target.
     for (ei, mut segs) in pieces.into_iter().enumerate() {
@@ -1048,12 +1082,13 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 label = r.label;
             }
         }
+        legs[ei] = super::legs_of(&points);
         routes[ei] = Some(EdgeRoute {
             points: super::ortho::simplify(&points),
             label,
         });
     }
-    let edges = routes
+    let edges: Vec<EdgeRoute> = routes
         .into_iter()
         .zip(&input.edges)
         .map(|(r, e)| {
@@ -1073,12 +1108,202 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             tree.direction(scope)
         })
         .collect();
+    let sizes: Vec<(f64, f64)> = input.nodes.iter().map(|n| (n.width, n.height)).collect();
+    let elk_exact = elk_exact
+        .and_then(|x| super::checked_exact(x, &nodes, &sizes, &edges))
+        .map(|x| super::ElkExact { legs, ..x });
     LayoutOutput {
         nodes,
         edges,
         clusters,
         cluster_directions,
+        elk_frame: None,
+        elk_exact,
     }
+}
+
+/// mermaid's exact coordinates (see [`super::ElkExact`]) of a hierarchy of
+/// ELK graphs: each laid out graph's [`super::ElkFrame`] carried out as
+/// ELK's `ElkGraphImporter` and `CompoundGraphPostprocessor` and mermaid's
+/// `applyElkNodePositions` and `calcOffset` add the parts up. `None` where a
+/// graph's frame is unknown (a direction ELK mirrors).
+fn compose_elk_exact(tree: &Tree, levels: &[Option<Level>]) -> Option<super::ElkExact> {
+    let input = tree.input;
+    let nc = input.clusters.len();
+    let slot = |s: Option<usize>| s.unwrap_or(nc);
+    let frame = |s: Option<usize>| -> Option<&super::ElkFrame> {
+        levels.get(slot(s))?.as_ref()?.out.elk_frame.as_ref()
+    };
+    // Where each box stands: (its level's scope, its item).
+    let mut box_at: Vec<Option<(Option<usize>, usize)>> = vec![None; nc];
+    for (k, level) in levels.iter().enumerate() {
+        let Some(level) = level else { continue };
+        let scope = (k < nc).then_some(k);
+        for (i, it) in level.items.iter().enumerate() {
+            if let Item::Box(b) = *it {
+                box_at[b] = Some((scope, i));
+            }
+        }
+    }
+    // A graph's padding (left, top): the root's mermaid's, a container's its
+    // padding and its title above.
+    let pad = |s: Option<usize>| match s {
+        None => Point::new(super::ELK_ROOT_PADDING, super::ELK_ROOT_PADDING),
+        Some(c) => Point::new(
+            input.cluster_padding,
+            input.cluster_padding + input.clusters[c].title_height,
+        ),
+    };
+    let add = |a: Point, b: Point| Point::new(a.x + b.x, a.y + b.y);
+    let sub = |a: Point, b: Point| Point::new(a.x - b.x, a.y - b.y);
+    // `ElkGraphImporter.applyLayout`: an item's position relative to its
+    // graph's container, `pos + (offset + padding)`.
+    let rel = |s: Option<usize>, i: usize| -> Option<Point> {
+        let f = frame(s)?;
+        Some(add(f.pos.get(i).copied().flatten()?, add(f.offset, pad(s))))
+    };
+    // mermaid's corner of a graph's container, summed down from the root.
+    fn corner(
+        s: Option<usize>,
+        box_at: &[Option<(Option<usize>, usize)>],
+        rel: &dyn Fn(Option<usize>, usize) -> Option<Point>,
+    ) -> Option<Point> {
+        let Some(c) = s else {
+            return Some(Point::new(0.0, 0.0));
+        };
+        let (parent, i) = box_at[c]?;
+        let r = rel(parent, i)?;
+        let up = corner(parent, box_at, rel)?;
+        Some(Point::new(r.x + up.x, r.y + up.y))
+    }
+    let corner_of = |s: Option<usize>| corner(s, &box_at, &rel);
+    // The box of graph `s` in its parent's graph: (parent scope, position).
+    let up = |s: Option<usize>| -> Option<(Option<usize>, Point)> {
+        let (parent, i) = box_at[s?]?;
+        Some((parent, frame(parent)?.pos.get(i).copied().flatten()?))
+    };
+    let mut nodes = vec![None; input.nodes.len()];
+    // Per edge: its source and target anchors and their graphs, and the
+    // graph holding it (its main segment's).
+    let ne = input.edges.len();
+    let mut src: Vec<Option<(Point, Option<usize>)>> = vec![None; ne];
+    let mut tgt: Vec<Option<(Point, Option<usize>)>> = vec![None; ne];
+    let mut holder: Vec<Option<Option<usize>>> = vec![None; ne];
+    for (k, level) in levels.iter().enumerate() {
+        let Some(level) = level else { continue };
+        let scope = (k < nc).then_some(k);
+        let Some(f) = frame(scope) else { continue };
+        let at = corner_of(scope);
+        for (i, it) in level.items.iter().enumerate() {
+            if let (Item::Node(v), Some(at)) = (*it, at) {
+                nodes[v] = rel(scope, i).map(|r| add(r, at));
+            }
+        }
+        for (j, &ei) in level.edge_ids.iter().enumerate() {
+            let e = &input.edges[ei];
+            if e.from == e.to && e.from_cluster.is_none() && e.to_cluster.is_none() {
+                continue;
+            }
+            match level.segs.get(j).copied().flatten() {
+                Some(s) if !s.main => {}
+                _ => holder[ei] = Some(scope),
+            }
+            let (a, b) = level.ends[j];
+            let anchors = f.anchors.get(j).copied().unwrap_or_default();
+            for (item, anchor) in [(a, anchors[0]), (b, anchors[1])] {
+                let (Item::Node(v), Some(p)) = (level.items[item], anchor) else {
+                    continue;
+                };
+                if v == e.from && e.from_cluster.is_none() {
+                    src[ei] = Some((p, scope));
+                }
+                if v == e.to && e.to_cluster.is_none() {
+                    tgt[ei] = Some((p, scope));
+                }
+            }
+        }
+    }
+    // `LGraphUtil.changeCoordSystem` of the origin: from graph `from`'s
+    // coordinates to graph `to`'s.
+    let change = |from: Option<usize>, to: Option<usize>| -> Option<Point> {
+        let mut p = Point::new(0.0, 0.0);
+        if from == to {
+            return Some(p);
+        }
+        let mut g = from;
+        loop {
+            p = add(p, frame(g)?.offset);
+            let Some((parent, at)) = up(g) else { break };
+            p = add(p, pad(g));
+            p = add(p, at);
+            g = parent;
+        }
+        let mut g = to;
+        loop {
+            p = sub(p, frame(g)?.offset);
+            let Some((parent, at)) = up(g) else { break };
+            p = sub(p, pad(g));
+            p = sub(p, at);
+            g = parent;
+        }
+        Some(p)
+    };
+    // The graph an edge's source is in, ELK's reference graph for its
+    // points: a container's own where the target is inside it.
+    let reference = |ei: usize| -> Option<Option<usize>> {
+        let e = &input.edges[ei];
+        match e.from_cluster {
+            None => src[ei].map(|(_, s)| s),
+            Some(c) => {
+                let inside = match e.to_cluster {
+                    Some(d) => tree.chains[d].contains(&c) && d != c,
+                    None => input.nodes[e.to]
+                        .cluster
+                        .is_some_and(|d| tree.chains[d].contains(&c)),
+                };
+                if inside {
+                    Some(Some(c))
+                } else {
+                    box_at[c].map(|(s, _)| s)
+                }
+            }
+        }
+    };
+    let ends = (0..ne)
+        .map(|ei| {
+            let (Some(holder), Some(rs)) = (holder[ei], reference(ei)) else {
+                return [None, None];
+            };
+            let point = || -> Option<Point> {
+                // `ElkGraphImporter.applyEdgeLayout`: the reference graph's
+                // offset and padding, then (`y_b`) each container on the
+                // way out to the edge's own graph: its position, that
+                // graph's offset and padding.
+                let mut out = Point::new(0.0, 0.0);
+                let mut g = rs;
+                while g != holder {
+                    let (parent, at) = up(g)?;
+                    out = add(add(add(out, at), frame(parent)?.offset), pad(parent));
+                    g = parent;
+                }
+                Some(add(add(frame(rs)?.offset, pad(rs)), out))
+            };
+            let (Some(e), Some(at)) = (point(), corner_of(holder)) else {
+                return [None, None];
+            };
+            // mermaid's `calcOffset` adds the corner of the edge's container.
+            let start = src[ei].map(|(s, _)| add(add(s, e), at));
+            // The target's anchor first goes over to the reference graph
+            // (`CompoundGraphPostprocessor`'s target offset).
+            let end = tgt[ei].and_then(|(t, rt)| Some(add(add(add(t, change(rt, rs)?), e), at)));
+            [start, end]
+        })
+        .collect();
+    Some(super::ElkExact {
+        nodes,
+        ends,
+        legs: Vec::new(),
+    })
 }
 
 /// ELK's split of every edge into one segment per graph of the hierarchy it
@@ -2137,6 +2362,7 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
             }
         }
     }
+    let ends = flat.edges.iter().map(|e| (e.from, e.to)).collect();
     Level {
         items,
         out,
@@ -2145,6 +2371,7 @@ fn level_output(li: LevelInput, out: LayoutOutput) -> Level {
         segs: seg_of,
         ext_kinds,
         bbox,
+        ends,
     }
 }
 
@@ -2454,6 +2681,8 @@ fn layout_components(tree: &Tree, scope: Option<usize>, li: &LevelInput) -> Opti
         ],
         clusters: Vec::new(),
         cluster_directions: Vec::new(),
+        elk_frame: None,
+        elk_exact: None,
     };
     for ((level, (nodes, edges)), corner) in levels.iter().zip(&comps).zip(at) {
         let shift =
@@ -2834,6 +3063,7 @@ mod tests {
             ],
             clusters: vec![],
             cluster_directions: vec![],
+            ..Default::default()
         };
         let li = LevelInput {
             items: vec![Item::Node(0), Item::Node(1)],
@@ -2926,6 +3156,7 @@ mod tests {
                 }],
                 clusters: vec![],
                 cluster_directions: vec![],
+                ..Default::default()
             };
             let li = LevelInput {
                 items: vec![Item::Node(0), Item::Node(1)],
@@ -3496,6 +3727,7 @@ mod tests {
             ],
             clusters: vec![Rect::new(-20.0, 30.0, 260.0, 260.0)],
             cluster_directions: vec![Direction::TopBottom],
+            ..Default::default()
         };
         even_group_frames(&inp, &mut out);
         // Children span x 60..140, y 80..220: left 60 - 24, right the lane's

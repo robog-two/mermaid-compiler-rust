@@ -1094,8 +1094,8 @@ pub fn render_with(
         nodes: perm
             .iter()
             .map(|&i| LayoutNode {
-                width: measured[i].w,
-                height: measured[i].h,
+                width: browser_size(measured[i].w, elk),
+                height: browser_size(measured[i].h, elk),
                 cluster: nodes[i].cluster.map(|c| c.0),
             })
             .collect(),
@@ -1218,10 +1218,18 @@ pub fn render_with(
         _ if elk && flow_leaf => (layout_without_empty(&input, &empty_of), Default::default()),
         _ => (layout::layout(&input), Default::default()),
     };
+    let exact_nodes = raw.elk_exact.as_ref().map(|x| {
+        (0..nodes.len())
+            .map(|i| x.nodes.get(pos_of[i]).copied().flatten())
+            .collect::<Vec<_>>()
+    });
     let mut out = layout::LayoutOutput {
         nodes: (0..nodes.len()).map(|i| raw.nodes[pos_of[i]]).collect(),
         ..raw
     };
+    if let (Some(x), Some(n)) = (out.elk_exact.as_mut(), exact_nodes) {
+        x.nodes = n;
+    }
     // A fork bar drawn in a graph laid out across the diagram's direction.
     for (i, n) in nodes.iter().enumerate() {
         let dir = extras.node_dirs.get(pos_of[i]).copied().flatten();
@@ -1619,6 +1627,57 @@ pub fn render_with(
                 }
                 if by_centre {
                     keep_ports_off_the_line(&mut pts, &mut kept[ei]);
+                }
+                // A port mermaid finds inside its node's bounds (ELK's anchor
+                // an ulp short of the side): `cutter2` and its kin cut the
+                // edge further on, where it leaves the node.
+                let neo = cfg.look == ConfigLook::Neo;
+                for (k, end) in [(0, e.from), (1, e.to)] {
+                    let Endpoint::Node(NodeId(i)) = end else {
+                        continue;
+                    };
+                    let (w, h) = (measured[i].w, measured[i].h);
+                    let size = (browser_size(w, true), browser_size(h, true));
+                    if !port_inside(out.elk_exact.as_ref(), ei, k, i, size.0, size.1) {
+                        continue;
+                    }
+                    let head = if k == 0 { e.start } else { e.end };
+                    let offset =
+                        markers::pullback_for(head, neo).max(markers::hidden_end(head, true));
+                    let r = Rect::centered(out.nodes[i], w, h);
+                    let mut route = route.points.clone();
+                    if k == 1 {
+                        route.reverse();
+                        pts.reverse();
+                    }
+                    let leg = out
+                        .elk_exact
+                        .as_ref()
+                        .and_then(|x| x.legs.get(ei))
+                        .and_then(|l| l[k]);
+                    if let Some(cut) = cut_inside_port(&boundaries[i], r, &route, leg, by_centre) {
+                        let port = route[0];
+                        pts[0] = port;
+                        let close = cut.dist(port);
+                        if k == 1 && close < ELK_MIN_LAST_SEGMENT {
+                            // `cutter2` trims a last segment this short.
+                        } else if close <= 1e-6
+                            || offset > 0.0
+                                && pts.len() >= 2
+                                && close < ELK_MIN_MARKER_SEGMENT.max(2.0 * offset)
+                                && on_border(r, port, 1.0)
+                        {
+                            // A duplicate, or too short a segment for the
+                            // marker (`ensureStart/EndMarkerSegmentLength`).
+                            pts[0] = cut;
+                        } else {
+                            pts.insert(0, cut);
+                        }
+                        kept[ei][k] = None;
+                    }
+                    if k == 1 {
+                        pts.reverse();
+                    }
                 }
             }
         }
@@ -2839,6 +2898,126 @@ fn keep_ports_off_the_line(pts: &mut Vec<Point>, kept: &mut [Option<Point>; 2]) 
         pts.insert(1, p);
         kept[0] = None;
     }
+}
+
+/// Whether mermaid's ELK adapter finds edge `ei`'s port at its start (`k` 0)
+/// or end (1) on node `i` (`w`×`h`) inside the node's bounds
+/// (`outsideNode` false), from the exact doubles it works with (see
+/// [`layout::ElkExact`]).
+fn port_inside(
+    exact: Option<&layout::ElkExact>,
+    ei: usize,
+    k: usize,
+    i: usize,
+    w: f64,
+    h: f64,
+) -> bool {
+    let Some(x) = exact else { return false };
+    let (Some(p), Some(c)) = (
+        x.ends.get(ei).and_then(|e| e[k]),
+        x.nodes.get(i).copied().flatten(),
+    ) else {
+        return false;
+    };
+    // `boundsFor`: the node's centre as mermaid sums it.
+    let (bx, by) = (c.x + w / 2.0, c.y + h / 2.0);
+    let (dx, dy) = ((p.x - bx).abs(), (p.y - by).abs());
+    !(dx >= w / 2.0 || dy >= h / 2.0)
+}
+
+/// A node's extent as mermaid hands it to ELK: what `getBBox()` reports for
+/// the drawn shape (`updateNodeBounds`), which Chromium measures in single
+/// precision. (dagre gets the same; its layout does not hang on the last bit.)
+fn browser_size(v: f64, elk: bool) -> f64 {
+    if elk { f64::from(v as f32) } else { v }
+}
+
+/// mermaid's `onBorder`: `p` within `tol` of a side of `r`.
+fn on_border(r: Rect, p: Point, tol: f64) -> bool {
+    let near = |a: f64, b: f64| (a - b).abs() <= tol;
+    let within_x = p.x >= r.x - tol && p.x <= r.right() + tol;
+    let within_y = p.y >= r.y - tol && p.y <= r.bottom() + tol;
+    (near(p.x, r.x) || near(p.x, r.right())) && within_y
+        || (near(p.y, r.y) || near(p.y, r.bottom())) && within_x
+}
+
+/// Where mermaid cuts a route whose port (`route[0]`) lies inside node `r`
+/// (outline `b`): at the first point outside the node's bounds, either along
+/// the route's next leg where that runs on an axis through the node
+/// (`attachAlongDepartureAxis`, not for an edge to a cluster: `by_centre`) or
+/// on the line from the node's centre (`computeNodeIntersection`). `None`
+/// where the whole route stays inside.
+fn cut_inside_port(
+    b: &Boundary,
+    r: Rect,
+    route: &[Point],
+    leg: Option<layout::Leg>,
+    by_centre: bool,
+) -> Option<Point> {
+    let c = r.center();
+    let outside = |p: Point| (p.x - c.x).abs() >= r.w / 2.0 || (p.y - c.y).abs() >= r.h / 2.0;
+    // ELK's next points, a straight run's dummies among them, where known.
+    if let Some((first, next)) = leg.filter(|l| outside(l.0)) {
+        let along = (!by_centre)
+            .then(|| next.and_then(|next| attach_along(b, c, first, next)))
+            .flatten();
+        return Some(along.unwrap_or_else(|| b.clip(first)));
+    }
+    let k = (1..route.len()).find(|&k| outside(route[k]))?;
+    let along = (!by_centre)
+        .then(|| {
+            route
+                .get(k + 1)
+                .and_then(|&next| attach_along(b, c, route[k], next))
+        })
+        .flatten();
+    Some(along.unwrap_or_else(|| b.clip(route[k])))
+}
+
+/// mermaid's `outlineAttachPoint`: where the axis-parallel line from `port`
+/// towards `next` meets the outline, found by bisection from the point level
+/// with the centre `c`; `None` where the leg is not on an axis or that point
+/// is outside the outline.
+fn attach_along(b: &Boundary, c: Point, port: Point, next: Point) -> Option<Point> {
+    const DEPARTURE_AXIS_EPS: f64 = 1e-6;
+    const OUTLINE_RAY_STEPS: usize = 20;
+    let (dx, dy) = (next.x - port.x, next.y - port.y);
+    if dx == 0.0 && dy == 0.0 || dx.abs() > DEPARTURE_AXIS_EPS && dy.abs() > DEPARTURE_AXIS_EPS {
+        return None;
+    }
+    let horizontal = dx.abs() > dy.abs();
+    let along = |t: f64| {
+        if horizontal {
+            Point::new(t, port.y)
+        } else {
+            Point::new(port.x, t)
+        }
+    };
+    // `insideOutline`: no further from the centre than the outline is that way.
+    let inside = |p: Point| {
+        let d = p.dist(c);
+        d < 1e-12 || d <= b.clip(p).dist(c) + 1e-9
+    };
+    let (mut inner, mut outer) = if horizontal {
+        (c.x, port.x)
+    } else {
+        (c.y, port.y)
+    };
+    if !inside(along(inner)) {
+        return None;
+    }
+    if inside(along(outer)) {
+        return Some(port);
+    }
+    for _ in 0..OUTLINE_RAY_STEPS {
+        let mid = (inner + outer) / 2.0;
+        if inside(along(mid)) {
+            inner = mid;
+        } else {
+            outer = mid;
+        }
+    }
+    Some(along(inner))
 }
 
 /// Whether `b` lies on the line through `a` and `c` (to rounding).

@@ -156,7 +156,7 @@ pub struct EdgeRoute {
     pub label: Option<Point>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct LayoutOutput {
     pub nodes: Vec<Point>,
     pub edges: Vec<EdgeRoute>,
@@ -165,6 +165,120 @@ pub struct LayoutOutput {
     /// Per input cluster: the direction its contents were laid out in (its own
     /// `direction` only where the layout honoured it).
     pub cluster_directions: Vec<Direction>,
+    /// Under ELK: one laid out graph's coordinates as ELK holds them (see
+    /// [`ElkFrame`]), for the composition of nested graphs.
+    pub elk_frame: Option<ElkFrame>,
+    /// Under ELK: the coordinates mermaid works with, to the last bit (see
+    /// [`ElkExact`]).
+    pub elk_exact: Option<ElkExact>,
+}
+
+/// One ELK graph (`LGraph`) as ELK holds it after layout, in the output
+/// directions (a layout down transposed): each node's position (its top left
+/// corner, before the graph's offset), the graph's offset, and per edge the
+/// absolute anchors of its ports at its source and target node (`None` where
+/// an end is no node of this graph's). The coordinates mermaid gets from ELK
+/// are sums of these in the order ELK and mermaid add them up (see
+/// [`ElkExact`]), and a decision of mermaid's can hang on their last bit.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ElkFrame {
+    pub pos: Vec<Option<Point>>,
+    pub offset: Point,
+    pub anchors: Vec<[Option<Point>; 2]>,
+}
+
+/// The coordinates mermaid's ELK adapter works with, as the doubles it gets:
+/// per node its top left corner (`offset.posX`, `posY`, its parents' summed
+/// down from the root), per edge its first and last point (ELK's section, the
+/// ports' anchors carried out to the edge's container, plus the container's
+/// corner). Their frame is mermaid's, not the layout's; only their relation
+/// to each other counts (whether a port lies inside its node's bounds).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ElkExact {
+    pub nodes: Vec<Option<Point>>,
+    pub ends: Vec<[Option<Point>; 2]>,
+    /// Per edge, at its start and its end: the next two points of its route
+    /// in from that end as ELK's section has them (a point for every dummy a
+    /// straight run passes, which the layout's routes leave out), in the
+    /// layout's frame.
+    pub legs: Vec<[Option<Leg>; 2]>,
+}
+
+/// The two points after an edge's port, in from that end (see
+/// [`ElkExact::legs`]).
+pub type Leg = (Point, Option<Point>);
+
+/// The [`Leg`]s of a route at its start and its end.
+pub(crate) fn legs_of(points: &[Point]) -> [Option<Leg>; 2] {
+    let mut pts: Vec<Point> = Vec::with_capacity(points.len());
+    for &p in points {
+        if pts.last().is_none_or(|q: &Point| q.dist(p) > 1e-9) {
+            pts.push(p);
+        }
+    }
+    let n = pts.len();
+    if n < 2 {
+        return [None, None];
+    }
+    [
+        Some((pts[1], pts.get(2).copied())),
+        Some((pts[n - 2], (n >= 3).then(|| pts[n - 3]))),
+    ]
+}
+
+/// `exact` where it agrees with the layout (`nodes`: centres of nodes of
+/// `sizes`; `edges`: routes from port to port) but for a shift of the frame:
+/// `None` where a node is off by more than rounding, an end dropped where it
+/// is not its route's end.
+pub(crate) fn checked_exact(
+    mut exact: ElkExact,
+    nodes: &[Point],
+    sizes: &[(f64, f64)],
+    edges: &[EdgeRoute],
+) -> Option<ElkExact> {
+    let centre = |v: usize| {
+        let p = exact.nodes.get(v).copied().flatten()?;
+        Some(Point::new(p.x + sizes[v].0 / 2.0, p.y + sizes[v].1 / 2.0))
+    };
+    let first = (0..nodes.len()).find_map(|v| Some((v, centre(v)?)))?;
+    let shift = nodes[first.0].minus(first.1);
+    for (v, &at) in nodes.iter().enumerate() {
+        if let Some(c) = centre(v)
+            && c.plus(shift).dist(at) > 1e-6
+        {
+            return None;
+        }
+    }
+    for (ends, route) in exact.ends.iter_mut().zip(edges) {
+        let (Some(&a), Some(&b)) = (route.points.first(), route.points.last()) else {
+            *ends = [None, None];
+            continue;
+        };
+        for (end, at) in ends.iter_mut().zip([a, b]) {
+            if end.is_some_and(|p| p.plus(shift).dist(at) > 1e-6) {
+                *end = None;
+            }
+        }
+    }
+    Some(exact)
+}
+
+/// mermaid's ELK padding of the root graph.
+pub(crate) const ELK_ROOT_PADDING: f64 = 12.0;
+
+impl ElkExact {
+    /// The exact coordinates of a flat ELK layout (a root graph of no
+    /// containers): its frame's sums with the root's padding.
+    fn of_root(frame: &ElkFrame) -> Self {
+        let pad = Point::new(ELK_ROOT_PADDING, ELK_ROOT_PADDING);
+        let shift = Point::new(frame.offset.x + pad.x, frame.offset.y + pad.y);
+        let at = |p: Point| Point::new(p.x + shift.x, p.y + shift.y);
+        ElkExact {
+            nodes: frame.pos.iter().map(|p| p.map(at)).collect(),
+            ends: frame.anchors.iter().map(|a| a.map(|p| p.map(at))).collect(),
+            legs: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,7 +360,18 @@ enum ElkGraph {
 
 /// One layered pass over the whole input (every cluster integrated).
 fn layout_flat(input: &LayoutInput) -> LayoutOutput {
-    layout_flat_in(input, ElkGraph::Root, &Hierarchy::default())
+    let mut out = layout_flat_in(input, ElkGraph::Root, &Hierarchy::default());
+    let sizes: Vec<(f64, f64)> = input.nodes.iter().map(|n| (n.width, n.height)).collect();
+    out.elk_exact = out
+        .elk_frame
+        .as_ref()
+        .map(ElkExact::of_root)
+        .and_then(|x| checked_exact(x, &out.nodes, &sizes, &out.edges))
+        .map(|x| ElkExact {
+            legs: out.edges.iter().map(|e| legs_of(&e.points)).collect(),
+            ..x
+        });
+    out
 }
 
 /// Where ports are in ELK's port lists after crossing minimisation: per edge,
@@ -1342,9 +1467,13 @@ fn finish_rng(
             elk_port_inset(graph),
         )
     });
-    let (x, ports) = match elk_placed {
-        Some((x, start, end)) => (x, Some((start, end))),
-        None => (assign_x(&layers, &verts, &links, &borders, &gap), None),
+    let (x, ports, elk_raw) = match elk_placed {
+        Some((x, start, end, raw)) => (x, Some((start, end)), Some(raw)),
+        None => (
+            assign_x(&layers, &verts, &links, &borders, &gap),
+            None,
+            None,
+        ),
     };
     let mut route_rng = hier
         .route_rng
@@ -1591,6 +1720,9 @@ fn finish_rng(
     // (`LGraphUtil.placeNodesHorizontally`, `alignment: AUTOMATIC`): towards the
     // side most of them leave from, as the share of outgoing ones.
     let mut vy: Vec<f64> = verts.iter().map(|v| rank_y[v.rank]).collect();
+    // Per node: where ELK puts its corner along the flow (`placeNodesHorizontally`:
+    // the layer's start plus the node's place in it).
+    let mut rank_top: Vec<f64> = verts.iter().map(|v| rank_y[v.rank] - v.h / 2.0).collect();
     if plan.is_some() {
         let mut ins = vec![0usize; n];
         let mut outs = vec![0usize; n];
@@ -1633,7 +1765,8 @@ fn finish_rng(
                 at += max_lo * 2.0 * (0.5 - ratio);
             }
             let at = at.min(size - hi - h).max(lo);
-            vy[v] = rank_y[r] - size / 2.0 + at + h / 2.0;
+            rank_top[v] = rank_y[r] - size / 2.0 + at;
+            vy[v] = rank_top[v] + h / 2.0;
         }
     }
     let pos = |v: usize| to_out(Point::new(x[v], vy[v]));
@@ -1741,15 +1874,110 @@ fn finish_rng(
         .enumerate()
         .map(|(c, r)| if span[c].is_some() { rect_out(r) } else { r })
         .collect();
+    let elk_frame = match (&elk_raw, &plan) {
+        (Some(raw), Some(_)) => elk_frame(
+            input, &verts, n, &is_ext, &chains, &inl, raw, &rank_top, &nodes,
+        ),
+        _ => None,
+    };
     (
         LayoutOutput {
             nodes,
             edges,
             clusters,
             cluster_directions: vec![input.direction; nc],
+            elk_frame,
+            elk_exact: None,
         },
         route_rng,
     )
+}
+
+/// The graph as ELK holds it (see [`ElkFrame`]), for a layout down or right
+/// (one up or left ELK mirrors, in arithmetic of its own: `None`). `raw`:
+/// the cross-axis coordinates before the offset, `rank_top`: each node's
+/// corner along the flow; `nodes`: the centres laid out, which the frame
+/// must match (else `None`).
+#[allow(clippy::too_many_arguments)]
+fn elk_frame(
+    input: &LayoutInput,
+    verts: &[Vertex],
+    n: usize,
+    is_ext: &[bool],
+    chains: &[Option<Chain>],
+    inl: &[InLayer],
+    raw: &ElkRaw,
+    rank_top: &[f64],
+    nodes: &[Point],
+) -> Option<ElkFrame> {
+    let down = match input.direction {
+        Direction::TopBottom => true,
+        Direction::LeftRight => false,
+        Direction::BottomTop | Direction::RightLeft => return None,
+    };
+    let out = |cross: f64, rank: f64| {
+        if down {
+            Point::new(cross, rank)
+        } else {
+            Point::new(rank, cross)
+        }
+    };
+    // `LayerSizeAndGraphHeightCalculator`: `offset.y -= minY`, the least top
+    // of the graph's nodes, an external port dummy's taken
+    // `spacing.portsSurrounding` further out.
+    let mut min = raw.min;
+    for v in 0..n {
+        let connected = chains
+            .iter()
+            .flatten()
+            .any(|(c, _, _)| c[0] == v || c[c.len() - 1] == v);
+        if is_ext.get(v).copied().unwrap_or(false) && connected {
+            min = min.min(raw.top[v] - PORTS_SURROUNDING);
+        }
+    }
+    let offset = out(0.0 - min, 0.0);
+    let pos: Vec<Option<Point>> = (0..n).map(|v| Some(out(raw.top[v], rank_top[v]))).collect();
+    // The layout's frame starts at `raw.min`, ELK's at `min`.
+    let shift = out(raw.min - min, 0.0);
+    for v in 0..n {
+        let p = pos[v]?;
+        let size = out(verts[v].w, verts[v].h);
+        let c = Point::new(
+            p.x + offset.x + size.x / 2.0 - shift.x,
+            p.y + offset.y + size.y / 2.0 - shift.y,
+        );
+        if c.dist(nodes[v]) > 1e-6 {
+            return None;
+        }
+    }
+    let anchors = chains
+        .iter()
+        .enumerate()
+        .map(|(ei, c)| {
+            let Some((chain, _, reversed)) = c else {
+                return [None, None];
+            };
+            let (u, w) = (chain[0], chain[chain.len() - 1]);
+            if u == w || u >= n || w >= n || inl.iter().any(|l| l.edge == ei) {
+                return [None, None];
+            }
+            // `getAbsoluteAnchor`: the node's position plus the port's (on
+            // the side towards the next layer at the upper end: the node's
+            // extent along the flow; at the lower end none).
+            let first = Some(out(raw.start[ei], rank_top[u] + verts[u].h));
+            let last = Some(out(raw.end[ei], rank_top[w]));
+            if *reversed {
+                [last, first]
+            } else {
+                [first, last]
+            }
+        })
+        .collect();
+    Some(ElkFrame {
+        pos,
+        offset,
+        anchors,
+    })
 }
 
 /// ELK's crossing minimisation (see `elkorder`) on ELK's own layers: the ranks of
@@ -2086,7 +2314,7 @@ fn elk_place(
     end_labels: &[[Option<f64>; 2]],
     spacing: elkbk::Spacing,
     port_inset: f64,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, ElkRaw) {
     let nv = verts.len();
     let kept_rank = |r: usize| {
         r % RANK_STEP == 0
@@ -2392,12 +2620,29 @@ fn elk_place(
             _ => top[v],
         })
         .fold(f64::INFINITY, f64::min);
+    // ELK keeps these (routing in them) and the graph's offset, `-min`.
+    let raw = ElkRaw {
+        top,
+        start: start.clone(),
+        end: end.clone(),
+        min: if min.is_finite() { min } else { 0.0 },
+    };
     if min.is_finite() {
         for p in x.iter_mut().chain(&mut start).chain(&mut end) {
             *p -= min;
         }
     }
-    (x, start, end)
+    (x, start, end, raw)
+}
+
+/// [`elk_place`]'s cross-axis coordinates as ELK holds them: every vertex's
+/// top, every edge's source and target port, and the least top, which the
+/// graph's offset undoes.
+struct ElkRaw {
+    top: Vec<f64>,
+    start: Vec<f64>,
+    end: Vec<f64>,
+    min: f64,
 }
 
 /// Where ELK puts a label whose dummy's ports carry the edge through `c`: not quite

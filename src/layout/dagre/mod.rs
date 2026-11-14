@@ -290,6 +290,8 @@ pub fn layout_full(input: &LayoutInput, model: &DagreModel) -> (LayoutOutput, Ex
             input.edges.len()
         ],
         clusters: vec![Rect::default(); input.clusters.len()],
+        elk_frame: None,
+        elk_exact: None,
         cluster_directions: vec![input.direction; input.clusters.len()],
     };
     for (i, p) in r.nodes {
