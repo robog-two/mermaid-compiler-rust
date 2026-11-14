@@ -132,6 +132,29 @@ pub enum PathCmd {
     Close,
 }
 
+/// A length as Chromium hands back an SVG attribute it was given (a `rect`'s
+/// `width` or `height` in its `getBBox()`): single precision, the nearest
+/// float, but a value half-way between two floats goes to the one nearer
+/// zero (not to the even one, as a plain cast does). Sums of floats land on
+/// such halves often.
+pub fn chromium_f32(v: f64) -> f64 {
+    let f = v as f32;
+    let d = f64::from(f) - v;
+    if d != 0.0 && f != 0.0 {
+        let bits = f.to_bits();
+        // The float on the other side of `v`.
+        let other = if (d > 0.0) == (f > 0.0) {
+            f32::from_bits(bits - 1)
+        } else {
+            f32::from_bits(bits + 1)
+        };
+        if (f64::from(other) - v).abs() == d.abs() && other.abs() < f.abs() {
+            return f64::from(other);
+        }
+    }
+    f64::from(f)
+}
+
 /// The tight bounding box of a path (curves by their extremes, as SVG's
 /// `getBBox` measures them), or `None` for an empty path.
 pub fn path_bbox(cmds: &[PathCmd]) -> Option<Rect> {
@@ -547,6 +570,27 @@ pub fn clip_polygon(c: Point, poly: &[Point], toward: Point) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `getBBox()` heights Chromium (mermaid-cli 12's) reports for `rect`s
+    /// given these heights.
+    #[test]
+    fn chromium_f32_takes_halves_toward_zero() {
+        for (v, bbox) in [
+            // Half-way between two floats: the lower one, odd or even.
+            (477.830_062_866_210_94, 477.830_047_607_421_9),
+            (196.956_962_585_449_22, 196.956_954_956_054_7),
+            (1.000_000_059_604_644_8, 1.0),
+            (1.000_000_178_813_934_3, 1.000_000_119_209_289_6),
+            (-1.000_000_059_604_644_8, -1.0),
+            // Otherwise the nearest.
+            (0.1, 0.100_000_001_490_116_12),
+            (52.937_862_396_240_23, 52.937_862_396_240_234),
+            (196.956_970_214_843_75, 196.956_970_214_843_75),
+            (0.0, 0.0),
+        ] {
+            assert_eq!(chromium_f32(v), bbox, "{v}");
+        }
+    }
 
     #[test]
     fn path_length_of_lines_and_rounded_corners() {

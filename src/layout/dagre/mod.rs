@@ -689,7 +689,7 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
     let sub = &ctx.subs[gi];
     let g = &sub.g;
     let input = ctx.input;
-    let f = |v: f64| f64::from(v as f32);
+    let f = crate::geom::chromium_f32;
     let size = |v: &str| -> (f64, f64) {
         let (a, b) = match g.node(v) {
             Some(MNode::Leaf { idx }) => {

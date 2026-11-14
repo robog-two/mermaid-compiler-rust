@@ -1488,7 +1488,7 @@ pub fn render_with(
                 .unwrap_or_else(|| r.center());
             // The shape leaves the node its drawn rect's `getBBox()` height (a
             // subgraph's `rect` its width too): an `SVGRect`, of floats.
-            let bbox = |v: f64| f64::from(v as f32);
+            let bbox = geom::chromium_f32;
             let w = if g.clusters[c].kind == ClusterKind::Group {
                 bbox(r.w)
             } else {
