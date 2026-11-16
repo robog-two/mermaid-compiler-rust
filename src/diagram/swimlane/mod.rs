@@ -646,8 +646,9 @@ fn box_paint(style: &graph::StyleOverrides, slot: Option<ColorSlot>, pal: &Palet
 
 /// Draw a parsed swimlane diagram.
 pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
-    let g = &sl.graph;
     let gcfg = &cfg.flowchart;
+    // Labels go through the flowchart's `createText`, Font Awesome icons and all.
+    let g = &*graph::with_icons(&sl.graph, gcfg);
     let font = pal.font_size;
     let horizontal = g.direction.is_horizontal();
     let sizes: Vec<(f64, f64)> = g

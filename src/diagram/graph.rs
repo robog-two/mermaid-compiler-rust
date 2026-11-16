@@ -843,7 +843,10 @@ fn wrap_lines(lines: &[String], width: f64, font: f64, bold: bool) -> Vec<String
 /// The diagram with Font Awesome references (`fa:fa-car`) in its HTML labels
 /// turned into icons ([`crate::icons`]); SVG labels keep them as text, as
 /// `createText` only replaces them in HTML.
-fn with_icons<'a>(g: &'a GraphDiagram, cfg: &GraphConfig) -> std::borrow::Cow<'a, GraphDiagram> {
+pub(crate) fn with_icons<'a>(
+    g: &'a GraphDiagram,
+    cfg: &GraphConfig,
+) -> std::borrow::Cow<'a, GraphDiagram> {
     use crate::icons::replace_references as icons;
     let has = |s: &str| s.contains(":fa-");
     let any = g

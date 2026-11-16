@@ -31,6 +31,18 @@ fn font_awesome_icons_are_drawn_in_html_labels() {
     assert!(s.contains("fa:fa-car") && !s.contains("fa-icon"));
 }
 
+/// Swimlane labels go through the flowchart's `createText`: nodes, edge labels
+/// and lane titles draw their icons too.
+#[cfg(feature = "icons")]
+#[test]
+fn font_awesome_icons_are_drawn_in_swimlane_labels() {
+    let s = svg(
+        "swimlane-beta TB\nsubgraph A[fa:fa-user Customer]\n a[fa:fa-car Drive car]\nend\nsubgraph B\n c[Plain]\nend\na -->|fa:fa-ban Stop| c\n",
+    );
+    assert_eq!(s.matches("class=\"fa-icon\"").count(), 3);
+    assert!(!s.contains("fa:fa-"));
+}
+
 #[cfg(feature = "icons")]
 #[test]
 fn icons_take_their_fixed_width() {
