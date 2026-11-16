@@ -2869,15 +2869,19 @@ impl Options {
 }
 
 /// Display lines of a label: entity codes decoded; Markdown strings lose their markers
-/// and keep their physical line breaks.
+/// and keep their physical line breaks. Font Awesome references become icons.
 fn label_lines(label: &Label) -> Vec<String> {
-    match label.kind {
+    let lines: Vec<String> = match label.kind {
         LabelKind::Text => vec![decode_entities(label.text.trim())],
         LabelKind::Markdown => normalize_label(&format!("`{}`", label.text))
             .split('\n')
             .map(|l| l.trim().to_string())
             .collect(),
-    }
+    };
+    lines
+        .iter()
+        .map(|l| crate::icons::replace_references(l))
+        .collect()
 }
 
 /// Greedy word wrap of every line to `max` pixels (the label `max-width`).

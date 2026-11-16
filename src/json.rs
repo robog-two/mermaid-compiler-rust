@@ -52,6 +52,17 @@ impl Json {
         }
     }
 
+    /// JavaScript truthiness (`if (value)`).
+    pub fn js_truthy(&self) -> bool {
+        match self {
+            Json::Null => false,
+            Json::Bool(b) => *b,
+            Json::Number(n) => *n != 0.0 && !n.is_nan(),
+            Json::String(s) => !s.is_empty(),
+            Json::Array(_) | Json::Object(_) => true,
+        }
+    }
+
     pub fn as_object(&self) -> Option<&[(String, Json)]> {
         match self {
             Json::Object(p) => Some(p),

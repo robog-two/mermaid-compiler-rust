@@ -169,6 +169,9 @@ fn class_attr(c: &Option<String>) -> String {
 }
 
 fn write_text(out: &mut String, t: &Text, class: &Option<String>) {
+    if t.lines.iter().any(|l| crate::icons::has_icons(l)) {
+        return write_text_with_icons(out, t, class);
+    }
     let anchor = match t.anchor {
         Anchor::Start => "start",
         Anchor::Middle => "middle",
@@ -199,6 +202,66 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>) {
         }
     }
     out.push_str("</text>");
+}
+
+/// Text with Font Awesome icons ([`crate::icons`]): each line's text runs as
+/// start-anchored `<text>` and each icon as a filled `<path>`, at the offsets the
+/// layout measured, grouped in one `<g>`.
+fn write_text_with_icons(out: &mut String, t: &Text, class: &Option<String>) {
+    use crate::icons::Piece;
+    let _ = write!(out, "<g{}>", class_attr(class));
+    let weight = if t.bold { " font-weight=\"bold\"" } else { "" };
+    for (i, line) in t.lines.iter().enumerate() {
+        let y = t.y + i as f64 * t.line_height;
+        let w = crate::text::line_width(line, t.font_size, t.bold);
+        let x0 = match t.anchor {
+            Anchor::Start => t.x,
+            Anchor::Middle => t.x - w / 2.0,
+            Anchor::End => t.x - w,
+        };
+        for piece in crate::icons::line_pieces(line, t.font_size, t.bold) {
+            match piece {
+                Piece::Text { x, text } => {
+                    if crate::text::plain(&text).is_empty() {
+                        continue;
+                    }
+                    let _ = write!(
+                        out,
+                        "<text x=\"{}\" y=\"{}\" font-size=\"{}\" fill=\"{}\"{weight} xml:space=\"preserve\">",
+                        num(x0 + x),
+                        num(y),
+                        num(t.font_size),
+                        esc(t.fill.css()),
+                    );
+                    write_line(out, &text, t.bold);
+                    out.push_str("</text>");
+                }
+                Piece::Icon { x, icon } => {
+                    let d = crate::icons::outline(icon);
+                    if d.is_empty() {
+                        continue;
+                    }
+                    let (tx, ty, s) = crate::icons::placement(icon, x0 + x, y, t.font_size);
+                    let _ = write!(
+                        out,
+                        "<path class=\"fa-icon\" transform=\"translate({} {}) scale({})\" d=\"{}\" fill=\"{}\"/>",
+                        num(tx),
+                        num(ty),
+                        fmt_scale(s),
+                        path_data(&d),
+                        esc(t.fill.css()),
+                    );
+                }
+            }
+        }
+    }
+    out.push_str("</g>");
+}
+
+/// A scale factor with enough digits for a 512-unit glyph to land within 0.001px.
+fn fmt_scale(s: f64) -> String {
+    let s = format!("{s:.7}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// One display line: plain text, or one `<tspan>` per run of markdown emphasis.

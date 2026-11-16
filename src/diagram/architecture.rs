@@ -16,6 +16,8 @@ use super::architecture_fcose::{self, Placement};
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
+use crate::json::Json;
+use crate::layout::force::fcose;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
 use crate::theme::Palette;
@@ -743,7 +745,7 @@ fn layout_from_placement(d: &Architecture, p: &Placement, font: f64) -> Layout {
 
 /// mermaid's placement (see [`architecture_fcose::place`]) and the boxes
 /// drawn from it.
-fn layout(d: &Architecture, font: f64) -> (Placement, Layout) {
+fn layout(d: &Architecture, font: f64, options: fcose::Options) -> (Placement, Layout) {
     // cytoscape measures a label (a service's raw title or an edge's label,
     // one line) on a canvas in its default font, `Helvetica Neue, Helvetica,
     // sans-serif` (Arial's metrics where Helvetica Neue is missing), rounded
@@ -751,14 +753,31 @@ fn layout(d: &Architecture, font: f64) -> (Placement, Layout) {
     let measure = |t: &str, edge: bool| {
         crate::text::line_width(t, if edge { 16.0 } else { font }, false).ceil()
     };
-    let placement = architecture_fcose::place(d, &measure);
+    let placement = architecture_fcose::place(d, &measure, options);
     let lay = layout_from_placement(d, &placement, font);
     (placement, lay)
 }
 
-fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
+/// The fcose options mermaid reads with `getConfigField`: the
+/// `architecture` config (site config, frontmatter and directives, latest
+/// first) over the defaults `randomize: false` and `nodeSeparation: 75`.
+/// fcose tests `randomize` for JavaScript truthiness.
+pub fn fcose_options(cfg: &MermaidConfig) -> fcose::Options {
+    let default = fcose::Options::default();
+    fcose::Options {
+        randomize: cfg
+            .section("architecture", "randomize")
+            .map_or(default.randomize, Json::js_truthy),
+        node_separation: cfg
+            .section("architecture", "nodeSeparation")
+            .and_then(Json::as_f64)
+            .unwrap_or(default.node_separation),
+    }
+}
+
+fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let font = pal.font_size;
-    let (placement, lay) = layout(d, font);
+    let (placement, lay) = layout(d, font, fcose_options(cfg));
     let icon_bg = Color::new("#087ebf");
     let mut bounds = Bounds::default();
     let mut group_els = Vec::new();
@@ -930,6 +949,49 @@ fn draw(d: &Architecture, _cfg: &MermaidConfig, pal: &Palette) -> Scene {
 mod tests {
     use super::*;
 
+    #[test]
+    fn fcose_options_read_the_architecture_config() {
+        let base = MermaidConfig::default();
+        assert_eq!(fcose_options(&base), fcose::Options::default());
+        assert!(!fcose_options(&base).randomize);
+        assert_eq!(fcose_options(&base).node_separation, 75.0);
+        let with = |site: &str, directive: &str| {
+            let mut c = MermaidConfig::default();
+            if !site.is_empty() {
+                c = c.with_json(&crate::json::parse(site).unwrap()).unwrap();
+            }
+            if !directive.is_empty() {
+                c = c
+                    .with_directive(&crate::json::parse(directive).unwrap())
+                    .unwrap();
+            }
+            fcose_options(&c)
+        };
+        let on = with(r#"{"architecture": {"randomize": true}}"#, "");
+        assert!(on.randomize);
+        // The diagram's directive wins over the site config.
+        assert!(
+            !with(
+                r#"{"architecture": {"randomize": true}}"#,
+                r#"{"architecture": {"randomize": false}}"#
+            )
+            .randomize
+        );
+        // fcose tests `options.randomize` for JavaScript truthiness.
+        for (v, want) in [
+            ("1", true),
+            ("0", false),
+            ("\"\"", false),
+            ("\"no\"", true),
+            ("null", false),
+        ] {
+            let j = format!(r#"{{"architecture": {{"randomize": {v}}}}}"#);
+            assert_eq!(with("", &j).randomize, want, "{v}");
+        }
+        let sep = with("", r#"{"architecture": {"nodeSeparation": 40}}"#);
+        assert_eq!((sep.randomize, sep.node_separation), (false, 40.0));
+    }
+
     const SRC: &str = "architecture-beta
     group api(cloud)[API]
 
@@ -994,7 +1056,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let (_, lay) = layout(&d, 16.0);
+        let (_, lay) = layout(&d, 16.0, fcose::Options::default());
         let (a, b, c) = (lay.icon_box[0], lay.icon_box[1], lay.icon_box[2]);
         assert!(b.x > a.right());
         assert!((a.y - b.y).abs() < 1e-6);
@@ -1005,7 +1067,7 @@ mod tests {
     #[test]
     fn groups_contain_their_members() {
         let d = parse(SRC, None).unwrap();
-        let (_, lay) = layout(&d, 16.0);
+        let (_, lay) = layout(&d, 16.0, fcose::Options::default());
         let g = lay.group_box[0];
         // (fcose lets the ungrouped `out` overlap the group, as in mermaid.)
         for (n, nb) in d.nodes.iter().zip(&lay.node_box) {
@@ -1041,7 +1103,7 @@ mod tests {
     #[test]
     fn nested_groups_contain_children_with_padding() {
         let d = parse(NESTED, None).unwrap();
-        let (_, lay) = layout(&d, 16.0);
+        let (_, lay) = layout(&d, 16.0, fcose::Options::default());
         let (cloud, private, public) = (lay.group_box[0], lay.group_box[1], lay.group_box[2]);
         assert!(inside(cloud, private, GROUP_PAD));
         assert!(inside(cloud, public, GROUP_PAD));
@@ -1058,7 +1120,7 @@ mod tests {
     #[test]
     fn straight_edges_across_group_borders_are_aligned() {
         let d = parse(NESTED, None).unwrap();
-        let (_, lay) = layout(&d, 16.0);
+        let (_, lay) = layout(&d, 16.0, fcose::Options::default());
         let c = |n: usize| lay.icon_box[n].center();
         // user:R --> L:web is horizontal, web:B --> T:app vertical (fcose aligns both).
         assert!((c(3).y - c(0).y).abs() < 1e-6);
@@ -1093,7 +1155,7 @@ mod tests {
                 members: vec![0, 1, 2]
             }]
         );
-        let (_, lay) = layout(&d, 16.0);
+        let (_, lay) = layout(&d, 16.0, fcose::Options::default());
         let (a, b, c) = (lay.icon_box[0], lay.icon_box[1], lay.icon_box[2]);
         assert!(a.right() < b.x && b.right() < c.x);
         assert!((a.y - b.y).abs() < 1e-6 && (b.y - c.y).abs() < 1e-6);
@@ -1162,7 +1224,7 @@ mod tests {
     /// 12.3.0's (Chromium, `Helvetica` resolving to Arial's metrics).
     fn assert_positions(src: &str, want: &[(&str, f64, f64)]) {
         let d = parse(src, None).unwrap();
-        let (p, _) = layout(&d, 16.0);
+        let (p, _) = layout(&d, 16.0, fcose::Options::default());
         let at = |id: &str| p.node_pos[d.nodes.iter().position(|n| n.id == id).unwrap()];
         let (o, (_, wx, wy)) = (at(want[0].0), want[0]);
         for &(id, x, y) in want {
@@ -1265,7 +1327,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let (p, lay) = layout(&d, 16.0);
+        let (p, lay) = layout(&d, 16.0, fcose::Options::default());
         let e = &d.edges[0];
         let h = d.groups.iter().position(|g| g.id == "h").unwrap();
         let pts = architecture_fcose::edge_points(&d, &p, e);

@@ -340,7 +340,13 @@ fn elements(d: &Architecture) -> (Vec<fcose::Node>, Vec<fcose::Edge>) {
 /// Lay the diagram out as mermaid does. `measure(text, edge)` is the width
 /// cytoscape measures for a label (a service's title, or with `edge` an edge's
 /// label), which widens the boxes it puts around nodes, edges and groups.
-pub fn place(d: &Architecture, measure: &dyn Fn(&str, bool) -> f64) -> Placement {
+/// `options` are the `architecture` config fields mermaid hands fcose
+/// (`randomize`, `nodeSeparation`).
+pub fn place(
+    d: &Architecture,
+    measure: &dyn Fn(&str, bool) -> f64,
+    options: fcose::Options,
+) -> Placement {
     let ng = d.groups.len();
     let (maps, group_al) = data_structures(d);
     let (horizontal, vertical) = alignments(d, &maps, &group_al);
@@ -382,7 +388,7 @@ pub fn place(d: &Architecture, measure: &dyn Fn(&str, bool) -> f64) -> Placement
         let first = (run == 1).then_some(first_pos.as_slice());
         let (_, all) = cy_boxes(d, &node_pos, first, &|g| pos[g], measure);
         let center = (all.x + all.w / 2.0, all.y + all.h / 2.0);
-        let rects = fcose::run(&nodes, &edges, &constraints, &pos, center);
+        let rects = fcose::run(&nodes, &edges, &constraints, &pos, center, options);
         pos = rects.iter().map(|r| (r.center_x(), r.center_y())).collect();
         if run == 0 {
             first_pos = (0..d.nodes.len())
@@ -647,7 +653,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let p = place(&d, &titled(&d));
+        let p = place(&d, &titled(&d), fcose::Options::default());
         let want = [
             (-229.5803166068381, 105.67886565152662),
             (-9.62211433371776, 105.67886565152662),
@@ -703,7 +709,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let p = place(&d, &titled(&d));
+        let p = place(&d, &titled(&d), fcose::Options::default());
         // mermaid's positions, compared relative to s0 (the absolute offset
         // depends on cytoscape's label metrics).
         let want = [
@@ -727,6 +733,174 @@ mod tests {
             let (dx, dy) = (q.x - o.x - (x - want[0].0), q.y - o.y - (y - want[0].1));
             assert!(dx.abs() < 1e-9 && dy.abs() < 1e-9, "{q:?} vs ({x}, {y})");
         }
+    }
+
+    const RANDOMIZE: fcose::Options = fcose::Options {
+        randomize: true,
+        node_separation: 75.0,
+    };
+
+    /// `place` with `randomize: true` gives exactly mermaid's positions
+    /// (and, where listed, its group rects: `x`, `y`, `width`, `height`).
+    fn assert_randomized(src: &str, want: &[(f64, f64)], groups: &[(f64, f64, f64, f64)]) {
+        let d = parse(src, None).unwrap();
+        let p = place(&d, &titled(&d), RANDOMIZE);
+        let got: Vec<(f64, f64)> = p.node_pos.iter().map(|q| (q.x, q.y)).collect();
+        assert_eq!(got, want);
+        let got: Vec<(f64, f64, f64, f64)> = p
+            .group_bbox
+            .iter()
+            .map(|r| (r.x + ICON_SIZE / 2.0, r.y + ICON_SIZE / 2.0, r.w, r.h))
+            .collect();
+        assert_eq!(got, groups);
+    }
+
+    // Positions from mermaid 12.3.0 in Chromium with `randomize: true`.
+
+    #[test]
+    fn randomize_reproduces_mermaid_with_junctions_and_bends() {
+        assert_randomized(
+            "architecture-beta
+    service s0(server)[Svc 0]
+    service s1(server)[Svc 1]
+    service s2(server)[Svc 2]
+    service s3(server)[Svc 3]
+    service s4(server)[Svc 4]
+    service s5(server)[Svc 5]
+    service s6(server)[Svc 6]
+    service s7(server)[Svc 7]
+    service s8(server)[Svc 8]
+    service s9(server)[Svc 9]
+    service s10(server)[Svc 10]
+    service s11(server)[Svc 11]
+    service s12(server)[Svc 12]
+    service s13(server)[Svc 13]
+    junction j0
+    junction j1
+    s9:R <--> L:s10
+    s9:L <-- R:s6
+    s10:B -- T:s7
+    s10:B <--> T:s13
+    s10:R <--> L:s1
+    s1:B --> T:j1
+    s9:B --> T:s0
+    s10:L <-- R:s8
+    s9:L --> R:s3
+    s13:T --> R:s2
+    s2:T <-- B:s12
+    j1:L <-- R:s11
+    s13:R -- L:s4
+    s13:B <--> T:j0
+    s7:T --> B:s5
+    s0:L --> R:s5",
+            &[
+                (-81.32819616425863, 143.57098523899288),
+                (268.2722159389102, -13.377516985289951),
+                (-81.32819616425863, -13.377516985289951),
+                (-225.27221593891022, -13.377516985289951),
+                (268.2722159389102, 143.57098523899288),
+                (-225.27221593891022, 143.57098523899288),
+                (81.08107055104679, -187.32102370879306),
+                (-225.27221593891022, 280.7132019189605),
+                (-81.32819616425863, -13.377516985289951),
+                (-81.32819616425863, -13.377516985289951),
+                (66.43445986407114, -13.377516985289951),
+                (66.43445986407114, 143.57098523899288),
+                (-81.32819616425863, -221.21320191896052),
+                (66.43445986407114, 143.57098523899288),
+                (66.43445986407114, 280.7132019189605),
+                (268.2722159389102, 143.57098523899288),
+            ],
+            &[],
+        );
+    }
+
+    #[test]
+    fn randomize_reproduces_mermaid_with_empty_groups() {
+        // Two empty groups and a junction: the spectral draft joins the
+        // disconnected parts through a dummy node.
+        assert_randomized(
+            "architecture-beta
+    group g0(cloud)[Group 0]
+    group g1(cloud)[Group 1]
+    group g2(cloud)[Group 2]
+    service s0(server)[Svc 0] in g2
+    service s1(server)[Svc 1]
+    service s2(server)[Svc 2]
+    service s3(server)[Svc 3]
+    service s4(server)[Svc 4]
+    junction j0
+    s3:L -- R:s0
+    s0:L --> R:s2
+    s2:B <--> T:s1
+    s2:L --> R:j0
+    s3:L <--> R:s4
+    s4:L <--> R:s2",
+            &[
+                (66.09637631694586, -116.31941961313751),
+                (-136.21898091296845, 85.7645847765595),
+                (-136.21898091296845, -116.31941961313751),
+                (267.8822831075071, -116.31941961313751),
+                (66.09637631694586, -116.31941961313751),
+                (-336.70950750972077, -116.31941961313751),
+            ],
+            &[
+                (305.70950750972077, 37.61493750966889, 112.0, 112.0),
+                (106.34304385655534, 140.8194196131375, 112.0, 112.0),
+                (23.596376316945864, -158.8194196131375, 165.0, 182.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn randomize_reproduces_mermaid_with_disconnected_groups() {
+        assert_randomized(
+            "architecture-beta
+    group g1(cloud)[G1]
+    group g2(cloud)[G2]
+    service a(server)[A] in g1
+    service b(server)[B] in g1
+    service c(server)[C] in g2
+    service d(server)[D] in g2
+    service e(server)[E]
+    a:R -- L:b
+    c:T -- B:d",
+            &[
+                (40.351070802823415, 14.00674526082635),
+                (241.0376365640085, 14.00674526082635),
+                (-241.0376365640085, 51.606121790450715),
+                (-241.0376365640085, -149.08044397073428),
+                (-41.48505813605246, 222.58044397073428),
+            ],
+            &[
+                (
+                    -2.148929197176585,
+                    -28.49325473917365,
+                    365.6865657611851,
+                    182.0,
+                ),
+                (
+                    -283.5376365640085,
+                    -191.58044397073428,
+                    165.0,
+                    382.68656576118497,
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn randomize_with_two_nodes_starts_the_second_at_the_origin() {
+        // fcose places the second of two nodes at x = NaN (it adds mermaid's
+        // `idealEdgeLength` function to a number) and then at rect.x = 0.
+        assert_randomized(
+            "architecture-beta
+    service a(server)[A]
+    service b(database)[B]
+    a:R -- L:b",
+            &[(-79.59328288059253, 18.0), (121.09328288059253, 18.0)],
+            &[],
+        );
     }
 
     #[test]
