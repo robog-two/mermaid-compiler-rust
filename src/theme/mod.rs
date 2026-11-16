@@ -104,6 +104,10 @@ pub struct Palette {
     pub pie_title_text: Color,
     pub pie_section_text: Color,
     pub pie_legend_text: Color,
+    /// `pieTitleTextSize`, `pieSectionTextSize`, `pieLegendTextSize` in px.
+    pub pie_title_text_size: f64,
+    pub pie_section_text_size: f64,
+    pub pie_legend_text_size: f64,
     /// mermaid's `cScale0..11`: section colours of timeline, mindmap, kanban, treemap, radar.
     pub scale: Vec<Color>,
     /// `cScaleLabel0..11`: text on each `scale` entry.
@@ -266,6 +270,9 @@ fn default_palette() -> Palette {
         pie_title_text: c("black"),
         pie_section_text: c("#333"),
         pie_legend_text: c("black"),
+        pie_title_text_size: 25.0,
+        pie_section_text_size: 17.0,
+        pie_legend_text_size: 17.0,
         scale: Vec::new(),
         scale_text: Vec::new(),
         scale_peer: Vec::new(),
@@ -683,6 +690,9 @@ fn apply_variable(p: &mut Palette, key: &str, value: &str) {
             p.pie_outer_stroke_width = num().unwrap_or(p.pie_outer_stroke_width)
         }
         "pieOpacity" => p.pie_opacity = num().unwrap_or(p.pie_opacity),
+        "pieTitleTextSize" => p.pie_title_text_size = num().unwrap_or(p.pie_title_text_size),
+        "pieSectionTextSize" => p.pie_section_text_size = num().unwrap_or(p.pie_section_text_size),
+        "pieLegendTextSize" => p.pie_legend_text_size = num().unwrap_or(p.pie_legend_text_size),
         "strokeWidth" => p.stroke_width = num().or(p.stroke_width),
         "radius" => p.radius = num().or(p.radius),
         k => {

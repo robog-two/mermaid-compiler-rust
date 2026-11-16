@@ -349,6 +349,12 @@ impl SequenceConfig {
 pub struct PieConfig {
     pub text_position: f64,
     pub use_max_width: bool,
+    /// `donutHole`: the inner radius as a fraction of the outer one (used when in `(0, 0.9]`).
+    pub donut_hole: f64,
+    /// `legendPosition`: `right` (default), `left`, `top`, `bottom` or `center`.
+    pub legend_position: String,
+    /// `highlightSlice`: the label of a slice drawn enlarged, or `hover`.
+    pub highlight_slice: String,
 }
 
 impl Default for PieConfig {
@@ -356,6 +362,9 @@ impl Default for PieConfig {
         PieConfig {
             text_position: 0.75,
             use_max_width: true,
+            donut_hole: 0.0,
+            legend_position: "right".into(),
+            highlight_slice: String::new(),
         }
     }
 }
@@ -595,6 +604,13 @@ impl MermaidConfig {
         if let Some(f) = j.get("pie") {
             set_f64(f, "textPosition", &mut self.pie.text_position);
             set_bool(f, "useMaxWidth", &mut self.pie.use_max_width);
+            set_f64(f, "donutHole", &mut self.pie.donut_hole);
+            if let Some(v) = f.get("legendPosition").and_then(Json::as_str) {
+                self.pie.legend_position = v.to_string();
+            }
+            if let Some(v) = f.get("highlightSlice").and_then(Json::as_str) {
+                self.pie.highlight_slice = v.to_string();
+            }
         }
         Ok(self)
     }
