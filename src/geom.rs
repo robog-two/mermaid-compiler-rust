@@ -455,6 +455,51 @@ pub fn fix_corners(points: &[Point]) -> Vec<Point> {
     out
 }
 
+/// The SVG arc `A r,r 0 0 sweep to` from `from` as cubics (SVG 1.1 implementation
+/// notes F.6.5/F.6.6 for a circle: the small arc, its radius scaled up when the
+/// chord is longer than the diameter). The last cubic ends exactly at `to`.
+pub fn svg_circle_arc_cubics(from: Point, r: f64, sweep: bool, to: Point) -> Vec<PathCmd> {
+    let mut r = r.abs();
+    if r == 0.0 || from == to {
+        return vec![PathCmd::LineTo(to)];
+    }
+    let (x1, y1) = ((from.x - to.x) / 2.0, (from.y - to.y) / 2.0);
+    let d2 = x1 * x1 + y1 * y1;
+    let lambda = d2 / (r * r);
+    if lambda > 1.0 {
+        r *= lambda.sqrt();
+    }
+    let mut coef = ((r * r * r * r - r * r * d2) / (r * r * d2))
+        .max(0.0)
+        .sqrt();
+    if !sweep {
+        coef = -coef;
+    }
+    let (cxp, cyp) = (coef * y1, -coef * x1);
+    let c = Point::new(cxp + (from.x + to.x) / 2.0, cyp + (from.y + to.y) / 2.0);
+    let t1 = (y1 - cyp).atan2(x1 - cxp);
+    let t2 = (-y1 - cyp).atan2(-x1 - cxp);
+    let mut dt = t2 - t1;
+    if !sweep && dt > 0.0 {
+        dt -= std::f64::consts::TAU;
+    } else if sweep && dt < 0.0 {
+        dt += std::f64::consts::TAU;
+    }
+    let n = ((dt.abs() / std::f64::consts::FRAC_PI_2).ceil() as usize).max(1);
+    let step = dt / n as f64;
+    let k = 4.0 / 3.0 * (step / 4.0).tan();
+    let at = |a: f64| Point::new(c.x + r * a.cos(), c.y + r * a.sin());
+    let d = |a: f64| Point::new(-r * a.sin(), r * a.cos());
+    (0..n)
+        .map(|i| {
+            let s = t1 + step * i as f64;
+            let e = s + step;
+            let end = if i + 1 == n { to } else { at(e) };
+            PathCmd::CubicTo(at(s).plus(d(s).scale(k)), at(e).minus(d(e).scale(k)), end)
+        })
+        .collect()
+}
+
 /// Cubic segments approximating a circular arc (angles in radians, SVG y-down,
 /// 0 = east, increasing clockwise on screen). Does not emit the initial MoveTo.
 pub fn arc_cubics(c: Point, r: f64, a0: f64, a1: f64) -> Vec<PathCmd> {
@@ -573,6 +618,35 @@ mod tests {
 
     /// `getBBox()` heights Chromium (mermaid-cli 12's) reports for `rect`s
     /// given these heights.
+    #[test]
+    fn svg_circle_arc_follows_the_endpoint_parameterisation() {
+        let end = |cmds: &[PathCmd]| match cmds.last() {
+            Some(PathCmd::CubicTo(_, _, p)) => *p,
+            other => panic!("{other:?}"),
+        };
+        let apex = |cmds: &[PathCmd]| match cmds[0] {
+            PathCmd::CubicTo(_, _, p) => p,
+            ref other => panic!("{other:?}"),
+        };
+        // Ends a diameter apart: a semicircle, over the chord when sweeping (y down).
+        let half = svg_circle_arc_cubics(Point::new(0.0, 0.0), 6.0, true, Point::new(12.0, 0.0));
+        assert_eq!(half.len(), 2);
+        assert_eq!(end(&half), Point::new(12.0, 0.0));
+        assert!(apex(&half).dist(Point::new(6.0, -6.0)) < 1e-12);
+        // Without the sweep flag it bulges the other way.
+        let under = svg_circle_arc_cubics(Point::new(0.0, 0.0), 6.0, false, Point::new(12.0, 0.0));
+        assert!(apex(&under).dist(Point::new(6.0, 6.0)) < 1e-12);
+        // Ends closer than the diameter: the small arc, its centre off the chord.
+        let small = svg_circle_arc_cubics(Point::new(0.0, 0.0), 5.0, true, Point::new(8.0, 0.0));
+        assert!(
+            apex(&small).dist(Point::new(4.0, -2.0)) < 1e-12,
+            "{small:?}"
+        );
+        // Ends further apart: the radius grows to half the chord.
+        let wide = svg_circle_arc_cubics(Point::new(0.0, 0.0), 1.0, true, Point::new(0.0, 10.0));
+        assert!(apex(&wide).dist(Point::new(5.0, 5.0)) < 1e-12, "{wide:?}");
+    }
+
     #[test]
     fn chromium_f32_takes_halves_toward_zero() {
         for (v, bbox) in [

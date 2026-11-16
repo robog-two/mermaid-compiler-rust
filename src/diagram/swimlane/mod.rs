@@ -548,6 +548,30 @@ fn clip_to_shapes(
     out
 }
 
+/// `markerOffsets`: how far a line end is moved for its marker (only
+/// `arrow_point` of the flowchart's arrow types is in the table).
+fn marker_offset(h: Head) -> f64 {
+    if h == Head::Arrow { 4.0 } else { 0.0 }
+}
+
+/// `applyMarkerOffsetsToPoints`: each end moved by its offset along its own
+/// segment, however short that segment is.
+fn apply_marker_offsets(points: &[Point], start: f64, end: f64) -> Vec<Point> {
+    let mut out = points.to_vec();
+    let n = points.len();
+    if n >= 2 && start != 0.0 {
+        let (a, b) = (points[0], points[1]);
+        let angle = (b.y - a.y).atan2(b.x - a.x);
+        out[0] = Point::new(a.x + start * angle.cos(), a.y + start * angle.sin());
+    }
+    if n >= 2 && end != 0.0 {
+        let (a, b) = (points[n - 2], points[n - 1]);
+        let angle = (b.y - a.y).atan2(b.x - a.x);
+        out[n - 1] = Point::new(b.x - end * angle.cos(), b.y - end * angle.sin());
+    }
+    out
+}
+
 /// `intersect-rect`: where the line from a box's centre to `p` leaves the box.
 fn intersect_rect(c: Point, w: f64, h: f64, p: Point) -> Point {
     let dx = p.x - c.x;
@@ -640,7 +664,11 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .iter()
         .map(|b| b.as_ref().map(|b| (b.width, b.height)))
         .collect();
-    let mut data = layout_data(sl, &sizes, &label_sizes);
+    // The layout reads each node's size from `getBBox()`: single-precision floats.
+    let bbox = |(w, h): (f64, f64)| (geom::chromium_f32(w), geom::chromium_f32(h));
+    let measured: Vec<(f64, f64)> = sizes.iter().map(|&s| bbox(s)).collect();
+    let label_measured: Vec<Option<(f64, f64)>> = label_sizes.iter().map(|s| s.map(bbox)).collect();
+    let mut data = layout_data(sl, &measured, &label_measured);
     run_layout(
         &mut data,
         gcfg.node_spacing,
@@ -740,6 +768,13 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 "swimlane-title",
             ));
             if !t.is_empty() {
+                // The label's box counts towards the diagram's bounds even where
+                // it overflows a title strip squeezed below its height.
+                bounds.add_rect(if rotate {
+                    Rect::centered(label_at, bh, bw)
+                } else {
+                    Rect::centered(label_at, bw, bh)
+                });
                 let text = Text::centered(label_at, &t.lines, font, t.line_height, &color);
                 let label = Element::classed_text(text, "cluster-label swimlane-label");
                 children.push(if rotate {
@@ -823,8 +858,8 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .iter()
         .map(|(ei, pts)| linejump::EdgeGeom {
             points: pts.clone(),
-            start_offset: markers::pullback_for(g.edges[*ei].start, neo),
-            end_offset: markers::pullback_for(g.edges[*ei].end, neo),
+            start_offset: marker_offset(g.edges[*ei].start),
+            end_offset: marker_offset(g.edges[*ei].end),
             rounded: true,
             corner_radius: EDGE_CORNER_RADIUS,
         })
@@ -857,14 +892,7 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             background: &pal.main_bkg,
         };
         // The marker sits on the line end pulled back by its offset.
-        let mut drawn = pts.clone();
-        for (h, at, from) in [(e.end, last, last - 1), (e.start, 0, 1)] {
-            let back = markers::pullback_for(h, neo);
-            if back > 0.0 && drawn[at].dist(drawn[from]) > back {
-                let dir = drawn[at].minus(drawn[from]).norm();
-                drawn[at] = drawn[at].minus(dir.scale(back));
-            }
-        }
+        let drawn = apply_marker_offsets(pts, marker_offset(e.start), marker_offset(e.end));
         let mut heads = markers::elements(
             e.end,
             End::End,
@@ -1001,5 +1029,156 @@ fn endpoint_id(g: &GraphDiagram, e: Endpoint) -> String {
     match e {
         Endpoint::Node(i) => g.nodes[i.0].id.clone(),
         Endpoint::Cluster(c) => g.clusters[c.0].id.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SUPPORT: &str = "swimlane-beta LR
+  subgraph Customer
+    request[Request service]
+    receive[Receive update]
+  end
+  subgraph Support
+    triage[Triage request]
+    answer[Send answer]
+  end
+  subgraph Engineering
+    investigate[Investigate issue]
+    fix[Prepare fix]
+  end
+  request --> triage
+  triage -->|Known issue| answer
+  answer --> receive";
+
+    fn lane_ids(sl: &Swimlanes) -> Vec<&str> {
+        sl.lanes.iter().map(|l| l.id.as_str()).collect()
+    }
+
+    #[test]
+    fn top_level_subgraphs_are_lanes_in_order() {
+        let sl = parse(SUPPORT, None).unwrap();
+        assert_eq!(lane_ids(&sl), ["Customer", "Support", "Engineering"]);
+        assert_eq!(sl.graph.direction, Direction::LeftRight);
+    }
+
+    #[test]
+    fn loose_nodes_get_a_default_lane_first() {
+        let sl = parse(
+            "swimlane-beta\n  start --> a\n  subgraph ops [Operations]\n    a\n  end",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sl.lanes.len(), 2);
+        assert!(sl.lanes[0].cluster.is_none());
+        assert_eq!(sl.lanes[1].title, "Operations");
+        assert_eq!(sl.lane_of, [0, 1]);
+    }
+
+    /// mermaid 12.3.0 draws only `lane1`: the node stays in the first lane that
+    /// names it, and the lane it was named in again is left empty and dropped.
+    #[test]
+    fn shared_node_stays_in_first_lane_and_emptied_lane_is_dropped() {
+        let sl = parse(
+            "swimlane-beta LR\nsubgraph lane1[Performer A]\n  a[\"step one\"]\nend\nsubgraph phase1[Phase 1]\n  a\nend",
+            None,
+        )
+        .unwrap();
+        assert_eq!(lane_ids(&sl), ["lane1"]);
+        assert_eq!(sl.lane_of, [0]);
+    }
+
+    /// A lane the author wrote empty is kept (mermaid 12.3.0 draws `l1` and `l2`).
+    #[test]
+    fn author_empty_lane_is_kept() {
+        let sl = parse(
+            "swimlane-beta LR\nsubgraph l1\n  a\nend\nsubgraph l2\nend",
+            None,
+        )
+        .unwrap();
+        assert_eq!(lane_ids(&sl), ["l1", "l2"]);
+    }
+
+    #[test]
+    fn nested_subgraph_belongs_to_its_lane() {
+        let sl = parse(
+            "swimlane-beta LR\nsubgraph lane1[Performer A]\n  subgraph ph1[Phase 1]\n    a[\"step one\"]\n  end\nend",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sl.lanes.len(), 1);
+        assert_eq!(sl.lane_of, [0]);
+    }
+
+    /// The default lane takes the colour slot after the subgraphs that keep a
+    /// lane (mermaid 12.3.0: `data-color-id` `color-1`, then `color-2`).
+    #[test]
+    fn default_lane_takes_the_slot_after_the_kept_subgraphs() {
+        let sl = parse(
+            "swimlane-beta\nsubgraph A\na\nend\nsubgraph B\na\nend\na-->b",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sl.lanes.len(), 2);
+        assert_eq!(sl.lanes[0].cluster, None);
+        assert_eq!(sl.lanes[0].slot, ColorSlot(1));
+        let sl = parse(
+            "swimlane-beta\nsubgraph A\na\nend\nsubgraph B\nc\nend\na-->b",
+            None,
+        )
+        .unwrap();
+        assert_eq!(sl.lanes[0].slot, ColorSlot(2));
+    }
+
+    #[test]
+    fn bad_input_is_a_parse_error() {
+        assert!(parse("swimlane-beta XY\n a --> b", None).is_err());
+        assert!(parse("swimlane-beta\nsubgraph A\n a", None).is_err());
+    }
+
+    fn config_from(yaml: &str) -> MermaidConfig {
+        MermaidConfig::default()
+            .with_directive(&crate::config::parse_yaml_subset(yaml))
+            .unwrap()
+    }
+
+    /// mermaid's `resolveAppearance`: `swimlane.layout` or `layout`, the
+    /// latest layer first, over the schema's `swimlane` default.
+    #[test]
+    fn a_layout_other_than_swimlane_draws_a_flowchart() {
+        use crate::config::LayoutAlgorithm;
+        assert_eq!(other_layout(&MermaidConfig::default()), None);
+        assert_eq!(other_layout(&config_from("layout: swimlane")), None);
+        assert_eq!(
+            other_layout(&config_from("layout: dagre")),
+            Some(LayoutAlgorithm::Dagre)
+        );
+        assert_eq!(
+            other_layout(&config_from("layout: elk")),
+            Some(LayoutAlgorithm::Elk)
+        );
+        assert_eq!(
+            other_layout(&config_from("layout: elk\nswimlane:\n  layout: dagre")),
+            Some(LayoutAlgorithm::Dagre)
+        );
+    }
+
+    #[test]
+    fn marker_offsets_move_each_end_along_its_own_segment() {
+        // `applyMarkerOffsetsToPoints`: however short the segment, the end moves
+        // the full offset along it (past the point before, here).
+        let pts = [
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 10.0),
+            Point::new(0.0, 12.5),
+        ];
+        let out = apply_marker_offsets(&pts, 0.0, marker_offset(Head::Arrow));
+        assert!(out[2].dist(Point::new(0.0, 8.5)) < 1e-12, "{:?}", out[2]);
+        assert_eq!(out[0], pts[0]);
+        // Circles and crosses are not in `markerOffsets`.
+        assert_eq!(marker_offset(Head::Circle), 0.0);
+        assert_eq!(marker_offset(Head::Cross), 0.0);
     }
 }
