@@ -5032,7 +5032,7 @@ mod tests {
         assert!((t.x - outer.center().x).abs() < 1e-6);
         // The title's top on the point, the padding (24) above the frame's
         // bottom.
-        let top = t.y - font * 0.35 - title.height / 2.0;
+        let top = t.y - crate::scene::first_baseline(font, title.height);
         assert!(
             (top - (outer.bottom() - 24.0)).abs() < 1e-6,
             "{top} {outer:?}"
@@ -5095,7 +5095,7 @@ mod tests {
     /// The diagram's bounds take the title in.
     #[test]
     fn elk_empty_subgraph_point_moves_onto_its_edge() {
-        let top = |t: &Text| t.y - t.font_size * 0.35 - t.line_height / 2.0;
+        let top = |t: &Text| t.y - crate::scene::first_baseline(t.font_size, t.line_height);
         // Across the flow: the container's edge enters the point from its side.
         let scene =
             render_cli("flowchart LR\nsubgraph G0[A title]\nsubgraph G1\nend\na\nend\nG0 --> G1");
@@ -5150,7 +5150,7 @@ mod tests {
         let scene = render_cli("flowchart TD\nsubgraph G0[A title]\nend\nx0\nG0 --> G0");
         let route = edge_points(&scene, "L-G0-G0-0");
         let t = empty_title(&scene, "G0");
-        let top = t.y - t.font_size * 0.35 - t.line_height / 2.0;
+        let top = t.y - crate::scene::first_baseline(t.font_size, t.line_height);
         assert!((top - route[0].y).abs() < 1e-3, "{t:?} {route:?}");
         assert!(
             (route[0].y - route[route.len() - 1].y - 8.0).abs() < 1e-3,
@@ -5189,7 +5189,7 @@ mod tests {
             let g1 = frame(&scene);
             (
                 t.x - g1.x,
-                t.y - t.font_size * 0.35 - t.line_height / 2.0 - g1.y,
+                t.y - crate::scene::first_baseline(t.font_size, t.line_height) - g1.y,
             )
         };
         let close = |a: f64, b: f64| (a - b).abs() < 1e-3;
@@ -5345,7 +5345,7 @@ mod tests {
         };
         let title = TextBlock::label("A title much wider than the node inside it", 16.0);
         assert!(rect.w >= title.width + CLUSTER_TITLE_PAD - 1e-6);
-        assert!((t.y - 16.0 * 0.35 - (rect.y + title.height / 2.0)).abs() < 1e-6);
+        assert!((t.y - crate::scene::first_baseline(16.0, title.height) - rect.y).abs() < 1e-6);
     }
 
     fn frame_of(scene: &Scene, id: &str) -> Rect {

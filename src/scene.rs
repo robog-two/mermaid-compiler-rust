@@ -156,6 +156,21 @@ pub struct Text {
     pub fill: Color,
 }
 
+/// The first line's baseline below the top of a block of `line_height`
+/// lines. An HTML label's line (`line-height: 1.5`) puts its glyph box,
+/// the font's ascent and descent rounded to whole pixels, half the leading
+/// below the line's top, rounded down to a pixel (measured in Chromium for
+/// 8-32px). Other line heights keep the 0.35em approximation.
+pub fn first_baseline(font_size: f64, line_height: f64) -> f64 {
+    if (line_height - 1.5 * font_size).abs() < 1e-9 {
+        let ascent = (0.905 * font_size).round();
+        let descent = (0.212 * font_size).round();
+        ((line_height - ascent - descent) / 2.0 + 1e-9).floor() + ascent
+    } else {
+        line_height / 2.0 + font_size * 0.35
+    }
+}
+
 impl Text {
     /// Lay out `lines` vertically centred on `center`.
     pub fn centered(
@@ -168,7 +183,7 @@ impl Text {
         let total = line_height * lines.len() as f64;
         Text {
             x: center.x,
-            y: center.y - total / 2.0 + line_height / 2.0 + font_size * 0.35,
+            y: center.y - total / 2.0 + first_baseline(font_size, line_height),
             lines: lines.to_vec(),
             line_height,
             font_size,
