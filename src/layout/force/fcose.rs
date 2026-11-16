@@ -1,16 +1,27 @@
 //! fCoSE (cytoscape-fcose 2.2.0 on cose-base 2.2.0 / layout-base 2.0.1) as
 //! mermaid 12.3 runs it for `architecture-beta`: `quality: 'proof'`,
-//! `randomize: false` (no spectral draft, an incremental CoSE run from the
-//! current positions), alignment and relative-placement constraints, compound
-//! nodes, per-edge ideal lengths and elasticities. mermaid wraps the run in a
+//! alignment and relative-placement constraints, compound nodes, per-edge
+//! ideal lengths and elasticities. mermaid wraps the run in a
 //! mulberry32-seeded `Math.random` (seed 1), so the run is deterministic and
 //! reproduced here step by step.
+//!
+//! With `randomize: false` (mermaid's default) CoSE starts from the current
+//! positions. With `randomize: true` fcose first draws a spectral layout
+//! ([`super::spectral`]), starts CoSE from it and, before enforcing the
+//! constraints, rotates / reflects the draft onto the alignments
+//! (`TRANSFORM_ON_CONSTRAINT_HANDLING`). Everything else is the same: fcose
+//! forces `DEFAULT_INCREMENTAL` back to true whatever `randomize` is, so the
+//! spring embedder keeps its incremental cooling and displacement limits, and
+//! `PURE_INCREMENTAL` only matters to tree reduction, which is off.
 //!
 //! mermaid always hands fcose an `alignmentConstraint` object, even when both
 //! of its lists are empty, so fcose treats every architecture as constrained:
 //! it turns off tiling and component packing and skips tree reduction. Those
-//! parts and the spectral layout (only for `randomize: true`) are therefore
-//! not ported, nor are fixed-node constraints, which mermaid never sets.
+//! parts are therefore not ported, nor are fixed-node constraints, which
+//! mermaid never sets. The same object makes the transformation take its
+//! alignment branch: it only rotates when some alignment list is non-empty
+//! (and then reflects for the relative placements), and never takes the
+//! relative-placement-only branch.
 
 use super::geometry::{RectD, clip_points, separation_amount, sign};
 use super::jsmath;
@@ -55,6 +66,24 @@ pub struct Constraints {
     pub relative: Vec<Relative>,
 }
 
+/// The fcose options mermaid takes from its `architecture` config.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Options {
+    /// `randomize`: start from a spectral draft instead of the positions.
+    pub randomize: bool,
+    /// `nodeSeparation`: the spectral draft's distance per edge hop.
+    pub node_separation: f64,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            randomize: false,
+            node_separation: 75.0,
+        }
+    }
+}
+
 /// Run fcose once. `positions` are the cytoscape positions of the leaves (the
 /// entries of compounds are ignored) and `center` the centre of the
 /// collection's bounding box before the run, which the result is moved onto
@@ -65,8 +94,21 @@ pub fn run(
     constraints: &Constraints,
     positions: &[(f64, f64)],
     center: (f64, f64),
+    options: Options,
 ) -> Vec<RectD> {
-    let mut l = Fcose::build(nodes, edges, positions);
+    // One seeded stream for the whole run: the spectral draft draws first,
+    // then the relaxed-movement shuffles.
+    let mut rng = Mulberry32(1);
+    let mut l = if options.randomize {
+        let centers =
+            super::spectral::layout(nodes, edges, positions, options.node_separation, &mut rng);
+        let mut l = Fcose::build(nodes, edges, &|c| centers[c]);
+        l.transform = true;
+        l
+    } else {
+        Fcose::build(nodes, edges, &|c| positions.get(c).copied())
+    };
+    l.rng = rng;
     l.constraints = constraints.clone();
     l.run();
     // aux.relocateComponent over every laid-out node.
@@ -101,10 +143,10 @@ pub fn run(
 }
 
 /// `Math.random` as mermaid's `withSeededRandom` replaces it (mulberry32).
-struct Mulberry32(u32);
+pub(super) struct Mulberry32(pub(super) u32);
 
 impl Mulberry32 {
-    fn next(&mut self) -> f64 {
+    pub(super) fn next(&mut self) -> f64 {
         self.0 = self.0.wrapping_add(0x6d2b_79f5);
         let mut t = self.0;
         t = (t ^ (t >> 15)).wrapping_mul(t | 1);
@@ -255,6 +297,8 @@ struct Fcose {
     cy_to_l: Vec<usize>,
     constraints: Constraints,
     relax: Option<RelaxState>,
+    /// `TRANSFORM_ON_CONSTRAINT_HANDLING` (`randomize: true`).
+    transform: bool,
     rng: Mulberry32,
     // Constants derived from the edges (`DEFAULT_EDGE_LENGTH` and friends).
     default_edge_length: f64,
@@ -277,7 +321,11 @@ struct Fcose {
 
 impl Fcose {
     /// fcose's `coseLayout`: the layout graph from the cytoscape elements.
-    fn build(nodes: &[Node], edges: &[Edge], positions: &[(f64, f64)]) -> Fcose {
+    fn build(
+        nodes: &[Node],
+        edges: &[Edge],
+        center_of: &dyn Fn(usize) -> Option<(f64, f64)>,
+    ) -> Fcose {
         let n = nodes.len();
         let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut top: Vec<usize> = Vec::new();
@@ -298,6 +346,7 @@ impl Fcose {
             cy_to_l: vec![usize::MAX; n],
             constraints: Constraints::default(),
             relax: None,
+            transform: false,
             rng: Mulberry32(1),
             default_edge_length: 50.0,
             ideal_edge_length: 50.0,
@@ -319,7 +368,7 @@ impl Fcose {
         let root_parent = l.new_node(RectD::default(), None, usize::MAX);
         let root = l.new_graph(root_parent);
         l.nodes[root_parent].owner = usize::MAX;
-        l.process_children(root, &top, nodes, &children, positions);
+        l.process_children(root, &top, nodes, &children, center_of);
         // getAllNodes(): the graphs' node lists in creation order.
         l.all_nodes = l.graphs.iter().flat_map(|g| g.nodes.clone()).collect();
         // processEdges.
@@ -394,14 +443,16 @@ impl Fcose {
         list: &[usize],
         nodes: &[Node],
         children: &[Vec<usize>],
-        positions: &[(f64, f64)],
+        center_of: &dyn Fn(usize) -> Option<(f64, f64)>,
     ) {
         for &c in list {
             let nd = &nodes[c];
-            let (x, y) = positions.get(c).copied().unwrap_or((0.0, 0.0));
+            let (x, y) = center_of(c).unwrap_or((0.0, 0.0));
+            // `if (isNaN(theNode.rect.x)) theNode.rect.x = 0` (and y).
+            let zero_nan = |v: f64| if v.is_nan() { 0.0 } else { v };
             let rect = RectD {
-                x: x - nd.width / 2.0,
-                y: y - nd.height / 2.0,
+                x: zero_nan(x - nd.width / 2.0),
+                y: zero_nan(y - nd.height / 2.0),
                 w: nd.width,
                 h: nd.height,
             };
@@ -411,7 +462,7 @@ impl Fcose {
             self.cy_to_l[c] = v;
             if !children[c].is_empty() {
                 let g = self.new_graph(v);
-                self.process_children(g, &children[c], nodes, children, positions);
+                self.process_children(g, &children[c], nodes, children, center_of);
             }
         }
     }
@@ -1023,8 +1074,8 @@ impl Fcose {
         (v != usize::MAX && self.nodes[v].child.is_none()).then_some(v)
     }
 
-    /// `ConstraintHandler.handleConstraints` with `ENFORCE_CONSTRAINTS` only
-    /// (no transformation: `randomize` is false) and no fixed nodes.
+    /// `ConstraintHandler.handleConstraints` without fixed nodes: the
+    /// transformation when `randomize` is true, then `ENFORCE_CONSTRAINTS`.
     fn handle_constraints(&mut self) {
         // Leaves in getAllNodes order.
         let mut index_of = std::collections::HashMap::new();
@@ -1050,6 +1101,9 @@ impl Fcose {
             }
             sum / n
         };
+        if self.transform {
+            transform_onto_alignments(&c, &idx, &avg, &mut xs, &mut ys);
+        }
         for set in &c.vertical {
             let set = dedup(set);
             let x = avg(&set, &xs);
@@ -1396,6 +1450,78 @@ impl Fcose {
             }
         }
         self.relax = Some(st);
+    }
+}
+
+/// `TRANSFORM_ON_CONSTRAINT_HANDLING` with an `alignmentConstraint` object
+/// and no fixed nodes: the orthogonal map (Procrustes, by SVD) that best
+/// moves the aligned leaves onto their alignment lines, applied to every
+/// leaf, then the reflection that satisfies most relative placements. Only
+/// when some alignment list is non-empty (`standardTransformation`).
+fn transform_onto_alignments(
+    c: &Constraints,
+    idx: &dyn Fn(usize) -> Option<usize>,
+    avg: &dyn Fn(&[usize], &[f64]) -> f64,
+    xs: &mut [f64],
+    ys: &mut [f64],
+) {
+    use super::spectral::{dot, mult_gamma, mult_mat, svd, transpose};
+    if c.vertical.is_empty() && c.horizontal.is_empty() {
+        return;
+    }
+    let at = |coords: &[f64], id: usize| idx(id).map_or(f64::NAN, |i| coords[i]);
+    let mut target: Vec<Vec<f64>> = Vec::new();
+    let mut source: Vec<Vec<f64>> = Vec::new();
+    for set in &c.vertical {
+        let x = avg(&dedup(set), xs);
+        for &id in set {
+            target.push(vec![x, at(ys, id)]);
+            source.push(vec![at(xs, id), at(ys, id)]);
+        }
+    }
+    for set in &c.horizontal {
+        let y = avg(&dedup(set), ys);
+        for &id in set {
+            target.push(vec![at(xs, id), y]);
+            source.push(vec![at(xs, id), at(ys, id)]);
+        }
+    }
+    let target_t: Vec<Vec<f64>> = transpose(&target).iter().map(|r| mult_gamma(r)).collect();
+    let source_t: Vec<Vec<f64>> = transpose(&source).iter().map(|r| mult_gamma(r)).collect();
+    let r = svd(mult_mat(&target_t, &transpose(&source_t)));
+    let t = mult_mat(&r.v, &transpose(&r.u));
+    for (x, y) in xs.iter_mut().zip(ys.iter_mut()) {
+        let p = [*x, *y];
+        *x = dot(&p, &[t[0][0], t[1][0]]);
+        *y = dot(&p, &[t[0][1], t[1][1]]);
+    }
+    if !c.relative.is_empty() {
+        // applyReflectionForRelativePlacement.
+        let (mut flip_x, mut keep_x, mut flip_y, mut keep_y) = (0, 0, 0, 0);
+        for r in &c.relative {
+            match *r {
+                Relative::LeftRight(a, b, _) => {
+                    if at(xs, a) - at(xs, b) >= 0.0 {
+                        flip_x += 1;
+                    } else {
+                        keep_x += 1;
+                    }
+                }
+                Relative::TopBottom(a, b, _) => {
+                    if at(ys, a) - at(ys, b) >= 0.0 {
+                        flip_y += 1;
+                    } else {
+                        keep_y += 1;
+                    }
+                }
+            }
+        }
+        if flip_x > keep_x {
+            xs.iter_mut().for_each(|v| *v *= -1.0);
+        }
+        if flip_y > keep_y {
+            ys.iter_mut().for_each(|v| *v *= -1.0);
+        }
     }
 }
 

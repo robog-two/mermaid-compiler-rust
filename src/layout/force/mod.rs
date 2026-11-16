@@ -6,3 +6,4 @@ pub mod cose;
 pub mod fcose;
 mod geometry;
 pub mod jsmath;
+mod spectral;
