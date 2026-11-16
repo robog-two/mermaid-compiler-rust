@@ -870,6 +870,11 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let mut edge_els = Vec::new();
     for (k, (ei, pts)) in routes.iter().enumerate() {
         let e = &g.edges[*ei];
+        // An invisible link keeps its (unstroked) path upstream, which the
+        // diagram's `getBBox` takes in like any other.
+        for p in pts {
+            bounds.add_point(*p);
+        }
         if e.line == LineKind::Invisible {
             continue;
         }
@@ -911,9 +916,6 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             width,
             neo,
         ));
-        for p in pts {
-            bounds.add_point(*p);
-        }
         let plain = geom::rounded_path(&drawn, EDGE_CORNER_RADIUS);
         let cmds = hopped[k].clone().unwrap_or_else(|| plain.clone());
         let mut paint = Paint::stroke(&stroke, width);
