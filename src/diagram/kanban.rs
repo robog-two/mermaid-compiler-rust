@@ -86,7 +86,7 @@ fn parse_node(text: &str) -> Option<(String, String)> {
     let body = body[..close].trim_end_matches(closes);
     let label = normalize_label(body);
     let id = if id.is_empty() { label.clone() } else { id };
-    Some((id, label))
+    Some((id, crate::icons::replace_references(&label)))
 }
 
 fn unquote(s: &str) -> String {

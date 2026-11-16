@@ -1092,17 +1092,17 @@ fn bow_arc_points(a: Point, b: Point, rx: f64, ry: f64, clockwise: bool) -> Vec<
 /// One SVG elliptical arc command: radii, `x-axis-rotation` (degrees), the
 /// large-arc and sweep flags.
 #[derive(Debug, Clone, Copy)]
-struct Arc {
-    rx: f64,
-    ry: f64,
-    phi: f64,
-    large: bool,
-    sweep: bool,
+pub(crate) struct Arc {
+    pub(crate) rx: f64,
+    pub(crate) ry: f64,
+    pub(crate) phi: f64,
+    pub(crate) large: bool,
+    pub(crate) sweep: bool,
 }
 
 /// SVG elliptical arc from `from` to `to` as cubics (SVG 1.1 implementation notes
 /// F.6.5/F.6.6, radii scaled up when too small).
-fn svg_arc(out: &mut Vec<PathCmd>, from: Point, a: Arc, to: Point) {
+pub(crate) fn svg_arc(out: &mut Vec<PathCmd>, from: Point, a: Arc, to: Point) {
     let Some(e) = ArcCenter::new(from, a, to) else {
         out.push(PathCmd::LineTo(to));
         return;

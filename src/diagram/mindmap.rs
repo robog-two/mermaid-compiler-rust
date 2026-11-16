@@ -4,8 +4,9 @@
 //! `text` (default), `id[square]`, `id(rounded)`, `id((circle))`,
 //! `id))bang((`, `id)cloud(`, `id{{hexagon}}`; labels may be `"quoted"` or
 //! markdown strings (`` "`**bold**`" ``). `::icon(fa fa-book)` and
-//! `:::class1 class2` on their own line decorate the previous node. Icons are
-//! accepted but not drawn (no icon fonts in this renderer).
+//! `:::class1 class2` on their own line decorate the previous node. `::icon()`
+//! is accepted but not drawn, as mermaid 12.3's renderer does not draw it either;
+//! `fa:fa-book` in a label is an inline icon ([`crate::icons`]).
 //!
 //! Layout: mermaid 12.3's own, cytoscape's CoSE-Bilkent force-directed layout
 //! (see [`crate::layout::force::cose`]). For a tree it starts from a
@@ -290,7 +291,7 @@ impl Placed {
 /// that is given the whole width once a line had to wrap. Returns the lines and
 /// the label's width.
 fn wrap(text: &str, font: f64, width: f64) -> (Vec<String>, f64) {
-    let raw = crate::text::markdown_lines(text);
+    let raw = crate::text::markdown_lines(&crate::icons::replace_references(text));
     let natural = raw
         .iter()
         .map(|l| line_width(l, font, false))
