@@ -952,7 +952,7 @@ pub fn draw(lay: &Layout, cfg: &LayoutConfig, colors: &Colors, pal: &Palette) ->
     let fs = cfg.font_size;
     let label_text = |x: f64, cy: f64, s: &str, fill: &Color| Text {
         x,
-        y: cy + fs * 0.35,
+        y: cy + crate::text::baseline_shift(crate::text::Baseline::Middle, fs),
         lines: vec![s.to_string()],
         line_height: fs * 1.5,
         font_size: fs,

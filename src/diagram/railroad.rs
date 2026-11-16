@@ -1707,16 +1707,15 @@ fn draw_prim(p: &Prim, st: &Style, m: &Metrics) -> Element {
             if *kind == BoxKind::Special {
                 paint = paint.dashed(vec![5.0, 3.0]);
             }
-            let lh = m.font_size * 1.5;
             Element::group(
                 class,
                 vec![
                     Element::shape(Geometry::Rect { rect: *rect, rx }, paint),
-                    Element::text(Text::centered(
+                    // `dominant-baseline: middle` (railroad's stylesheet).
+                    Element::text(Text::middle(
                         rect.center(),
-                        &[display_text(label)],
+                        &display_text(label),
                         m.font_size,
-                        lh,
                         text,
                     )),
                 ],

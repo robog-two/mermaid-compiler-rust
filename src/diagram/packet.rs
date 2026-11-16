@@ -10,10 +10,11 @@
 
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
-use crate::geom::{Bounds, Point, Rect};
+use crate::geom::{Point, Rect};
+use crate::json::Json;
 use crate::layout::boxes::{self, BoxNode, taffy};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
-use crate::text::{TextBlock, decode_entities};
+use crate::text::decode_entities;
 use crate::theme::{Palette, ThemeName};
 
 /// Mermaid refuses to build more than this many words.
@@ -43,6 +44,8 @@ pub struct PacketConfig {
     pub padding_x: f64,
     pub padding_y: f64,
     pub show_bits: bool,
+    /// `bitOrder: descending`: bits numbered right to left in each row.
+    pub descending: bool,
 }
 
 impl PacketConfig {
@@ -60,6 +63,8 @@ impl PacketConfig {
                 padding_y
             },
             show_bits,
+            descending: cfg.section("packet", "bitOrder").and_then(Json::as_str)
+                == Some("descending"),
         }
     }
 }
@@ -73,6 +78,7 @@ impl Default for PacketConfig {
             padding_x: 5.0,
             padding_y: 15.0,
             show_bits: true,
+            descending: false,
         }
     }
 }
@@ -263,9 +269,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
     let rows = rows(p, pc.bits_per_row);
     let rects = layout(&rows, pc);
     let mut els = Vec::new();
-    let mut bounds = Bounds::default();
     let width = pc.bit_width * pc.bits_per_row as f64 + 2.0;
-    bounds.add_rect(Rect::new(0.0, 0.0, width, pc.padding_y));
     // packet/styles.ts: black ink on #efefef blocks, except where a theme
     // sets `packet` (dark: on the background, forest: on mainBkg, both in
     // primaryTextColor).
@@ -278,16 +282,25 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
     for (row, rr) in rows.iter().zip(&rects) {
         let mut g = Vec::new();
         for (seg, r) in row.iter().zip(rr) {
-            let rect = Rect::new(r.x + 1.0, r.y, (r.w - pc.padding_x).max(1.0), r.h);
-            bounds.add_rect(rect);
+            // drawWord: a descending row puts a block's columns mirrored.
+            let x = if pc.descending {
+                pc.bit_width * pc.bits_per_row as f64 - r.x - r.w
+            } else {
+                r.x
+            };
+            let rect = Rect::new(x + 1.0, r.y, (r.w - pc.padding_x).max(1.0), r.h);
+            let (leading, trailing) = if pc.descending {
+                (seg.end, seg.start)
+            } else {
+                (seg.start, seg.end)
+            };
             g.push(Element::classed_shape(
                 crate::scene::Geometry::Rect { rect, rx: 0.0 },
                 Paint::both(&fill, &stroke, 1.0),
                 "packetBlock",
             ));
-            let tb = TextBlock::new(vec![seg.label.clone()], LABEL_FONT, false);
             g.push(Element::classed_text(
-                Text::centered(rect.center(), &tb.lines, LABEL_FONT, tb.line_height, &ink),
+                Text::middle(rect.center(), &seg.label, LABEL_FONT, &ink),
                 "packetLabel",
             ));
             if pc.show_bits {
@@ -296,7 +309,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                 let start = Text {
                     x: if single { rect.center().x } else { rect.x },
                     y,
-                    lines: vec![seg.start.to_string()],
+                    lines: vec![leading.to_string()],
                     line_height: BYTE_FONT,
                     font_size: BYTE_FONT,
                     bold: false,
@@ -307,13 +320,12 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                     },
                     fill: ink.clone(),
                 };
-                bounds.add_point(Point::new(rect.x, y - BYTE_FONT));
                 g.push(Element::classed_text(start, "packetByte start"));
                 if !single {
                     let end = Text {
                         x: rect.right(),
                         y,
-                        lines: vec![seg.end.to_string()],
+                        lines: vec![trailing.to_string()],
                         line_height: BYTE_FONT,
                         font_size: BYTE_FONT,
                         bold: false,
@@ -326,26 +338,22 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
         }
         els.push(Element::group("packetRow", g));
     }
-    let content_bottom = rects
-        .iter()
-        .flatten()
-        .map(|r| r.bottom())
-        .fold(pc.padding_y, f64::max);
-    if let Some(t) = p.title.as_ref().filter(|t| !t.is_empty()) {
-        let total_row = pc.row_height + pc.padding_y;
-        let c = Point::new(width / 2.0, content_bottom + total_row / 2.0);
-        let tb = TextBlock::new(vec![t.clone()], TITLE_FONT, false);
-        bounds.add_rect(Rect::centered(c, tb.width, total_row));
+    // renderer.ts: a fixed `0 0 W H` viewBox, one row taller than the
+    // words (the title's row) or `paddingY` taller without a title.
+    let total_row = pc.row_height + pc.padding_y;
+    let title = p.title.as_ref().filter(|t| !t.is_empty());
+    let height =
+        total_row * (rows.len() + 1) as f64 - if title.is_some() { 0.0 } else { pc.row_height };
+    if let Some(t) = title {
+        let c = Point::new(width / 2.0, height - total_row / 2.0);
         els.push(Element::classed_text(
-            Text::centered(c, &tb.lines, TITLE_FONT, tb.line_height, &ink),
+            Text::middle(c, t, TITLE_FONT, &ink),
             "packetTitle",
         ));
-    } else {
-        bounds.add_point(Point::new(0.0, content_bottom + pc.padding_y));
     }
     Scene {
         kind: DiagramKind::Packet,
-        view_box: bounds.rect().pad(8.0),
+        view_box: Rect::new(0.0, 0.0, width, height),
         elements: els,
         acc_title: None,
         acc_descr: None,
@@ -440,5 +448,48 @@ mod tests {
         let (fill, stroke) = block("dark");
         assert_ne!(fill, "#efefef");
         assert_ne!(stroke, "black");
+    }
+
+    fn texts(els: &[Element], out: &mut Vec<Text>) {
+        for e in els {
+            match e {
+                Element::Group { children, .. } => texts(children, out),
+                Element::Text { text, .. } => out.push(text.clone()),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn view_box_is_the_fixed_chart_size() {
+        let cfg = MermaidConfig::default();
+        let s = render("packet\n0-15: \"A\"", None, &cfg, &cfg.palette()).unwrap();
+        // 32 bits of 32px + 2; one 32px row + 15 padding, plus 15.
+        assert_eq!(s.view_box, Rect::new(0.0, 0.0, 1026.0, 62.0));
+        let s = render("packet\ntitle T\n0-15: \"A\"", None, &cfg, &cfg.palette()).unwrap();
+        assert_eq!(s.view_box, Rect::new(0.0, 0.0, 1026.0, 94.0));
+    }
+
+    #[test]
+    fn descending_bit_order_mirrors_each_row() {
+        let cfg = MermaidConfig::default()
+            .with_json(
+                &crate::json::parse(r#"{"packet": {"bitOrder": "descending", "bitsPerRow": 16}}"#)
+                    .unwrap(),
+            )
+            .unwrap();
+        let s = render(
+            "packet\n0-7: \"D\"\n8-11: \"T\"",
+            None,
+            &cfg,
+            &cfg.palette(),
+        )
+        .unwrap();
+        let mut t = Vec::new();
+        texts(&s.elements, &mut t);
+        let at = |l: &str| t.iter().find(|x| x.lines[0] == l).unwrap();
+        // Bits 0-7 fill the right half, numbered 7 down to 0 (mermaid 12.3.0).
+        assert_eq!((at("D").x, at("7").x, at("0").x), (382.5, 257.0, 508.0));
+        assert_eq!((at("T").x, at("11").x, at("8").x), (190.5, 129.0, 252.0));
     }
 }

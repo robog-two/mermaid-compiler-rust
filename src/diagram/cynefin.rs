@@ -756,8 +756,9 @@ fn with_alpha(c: &Color, alpha: f64) -> Color {
     }
 }
 
+/// One line centred on `p` with `dominant-baseline: middle`.
 fn middle_text(p: Point, s: &str, font: f64, fill: &Color) -> Text {
-    Text::centered(p, &[s.to_string()], font, font, fill)
+    Text::middle(p, s, font, fill)
 }
 
 /// Quadratic Bézier as an exact cubic.
@@ -933,7 +934,17 @@ pub fn draw(d: &Cynefin, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 Element::shape(geom.clone(), Paint::fill(&with_alpha(bg, alpha))),
                 Element::shape(geom, stroke),
                 Element::classed_text(
-                    middle_text(b.rect.center(), &b.label, t.item_font_size, &t.text_color),
+                    {
+                        // Items: `dominant-baseline: central`.
+                        let mut tx =
+                            middle_text(b.rect.center(), &b.label, t.item_font_size, &t.text_color);
+                        tx.y = b.rect.center().y
+                            + crate::text::baseline_shift(
+                                crate::text::Baseline::Central,
+                                t.item_font_size,
+                            );
+                        tx
+                    },
                     "cynefinItemText",
                 ),
             ],

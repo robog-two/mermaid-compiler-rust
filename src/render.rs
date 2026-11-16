@@ -228,7 +228,7 @@ fn render_source(source: &str, base: &MermaidConfig) -> Result<Rendered> {
         ),
         DiagramType::Ishikawa => (
             diagram::ishikawa::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.section_bool("ishikawa", "useMaxWidth", false),
+            cfg.section_bool("ishikawa", "useMaxWidth", true),
         ),
         DiagramType::Railroad => (
             diagram::railroad::render(&pre.body, pre.title.clone(), &cfg, &pal)?,

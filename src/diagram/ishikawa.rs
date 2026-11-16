@@ -9,7 +9,7 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::line_width;
+use crate::text::{Baseline as TextBaseline, baseline_shift, line_width};
 use crate::theme::Palette;
 
 const SPINE_BASE_LENGTH: f64 = 250.0;
@@ -247,11 +247,9 @@ impl Label {
         let fs = self.font_size;
         let last = self.lines.last().map_or("", String::as_str);
         let th = super::treeview::text_height(last, fs);
-        let top = match self.baseline {
-            Baseline::Middle => self.y - 0.61 * fs,
-            Baseline::Alphabetic => self.y - 0.8 * fs,
-            Baseline::Hanging => self.y,
-        };
+        // The glyph box starts the font's ascent (rounded to whole pixels)
+        // above the first baseline.
+        let top = self.first_baseline() - (0.905 * fs).round();
         let h = (self.lines.len() as f64 - 1.0) * self.line_height + th;
         Rect::new(x, top, w, h)
     }
@@ -259,9 +257,9 @@ impl Label {
     /// Baseline of the first line.
     fn first_baseline(&self) -> f64 {
         match self.baseline {
-            Baseline::Middle => self.y + 0.35 * self.font_size,
+            Baseline::Middle => self.y + baseline_shift(TextBaseline::Middle, self.font_size),
             Baseline::Alphabetic => self.y,
-            Baseline::Hanging => self.y + 0.75 * self.font_size,
+            Baseline::Hanging => self.y + baseline_shift(TextBaseline::Hanging, self.font_size),
         }
     }
 }

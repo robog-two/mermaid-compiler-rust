@@ -192,6 +192,20 @@ impl Text {
             fill: fill.clone(),
         }
     }
+    /// One line of SVG text centred on `center` with `dominant-baseline:
+    /// middle` (its baseline half the x-height below the centre).
+    pub fn middle(center: Point, line: &str, font_size: f64, fill: &Color) -> Text {
+        Text {
+            x: center.x,
+            y: center.y + crate::text::baseline_shift(crate::text::Baseline::Middle, font_size),
+            lines: vec![line.to_string()],
+            line_height: font_size * 1.5,
+            font_size,
+            bold: false,
+            anchor: Anchor::Middle,
+            fill: fill.clone(),
+        }
+    }
     pub fn bold(mut self) -> Self {
         self.bold = true;
         self
