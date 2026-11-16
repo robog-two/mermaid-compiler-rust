@@ -1188,7 +1188,7 @@ impl NodeGeom {
 
 /// A block's HTML label box (layout units, one 1.5em line box per line).
 fn label_box(label: &str, font: f64) -> TextBlock {
-    TextBlock::label(label, font).html()
+    TextBlock::label(&crate::icons::replace_references(label), font).html()
 }
 
 /// The longest prefix of `line` that fits in `width`.
@@ -1758,7 +1758,7 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         bounds.add_point(pa);
         bounds.add_point(pb);
         if let Some(l) = &e.label {
-            let tb = TextBlock::label(l, m.font).html();
+            let tb = label_box(l, m.font);
             let mid = pa.lerp(pb, 0.5);
             let bg = Rect::centered(mid, tb.width + 6.0, tb.height + 2.0);
             bounds.add_rect(bg);

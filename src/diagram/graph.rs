@@ -840,6 +840,51 @@ fn wrap_lines(lines: &[String], width: f64, font: f64, bold: bool) -> Vec<String
     crate::text::wrap_lines(lines, width, font, bold, crate::text::BreakRule::Browser)
 }
 
+/// The diagram with Font Awesome references (`fa:fa-car`) in its HTML labels
+/// turned into icons ([`crate::icons`]); SVG labels keep them as text, as
+/// `createText` only replaces them in HTML.
+fn with_icons<'a>(g: &'a GraphDiagram, cfg: &GraphConfig) -> std::borrow::Cow<'a, GraphDiagram> {
+    use crate::icons::replace_references as icons;
+    let has = |s: &str| s.contains(":fa-");
+    let any = g
+        .nodes
+        .iter()
+        .any(|n| has(&n.label) || n.sections.iter().flat_map(|s| &s.lines).any(|l| has(l)))
+        || g.edges.iter().any(|e| {
+            [&e.label, &e.start_label, &e.end_label]
+                .into_iter()
+                .flatten()
+                .any(|l| has(l))
+        })
+        || g.clusters.iter().any(|c| has(&c.title));
+    if !any || !(cfg.html_labels || cfg.html_edge_labels) {
+        return std::borrow::Cow::Borrowed(g);
+    }
+    let mut g = g.clone();
+    if cfg.html_labels {
+        for n in &mut g.nodes {
+            n.label = icons(&n.label);
+            for l in n.sections.iter_mut().flat_map(|s| &mut s.lines) {
+                *l = icons(l);
+            }
+        }
+    }
+    if cfg.html_edge_labels {
+        for e in &mut g.edges {
+            for l in [&mut e.label, &mut e.start_label, &mut e.end_label]
+                .into_iter()
+                .flatten()
+            {
+                *l = icons(l);
+            }
+        }
+        for c in &mut g.clusters {
+            c.title = icons(&c.title);
+        }
+    }
+    std::borrow::Cow::Owned(g)
+}
+
 /// Pure renderer for graph diagrams.
 pub fn render(g: &GraphDiagram, cfg: &GraphConfig, pal: &Palette) -> Scene {
     render_with(g, cfg, pal, &RenderOptions::default())
@@ -852,6 +897,7 @@ pub fn render_with(
     pal: &Palette,
     opts: &RenderOptions,
 ) -> Scene {
+    let g = &*with_icons(g, cfg);
     let lk = themed_look(look(g.kind), g.kind, cfg.look, pal);
     let shadow = pal
         .drop_shadow

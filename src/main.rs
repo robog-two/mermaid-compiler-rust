@@ -277,7 +277,17 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
 
 #[cfg(feature = "png")]
 fn make_rasterizer(format: Format) -> Result<Option<Rasterizer>, String> {
-    Ok((format == Format::Png).then(Rasterizer::new))
+    // `MMDC_NO_SYSTEM_FONTS=1` skips the system font lookup and draws PNG text
+    // with the bundled TeX Gyre Heros only, as on a machine with no fonts.
+    let bundled_only =
+        std::env::var_os("MMDC_NO_SYSTEM_FONTS").is_some_and(|v| !v.is_empty() && v != "0");
+    Ok((format == Format::Png).then(|| {
+        if bundled_only {
+            Rasterizer::bundled_only()
+        } else {
+            Rasterizer::new()
+        }
+    }))
 }
 
 #[cfg(not(feature = "png"))]

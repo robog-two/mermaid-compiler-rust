@@ -1,3 +1,5 @@
+*Includes [Font Awesome Free](https://fontawesome.com) icons by Fonticons, Inc. ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)) and the [TeX Gyre Heros](https://www.gust.org.pl/projects/e-foundry/tex-gyre/heros) font by B. Jackowski and J.M. Nowacki for GUST ([GUST Font License](http://www.gust.org.pl/fonts/licenses/GUST-FONT-LICENSE.txt)); see [NOTICE](NOTICE) and [LICENSES](LICENSES/).*
+
 # Mermaid Diagram Compiler (rust)
 
 I built this after having issues with the way that mermaid works in terms of the attack surface, memory footprint, etc. I heard that they use puppeteer because it allows them to take advantage of the Blink layout engine in Chrome(ium). I figured that there were some rust crates that could do layouts, I had remembered seeing them when working on another project. So, I found taffy and I pointed my agent at the Mermaid source code and told it to use that and implement as much as possible.

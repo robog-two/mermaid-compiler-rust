@@ -18,10 +18,17 @@ name = "mmdc"
 path = "src/main.rs"
 
 [features]
-default = ["png"]
+default = ["png", "icons", "fonts"]
 # PNG rasterisation via resvg (pure Rust). Disable with --no-default-features
 # for a minimal build (only taffy) that supports SVG, PDF and Markdown output.
 png = ["dep:resvg"]
+# Font Awesome Free 7 icon outlines (CC BY 4.0) for `fa:fa-car` label icons, as
+# mmdc draws them (assets/fontawesome, ~0.8 MB). Without it icons become `•`.
+icons = []
+# TeX Gyre Heros (GUST Font License) bundled as the fallback font for PNG text
+# when no system font matches, and embedded in PDFs for text outside
+# Windows-1252 (assets/fonts, ~0.5 MB).
+fonts = []
 
 [dependencies]
 # CSS flexbox / grid / block layout for box-shaped diagrams (block, kanban, C4, ...).
