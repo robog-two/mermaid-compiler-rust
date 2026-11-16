@@ -12,7 +12,6 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Point, Rect};
 use crate::json::Json;
-use crate::layout::boxes::{self, BoxNode};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
 use crate::text::{line_width, normalize_label};
 use crate::theme::{Palette, ThemeName};
@@ -117,65 +116,6 @@ pub(crate) fn keyword<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
         Some(rest.trim())
     } else {
         None
-    }
-}
-
-/// A laid-out legend: a coloured swatch and a label per entry.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LegendLayout {
-    pub swatches: Vec<Rect>,
-    /// Baseline-start position of each label.
-    pub labels: Vec<Point>,
-    pub size: (f64, f64),
-}
-
-/// Lay out legend entries with Taffy, either as a wrapping row (max width `max_w`)
-/// or as a single column. Coordinates are relative to the legend's top-left.
-pub(crate) fn legend_layout(
-    labels: &[String],
-    font: f64,
-    swatch: f64,
-    vertical: bool,
-    max_w: f64,
-) -> LegendLayout {
-    let line_h = font * 1.4;
-    let item_h = line_h.max(swatch);
-    let items: Vec<BoxNode> = labels
-        .iter()
-        .map(|l| {
-            BoxNode::new(
-                boxes::row(6.0),
-                vec![
-                    BoxNode::leaf(swatch, item_h),
-                    BoxNode::leaf(line_width(l, font, false), item_h),
-                ],
-            )
-        })
-        .collect();
-    let root = if vertical {
-        BoxNode::new(boxes::column(4.0), items)
-    } else {
-        BoxNode::new(boxes::wrap_row(18.0, max_w.max(swatch * 4.0)), items)
-    };
-    let placed = boxes::compute(&root);
-    let mut sw = Vec::new();
-    let mut lp = Vec::new();
-    for item in &placed.children {
-        let (Some(b), Some(t)) = (item.children.first(), item.children.get(1)) else {
-            continue;
-        };
-        sw.push(Rect::new(
-            b.rect.x,
-            b.rect.y + (item_h - swatch) / 2.0,
-            swatch,
-            swatch,
-        ));
-        lp.push(Point::new(t.rect.x, t.rect.y + item_h / 2.0 + font * 0.35));
-    }
-    LegendLayout {
-        swatches: sw,
-        labels: lp,
-        size: (placed.rect.w, placed.rect.h),
     }
 }
 

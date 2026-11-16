@@ -5,11 +5,11 @@
 
 use crate::color;
 use crate::config::MermaidConfig;
-use crate::diagram::xychart::{keyword, text_at, text_bounds, unquote};
+use crate::diagram::xychart::{keyword, text_at, unquote};
 use crate::error::{Error, Result};
-use crate::geom::{Bounds, Point, Rect};
+use crate::geom::{Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene};
-use crate::text::line_width;
+use crate::text::{Baseline, baseline_shift};
 use crate::theme::Palette;
 
 /// Optional per-point (or per-class) style.
@@ -268,12 +268,21 @@ struct QuadColors {
 }
 
 fn colors(cfg: &MermaidConfig, pal: &Palette) -> QuadColors {
+    // The renderer writes each colour into a `fill` attribute; one the browser cannot
+    // parse is ignored and the element inherits the root's `fill: textColor`.
     let var = |k: &str| {
         cfg.theme_variables
             .iter()
             .rev()
             .find(|(n, _)| n == k)
-            .map(|(_, v)| Color::new(v.trim()))
+            .map(|(_, v)| {
+                let v = v.trim();
+                if k.ends_with("Fill") && !k.contains("Border") && color::parse(v).is_none() {
+                    pal.text_color.clone()
+                } else {
+                    Color::new(v)
+                }
+            })
     };
     // The theme files: `quadrantNFill = adjust(primaryColor, { r, g, b: 5(N-1) })`,
     // `quadrantNTextFill = adjust(primaryTextColor, { r, g, b: -5(N-1) })`.
@@ -327,21 +336,6 @@ fn colors(cfg: &MermaidConfig, pal: &Palette) -> QuadColors {
     }
 }
 
-/// Word-wrap `s` to lines no wider than `max_w`.
-fn wrap(s: &str, font: f64, max_w: f64) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for word in s.split_whitespace() {
-        match lines.last_mut() {
-            Some(l) if line_width(&format!("{l} {word}"), font, false) <= max_w => {
-                l.push(' ');
-                l.push_str(word);
-            }
-            _ => lines.push(word.to_string()),
-        }
-    }
-    lines
-}
-
 /// Render a `quadrantChart` diagram body (already preprocessed).
 pub fn render(
     body: &str,
@@ -352,12 +346,6 @@ pub fn render(
     let chart = parse(body, title)?;
     Ok(draw(&chart, cfg, pal))
 }
-
-/// Alphabetic baseline offset for SVG `dominant-baseline: hanging` text
-/// (Blink places the hanging baseline at 0.8 × ascent; Arial ascent ≈ 0.905em).
-const HANGING: f64 = 0.72;
-/// Alphabetic baseline offset for `dominant-baseline: middle` text.
-const MIDDLE: f64 = 0.35;
 
 /// Lay out and draw a parsed chart, following `quadrantBuilder.ts` (space
 /// calculation, label anchors) and `quadrantRenderer.ts` (draw order; texts at
@@ -423,9 +411,6 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
     );
     let (hw, hh) = (quad.w / 2.0, quad.h / 2.0);
 
-    let mut bounds = Bounds::default();
-    bounds.add_rect(Rect::new(0.0, 0.0, width, height));
-
     // Quadrants: 1 top-right, 2 top-left, 3 bottom-left, 4 bottom-right.
     let qrects = [
         Rect::new(quad.x + hw, quad.y, hw, hh),
@@ -437,18 +422,17 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
     for (i, r) in qrects.iter().enumerate() {
         let mut q = vec![Element::rect(*r, 0.0, Paint::fill(&qc.fills[i]))];
         if let Some(t) = chart.quadrants[i].as_ref().filter(|t| !t.is_empty()) {
-            // mermaid never wraps; we only wrap texts wider than the quadrant.
-            let lines = wrap(t, q_font, r.w - 10.0);
-            let lh = q_font * 1.2;
+            // One unwrapped line: `hanging` below the top padding with points,
+            // else `middle` on the quadrant's centre.
             let first = if has_points {
-                r.y + q_text_top + q_font * HANGING
+                r.y + q_text_top + baseline_shift(Baseline::Hanging, q_font)
             } else {
-                r.y + r.h / 2.0 - lh * (lines.len() as f64 - 1.0) / 2.0 + q_font * MIDDLE
+                r.y + r.h / 2.0 + baseline_shift(Baseline::Middle, q_font)
             };
             let txt = text_at(
                 r.x + r.w / 2.0,
                 first,
-                &lines,
+                std::slice::from_ref(t),
                 q_font,
                 Anchor::Middle,
                 &qc.texts[i],
@@ -502,16 +486,14 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
         } else {
             Paint::fill(&fill)
         };
-        bounds.add_rect(Rect::centered(c, 2.0 * rad + sw, 2.0 * rad + sw));
         let txt = text_at(
             c.x,
-            c.y + pt_pad + pt_font * HANGING,
+            c.y + pt_pad + baseline_shift(Baseline::Hanging, pt_font),
             std::slice::from_ref(&p.name),
             pt_font,
             Anchor::Middle,
             &qc.point_text,
         );
-        bounds.add_rect(text_bounds(&txt));
         pt_els.push(Element::group(
             "data-point",
             vec![
@@ -541,13 +523,12 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
             };
             let txt = text_at(
                 x,
-                y + x_font * HANGING,
+                y + baseline_shift(Baseline::Hanging, x_font),
                 std::slice::from_ref(label),
                 x_font,
                 anchor,
                 &qc.x_text,
             );
-            bounds.add_rect(text_bounds(&txt));
             label_els.push(Element::classed_text(txt, "x-axis-label"));
         }
     }
@@ -572,13 +553,12 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
             let about = Point::new(x, y);
             let txt = text_at(
                 x,
-                y + y_font * HANGING,
+                y + baseline_shift(Baseline::Hanging, y_font),
                 std::slice::from_ref(label),
                 y_font,
                 anchor,
                 &qc.y_text,
             );
-            bounds.add_rotated_rect(text_bounds(&txt), about, -90.0);
             label_els.push(Element::Rotated {
                 deg: -90.0,
                 about,
@@ -596,13 +576,12 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
     if let Some(t) = title {
         let txt = text_at(
             width / 2.0,
-            title_pad + title_font * HANGING,
+            title_pad + baseline_shift(Baseline::Hanging, title_font),
             std::slice::from_ref(t),
             title_font,
             Anchor::Middle,
             &qc.title,
         );
-        bounds.add_rect(text_bounds(&txt));
         els.push(Element::group(
             "title",
             vec![Element::classed_text(txt, "quadrant-title")],
@@ -611,7 +590,7 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
 
     Scene {
         kind: DiagramKind::Quadrant,
-        view_box: bounds.rect().pad(4.0),
+        view_box: Rect::new(0.0, 0.0, width, height),
         elements: vec![Element::group("main", els)],
         acc_title: None,
         acc_descr: None,
@@ -689,7 +668,50 @@ mod tests {
         let pal = cfg.palette();
         let scene = render(SRC, None, &cfg, &pal).unwrap();
         assert_eq!(scene.kind, DiagramKind::Quadrant);
-        assert!(scene.view_box.w >= 500.0);
+        // `viewBox="0 0 chartWidth chartHeight"`, no margin.
+        assert_eq!(scene.view_box, Rect::new(0.0, 0.0, 500.0, 500.0));
+    }
+
+    fn texts(els: &[Element]) -> Vec<Text> {
+        let mut out = Vec::new();
+        for e in els {
+            match e {
+                Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                    out.extend(texts(children))
+                }
+                Element::Text { text, .. } => out.push(text.clone()),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn texts_sit_on_chromium_baselines() {
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let src = "quadrantChart\ntitle T\nquadrant-1 A very long quadrant label that overflows\n";
+        let all = texts(&render(src, None, &cfg, &pal).unwrap().elements);
+        // The title hangs from y = titlePadding (20px: hanging baseline 14.406 down).
+        assert_eq!(all[1].y, 10.0 + 14.40625);
+        // Without points a quadrant label is one `middle` line on its centre
+        // (quadrant 1 spans y 45..270 → 157.5 + 4.21875).
+        assert_eq!(all[0].lines.len(), 1);
+        assert_eq!(all[0].y, 157.5 + 4.21875);
+    }
+
+    #[test]
+    fn unparseable_fills_inherit_the_text_colour() {
+        let cfg = MermaidConfig::default()
+            .with_directive(
+                &crate::json::parse(r#"{"themeVariables":{"quadrant1TextFill":"ff0000"}}"#)
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            colors(&cfg, &cfg.palette()).texts[0],
+            cfg.palette().text_color
+        );
     }
 
     use crate::scene::Text;

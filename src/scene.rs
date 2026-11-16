@@ -33,6 +33,8 @@ pub struct Paint {
     pub stroke_width: f64,
     pub dash: Option<Vec<f64>>,
     pub opacity: Option<f64>,
+    /// `fill-opacity`: the fill alone made translucent (the stroke stays opaque).
+    pub fill_opacity: Option<f64>,
     /// A blurred drop shadow behind the shape (CSS `filter: drop-shadow()`).
     pub shadow: Option<Shadow>,
 }
@@ -56,6 +58,7 @@ impl Paint {
             stroke_width: 0.0,
             dash: None,
             opacity: None,
+            fill_opacity: None,
             shadow: None,
         }
     }
@@ -66,6 +69,7 @@ impl Paint {
             stroke_width: w,
             dash: None,
             opacity: None,
+            fill_opacity: None,
             shadow: None,
         }
     }
@@ -76,6 +80,7 @@ impl Paint {
             stroke_width: w,
             dash: None,
             opacity: None,
+            fill_opacity: None,
             shadow: None,
         }
     }
@@ -85,6 +90,10 @@ impl Paint {
     }
     pub fn with_opacity(mut self, o: f64) -> Self {
         self.opacity = Some(o);
+        self
+    }
+    pub fn with_fill_opacity(mut self, o: f64) -> Self {
+        self.fill_opacity = Some(o);
         self
     }
     pub fn with_shadow(mut self, s: Option<Shadow>) -> Self {

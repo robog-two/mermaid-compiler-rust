@@ -554,6 +554,39 @@ pub fn layout_unit_ceil(w: f64) -> f64 {
     ((w * 64.0) - 1e-6).ceil().max(0.0) / 64.0
 }
 
+/// An SVG `dominant-baseline` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Baseline {
+    Alphabetic,
+    Middle,
+    Central,
+    Hanging,
+    TextBeforeEdge,
+    TextAfterEdge,
+    Mathematical,
+    Ideographic,
+}
+
+/// How far below its `y` Chromium draws the alphabetic baseline of SVG text with
+/// `dominant-baseline: b` in mermaid's fonts (Liberation Sans, the Arial the
+/// browser falls back to). Blink takes the font's ascent and descent rounded
+/// to whole pixels (0.905em and 0.212em), its x-height (1082/2048 em) and the
+/// hanging baseline (0.8 × ascent) to the 1/64 px layout unit; `middle` is half
+/// the x-height, a tie rounding down. Measured in Chromium for 6–60px.
+pub fn baseline_shift(b: Baseline, font_size: f64) -> f64 {
+    let ascent = (0.905 * font_size).round();
+    let descent = (0.212 * font_size).round();
+    match b {
+        Baseline::Alphabetic => 0.0,
+        Baseline::Middle => (font_size * 1082.0 / 4096.0 * 64.0 - 0.5).ceil() / 64.0,
+        Baseline::Central => (ascent - descent) / 2.0,
+        Baseline::Hanging => (0.8 * ascent * 64.0).round() / 64.0,
+        Baseline::TextBeforeEdge => ascent,
+        Baseline::TextAfterEdge | Baseline::Ideographic => -descent,
+        Baseline::Mathematical => ascent / 2.0,
+    }
+}
+
 /// Multi-line text with its measured extent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextBlock {
@@ -1277,6 +1310,32 @@ fn named_entity(name: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn baseline_shifts_match_chromium() {
+        // getBBox().y with each dominant-baseline minus the alphabetic one, in Chromium.
+        use Baseline::*;
+        let cases: [(f64, [f64; 6]); 7] = [
+            (8.0, [2.109375, 2.5, 5.59375, 7.0, -2.0, 3.5]),
+            (12.0, [3.171875, 4.0, 8.796875, 11.0, -3.0, 5.5]),
+            (14.0, [3.703125, 5.0, 10.40625, 13.0, -3.0, 6.5]),
+            (16.0, [4.21875, 5.5, 11.203125, 14.0, -3.0, 7.0]),
+            (20.0, [5.28125, 7.0, 14.40625, 18.0, -4.0, 9.0]),
+            (25.0, [6.609375, 9.0, 18.40625, 23.0, -5.0, 11.5]),
+            (48.0, [12.671875, 16.5, 34.40625, 43.0, -10.0, 21.5]),
+        ];
+        for (fs, want) in cases {
+            let got = [
+                baseline_shift(Middle, fs),
+                baseline_shift(Central, fs),
+                baseline_shift(Hanging, fs),
+                baseline_shift(TextBeforeEdge, fs),
+                baseline_shift(TextAfterEdge, fs),
+                baseline_shift(Mathematical, fs),
+            ];
+            assert_eq!(got, want, "{fs}px");
+        }
+    }
 
     #[test]
     fn html_labels_snap_up_to_layout_units() {

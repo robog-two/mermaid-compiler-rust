@@ -156,6 +156,9 @@ fn paint_attrs(p: &Paint) -> String {
             d.iter().map(|v| num(*v)).collect::<Vec<_>>().join(" ")
         );
     }
+    if let Some(o) = p.fill_opacity {
+        let _ = write!(s, " fill-opacity=\"{}\"", num(o));
+    }
     if let Some(o) = p.opacity {
         let _ = write!(s, " opacity=\"{}\"", num(o));
     }

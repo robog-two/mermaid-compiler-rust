@@ -2,12 +2,11 @@
 //! (600×600 plot, 50px margins, closed Catmull-Rom-like curves with tension 0.17).
 
 use crate::config::MermaidConfig;
-use crate::diagram::xychart::{
-    keyword, legend_layout, logical_lines, split_top_level, text_at, text_bounds, unquote,
-};
+use crate::diagram::xychart::{keyword, logical_lines, split_top_level, text_at, unquote};
 use crate::error::{Error, Result};
-use crate::geom::{self, Bounds, PathCmd, Point, Rect};
+use crate::geom::{self, PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
+use crate::text::{Baseline, baseline_shift};
 use crate::theme::Palette;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,10 +192,11 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Radar> {
             r.min = number(v, line_no)?;
         } else if let Some(v) = keyword(line, "ticks") {
             let n = number(v, line_no)?;
-            if n < 1.0 || n.fract() != 0.0 || n > 100.0 {
+            if n < 1.0 || n.fract() != 0.0 {
                 return Err(Error::parse(line_no, "ticks must be a positive integer"));
             }
-            r.ticks = n as usize;
+            // `MAX_TICKS`: mermaid warns and draws 32.
+            r.ticks = n.min(32.0) as usize;
         } else if let Some(v) = keyword(line, "graticule") {
             r.graticule = match v {
                 "circle" => Graticule::Circle,
@@ -231,6 +231,13 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Radar> {
                     ));
                 }
             }
+            // `computeCurveEntries` needs an entry for every axis.
+            if let Some(a) = r.axes.iter().find(|a| !m.iter().any(|(k, _)| *k == a.id)) {
+                return Err(Error::parse(
+                    c.line,
+                    format!("Missing entry for axis {}", a.label),
+                ));
+            }
         }
     }
     Ok(r)
@@ -240,18 +247,11 @@ impl Radar {
     /// Values of `curve` in axis order (missing entries are 0).
     pub fn values_of(&self, curve: &Curve) -> Vec<f64> {
         match &curve.values {
-            CurveValues::List(v) => (0..self.axes.len())
-                .map(|i| v.get(i).copied().unwrap_or(0.0))
-                .collect(),
+            CurveValues::List(v) => v.clone(),
             CurveValues::Map(m) => self
                 .axes
                 .iter()
-                .map(|a| {
-                    m.iter()
-                        .rev()
-                        .find(|(k, _)| *k == a.id)
-                        .map_or(0.0, |(_, v)| *v)
-                })
+                .map(|a| m.iter().find(|(k, _)| *k == a.id).map_or(0.0, |(_, v)| *v))
                 .collect(),
         }
     }
@@ -263,7 +263,6 @@ impl Radar {
                 .iter()
                 .flat_map(|c| self.values_of(c))
                 .fold(f64::NEG_INFINITY, f64::max)
-                .max(self.min + 1e-9)
         })
     }
 }
@@ -306,11 +305,11 @@ pub fn render(
     Ok(draw(&radar, cfg, pal))
 }
 
-/// Lay out and draw a parsed radar chart.
+/// Lay out and draw a parsed radar chart (`radar/renderer.ts`, `radar/styles.ts`).
 pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let s = "radar";
-    let width = cfg.section_f64(s, "width", 600.0).max(100.0);
-    let height = cfg.section_f64(s, "height", 600.0).max(100.0);
+    let width = cfg.section_f64(s, "width", 600.0);
+    let height = cfg.section_f64(s, "height", 600.0);
     let mt = cfg.section_f64(s, "marginTop", 50.0);
     let mb = cfg.section_f64(s, "marginBottom", 50.0);
     let ml = cfg.section_f64(s, "marginLeft", 50.0);
@@ -318,180 +317,185 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let axis_scale = cfg.section_f64(s, "axisScaleFactor", 1.0);
     let label_factor = cfg.section_f64(s, "axisLabelFactor", 1.05);
     let tension = cfg.section_f64(s, "curveTension", 0.17);
-    let axis_font = 12.0;
-    let legend_font = 14.0;
-    let legend_box = 10.0;
-    let curve_opacity = 0.5;
+    // `themeVariables.radar`, over the theme's defaults.
+    let tv = |k: &str| cfg.section_nested("themeVariables", "radar", k);
+    let tv_num = |k: &str, d: f64| {
+        tv(k).map_or(d, |j| match j {
+            crate::json::Json::String(v) => v.trim().trim_end_matches("px").parse().unwrap_or(d),
+            _ => j.as_f64().unwrap_or(d),
+        })
+    };
+    let tv_color = |k: &str, d: &Color| {
+        tv(k)
+            .and_then(crate::json::Json::as_str)
+            .map_or_else(|| d.clone(), |v| Color::new(v.trim()))
+    };
+    let axis_font = tv_num("axisLabelFontSize", 12.0);
+    let legend_font = tv_num("legendFontSize", 12.0);
+    let curve_opacity = tv_num("curveOpacity", 0.5);
+    let curve_stroke = tv_num("curveStrokeWidth", 2.0);
+    let axis_stroke = tv_num("axisStrokeWidth", 2.0);
+    let grat_opacity = tv_num("graticuleOpacity", 0.3);
+    let grat_stroke = tv_num("graticuleStrokeWidth", 1.0);
 
+    // `drawFrame`: the viewBox is the plot plus its margins; everything is drawn
+    // from the plot's centre.
     let total_w = width + ml + mr;
-    // The title takes no room: mermaid puts it on the chart's top edge.
     let total_h = height + mt + mb;
     let center = Point::new(ml + width / 2.0, mt + height / 2.0);
     let radius = width.min(height) / 2.0;
     let n = radar.axes.len();
     let angle = |i: usize| -> f64 {
-        std::f64::consts::TAU * i as f64 / n.max(1) as f64 - std::f64::consts::FRAC_PI_2
+        2.0 * i as f64 * std::f64::consts::PI / n as f64 - std::f64::consts::FRAC_PI_2
     };
-    let at = |i: usize, r: f64| {
-        let a = angle(i);
-        Point::new(center.x + r * a.cos(), center.y + r * a.sin())
-    };
+    let at = |a: f64, r: f64| Point::new(center.x + r * a.cos(), center.y + r * a.sin());
 
     let mut els = Vec::new();
-    let mut bounds = Bounds::default();
-    bounds.add_rect(Rect::new(0.0, 0.0, total_w, total_h));
-    let axis_c = pal.line_color.clone();
+    let axis_c = tv_color("axisColor", &pal.line_color);
+    // Unstyled text fills inherit the root's `fill: textColor`.
+    let text_c = pal.text_color.clone();
 
-    // Graticule: `.radarGraticule` fills `graticuleColor` at fill-opacity 0.3 and
-    // strokes it at full opacity (drawn as a fill and an outline).
-    let mut grat = Vec::new();
-    let grat_c = Color::new(GRATICULE);
-    for t in (1..=radar.ticks).rev() {
-        let r = radius * t as f64 / radar.ticks as f64;
+    // `drawGraticule`: `.radarGraticule` fills `graticuleColor` at fill-opacity
+    // 0.3 and strokes it 1px, smallest ring first.
+    let grat_c = tv_color("graticuleColor", &Color::new(GRATICULE));
+    let grat_paint = Paint::both(&grat_c, &grat_c, grat_stroke).with_fill_opacity(grat_opacity);
+    for t in 0..radar.ticks {
+        let r = radius * (t + 1) as f64 / radar.ticks as f64;
         let geom = match radar.graticule {
             Graticule::Circle => Geometry::Circle { c: center, r },
-            Graticule::Polygon if n >= 3 => {
-                Geometry::Path(geom::polygon(&(0..n).map(|i| at(i, r)).collect::<Vec<_>>()))
-            }
-            Graticule::Polygon => Geometry::Circle { c: center, r },
+            Graticule::Polygon => Geometry::Path(geom::polygon(
+                &(0..n).map(|j| at(angle(j), r)).collect::<Vec<_>>(),
+            )),
         };
-        grat.push(Element::classed_shape(
-            geom.clone(),
-            Paint::fill(&grat_c).with_opacity(0.3),
+        els.push(Element::classed_shape(
+            geom,
+            grat_paint.clone(),
             "radarGraticule",
         ));
-        grat.push(Element::shape(geom, Paint::stroke(&grat_c, 1.0)));
     }
-    els.push(Element::group("graticule", grat));
 
-    // Axes + labels.
-    let mut axes = Vec::new();
+    // `drawAxes`: a line per axis and its label 4px beyond `axisLabelFactor`,
+    // anchored and baselined away from the centre.
     for (i, a) in radar.axes.iter().enumerate() {
-        axes.push(Element::classed_shape(
-            Geometry::Path(geom::polyline(&[center, at(i, radius * axis_scale)])),
-            // `axisStrokeWidth` 2.
-            Paint::stroke(&axis_c, 2.0),
+        let ang = angle(i);
+        let (cos_a, sin_a) = (ang.cos(), ang.sin());
+        els.push(Element::classed_shape(
+            Geometry::Path(geom::polyline(&[
+                center,
+                Point::new(
+                    center.x + radius * axis_scale * cos_a,
+                    center.y + radius * axis_scale * sin_a,
+                ),
+            ])),
+            Paint::stroke(&axis_c, axis_stroke),
             "radarAxisLine",
         ));
-        let p = at(i, radius * axis_scale * label_factor);
-        let ang = angle(i);
-        let (cx, sy) = (ang.cos(), ang.sin());
-        let anchor = if cx > 0.2 {
+        let anchor = if cos_a > 0.01 {
             Anchor::Start
-        } else if cx < -0.2 {
+        } else if cos_a < -0.01 {
             Anchor::End
         } else {
             Anchor::Middle
         };
-        // Push labels away from the circle vertically near the poles.
-        let baseline = p.y + axis_font * 0.35 + sy * axis_font * 0.6;
+        let baseline = if sin_a > 0.01 {
+            Baseline::Hanging
+        } else if sin_a < -0.01 {
+            Baseline::Alphabetic
+        } else {
+            Baseline::Central
+        };
+        let x = center.x + radius * label_factor * cos_a + 4.0 * cos_a;
+        let y = center.y + radius * label_factor * sin_a + 4.0 * sin_a;
         let t = text_at(
-            p.x,
-            baseline,
+            x,
+            y + baseline_shift(baseline, axis_font),
             std::slice::from_ref(&a.label),
             axis_font,
             anchor,
-            &pal.text_color,
+            &text_c,
         );
-        bounds.add_rect(text_bounds(&t));
-        axes.push(Element::classed_text(t, "radarAxisLabel"));
+        els.push(Element::classed_text(t, "radarAxisLabel"));
     }
-    els.push(Element::group("axes", axes));
 
-    // Curves.
+    // `drawCurves`: curves without an entry per axis are skipped.
     let max = radar.max_value();
     let min = radar.min;
-    let span = (max - min).abs().max(1e-12);
-    let mut curves = Vec::new();
     for (ci, c) in radar.curves.iter().enumerate() {
+        let values = radar.values_of(c);
+        if values.len() != n {
+            continue;
+        }
         let col = pal.scale_color(ci).clone();
-        let pts: Vec<Point> = radar
-            .values_of(c)
+        let pts: Vec<Point> = values
             .iter()
             .enumerate()
             .map(|(i, v)| {
+                let r = radius * (v.max(min).min(max) - min) / (max - min);
                 at(
-                    i,
-                    (v.clamp(min.min(max), max.max(min)) - min) / span * radius,
+                    2.0 * std::f64::consts::PI * i as f64 / n as f64 - std::f64::consts::FRAC_PI_2,
+                    r,
                 )
             })
             .collect();
-        if pts.is_empty() {
-            continue;
-        }
         let path = match radar.graticule {
             Graticule::Circle => closed_round_curve(&pts, tension),
             Graticule::Polygon => geom::polygon(&pts),
         };
-        curves.push(Element::classed_shape(
-            Geometry::Path(path.clone()),
-            Paint::fill(&col).with_opacity(curve_opacity),
+        els.push(Element::classed_shape(
+            Geometry::Path(path),
+            Paint::both(&col, &col, curve_stroke).with_fill_opacity(curve_opacity),
             format!("radarCurve-{ci}"),
         ));
-        curves.push(Element::shape(
-            Geometry::Path(path),
-            // `.radarCurve-N`: `cScaleN` fill (opacity 0.5) and stroke, width 2.
-            Paint::stroke(&col, 2.0),
-        ));
     }
-    els.push(Element::group("curves", curves));
 
-    // Legend (top right, Taffy column).
-    if radar.show_legend && !radar.curves.is_empty() {
-        let labels: Vec<String> = radar.curves.iter().map(|c| c.label.clone()).collect();
-        let lg = legend_layout(&labels, legend_font, legend_box * 1.2, true, f64::INFINITY);
-        let ox = center.x + (width / 2.0 + mr) * 0.75;
-        let oy = center.y - (height / 2.0 + mt) * 0.75;
-        let mut items = Vec::new();
-        for (i, label) in labels.iter().enumerate() {
-            let (Some(sw), Some(lp)) = (lg.swatches.get(i), lg.labels.get(i)) else {
-                continue;
-            };
+    // `drawLegend`: 12px boxes 20px apart, three quarters of the way to the
+    // top-right corner; `hanging` labels 16px to their right.
+    if radar.show_legend {
+        let lx = center.x + (width / 2.0 + mr) * 3.0 / 4.0;
+        let ly = center.y - (height / 2.0 + mt) * 3.0 / 4.0;
+        for (i, c) in radar.curves.iter().enumerate() {
             let col = pal.scale_color(i).clone();
-            let r = Rect::new(sw.x + ox, sw.y + oy, sw.w, sw.h);
-            items.push(Element::rect(
-                r,
-                0.0,
-                Paint::fill(&col).with_opacity(curve_opacity),
+            let y = ly + i as f64 * 20.0;
+            els.push(Element::classed_shape(
+                Geometry::Rect {
+                    rect: Rect::new(lx, y, 12.0, 12.0),
+                    rx: 0.0,
+                },
+                Paint::both(&col, &col, 1.0).with_fill_opacity(curve_opacity),
+                format!("radarLegendBox-{i}"),
             ));
-            items.push(Element::rect(r, 0.0, Paint::stroke(&col, 1.0)));
             let t = text_at(
-                lp.x + ox,
-                lp.y + oy,
-                std::slice::from_ref(label),
+                lx + 16.0,
+                y + baseline_shift(Baseline::Hanging, legend_font),
+                std::slice::from_ref(&c.label),
                 legend_font,
                 Anchor::Start,
-                &pal.text_color,
+                &text_c,
             );
-            bounds.add_rect(text_bounds(&t));
-            items.push(Element::text(t));
+            els.push(Element::classed_text(t, "radarLegendText"));
         }
-        els.push(Element::group("legend", items));
     }
 
-    // Title.
+    // Title: `hanging` from the svg's top edge, centred; `.radarTitle` sets only
+    // `color`, so the text keeps the inherited `fill: textColor`.
     if let Some(t) = radar.title.as_ref().filter(|t| !t.is_empty()) {
-        // radarRenderer: at (0, -totalHeight / 2) from the centre, i.e. on the
-        // svg's top edge, `dominant-baseline: hanging`; the viewBox does not grow
-        // for it, so its accents reach the edge as in mermaid.
         let fs = pal.font_size;
         let txt = Text {
             x: center.x,
-            y: center.y - total_h / 2.0 + 0.72 * fs,
+            y: center.y - height / 2.0 - mt + baseline_shift(Baseline::Hanging, fs),
             lines: vec![t.clone()],
-            line_height: fs * 1.5,
+            line_height: fs,
             font_size: fs,
             bold: false,
-            anchor: crate::scene::Anchor::Middle,
-            // `.radarTitle` sets only `color`; the SVG text inherits `fill: textColor`.
-            fill: pal.text_color.clone(),
+            anchor: Anchor::Middle,
+            fill: text_c.clone(),
         };
         els.push(Element::classed_text(txt, "radarTitle"));
     }
 
     Scene {
         kind: DiagramKind::Radar,
-        view_box: bounds.rect().pad(4.0),
+        view_box: Rect::new(0.0, 0.0, total_w, total_h),
         elements: vec![Element::group("main", els)],
         acc_title: None,
         acc_descr: None,
@@ -517,11 +521,15 @@ mod tests {
 
     #[test]
     fn parses_maps_and_options() {
-        let src = "radar-beta\naxis a1, a2, a3\ncurve id1[\"L1\"]{1, 2, 3}, id2{4, 5, 6}\ncurve id4{ a3: 30, a1: 20 }\nshowLegend false\ngraticule polygon\nticks 4\n";
+        let src = "radar-beta\naxis a1, a2, a3\ncurve id1[\"L1\"]{1, 2, 3}, id2{4, 5, 6}\ncurve id4{ a3: 30, a1: 20, a2: 10, a1: 5 }\nshowLegend false\ngraticule polygon\nticks 4\n";
         let r = parse(src, None).unwrap();
         assert_eq!(r.curves.len(), 3);
         assert_eq!(r.curves[1].label, "id2");
-        assert_eq!(r.values_of(&r.curves[2]), vec![20.0, 0.0, 30.0]);
+        // The first entry for an axis counts (`entries.find`).
+        assert_eq!(r.values_of(&r.curves[2]), vec![20.0, 10.0, 30.0]);
+        // Every axis needs an entry (`computeCurveEntries`).
+        let e = parse("radar-beta\naxis a, b\ncurve c{ a: 1 }\n", None).unwrap_err();
+        assert!(e.to_string().contains("Missing entry for axis b"), "{e}");
         assert!(!r.show_legend);
         assert_eq!(r.graticule, Graticule::Polygon);
         assert_eq!(r.ticks, 4);
@@ -576,5 +584,50 @@ mod tests {
         let plain = render(src, None, &cfg, &pal).unwrap();
         let titled = render(src, Some("Grades".into()), &cfg, &pal).unwrap();
         assert_eq!(plain.view_box, titled.view_box);
+        // `viewBox="0 0 700 700"`: the plot plus its margins, no extra padding.
+        assert_eq!(plain.view_box, Rect::new(0.0, 0.0, 700.0, 700.0));
+    }
+
+    fn walk(els: &[Element], f: &mut impl FnMut(&Element)) {
+        for e in els {
+            f(e);
+            if let Element::Group { children, .. } = e {
+                walk(children, f);
+            }
+        }
+    }
+
+    #[test]
+    fn follows_the_mermaid_renderer() {
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let src = "radar-beta\naxis a,b,c\ncurve x{1,2,3}\ncurve short{1,2}";
+        let s = render(src, Some("T".into()), &cfg, &pal).unwrap();
+        let (mut curves, mut texts) = (Vec::new(), Vec::new());
+        walk(&s.elements, &mut |e| match e {
+            Element::Shape { paint, class, .. }
+                if class
+                    .as_deref()
+                    .is_some_and(|c| c.starts_with("radarCurve")) =>
+            {
+                curves.push(paint.clone())
+            }
+            Element::Text { text, .. } => texts.push(text.clone()),
+            _ => {}
+        });
+        // A curve without a value per axis is not drawn; one element per curve,
+        // translucent fill under an opaque stroke.
+        assert_eq!(curves.len(), 1);
+        assert_eq!(curves[0].fill_opacity, Some(0.5));
+        assert_eq!(curves[0].opacity, None);
+        // Axis `a` points up: its label's baseline is 4px beyond 1.05 r (auto).
+        let a = texts.iter().find(|t| t.lines[0] == "a").unwrap();
+        assert_eq!(a.y, 350.0 - 300.0 * 1.05 - 4.0);
+        // The title hangs from the top edge (16px: 11.203).
+        let t = texts.iter().find(|t| t.lines[0] == "T").unwrap();
+        assert_eq!(t.y, 11.203125);
+        // The legend's labels hang 16px right of their 12px boxes.
+        let l = texts.iter().find(|t| t.lines[0] == "x").unwrap();
+        assert_eq!((l.x, l.y), (350.0 + 262.5 + 16.0, 350.0 - 262.5 + 8.796875));
     }
 }

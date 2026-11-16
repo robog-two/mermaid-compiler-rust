@@ -132,6 +132,12 @@ impl K {
     }
 
     pub(super) fn to_color(self) -> Color {
+        // khroma prints a colour last changed in HSL as `hsl(h, s%, l%)` with ten
+        // decimals; the browser, not we, then rounds it to 8-bit channels.
+        if let K::Hsl(h, s, l) = self {
+            let r = |v: f64| (v * 1e10).round() / 1e10;
+            return Color::new(format!("hsl({}, {}%, {}%)", r(h), r(s), r(l)));
+        }
         let (r, g, b) = self.rgb();
         let ch = |v: f64| v.round().clamp(0.0, 255.0) as u8;
         Color::new(
@@ -636,7 +642,7 @@ mod tests {
                 "gitBranchLabel" => &s.git_branch_label,
                 _ => unreachable!(),
             };
-            assert_eq!(set[i].css(), *want, "{theme:?} {key}");
+            assert_eq!(hexed(&set[i]), *want, "{theme:?} {key}");
         }
     }
 
@@ -739,14 +745,22 @@ mod tests {
         );
     }
 
+    /// The colour as hex (an `hsl()` string as the browser rounds it).
+    fn hexed(c: &Color) -> String {
+        if c.css().starts_with("hsl") {
+            return color::parse(c.css()).unwrap().to_hex();
+        }
+        c.css().to_string()
+    }
+
     #[test]
     fn pie_slots() {
         let pie = |t| sc(t, &[]).pie.unwrap();
         // theme-dark.js: `pieN = cScaleN`.
-        assert_eq!(pie(ThemeName::Dark)[0].css(), "#0b0000");
-        assert_eq!(pie(ThemeName::Dark)[1].css(), "#4d1037");
+        assert_eq!(hexed(&pie(ThemeName::Dark)[0]), "#0b0000");
+        assert_eq!(hexed(&pie(ThemeName::Dark)[1]), "#4d1037");
         // theme-forest.js: pie4 = adjust(primaryColor, { l: -30 }).
-        assert_eq!(pie(ThemeName::Forest)[3].css(), "#8cb42f");
+        assert_eq!(hexed(&pie(ThemeName::Forest)[3]), "#8cb42f");
         assert!(sc(ThemeName::Default, &[]).pie.is_none());
     }
 

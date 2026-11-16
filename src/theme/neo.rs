@@ -462,7 +462,11 @@ mod tests {
 
     use crate::theme::ColorSlot;
 
+    /// The colour as hex (an `hsl()` string as the browser rounds it).
     fn css(c: &Color) -> String {
+        if c.css().starts_with("hsl") {
+            return crate::color::parse(c.css()).unwrap().to_hex();
+        }
         c.css().to_ascii_lowercase()
     }
 
@@ -616,7 +620,7 @@ mod tests {
             (
                 ThemeName::ReduxDarkColor,
                 [
-                    "#46ecd5", "#a3b3ff", "#18e7cb", "#004795", "#230028", "#7c2d12", "#713f12",
+                    "#46ecd5", "#a3b3ff", "#18e7cb", "#004795", "#230029", "#7c2d12", "#713f12",
                     "#000000", "#000000", "#f7f6f6", "#e0dfdf",
                 ],
             ),

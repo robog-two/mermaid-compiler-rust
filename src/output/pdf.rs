@@ -151,9 +151,22 @@ impl Ctx {
         if fill.is_none() && stroke.is_none() {
             return;
         }
+        // A fill-only opacity: fill, then stroke over it, each with its own alpha.
+        if let (Some(_), Some(_), Some(_)) = (paint.fill_opacity, fill, stroke) {
+            let mut f = paint.clone();
+            f.stroke = crate::scene::Color::none();
+            self.shape(geom, &f);
+            let mut s = paint.clone();
+            s.fill = crate::scene::Color::none();
+            s.fill_opacity = None;
+            self.shape(geom, &s);
+            return;
+        }
         self.out.push_str("q\n");
         let opacity = paint.opacity.unwrap_or(1.0);
-        let fa = fill.map(|c| c.a * opacity).unwrap_or(1.0);
+        let fa = fill
+            .map(|c| c.a * opacity * paint.fill_opacity.unwrap_or(1.0))
+            .unwrap_or(1.0);
         let sa = stroke.map(|c| c.a * opacity).unwrap_or(1.0);
         // One ExtGState per distinct alpha; when fill and stroke differ use the smaller.
         if let Some(g) = self.gs_for(fa.min(sa)) {
