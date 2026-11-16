@@ -47,3 +47,15 @@ It is wired up in `src/diagram/mod.rs` (detection) and `src/render.rs` (dispatch
 3. `cargo test` and `cargo clippy --all-targets -- -D warnings` pass.
 4. You rendered the example to PNG (`cargo run -q -- -i examples/diagrams/<name>.mmd -o /tmp/<name>.png -s 2`)
    and **looked at it**; it is legible, nothing overlaps or is clipped, and it resembles mermaid's output.
+
+## Deliberate differences from mermaid
+
+We match mermaid 12.3's output, with these exceptions where mermaid fails or is unhelpful:
+
+- **Graphs mermaid cannot draw.** Under `layout: dagre`, an edge from an empty subgraph to itself
+  makes mermaid throw "Cannot read properties of undefined (reading 'node')". Under ELK, an edge
+  between a subgraph and its parent, inside a subgraph that sets its own `direction`, makes elkjs
+  throw `UnsupportedGraphException`. We draw both. `tests/mermaid_failures.rs` pins this.
+- **Parse errors.** Our messages name the problem (for example "missing 'end' for subgraph") and
+  point at the line it is on. Mermaid prints the parser generator's list of expected tokens, and at
+  end of input reports a line number past the end of the file.
