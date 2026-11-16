@@ -10,11 +10,35 @@ use crate::geom::{Point, Rect};
 use crate::layout::force::fcose::{self, Constraints, Relative};
 use std::collections::HashMap;
 
-/// `iconSize`, `padding`, `idealEdgeLengthMultiplier`, `edgeElasticity`.
-pub const ICON_SIZE: f64 = 80.0;
-pub const PADDING: f64 = 40.0;
-const IDEAL_MULT: f64 = 1.5;
-const ELASTICITY: f64 = 0.45;
+/// The `architecture` config fields the layout reads with `getConfigField`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArchConfig {
+    /// `iconSize`: a service's or junction's square.
+    pub icon_size: f64,
+    /// `padding`: a group's padding (and the viewBox margin).
+    pub padding: f64,
+    /// `fontSize`: cytoscape's font for the service labels it sizes groups by.
+    pub font_size: f64,
+    /// `idealEdgeLengthMultiplier`: ideal length within a group, in icons.
+    pub ideal_mult: f64,
+    /// `edgeElasticity` within a group.
+    pub elasticity: f64,
+    /// `randomize`, `nodeSeparation`, `seed`, `numIter`.
+    pub fcose: fcose::Options,
+}
+
+impl Default for ArchConfig {
+    fn default() -> Self {
+        ArchConfig {
+            icon_size: 80.0,
+            padding: 40.0,
+            font_size: 16.0,
+            ideal_mult: 1.5,
+            elasticity: 0.45,
+            fcose: fcose::Options::default(),
+        }
+    }
+}
 
 /// Positions mermaid's cytoscape run gives the nodes, and the bounding boxes
 /// cytoscape reports for the groups (both in cytoscape coordinates: a
@@ -229,8 +253,8 @@ fn alignments(
 }
 
 /// `getRelativeConstraints`.
-fn relative_constraints(d: &Architecture, maps: &[SpatialMap]) -> Vec<Relative> {
-    let gap = IDEAL_MULT * ICON_SIZE;
+fn relative_constraints(d: &Architecture, maps: &[SpatialMap], c: &ArchConfig) -> Vec<Relative> {
+    let gap = c.ideal_mult * c.icon_size;
     let mut out = Vec::new();
     let mut declared: Vec<(usize, usize)> = Vec::new();
     for a in &d.aligns {
@@ -288,7 +312,7 @@ fn relative_constraints(d: &Architecture, maps: &[SpatialMap]) -> Vec<Relative> 
 
 /// The architecture's cytoscape elements: groups, services, junctions (node
 /// indices `0..groups`, then `groups + node`), and its edges.
-fn elements(d: &Architecture) -> (Vec<fcose::Node>, Vec<fcose::Edge>) {
+fn elements(d: &Architecture, c: &ArchConfig) -> (Vec<fcose::Node>, Vec<fcose::Edge>) {
     let ng = d.groups.len();
     let mut nodes: Vec<fcose::Node> = d
         .groups
@@ -297,9 +321,9 @@ fn elements(d: &Architecture) -> (Vec<fcose::Node>, Vec<fcose::Edge>) {
             parent: g.parent,
             // A group without members is a plain node: cytoscape's default
             // 30px body plus its padding on both sides.
-            width: 30.0 + 2.0 * PADDING,
-            height: 30.0 + 2.0 * PADDING,
-            padding: PADDING,
+            width: 30.0 + 2.0 * c.padding,
+            height: 30.0 + 2.0 * c.padding,
+            padding: c.padding,
         })
         .collect();
     let order: Vec<usize> = (0..d.nodes.len())
@@ -311,8 +335,8 @@ fn elements(d: &Architecture) -> (Vec<fcose::Node>, Vec<fcose::Edge>) {
         cy_of[i] = nodes.len();
         nodes.push(fcose::Node {
             parent: d.nodes[i].parent,
-            width: ICON_SIZE,
-            height: ICON_SIZE,
+            width: c.icon_size,
+            height: c.icon_size,
             padding: 0.0,
         });
     }
@@ -326,11 +350,11 @@ fn elements(d: &Architecture) -> (Vec<fcose::Node>, Vec<fcose::Edge>) {
                 source: cy_of[e.lhs.node],
                 target: cy_of[e.rhs.node],
                 ideal_length: if same {
-                    IDEAL_MULT * ICON_SIZE
+                    c.ideal_mult * c.icon_size
                 } else {
-                    0.5 * ICON_SIZE
+                    0.5 * c.icon_size
                 },
-                elasticity: if same { ELASTICITY } else { 0.001 },
+                elasticity: if same { c.elasticity } else { 0.001 },
             }
         })
         .collect();
@@ -340,18 +364,13 @@ fn elements(d: &Architecture) -> (Vec<fcose::Node>, Vec<fcose::Edge>) {
 /// Lay the diagram out as mermaid does. `measure(text, edge)` is the width
 /// cytoscape measures for a label (a service's title, or with `edge` an edge's
 /// label), which widens the boxes it puts around nodes, edges and groups.
-/// `options` are the `architecture` config fields mermaid hands fcose
-/// (`randomize`, `nodeSeparation`).
-pub fn place(
-    d: &Architecture,
-    measure: &dyn Fn(&str, bool) -> f64,
-    options: fcose::Options,
-) -> Placement {
+/// `c` holds the `architecture` config fields mermaid reads for the layout.
+pub fn place(d: &Architecture, measure: &dyn Fn(&str, bool) -> f64, c: &ArchConfig) -> Placement {
     let ng = d.groups.len();
     let (maps, group_al) = data_structures(d);
     let (horizontal, vertical) = alignments(d, &maps, &group_al);
-    let relative = relative_constraints(d, &maps);
-    let (nodes, edges) = elements(d);
+    let relative = relative_constraints(d, &maps, c);
+    let (nodes, edges) = elements(d, c);
     let order: Vec<usize> = (0..d.nodes.len())
         .filter(|&i| matches!(d.nodes[i].kind, NodeKind::Service { .. }))
         .chain((0..d.nodes.len()).filter(|&i| matches!(d.nodes[i].kind, NodeKind::Junction)))
@@ -386,9 +405,9 @@ pub fn place(
             .map(|i| Point::new(pos[cy_of[i]].0, pos[cy_of[i]].1))
             .collect();
         let first = (run == 1).then_some(first_pos.as_slice());
-        let (_, all) = cy_boxes(d, &node_pos, first, &|g| pos[g], measure);
+        let (_, all) = cy_boxes(d, &node_pos, first, &|g| pos[g], measure, c);
         let center = (all.x + all.w / 2.0, all.y + all.h / 2.0);
-        let rects = fcose::run(&nodes, &edges, &constraints, &pos, center, options);
+        let rects = fcose::run(&nodes, &edges, &constraints, &pos, center, c.fcose);
         pos = rects.iter().map(|r| (r.center_x(), r.center_y())).collect();
         if run == 0 {
             first_pos = (0..d.nodes.len())
@@ -399,7 +418,7 @@ pub fn place(
     let node_pos: Vec<Point> = (0..d.nodes.len())
         .map(|i| Point::new(pos[cy_of[i]].0, pos[cy_of[i]].1))
         .collect();
-    let (group_bbox, _) = cy_boxes(d, &node_pos, Some(&first_pos), &|g| pos[g], measure);
+    let (group_bbox, _) = cy_boxes(d, &node_pos, Some(&first_pos), &|g| pos[g], measure, c);
     Placement {
         node_pos,
         first_pos,
@@ -410,14 +429,14 @@ pub fn place(
 /// A node's `source-endpoint` / `target-endpoint` (`'100% 50%'` etc.:
 /// fractions of the node's size from its position, which is where mermaid
 /// draws the icon's top left corner).
-fn endpoint(p: Point, side: Side) -> Point {
+fn endpoint(p: Point, side: Side, icon: f64) -> Point {
     let (fx, fy) = match side {
         Side::L => (0.0, 0.5),
         Side::R => (1.0, 0.5),
         Side::T => (0.5, 0.0),
         Side::B => (0.5, 1.0),
     };
-    Point::new(p.x + fx * ICON_SIZE, p.y + fy * ICON_SIZE)
+    Point::new(p.x + fx * icon, p.y + fy * icon)
 }
 
 /// mermaid's `getSegmentWeights`: `(weight, distance)` that put the single
@@ -451,13 +470,20 @@ fn cy_edge(
     now: &[Point],
     first: Option<&[Point]>,
     e: &super::architecture::ArchEdge,
+    icon: f64,
 ) -> [Point; 3] {
     let (a, b) = (e.lhs.node, e.rhs.node);
-    let (s, t) = (endpoint(now[a], e.lhs.side), endpoint(now[b], e.rhs.side));
+    let (s, t) = (
+        endpoint(now[a], e.lhs.side, icon),
+        endpoint(now[b], e.rhs.side, icon),
+    );
     let mid = if is_x(e.lhs.side) != is_x(e.rhs.side) {
         let (w, dist) = match first {
             Some(f) if f[a].x != f[b].x && f[a].y != f[b].y => {
-                let (s1, t1) = (endpoint(f[a], e.lhs.side), endpoint(f[b], e.rhs.side));
+                let (s1, t1) = (
+                    endpoint(f[a], e.lhs.side, icon),
+                    endpoint(f[b], e.rhs.side, icon),
+                );
                 let corner = if is_x(e.lhs.side) {
                     Point::new(t1.x, s1.y)
                 } else {
@@ -491,10 +517,11 @@ pub fn edge_points(
     d: &Architecture,
     p: &Placement,
     e: &super::architecture::ArchEdge,
+    c: &ArchConfig,
 ) -> [Point; 3] {
-    let [s, mid, t] = cy_edge(&p.node_pos, Some(&p.first_pos), e);
+    let [s, mid, t] = cy_edge(&p.node_pos, Some(&p.first_pos), e, c.icon_size);
     let shift = |mut q: Point, end: &super::architecture::EdgeEnd| {
-        let group_shift = PADDING + 4.0;
+        let group_shift = c.padding + 4.0;
         if end.group {
             match end.side {
                 Side::L => q.x -= group_shift,
@@ -504,7 +531,7 @@ pub fn edge_points(
                 Side::B => q.y += group_shift + 18.0,
             }
         } else if matches!(d.nodes[end.node].kind, NodeKind::Junction) {
-            let half = ICON_SIZE / 2.0;
+            let half = c.icon_size / 2.0;
             match end.side {
                 Side::L => q.x += half,
                 Side::R => q.x -= half,
@@ -526,35 +553,40 @@ fn cy_boxes(
     first_pos: Option<&[Point]>,
     group_pos: &dyn Fn(usize) -> (f64, f64),
     measure: &dyn Fn(&str, bool) -> f64,
+    c: &ArchConfig,
 ) -> (Vec<Rect>, Rect) {
     let ng = d.groups.len();
-    let leaf_box = |i: usize| {
+    // A leaf's box: its body widened by 1px, and its label (`fontSize` tall,
+    // below the node) by cytoscape's 2px `marginOfError`. A group sizes
+    // itself from its children's uncached bounds, where the label gets no
+    // more (`label_margin` 0); the cached bounds of the whole graph add the
+    // 1px to the labels too (`label_margin` 1).
+    let leaf_box = |i: usize, label_margin: f64| {
         let p = node_pos[i];
         let lw = match &d.nodes[i].kind {
             NodeKind::Service { title: Some(t), .. } if !t.is_empty() => measure(t, false),
             _ => 0.0,
         };
-        // The label's box is widened by cytoscape's `marginOfError` (2px),
-        // and every box by 1px.
-        let half = (ICON_SIZE / 2.0 + 1.0).max(lw / 2.0 + 3.0);
-        let bottom = if lw > 0.0 { 59.0 } else { 41.0 };
-        (
-            Rect::new(p.x - half, p.y - 41.0, 2.0 * half, 41.0 + bottom),
-            lw > 0.0,
-        )
+        let icon_half = c.icon_size / 2.0 + 1.0;
+        let m = 2.0 + label_margin;
+        let (half, bottom) = if lw > 0.0 {
+            (
+                icon_half.max(lw / 2.0 + m),
+                icon_half.max(c.icon_size / 2.0 + c.font_size + m),
+            )
+        } else {
+            (icon_half, icon_half)
+        };
+        Rect::new(p.x - half, p.y - icon_half, 2.0 * half, icon_half + bottom)
     };
     let mut group_bbox: Vec<Option<Rect>> = vec![None; ng];
     // Groups nest at most as deep as there are groups; resolve bottom-up.
     for _ in 0..ng {
         for g in (0..ng).rev() {
             let mut acc: Option<(f64, f64, f64, f64)> = None;
-            let mut add = |r: Rect, bottom_pad: f64| {
-                let e = (
-                    r.x - 41.5,
-                    r.y - 41.5,
-                    r.right() + 41.5,
-                    r.bottom() + bottom_pad,
-                );
+            let mut add = |r: Rect| {
+                let m = c.padding + 1.5;
+                let e = (r.x - m, r.y - m, r.right() + m, r.bottom() + m);
                 acc = Some(match acc {
                     None => e,
                     Some(a) => (a.0.min(e.0), a.1.min(e.1), a.2.max(e.2), a.3.max(e.3)),
@@ -562,14 +594,13 @@ fn cy_boxes(
             };
             for i in 0..d.nodes.len() {
                 if d.nodes[i].parent == Some(g) {
-                    let (r, labelled) = leaf_box(i);
-                    add(r, if labelled { 40.5 } else { 41.5 });
+                    add(leaf_box(i, 0.0));
                 }
             }
-            for (c, cg) in d.groups.iter().enumerate() {
+            for (ci, cg) in d.groups.iter().enumerate() {
                 if cg.parent == Some(g) {
-                    if let Some(r) = group_bbox[c] {
-                        add(r, 41.5);
+                    if let Some(r) = group_bbox[ci] {
+                        add(r);
                     }
                 }
             }
@@ -577,7 +608,7 @@ fn cy_boxes(
                 Some((x0, y0, x1, y1)) => Rect::new(x0, y0, x1 - x0, y1 - y0),
                 None => {
                     let p = group_pos(g);
-                    let s = 30.0 + 2.0 * PADDING + 2.0;
+                    let s = 30.0 + 2.0 * c.padding + 2.0;
                     Rect::new(p.0 - s / 2.0, p.1 - s / 2.0, s, s)
                 }
             });
@@ -590,7 +621,7 @@ fn cy_boxes(
     let mut all: Option<Rect> = None;
     let mut add = |r: Rect| all = Some(all.map_or(r, |a| a.union(&r)));
     for i in 0..d.nodes.len() {
-        add(leaf_box(i).0);
+        add(leaf_box(i, 1.0));
     }
     for &r in &groups {
         add(r);
@@ -599,7 +630,7 @@ fn cy_boxes(
     // default 3px width and the 1px margin, and their labels (cytoscape's
     // default 16px font) by its 2px `marginOfError` and the same margin.
     for e in &d.edges {
-        let pts = cy_edge(node_pos, first_pos, e);
+        let pts = cy_edge(node_pos, first_pos, e, c.icon_size);
         let (mut x0, mut y0, mut x1, mut y1) = (
             f64::INFINITY,
             f64::INFINITY,
@@ -653,7 +684,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let p = place(&d, &titled(&d), fcose::Options::default());
+        let p = place(&d, &titled(&d), &ArchConfig::default());
         let want = [
             (-229.5803166068381, 105.67886565152662),
             (-9.62211433371776, 105.67886565152662),
@@ -709,7 +740,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let p = place(&d, &titled(&d), fcose::Options::default());
+        let p = place(&d, &titled(&d), &ArchConfig::default());
         // mermaid's positions, compared relative to s0 (the absolute offset
         // depends on cytoscape's label metrics).
         let want = [
@@ -735,22 +766,23 @@ mod tests {
         }
     }
 
-    const RANDOMIZE: fcose::Options = fcose::Options {
-        randomize: true,
-        node_separation: 75.0,
-    };
+    fn randomize() -> ArchConfig {
+        let mut c = ArchConfig::default();
+        c.fcose.randomize = true;
+        c
+    }
 
     /// `place` with `randomize: true` gives exactly mermaid's positions
     /// (and, where listed, its group rects: `x`, `y`, `width`, `height`).
     fn assert_randomized(src: &str, want: &[(f64, f64)], groups: &[(f64, f64, f64, f64)]) {
         let d = parse(src, None).unwrap();
-        let p = place(&d, &titled(&d), RANDOMIZE);
+        let p = place(&d, &titled(&d), &randomize());
         let got: Vec<(f64, f64)> = p.node_pos.iter().map(|q| (q.x, q.y)).collect();
         assert_eq!(got, want);
         let got: Vec<(f64, f64, f64, f64)> = p
             .group_bbox
             .iter()
-            .map(|r| (r.x + ICON_SIZE / 2.0, r.y + ICON_SIZE / 2.0, r.w, r.h))
+            .map(|r| (r.x + 40.0, r.y + 40.0, r.w, r.h))
             .collect();
         assert_eq!(got, groups);
     }
@@ -903,6 +935,110 @@ mod tests {
         );
     }
 
+    const R12: &str = "architecture-beta
+    group g0(cloud)[Group 0]
+    group g1(cloud)[Group 1]
+    service s0(server)[Svc 0]
+    service s1(server)[Svc 1] in g0
+    service s2(server)[Svc 2] in g0
+    service s3(server)[Svc 3]
+    service s4(server)[Svc 4] in g0
+    service s5(server)[Svc 5] in g0
+    service s6(server)[Svc 6]
+    service s7(server)[Svc 7]
+    junction j0 in g0
+    s0:T -- L:s7
+    s0:R --> B:j0
+    j0:T <--> B:s6
+    s7:L --> R:s3
+    s0:T --> B:s4
+    j0:L --> R:s1
+    s4:R -- L:s2
+    s7:L <-- R:s5
+    s0:T -- B:s3
+    j0:B <--> T:s2";
+
+    /// `place` under `c` gives exactly mermaid's service positions (each
+    /// service's titles measure `label` wide).
+    fn assert_config(src: &str, c: &ArchConfig, label: f64, want: &[(f64, f64)]) {
+        let d = parse(src, None).unwrap();
+        let p = place(&d, &move |_: &str, _: bool| label, c);
+        let got: Vec<(f64, f64)> = d
+            .nodes
+            .iter()
+            .zip(&p.node_pos)
+            .filter(|(n, _)| matches!(n.kind, NodeKind::Service { .. }))
+            .map(|(_, q)| (q.x, q.y))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    // Positions from mermaid 12.3.0 in Chromium with non-default
+    // `architecture` config.
+
+    #[test]
+    fn seed_and_num_iter_reproduce_mermaid() {
+        let mut c = randomize();
+        c.fcose.seed = 7;
+        c.fcose.num_iter = 100;
+        let (a, b) = (-21.7273911111386, 246.58620346257032);
+        assert_config(
+            R12,
+            &c,
+            40.0,
+            &[
+                (a, -452.1869309271797),
+                (a, 472.7584396653098),
+                (b, 606.1869309271798),
+                (a, -572.1869309271797),
+                (a, 606.1869309271798),
+                (a, -572.1869309271797),
+                (b, -452.1869309271797),
+                (b, -572.1869309271797),
+            ],
+        );
+    }
+
+    #[test]
+    fn every_layout_field_reproduces_mermaid() {
+        let mut c = randomize();
+        c.fcose.seed = 9;
+        c.fcose.node_separation = 50.0;
+        c.icon_size = 64.0;
+        c.padding = 24.0;
+        c.font_size = 20.0;
+        c.ideal_mult = 2.0;
+        c.elasticity = 0.3;
+        let (a, b) = (-139.11087377948934, 147.11087377948942);
+        assert_config(
+            R12,
+            &c,
+            50.0,
+            &[
+                (a, -539.7607331044737),
+                (a, 442.24201774674566),
+                (b, 577.4172525871509),
+                (a, -675.0256374331648),
+                (a, 577.4172525871509),
+                (a, -675.0256374331648),
+                (b, -539.7607331044737),
+                (b, -675.0256374331648),
+            ],
+        );
+    }
+
+    #[test]
+    fn seed_zero_is_deterministic() {
+        let d = parse(R12, None).unwrap();
+        let mut c = randomize();
+        c.fcose.seed = 0;
+        let a = place(&d, &titled(&d), &c);
+        let b = place(&d, &titled(&d), &c);
+        assert_eq!(a.node_pos, b.node_pos);
+        c.fcose.seed = 1;
+        assert_ne!(a.node_pos, place(&d, &titled(&d), &c).node_pos);
+    }
+
     #[test]
     fn segment_weights_reproduce_the_corner() {
         let (s, t) = (Point::new(10.0, 20.0), Point::new(110.0, 220.0));
@@ -930,7 +1066,7 @@ mod tests {
         .unwrap();
         let (maps, _) = data_structures(&d);
         assert_eq!(maps, vec![vec![(0, (0, 0)), (1, (1, 0)), (2, (1, -1))]]);
-        let rel = relative_constraints(&d, &maps);
+        let rel = relative_constraints(&d, &maps, &ArchConfig::default());
         assert_eq!(
             rel,
             vec![

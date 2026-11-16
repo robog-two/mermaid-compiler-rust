@@ -2,8 +2,8 @@
 //! mermaid 12.3 runs it for `architecture-beta`: `quality: 'proof'`,
 //! alignment and relative-placement constraints, compound nodes, per-edge
 //! ideal lengths and elasticities. mermaid wraps the run in a
-//! mulberry32-seeded `Math.random` (seed 1), so the run is deterministic and
-//! reproduced here step by step.
+//! mulberry32-seeded `Math.random` (`architecture.seed`, default 1), so the
+//! run is deterministic and reproduced here step by step.
 //!
 //! With `randomize: false` (mermaid's default) CoSE starts from the current
 //! positions. With `randomize: true` fcose first draws a spectral layout
@@ -73,6 +73,13 @@ pub struct Options {
     pub randomize: bool,
     /// `nodeSeparation`: the spectral draft's distance per edge hop.
     pub node_separation: f64,
+    /// `seed`: the mulberry32 state `withSeededRandom` starts each run from
+    /// (`seed >>> 0`). mermaid leaves `Math.random` alone for seed 0, which
+    /// makes its layout nondeterministic; we keep ours deterministic and run
+    /// mulberry32 from state 0 instead.
+    pub seed: u32,
+    /// `numIter`: fcose's `MAX_ITERATIONS` (raised to five per node).
+    pub num_iter: usize,
 }
 
 impl Default for Options {
@@ -80,6 +87,8 @@ impl Default for Options {
         Options {
             randomize: false,
             node_separation: 75.0,
+            seed: 1,
+            num_iter: 2500,
         }
     }
 }
@@ -98,7 +107,7 @@ pub fn run(
 ) -> Vec<RectD> {
     // One seeded stream for the whole run: the spectral draft draws first,
     // then the relaxed-movement shuffles.
-    let mut rng = Mulberry32(1);
+    let mut rng = Mulberry32(options.seed);
     let mut l = if options.randomize {
         let centers =
             super::spectral::layout(nodes, edges, positions, options.node_separation, &mut rng);
@@ -109,6 +118,7 @@ pub fn run(
         Fcose::build(nodes, edges, &|c| positions.get(c).copied())
     };
     l.rng = rng;
+    l.max_iterations = options.num_iter;
     l.constraints = constraints.clone();
     l.run();
     // aux.relocateComponent over every laid-out node.
@@ -747,7 +757,7 @@ impl Fcose {
             );
         }
         self.max_node_displacement = MAX_NODE_DISPLACEMENT_INCREMENTAL;
-        self.max_iterations = (self.all_nodes.len() * 5).max(MAX_ITERATIONS);
+        self.max_iterations = (self.all_nodes.len() * 5).max(self.max_iterations);
         self.total_displacement_threshold = 3.0 * self.default_edge_length / 100.0 * s;
         self.ideal_edge_length = self.default_edge_length.max(10.0);
         // CoSELayout.calcRepulsionRange: 2 · (level + 1) · idealEdgeLength.
