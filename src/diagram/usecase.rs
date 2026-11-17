@@ -4609,4 +4609,25 @@ mod tests {
         let normal = t.iter().find(|t| t.lines == ["Normal actor"]).unwrap();
         assert!((normal.x - 101.9297).abs() < 0.01, "{}", normal.x);
     }
+
+    #[test]
+    fn element_labels_take_the_primary_text_colour() {
+        // mermaid 12.3.0, default theme: `.usecase-element .nodeLabel` is
+        // primaryTextColor, rgb(19, 19, 0).
+        let src = "---\nconfig:\n  theme: default\n  look: classic\n---\nusecase-beta\nactor User\nUser --> Checkout\n";
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        fn texts(els: &[Element], out: &mut Vec<Text>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => texts(children, out),
+                    Element::Text { text, .. } => out.push(text.clone()),
+                    _ => {}
+                }
+            }
+        }
+        let mut t = Vec::new();
+        texts(&r.scene.elements, &mut t);
+        let c = t.iter().find(|t| t.lines == ["Checkout"]).unwrap();
+        assert_eq!(c.fill.css(), "#131300");
+    }
 }
