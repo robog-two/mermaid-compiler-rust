@@ -2501,9 +2501,9 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
                     Element::Text { text, .. } | Element::OutlinedText { text, .. } => {
                         out.push(text.clone())
                     }
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        walk(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Rotated { children, .. }
+                    | Element::Clipped { children, .. } => walk(children, out),
                     Element::Shape { .. } => {}
                 }
             }

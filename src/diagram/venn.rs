@@ -1766,7 +1766,8 @@ impl VennSolution {
 pub fn circle_path(c: &Circle) -> Vec<PathCmd> {
     let r = c.radius;
     let arc = |dx: f64| PathCmd::ArcTo {
-        r,
+        rx: r,
+        ry: r,
         large: true,
         sweep: false,
         to: Point::new(dx, 0.0),
@@ -1794,7 +1795,8 @@ pub fn intersection_path(circles: &[Circle]) -> Vec<PathCmd> {
             let mut cmds = vec![PathCmd::MoveTo(arcs[0].p2)];
             for a in &arcs {
                 cmds.push(PathCmd::ArcTo {
-                    r: a.circle.radius,
+                    rx: a.circle.radius,
+                    ry: a.circle.radius,
                     large: a.large,
                     sweep: true,
                     to: a.p1,
@@ -2131,7 +2133,7 @@ fn translate_element(e: Element, dy: f64) -> Element {
         return e;
     }
     match e {
-        e @ Element::OutlinedText { .. } => e.translated(0.0, dy),
+        e @ (Element::OutlinedText { .. } | Element::Clipped { .. }) => e.translated(0.0, dy),
         Element::Group {
             id,
             class,

@@ -224,13 +224,15 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
                     PathCmd::Close => PathCmd::Close,
                     PathCmd::MoveBy(d) => PathCmd::MoveBy(d.scale(k)),
                     &PathCmd::ArcTo {
-                        r,
+                        rx,
+                        ry,
                         large,
                         sweep,
                         to,
                         rel,
                     } => PathCmd::ArcTo {
-                        r: r * k,
+                        rx: rx * k,
+                        ry: ry * k,
                         large,
                         sweep,
                         to: if rel { to.scale(k) } else { sc(&to) },

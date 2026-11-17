@@ -86,7 +86,8 @@ pub fn path_data(cmds: &[PathCmd]) -> String {
                 let _ = write!(d, "m {} {} ", js_num(p.x), js_num(p.y));
             }
             PathCmd::ArcTo {
-                r,
+                rx,
+                ry,
                 large,
                 sweep,
                 to,
@@ -96,8 +97,8 @@ pub fn path_data(cmds: &[PathCmd]) -> String {
                     d,
                     "{} {} {} 0 {} {} {} {} ",
                     if *rel { 'a' } else { 'A' },
-                    js_num(*r),
-                    js_num(*r),
+                    js_num(*rx),
+                    js_num(*ry),
                     u8::from(*large),
                     u8::from(*sweep),
                     js_num(to.x),
@@ -125,7 +126,9 @@ impl Filters<'_> {
     fn collect(&mut self, els: &[Element]) {
         for el in els {
             match el {
-                Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                Element::Group { children, .. }
+                | Element::Rotated { children, .. }
+                | Element::Clipped { children, .. } => {
                     self.collect(children);
                 }
                 Element::Shape { paint, .. } => {
@@ -437,6 +440,18 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
         }
         Element::Text { text, class } | Element::OutlinedText { text, class, .. } => {
             write_text(out, text, class)
+        }
+        Element::Clipped { rect, children } => {
+            // A nested viewport over the same user coordinates clips its content.
+            let (x, y, w, h) = (num(rect.x), num(rect.y), num(rect.w), num(rect.h));
+            let _ = write!(
+                out,
+                "<svg x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" viewBox=\"{x} {y} {w} {h}\">"
+            );
+            for c in children {
+                write_element(out, c, fx);
+            }
+            out.push_str("</svg>");
         }
         Element::Rotated {
             deg,

@@ -178,13 +178,15 @@ impl Geometry {
                         PathCmd::Close => PathCmd::Close,
                         PathCmd::MoveBy(d) => PathCmd::MoveBy(*d),
                         &PathCmd::ArcTo {
-                            r,
+                            rx,
+                            ry,
                             large,
                             sweep,
                             to,
                             rel,
                         } => PathCmd::ArcTo {
-                            r,
+                            rx,
+                            ry,
                             large,
                             sweep,
                             to: if rel { to } else { mv(&to) },
@@ -323,6 +325,13 @@ pub enum Element {
         about: Point,
         children: Vec<Element>,
     },
+    /// Children cut off outside `rect`, as a `<foreignObject>` clips the HTML
+    /// label that overflows it (mid-glyph). SVG output writes a nested `<svg>`
+    /// viewport over the same user coordinates.
+    Clipped {
+        rect: Rect,
+        children: Vec<Element>,
+    },
 }
 
 impl Element {
@@ -377,6 +386,10 @@ impl Element {
             } => Element::Group {
                 id,
                 class,
+                children: all(children),
+            },
+            Element::Clipped { rect, children } => Element::Clipped {
+                rect: Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h),
                 children: all(children),
             },
             Element::Shape { geom, paint, class } => Element::Shape {

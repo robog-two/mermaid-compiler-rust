@@ -157,7 +157,7 @@ impl Ctx {
                 PathCmd::CubicTo(a, b, p) => finite(a) && finite(b) && finite(p),
                 PathCmd::Close => true,
                 PathCmd::MoveBy(p) => finite(p),
-                PathCmd::ArcTo { r, to, .. } => r.is_finite() && finite(to),
+                PathCmd::ArcTo { rx, ry, to, .. } => rx.is_finite() && ry.is_finite() && finite(to),
             })
         {
             return;
@@ -368,6 +368,18 @@ impl Ctx {
     fn element(&mut self, el: &Element) {
         match el {
             Element::Group { children, .. } => children.iter().for_each(|c| self.element(c)),
+            Element::Clipped { rect, children } => {
+                let _ = writeln!(
+                    self.out,
+                    "q\n{} {} {} {} re W n",
+                    n(rect.x),
+                    n(rect.y),
+                    n(rect.w),
+                    n(rect.h)
+                );
+                children.iter().for_each(|c| self.element(c));
+                self.out.push_str("Q\n");
+            }
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
             Element::Text { text, .. } => self.text(text, None),
             Element::OutlinedText {

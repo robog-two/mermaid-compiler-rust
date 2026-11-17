@@ -340,7 +340,8 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                     // Chromium paints the 1px underline on the pixel row just below
                     // the one under the baseline (measured at 16px), in the anchor's
                     // `color`, the page's black: the label's `#333` is only its fill.
-                    let w = line_width(t, font, false);
+                    // As wide as the HTML text: its advance in layout units.
+                    let w = crate::text::html_line_width(t, font, false);
                     let base = baseline + 1.5;
                     g.push(Element::line(
                         Point::new(lx, base),

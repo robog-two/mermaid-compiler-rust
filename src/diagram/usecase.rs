@@ -4565,9 +4565,9 @@ mod tests {
             for e in els {
                 match e {
                     Element::Shape { paint, .. } => out.extend(paint.dash.clone()),
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        dashes(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Rotated { children, .. }
+                    | Element::Clipped { children, .. } => dashes(children, out),
                     Element::Text { .. } | Element::OutlinedText { .. } => {}
                 }
             }

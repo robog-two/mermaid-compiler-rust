@@ -138,10 +138,11 @@ pub enum PathCmd {
     Close,
     /// `m`: a move by an offset from the current point.
     MoveBy(Point),
-    /// A circular arc of radius `r` (SVG `A r r 0 large sweep to`, or `a` with
+    /// An unrotated elliptical arc (SVG `A rx ry 0 large sweep to`, or `a` with
     /// `to` relative to the current point when `rel`).
     ArcTo {
-        r: f64,
+        rx: f64,
+        ry: f64,
         large: bool,
         sweep: bool,
         to: Point,
@@ -180,7 +181,8 @@ pub fn flatten_arcs(cmds: &[PathCmd]) -> std::borrow::Cow<'_, [PathCmd]> {
                 out.push(*c);
             }
             PathCmd::ArcTo {
-                r,
+                rx,
+                ry,
                 large,
                 sweep,
                 to,
@@ -188,7 +190,24 @@ pub fn flatten_arcs(cmds: &[PathCmd]) -> std::borrow::Cow<'_, [PathCmd]> {
             } => {
                 let end = if rel { cur.plus(to) } else { to };
                 if cur != end {
-                    out.extend(svg_arc_cubics(cur, r, large, sweep, end));
+                    let (rx, ry) = (rx.abs(), ry.abs());
+                    if rx == ry || rx == 0.0 || ry == 0.0 {
+                        out.extend(svg_arc_cubics(cur, rx.min(ry), large, sweep, end));
+                    } else {
+                        // A circle in a frame stretched by rx / ry along y.
+                        let k = rx / ry;
+                        let (s, e) = (Point::new(cur.x, cur.y * k), Point::new(end.x, end.y * k));
+                        let back = |p: Point| Point::new(p.x, p.y / k);
+                        out.extend(svg_arc_cubics(s, rx, large, sweep, e).into_iter().map(|c| {
+                            match c {
+                                PathCmd::CubicTo(a, b, p) => {
+                                    PathCmd::CubicTo(back(a), back(b), back(p))
+                                }
+                                PathCmd::LineTo(p) => PathCmd::LineTo(back(p)),
+                                other => other,
+                            }
+                        }));
+                    }
                 }
                 cur = end;
             }

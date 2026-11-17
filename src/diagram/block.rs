@@ -1043,12 +1043,43 @@ fn shift(pts: &[(f64, f64)], w: f64, h: f64) -> Vec<Point> {
         .collect()
 }
 
+/// stadium.ts's outline about the centre: the straight top, then 50-point
+/// arcs of radius `h / 2` (`generateCirclePoints`, negated) for the caps,
+/// which never reach the cap's outermost point.
+fn stadium_points(w: f64, h: f64) -> Vec<Point> {
+    let r = h / 2.0;
+    let arc = |cx: f64, a0: f64, a1: f64| {
+        let pi = std::f64::consts::PI;
+        let (s, e) = (a0 * pi / 180.0, a1 * pi / 180.0);
+        let step = (e - s) / 49.0;
+        (0..50).map(move |i| {
+            let a = s + f64::from(i) * step;
+            Point::new(-(cx + r * a.cos()), -(r * a.sin()))
+        })
+    };
+    let mut pts = vec![
+        Point::new(-w / 2.0 + r, -h / 2.0),
+        Point::new(w / 2.0 - r, -h / 2.0),
+    ];
+    pts.extend(arc(-w / 2.0 + r, 90.0, 270.0));
+    pts.push(Point::new(w / 2.0 - r, h / 2.0));
+    pts.extend(arc(w / 2.0 - r, 270.0, 450.0));
+    pts
+}
+
 impl NodeGeom {
     /// The node's bounding box around its centre (shape and label, as `getBBox`).
     fn bbox(&self) -> Rect {
         let shape = match &self.prim {
-            Prim::Rect { w, h, .. } | Prim::Subroutine { w, h } | Prim::Stadium { w, h } => {
+            Prim::Rect { w, h, .. } | Prim::Subroutine { w, h } => {
                 Rect::centered(Point::new(0.0, 0.0), *w, *h)
+            }
+            Prim::Stadium { w, h } => {
+                let mut b = Bounds::default();
+                for p in stadium_points(*w, *h) {
+                    b.add_point(p);
+                }
+                b.rect()
             }
             Prim::Poly(pts) => {
                 let mut b = Bounds::default();
@@ -1070,7 +1101,6 @@ impl NodeGeom {
     /// The shape drawn around `c`, and its outline for clipping edges.
     fn draw(&self, c: Point, paint: &Paint) -> (Vec<Element>, Outline) {
         let at = |p: &Point| c.plus(*p);
-        let line = Paint::stroke(&paint.stroke, paint.stroke_width);
         match &self.prim {
             Prim::Rect { w, h, rx } => {
                 let r = Rect::centered(c, *w, *h);
@@ -1084,40 +1114,42 @@ impl NodeGeom {
                 )
             }
             Prim::Stadium { w, h } => {
-                let r = Rect::centered(c, *w, *h);
+                // A polygon (rough.js draws its straight segments, roughness 0).
+                let pts: Vec<Point> = stadium_points(*w, *h).iter().map(at).collect();
                 (
                     vec![Element::classed_shape(
-                        Geometry::Rect {
-                            rect: r,
-                            rx: h / 2.0,
-                        },
+                        Geometry::Path(geom::polygon(&pts)),
                         paint.clone(),
                         "label-container",
                     )],
-                    Outline::Rect(r),
+                    Outline::Polygon(c, pts),
                 )
             }
             Prim::Subroutine { w, h } => {
+                // subroutine.ts: one polygon, the inner frame's rectangle then the
+                // outer one (both edges of the frame drawn by its outline).
                 let r = Rect::centered(c, *w, *h);
-                let inner = w / 2.0 - SUBROUTINE_FRAME;
+                let (x0, x1) = (r.x + SUBROUTINE_FRAME, r.right() - SUBROUTINE_FRAME);
+                let (top, bot) = (r.y, r.bottom());
+                let pts = [
+                    (x0, bot),
+                    (x1, bot),
+                    (x1, top),
+                    (x0, top),
+                    (x0, bot),
+                    (r.x, bot),
+                    (r.right(), bot),
+                    (r.right(), top),
+                    (r.x, top),
+                    (r.x, bot),
+                ]
+                .map(|(x, y)| Point::new(x, y));
                 (
-                    vec![
-                        Element::classed_shape(
-                            Geometry::Rect { rect: r, rx: 0.0 },
-                            paint.clone(),
-                            "label-container",
-                        ),
-                        Element::line(
-                            Point::new(c.x - inner, r.y),
-                            Point::new(c.x - inner, r.bottom()),
-                            line.clone(),
-                        ),
-                        Element::line(
-                            Point::new(c.x + inner, r.y),
-                            Point::new(c.x + inner, r.bottom()),
-                            line,
-                        ),
-                    ],
+                    vec![Element::classed_shape(
+                        Geometry::Path(geom::polygon(&pts)),
+                        paint.clone(),
+                        "label-container",
+                    )],
                     Outline::Rect(r),
                 )
             }
@@ -1156,30 +1188,43 @@ impl NodeGeom {
                 Outline::Ellipse(c, *outer, *outer),
             ),
             Prim::Cylinder { w, h, rx, ry } => {
-                let pi = std::f64::consts::PI;
+                // createCylinderPathD: the top ellipse (front half, then back),
+                // down the left side, the bottom's front half, up the right side;
+                // one path, filled and stroked.
                 let (x0, x1) = (c.x - w / 2.0, c.x + w / 2.0);
-                let top = Point::new(c.x, c.y - h / 2.0);
-                let bot = Point::new(c.x, c.y + h / 2.0);
-                let mut body = vec![
-                    PathCmd::MoveTo(Point::new(x0, top.y)),
-                    PathCmd::LineTo(Point::new(x0, bot.y)),
+                let (top, bot) = (c.y - h / 2.0, c.y + h / 2.0);
+                let arc = |x: f64, y: f64| PathCmd::ArcTo {
+                    rx: *rx,
+                    ry: *ry,
+                    large: false,
+                    sweep: false,
+                    to: Point::new(x, y),
+                    rel: false,
+                };
+                let body = vec![
+                    PathCmd::MoveTo(Point::new(x0, top)),
+                    arc(x1, top),
+                    arc(x0, top),
+                    PathCmd::LineTo(Point::new(x0, bot)),
+                    arc(x1, bot),
+                    PathCmd::LineTo(Point::new(x1, top)),
                 ];
-                body.extend(geom::elliptic_arc_cubics(bot, *rx, *ry, pi, 0.0));
-                body.push(PathCmd::LineTo(Point::new(x1, top.y)));
-                body.extend(geom::elliptic_arc_cubics(top, *rx, *ry, 0.0, -pi));
-                body.push(PathCmd::Close);
-                let mut front = vec![PathCmd::MoveTo(Point::new(x0, top.y))];
-                front.extend(geom::elliptic_arc_cubics(top, *rx, *ry, pi, 0.0));
                 (
-                    vec![
-                        Element::classed_shape(
-                            Geometry::Path(body),
-                            paint.clone(),
-                            "label-container",
-                        ),
-                        Element::path(front, line),
-                    ],
-                    Outline::Rect(Rect::centered(c, *w, h + 2.0 * ry)),
+                    vec![Element::classed_shape(
+                        Geometry::Path(body),
+                        paint.clone(),
+                        "label-container",
+                    )],
+                    // `updateNodeBounds`: the node's size is the path's getBBox,
+                    // single precision; whether an edge lands on a side or a
+                    // cap hangs on it.
+                    Outline::Cylinder(
+                        c,
+                        geom::chromium_f32(*w),
+                        geom::chromium_f32(h + 2.0 * ry),
+                        *rx,
+                        *ry,
+                    ),
                 )
             }
         }
@@ -1189,19 +1234,6 @@ impl NodeGeom {
 /// A block's HTML label box (layout units, one 1.5em line box per line).
 fn label_box(label: &str, font: f64) -> TextBlock {
     TextBlock::label(&crate::icons::replace_references(label), font).html()
-}
-
-/// The longest prefix of `line` that fits in `width`.
-fn clip_line(line: &str, width: f64, font: f64) -> String {
-    let mut out = String::new();
-    for ch in line.chars() {
-        out.push(ch);
-        if crate::text::line_width(&out, font, false) > width {
-            out.pop();
-            break;
-        }
-    }
-    out
 }
 
 /// `calculateBlockSize`: the bounding box of the block as drawn unpositioned.
@@ -1444,6 +1476,8 @@ pub(crate) enum Outline {
     Rect(Rect),
     Ellipse(Point, f64, f64),
     Polygon(Point, Vec<Point>),
+    /// A cylinder's centre, bounding box size and cap radii.
+    Cylinder(Point, f64, f64, f64, f64),
 }
 
 impl Outline {
@@ -1452,6 +1486,43 @@ impl Outline {
             Outline::Rect(r) => geom::clip_rect(r, toward),
             Outline::Ellipse(c, rx, ry) => geom::clip_ellipse(*c, *rx, *ry, toward),
             Outline::Polygon(c, pts) => geom::clip_polygon(*c, pts, toward),
+            &Outline::Cylinder(c, bw, bh, rx, ry) => {
+                // cylinder.ts `intersect`: the box's, moved onto the cap's
+                // ellipse when it lands on the top or bottom side.
+                // intersect.rect, operation for operation: whether the point
+                // is on a side (`|x| == width / 2`) is an exact comparison.
+                let (dx, dy) = (toward.x - c.x, toward.y - c.y);
+                let (mut w, mut h) = (bw / 2.0, bh / 2.0);
+                let (sx, sy) = if dy.abs() * w > dx.abs() * h {
+                    if dy < 0.0 {
+                        h = -h;
+                    }
+                    (if dy == 0.0 { 0.0 } else { h * dx / dy }, h)
+                } else {
+                    if dx < 0.0 {
+                        w = -w;
+                    }
+                    (w, if dx == 0.0 { 0.0 } else { w * dy / dx })
+                };
+                let mut pos = Point::new(c.x + sx, c.y + sy);
+                let x = pos.x - c.x;
+                #[allow(clippy::float_cmp)]
+                if rx != 0.0
+                    && (x.abs() < bw / 2.0
+                        || x.abs() == bw / 2.0 && (pos.y - c.y).abs() > bh / 2.0 - ry)
+                {
+                    let mut y = ry * ry * (1.0 - x * x / (rx * rx));
+                    if y > 0.0 {
+                        y = y.sqrt();
+                    }
+                    y = ry - y;
+                    if toward.y - c.y > 0.0 {
+                        y = -y;
+                    }
+                    pos.y += y;
+                }
+                pos
+            }
         }
     }
 }
@@ -1675,23 +1746,30 @@ fn draw_blocks(
                 let (mut els, outline) = g.draw(c, &paint);
                 let color: Color = st.color.clone().unwrap_or_else(|| pal.node_text.clone());
                 let center = c.plus(g.label_off);
-                let mut t = if g.clipped {
-                    // A label wider than the width the shape gave it overflows its
-                    // box to the right and is cut off there.
-                    let lines: Vec<String> = g
-                        .lines
-                        .iter()
-                        .map(|l| clip_line(l, g.label_w, m.font))
-                        .collect();
-                    Text::centered(center, &lines, m.font, tb.line_height, &color)
-                        .anchored(Anchor::Start, center.x - g.label_w / 2.0)
-                } else {
-                    Text::centered(center, &g.lines, m.font, tb.line_height, &color)
-                };
+                let mut t = Text::centered(center, &g.lines, m.font, tb.line_height, &color);
+                if g.clipped {
+                    t = t.anchored(Anchor::Start, center.x - g.label_w / 2.0);
+                }
                 if st.bold == Some(true) {
                     t = t.bold();
                 }
-                els.push(Element::classed_text(t, "label"));
+                let label = Element::classed_text(t, "label");
+                els.push(if g.clipped {
+                    // A label wider than the width the shape gave it overflows its
+                    // `foreignObject` to the right, which cuts it off (mid-glyph).
+                    let h = tb.line_height * g.lines.len() as f64;
+                    Element::Clipped {
+                        rect: Rect::new(
+                            center.x - g.label_w / 2.0,
+                            center.y - h / 2.0,
+                            g.label_w,
+                            h,
+                        ),
+                        children: vec![label],
+                    }
+                } else {
+                    label
+                });
                 let mut class = format!("node {}", b.id);
                 for (bid, c) in &d.classes {
                     if bid == &b.id {
@@ -1730,10 +1808,14 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         let (Some(a), Some(b)) = (find(&e.from), find(&e.to)) else {
             continue;
         };
+        // blockRenderer: the edge runs through the blocks' centres and the
+        // point half-way between them; insertEdge cuts its ends at the
+        // outlines toward that middle point and curves it (curveBasis).
         let ca = outline_center(a);
         let cb = outline_center(b);
-        let pa = a.clip(cb);
-        let pb = b.clip(ca);
+        let mid = Point::new(ca.x + (cb.x - ca.x) / 2.0, ca.y + (cb.y - ca.y) / 2.0);
+        let pa = a.clip(mid);
+        let pb = b.clip(mid);
         // `.edge-thickness-normal` is 1px in the block stylesheet, `-thick` 3.5px;
         // `.edge-pattern-dotted` dashes 2.
         let width = match e.line {
@@ -1744,19 +1826,28 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         if e.line == Line::Dotted {
             paint = paint.dashed(vec![2.0]);
         }
-        let dir = pb.minus(pa).norm();
-        // The line stops 4px short of an arrow end (markerOffsets), where the
-        // 8px `pointEnd` marker is centred.
+        // Each end leaves (and arrives) toward the middle point. The line stops
+        // 4px short of an arrow end (markerOffsets), where the 8px `pointEnd`
+        // marker is centred.
+        let toward = |from: Point, to: Point| {
+            let d = to.minus(from);
+            if d.len() < 1e-12 {
+                pb.minus(pa).norm()
+            } else {
+                d.norm()
+            }
+        };
+        let (out_a, in_b) = (toward(pa, mid), toward(mid, pb));
         let trim = |h: Head| if h == Head::Arrow { 4.0 } else { 0.0 };
-        let sa = pa.plus(dir.scale(trim(e.start)));
-        let sb = pb.minus(dir.scale(trim(e.end)));
-        edges.push(Element::classed_shape(
-            Geometry::Path(vec![PathCmd::MoveTo(sa), PathCmd::LineTo(sb)]),
-            paint,
-            "edge",
-        ));
-        edges.extend(head(e.end, pb, dir, &pal.line_color));
-        edges.extend(head(e.start, pa, dir.scale(-1.0), &pal.line_color));
+        let sa = pa.plus(out_a.scale(trim(e.start)));
+        let sb = pb.minus(in_b.scale(trim(e.end)));
+        let path = geom::basis_curve(&[sa, mid, sb]);
+        if let Some(bb) = geom::path_bbox(&path) {
+            bounds.add_rect(bb);
+        }
+        edges.push(Element::classed_shape(Geometry::Path(path), paint, "edge"));
+        edges.extend(head(e.end, pb, in_b, &pal.line_color));
+        edges.extend(head(e.start, pa, out_a.scale(-1.0), &pal.line_color));
         bounds.add_point(pa);
         bounds.add_point(pb);
         if let Some(l) = &e.label {
@@ -1808,6 +1899,7 @@ fn outline_center(o: &Outline) -> Point {
     match o {
         Outline::Rect(r) => r.center(),
         Outline::Ellipse(c, _, _) | Outline::Polygon(c, _) => *c,
+        Outline::Cylinder(c, ..) => *c,
     }
 }
 
@@ -2256,6 +2348,125 @@ class c hot
         let f = fit_label(&tb, 49.64);
         assert!(f.clipped);
         assert_eq!((f.w, f.h), (49.625, 24.0));
+    }
+
+    /// The gallery example (mermaid 12.3.0 reference: `ex_block`).
+    const EX_BLOCK: &str = "block-beta\n  columns 3\n  client([\"Browser\"]) space gw{{\"API Gateway\"}}\n  block:services:3\n    columns 3\n    auth[\"Auth service\"] orders[\"Orders\"] search[/\"Search\"/]\n  end\n  queue[[\"Event queue\"]] arrow<[\"publish\"]>(right) db[(\"Database\")]\n  space:2 decide{\"Healthy?\"}\n  ok(((\"OK\"))) space alert>\"Page on-call\"]\n\n  client -- \"HTTPS\" --> gw\n  gw --> auth\n  gw --> orders\n  orders --> queue\n  db -.-> search\n  ok --> alert\n  queue ==> db\n";
+
+    /// Every element of a render, groups flattened.
+    fn flat(src: &str) -> (Rect, Vec<Element>) {
+        fn walk(els: &[Element], out: &mut Vec<Element>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, out),
+                    other => out.push(other.clone()),
+                }
+            }
+        }
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        let mut out = Vec::new();
+        walk(&r.scene.elements, &mut out);
+        (r.scene.view_box, out)
+    }
+
+    fn container(els: &[Element]) -> Vec<&Geometry> {
+        els.iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom,
+                    class: Some(c),
+                    ..
+                } if c == "label-container" => Some(geom),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// mermaid 12.3.0 draws a subroutine as one polygon (inner frame, then the
+    /// outer rectangle), a cylinder as one path of SVG arcs, a stadium as a
+    /// polygon of 50-point caps (viewBox 205.8267822 wide, not 205.843).
+    #[test]
+    fn shapes_are_single_elements_like_mermaids() {
+        let (_, els) = flat("block\n    id1[[\"This is the text in the box\"]]\n");
+        let g = container(&els);
+        assert_eq!(g.len(), 1);
+        let Geometry::Path(cmds) = g[0] else {
+            panic!("{g:?}")
+        };
+        assert_eq!(cmds.len(), 11);
+        assert_eq!(
+            els.iter()
+                .filter(|e| matches!(e, Element::Shape { .. }))
+                .count(),
+            1
+        );
+        let (_, els) = flat("block\n    id1[(\"Database\")]\n");
+        let g = container(&els);
+        let Geometry::Path(cmds) = g[0] else {
+            panic!("{g:?}")
+        };
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, PathCmd::ArcTo { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            els.iter()
+                .filter(|e| matches!(e, Element::Shape { .. }))
+                .count(),
+            1
+        );
+        let (vb, _) = flat("block\n    id1([\"This is the text in the box\"])\n");
+        assert!((vb.w - 205.826_782_2).abs() < 1e-4, "{vb:?}");
+    }
+
+    /// A label too wide for its hexagon is cut by its foreignObject, mid-glyph:
+    /// the whole text inside a clip of the 71.125px label box.
+    #[test]
+    fn overflowing_label_is_clipped_not_cut_short() {
+        let (_, els) = flat(EX_BLOCK);
+        let clip = els
+            .iter()
+            .find_map(|e| match e {
+                Element::Clipped { rect, children } => Some((rect, children)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(clip.0.w, 71.125);
+        let Element::Text { text, .. } = &clip.1[0] else {
+            panic!()
+        };
+        assert_eq!(text.lines, ["API Gateway"]);
+    }
+
+    /// blockRenderer runs an edge through the middle point between the blocks'
+    /// centres; a short edge from a cylinder curves back (mermaid 12.3.0:
+    /// `M339.643,-98.72L339.722,-97.424C...`, data-points start
+    /// (339.6428, -98.7196), the cap's ellipse, not the box's top -98.734).
+    #[test]
+    fn edges_curve_through_the_centres_midpoint() {
+        let src = EX_BLOCK;
+        let (_, els) = flat(src);
+        let dotted = els
+            .iter()
+            .find_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Path(c),
+                    paint,
+                    class: Some(k),
+                } if k == "edge" && paint.dash.is_some() => Some(c.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let PathCmd::MoveTo(a) = dotted[0] else {
+            panic!()
+        };
+        assert!(
+            a.dist(Point::new(339.642_848_9, -98.719_612_1)) < 1e-3,
+            "{a:?}"
+        );
+        assert!(dotted.iter().any(|c| matches!(c, PathCmd::CubicTo(..))));
     }
 
     #[test]
