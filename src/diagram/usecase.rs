@@ -4821,7 +4821,7 @@ mod tests {
         cmds.iter()
             .filter_map(|c| match *c {
                 PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(p),
-                PathCmd::Close => None,
+                PathCmd::Close | PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => None,
             })
             .collect()
     }

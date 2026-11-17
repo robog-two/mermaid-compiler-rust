@@ -369,7 +369,9 @@ fn gantt_today_line_reads_source_date_epoch_or_the_clock() {
     // <line x1="497" x2="497" y1="25" y2="147" class="today">.
     let out = mmdc_at(Some("1706110200"), gantt);
     assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(text(&out.stdout).contains(r#"class="today" d="M497,25L497,147""#));
+    assert!(
+        text(&out.stdout).contains(r#"<line class="today" x1="497" y1="25" x2="497" y2="147""#)
+    );
     // Without it, the system clock: a today line is drawn (right of this 2024 plan).
     let out = mmdc_at(None, gantt);
     assert!(out.status.success(), "{}", text(&out.stderr));
