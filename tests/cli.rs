@@ -340,3 +340,42 @@ fn every_example_renders_in_every_format() {
     }
     assert!(count >= 5);
 }
+
+/// `mmdc` on stdin with `SOURCE_DATE_EPOCH` set (or removed with `None`).
+fn mmdc_at(epoch: Option<&str>, src: &str) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mmdc"));
+    cmd.args(["-i", "-", "-o", "-", "-q"])
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match epoch {
+        Some(e) => cmd.env("SOURCE_DATE_EPOCH", e),
+        None => cmd.env_remove("SOURCE_DATE_EPOCH"),
+    };
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(src.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn gantt_today_line_reads_source_date_epoch_or_the_clock() {
+    let gantt = "gantt\n    dateFormat YYYY-MM-DD\n    section A\n    One   :a1, 2024-01-10, 10d\n    Two   :after a1, 12d\n    section B\n    Three :2024-01-15, 15d\n";
+    // 2024-01-24T15:30:00Z: mermaid 12.3.0 draws
+    // <line x1="497" x2="497" y1="25" y2="147" class="today">.
+    let out = mmdc_at(Some("1706110200"), gantt);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains(r#"class="today" d="M497,25L497,147""#));
+    // Without it, the system clock: a today line is drawn (right of this 2024 plan).
+    let out = mmdc_at(None, gantt);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains(r#"class="today""#));
+    let out = mmdc_at(Some("soon"), gantt);
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("SOURCE_DATE_EPOCH"));
+}

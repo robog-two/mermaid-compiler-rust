@@ -35,13 +35,29 @@ fn graph_options(cfg: &MermaidConfig) -> diagram::graph::RenderOptions {
     }
 }
 
-/// Parse, lay out and draw one mermaid definition.
+/// What mermaid reads from its surroundings rather than from the diagram: the
+/// library never reads the clock itself, so a caller that wants a gantt chart's
+/// today line passes the time in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderEnv {
+    /// "Now" in milliseconds since 1970-01-01T00:00Z (mermaid's `new Date()`);
+    /// `None` leaves out everything that depends on it (the gantt today line).
+    pub now_ms: Option<i64>,
+}
+
+/// Parse, lay out and draw one mermaid definition, as of no particular time
+/// (see [`render_with_env`]).
 ///
 /// Parse errors report line numbers the way mermaid does: counted in the text left
 /// after front-matter, directives and comment lines are removed
 /// ([`diagram::mermaid_line_numbers`]).
 pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
-    render_source(source, base).map_err(|e| match e {
+    render_with_env(source, base, &RenderEnv::default())
+}
+
+/// [`render`] with the inputs mermaid takes from its environment.
+pub fn render_with_env(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<Rendered> {
+    render_source(source, base, env).map_err(|e| match e {
         Error::Parse { line, message } => {
             let map = diagram::mermaid_line_numbers(source);
             let to = |l: usize| map.get(l.wrapping_sub(1)).copied().flatten().unwrap_or(l);
@@ -65,7 +81,7 @@ pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
     })
 }
 
-fn render_source(source: &str, base: &MermaidConfig) -> Result<Rendered> {
+fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<Rendered> {
     let pre = diagram::preprocess(source)?;
     let mut cfg = base.clone();
     for layer in &pre.config_layers {
@@ -124,7 +140,7 @@ fn render_source(source: &str, base: &MermaidConfig) -> Result<Rendered> {
             cfg.use_max_width("er"),
         ),
         DiagramType::Gantt => (
-            diagram::gantt::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+            diagram::gantt::render(&pre.body, pre.title.clone(), &cfg, &pal, env.now_ms)?,
             cfg.use_max_width("gantt"),
         ),
         DiagramType::Journey => (

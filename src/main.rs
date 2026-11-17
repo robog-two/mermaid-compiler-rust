@@ -195,6 +195,7 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
     };
     let format = plan::infer_format(&output_name, format)?;
     let rasterizer = make_rasterizer(format)?;
+    let env = render_env()?;
 
     let definition = match &input {
         Some(p) => {
@@ -229,7 +230,15 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
             })
             .collect();
         let defs: Vec<&str> = charts.iter().map(|c| c.definition).collect();
-        let results = render_parallel(&defs, &config, &encode, format, rasterizer.as_ref(), jobs);
+        let results = render_parallel(
+            &defs,
+            &config,
+            &env,
+            &encode,
+            format,
+            rasterizer.as_ref(),
+            jobs,
+        );
         if charts.is_empty() {
             log.info("No mermaid charts found in Markdown input");
         } else {
@@ -260,7 +269,14 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
     }
 
     log.info("Generating single mermaid chart");
-    let (bytes, _, _) = render_one(&definition, &config, &encode, format, rasterizer.as_ref())?;
+    let (bytes, _, _) = render_one(
+        &definition,
+        &config,
+        &env,
+        &encode,
+        format,
+        rasterizer.as_ref(),
+    )?;
     match &output {
         OutputArg::Stdout => {
             let mut out = io::stdout().lock();
@@ -302,14 +318,34 @@ fn make_rasterizer(format: Format) -> Result<Option<Rasterizer>, String> {
 
 type Rendered = (Vec<u8>, Option<String>, Option<String>);
 
+/// The time mermaid would read from `new Date()` (the gantt today line):
+/// `SOURCE_DATE_EPOCH` (whole seconds) when set, for reproducible output, else the
+/// system clock.
+fn render_env() -> Result<render::RenderEnv, String> {
+    let now_ms = match std::env::var("SOURCE_DATE_EPOCH") {
+        Ok(v) => Some(
+            v.trim()
+                .parse::<i64>()
+                .map_err(|_| format!("Invalid SOURCE_DATE_EPOCH \"{v}\": expected whole seconds"))?
+                .saturating_mul(1000),
+        ),
+        Err(_) => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok()),
+    };
+    Ok(render::RenderEnv { now_ms })
+}
+
 fn render_one(
     def: &str,
     config: &MermaidConfig,
+    env: &render::RenderEnv,
     enc: &EncodeOptions,
     format: Format,
     rast: Option<&Rasterizer>,
 ) -> Result<Rendered, String> {
-    let r = render::render(def, config).map_err(|e| format!("Error: {e}"))?;
+    let r = render::render_with_env(def, config, env).map_err(|e| format!("Error: {e}"))?;
     let bytes = match format {
         Format::Svg => output::encode_svg(&r, enc).into_bytes(),
         Format::Pdf => output::encode_pdf(&r, enc),
@@ -334,6 +370,7 @@ fn render_one(
 fn render_parallel(
     defs: &[&str],
     config: &MermaidConfig,
+    env: &render::RenderEnv,
     enc: &EncodeOptions,
     format: Format,
     rast: Option<&Rasterizer>,
@@ -342,7 +379,7 @@ fn render_parallel(
     if jobs <= 1 || defs.len() <= 1 {
         return defs
             .iter()
-            .map(|d| render_one(d, config, enc, format, rast))
+            .map(|d| render_one(d, config, env, enc, format, rast))
             .collect();
     }
     let chunk = defs.len().div_ceil(jobs);
@@ -352,7 +389,7 @@ fn render_parallel(
             .map(|part| {
                 s.spawn(move || {
                     part.iter()
-                        .map(|d| render_one(d, config, enc, format, rast))
+                        .map(|d| render_one(d, config, env, enc, format, rast))
                         .collect::<Vec<_>>()
                 })
             })

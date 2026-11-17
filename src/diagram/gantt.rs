@@ -8,10 +8,10 @@
 //! * every instant is an `i64` count of milliseconds since 1970-01-01T00:00 **UTC**
 //!   (mermaid uses the browser's local zone; we pin UTC so output is reproducible);
 //! * civil dates use Howard Hinnant's `days_from_civil` / `civil_from_days`;
-//! * formats missing a date part (e.g. `dateFormat HH:mm`) default to 1970-01-01,
-//!   where mermaid/dayjs would use *today*;
-//! * `todayMarker` is parsed but never drawn: drawing it needs the wall clock, which
-//!   would make the output non-deterministic.
+//! * formats missing a date part (e.g. `dateFormat HH:mm`) take it from *today*
+//!   (dayjs' `new Date()`) when the caller supplies "now", else from 1970-01-01;
+//! * the today line (`todayMarker`) needs the wall clock, which this module never
+//!   reads: the caller passes "now" to [`draw`] / [`render`] (`None` draws no line).
 
 use crate::color::{self, Rgba};
 use crate::config::MermaidConfig;
@@ -318,8 +318,24 @@ fn take_signed(s: &str) -> Option<(f64, &str)> {
 }
 
 /// Parse `input` strictly against a dayjs-style `format`. Returns UTC milliseconds.
+/// Date parts the format lacks come from 1970-01-01 (see [`parse_date_at`]).
 pub fn parse_date(input: &str, format: &str) -> Option<i64> {
+    parse_date_at(input, format, None)
+}
+
+/// [`parse_date`] as of `now` (UTC milliseconds): like dayjs' customParseFormat, a
+/// format without a year takes today's, one without a month takes today's month
+/// (January when it has a year), and one without a day takes today's day when it
+/// has neither year nor month (else the 1st).
+pub fn parse_date_at(input: &str, format: &str, now: Option<i64>) -> Option<i64> {
     let toks = tokenize_format(format.trim());
+    let (has_y, has_m, has_d) = toks.iter().fold((false, false, false), |(y, m, d), t| {
+        (
+            y || matches!(t, Tok::Year4 | Tok::Year2),
+            m || matches!(t, Tok::Month(_) | Tok::MonthShort | Tok::MonthLong),
+            d || matches!(t, Tok::Day(_) | Tok::DayOrdinal),
+        )
+    });
     let mut s = input.trim();
     let (mut y, mut mo, mut d) = (1970i64, 1u32, 1u32);
     let (mut h, mut mi, mut sec, mut ms) = (0u32, 0u32, 0u32, 0u32);
@@ -444,6 +460,18 @@ pub fn parse_date(input: &str, format: &str) -> Option<i64> {
             h += 12;
         } else if !is_pm && h == 12 {
             h = 0;
+        }
+    }
+    if let Some(now) = now {
+        let (ny, nm, nd) = civil_from_days(now.div_euclid(DAY_MS));
+        if !has_y {
+            y = ny;
+        }
+        if !has_m && !has_y {
+            mo = nm;
+        }
+        if !has_d && !has_y && !has_m {
+            d = nd;
         }
     }
     if !(1..=12).contains(&mo) || d < 1 || d > days_in_month(y, mo) || h > 23 || mi > 59 || sec > 59
@@ -773,6 +801,9 @@ pub struct Gantt {
     pub inclusive_end_dates: bool,
     pub top_axis: bool,
     pub today_marker: Option<String>,
+    /// "Now" (UTC milliseconds) for dates whose format lacks a date part; `None`
+    /// reads them as 1970-01-01.
+    pub now: Option<i64>,
     pub sections: Vec<String>,
     pub tasks: Vec<Task>,
 }
@@ -821,6 +852,12 @@ fn keyword<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
 
 /// Parse a gantt body and resolve every task's dates.
 pub fn parse(body: &str, title: Option<String>) -> Result<Gantt> {
+    parse_at(body, title, None)
+}
+
+/// [`parse`] as of `now` (UTC milliseconds), which fills in the date parts a
+/// `dateFormat` lacks.
+pub fn parse_at(body: &str, title: Option<String>, now: Option<i64>) -> Result<Gantt> {
     let mut g = Gantt {
         title,
         date_format: "YYYY-MM-DD".into(),
@@ -833,6 +870,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Gantt> {
         inclusive_end_dates: false,
         top_axis: false,
         today_marker: None,
+        now,
         sections: Vec::new(),
         tasks: Vec::new(),
     };
@@ -945,7 +983,7 @@ fn parse_start(g: &Gantt, s: &str) -> Option<StartSpec> {
         let ids: Vec<String> = ids.split_whitespace().map(str::to_string).collect();
         return (!ids.is_empty()).then_some(StartSpec::After(ids));
     }
-    parse_date(s, &g.date_format)
+    parse_date_at(s, &g.date_format, g.now)
         .or_else(|| parse_iso(s))
         .map(StartSpec::At)
 }
@@ -955,7 +993,7 @@ fn parse_end(g: &Gantt, s: &str) -> Option<EndSpec> {
         let ids: Vec<String> = ids.split_whitespace().map(str::to_string).collect();
         return (!ids.is_empty()).then_some(EndSpec::Until(ids));
     }
-    if let Some(t) = parse_date(s, &g.date_format) {
+    if let Some(t) = parse_date_at(s, &g.date_format, g.now) {
         let t = if g.inclusive_end_dates { t + DAY_MS } else { t };
         return Some(EndSpec::At(t));
     }
@@ -1020,7 +1058,7 @@ fn is_excluded(g: &Gantt, t: i64) -> bool {
     let day = t.div_euclid(DAY_MS);
     let on_day = |list: &[String]| {
         list.iter().any(|e| {
-            parse_date(e, &g.date_format)
+            parse_date_at(e, &g.date_format, g.now)
                 .or_else(|| parse_iso(e))
                 .is_some_and(|d| d.div_euclid(DAY_MS) == day)
         })
@@ -1200,6 +1238,8 @@ struct Colors {
     task_text_dark: Color,
     /// `taskTextOutsideColor`: labels beside a bar.
     task_text_outside: Color,
+    /// `todayLineColor`: red, but `#DB5757` (dark) and `#d42` (neutral).
+    today: Color,
 }
 
 impl Colors {
@@ -1386,6 +1426,20 @@ impl Colors {
                 .map_or_else(|| base(i), |(_, v)| Color::new(v.trim()))
         };
         let alt = var("altSectionBkgColor", 9);
+        let today = vars
+            .iter()
+            .rev()
+            .find(|(n, _)| n == "todayLineColor")
+            .map_or_else(
+                || match pal.theme {
+                    T::Dark => Color::new("#DB5757"),
+                    // theme-neutral sets it to its own `critBkgColor` before
+                    // themeVariables apply.
+                    T::Neutral => base(6),
+                    _ => Color::new("red"),
+                },
+                |(_, v)| Color::new(v.trim()),
+            );
         Colors {
             task: var("taskBkgColor", 0),
             task_border: var("taskBorderColor", 1),
@@ -1408,6 +1462,7 @@ impl Colors {
             task_text_outside: var("taskTextOutsideColor", 16),
             text: pal.text_color.clone(),
             title: pal.title_color.clone(),
+            today,
         }
     }
 }
@@ -1448,7 +1503,10 @@ fn assign_rows(g: &Gantt, compact: bool) -> (Vec<Option<usize>>, usize) {
 }
 
 /// Lay out and draw a resolved gantt chart.
-pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
+///
+/// `now` (milliseconds since the epoch, UTC) is the instant mermaid's `drawToday`
+/// reads from `new Date()`; `None` draws no today line.
+pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> Scene {
     let c = Colors::new(pal, &cfg.theme_variables);
     let bar_h = cfg.section_f64("gantt", "barHeight", 20.0);
     let bar_gap = cfg.section_f64("gantt", "barGap", 4.0);
@@ -1501,7 +1559,8 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     if t1 <= t0 {
         t1 = t0 + DAY_MS;
     }
-    let x_of = |t: i64| left_pad + ((t - t0) as f64 / (t1 - t0) as f64 * inner).round();
+    // d3's `interpolateRound` is `Math.round`: halves round up, also below zero.
+    let x_of = |t: i64| left_pad + ((t - t0) as f64 / (t1 - t0) as f64 * inner + 0.5).floor();
 
     let mut bounds = Bounds::default();
     bounds.add_rect(Rect::new(0.0, 0.0, w, h));
@@ -1820,6 +1879,25 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         ));
     }
 
+    // drawToday: a `line.today` at `timeScale(new Date())` from `titleTopMargin` down to
+    // `h - titleTopMargin`, unless `todayMarker off`; any other `todayMarker` value is
+    // its inline style (commas turned into semicolons). With no tasks the scale's
+    // domain is empty and the line lands at `NaN`, which the browser draws at 0.
+    if let Some(now) = now {
+        let marker = g.today_marker.as_deref().unwrap_or("");
+        if marker != "off" {
+            let x = if g.tasks.is_empty() { 0.0 } else { x_of(now) };
+            overlay.push(Element::classed_shape(
+                Geometry::Path(vec![
+                    geom::PathCmd::MoveTo(Point::new(x, title_margin)),
+                    geom::PathCmd::LineTo(Point::new(x, h - title_margin)),
+                ]),
+                today_paint(&c.today, marker),
+                "today",
+            ));
+        }
+    }
+
     if let Some(title) = g.title.as_ref().filter(|t| !t.trim().is_empty()) {
         let title = normalize_label(title);
         let tw = line_width(&title, 18.0, false);
@@ -1859,15 +1937,59 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
 }
 
-/// Parse and render a `gantt` diagram body (already preprocessed).
+/// The today line's paint: `.today` (`todayLineColor`, 2px) under the
+/// `todayMarker` inline style. mermaid writes the value with every comma made a
+/// semicolon, so a declaration with a comma inside (`rgb(1,2,3)`) breaks and the
+/// browser drops it.
+fn today_paint(color: &Color, style: &str) -> Paint {
+    let mut paint = Paint::stroke(color, 2.0);
+    for decl in style.split([',', ';']) {
+        let Some((k, v)) = decl.split_once(':') else {
+            continue;
+        };
+        let v = v.trim().trim_end_matches("!important").trim();
+        if v.is_empty() || v.matches('(').count() != v.matches(')').count() {
+            continue;
+        }
+        let px = || v.trim_end_matches("px").trim().parse::<f64>().ok();
+        match k.trim() {
+            "stroke" => paint.stroke = Color::new(v),
+            "stroke-width" => {
+                if let Some(w) = px() {
+                    paint.stroke_width = w;
+                }
+            }
+            "stroke-dasharray" => {
+                let d: Vec<f64> = v
+                    .split([' ', '\t'])
+                    .filter(|x| !x.is_empty())
+                    .filter_map(|x| x.trim_end_matches("px").parse().ok())
+                    .collect();
+                paint.dash = (!d.is_empty()).then_some(d);
+            }
+            "opacity" => {
+                if let Ok(o) = v.parse::<f64>() {
+                    paint.opacity = Some(o);
+                }
+            }
+            "fill" => paint.fill = Color::new(v),
+            _ => {}
+        }
+    }
+    paint
+}
+
+/// Parse and render a `gantt` diagram body (already preprocessed); `now` as for
+/// [`draw`].
 pub fn render(
     body: &str,
     title: Option<String>,
     cfg: &MermaidConfig,
     pal: &Palette,
+    now: Option<i64>,
 ) -> Result<Scene> {
-    let g = parse(body, title)?;
-    Ok(draw(&g, cfg, pal))
+    let g = parse_at(body, title, now)?;
+    Ok(draw(&g, cfg, pal, now))
 }
 
 #[cfg(test)]
@@ -2029,7 +2151,7 @@ mod tests {
         // other tasks' rows plus two bars and labelled 60px below them.
         let src = "gantt\ndateFormat YYYY-MM-DD\nexcludes weekends\nsection S\nA :a, 2024-01-01, 2024-01-03\nB :b, 2024-01-04, 2d\nM :vert, v, 2024-01-02, 0d";
         let cfg = MermaidConfig::default();
-        let s = render(src, None, &cfg, &cfg.palette()).unwrap();
+        let s = render(src, None, &cfg, &cfg.palette(), None).unwrap();
         assert_eq!(
             (s.view_box.x, s.view_box.y, s.view_box.w),
             (0.0, 0.0, 784.0)
@@ -2106,8 +2228,8 @@ mod tests {
     fn renders_deterministically() {
         let cfg = MermaidConfig::default();
         let pal = cfg.palette();
-        let a = render(SAMPLE, None, &cfg, &pal).unwrap();
-        let b = render(SAMPLE, None, &cfg, &pal).unwrap();
+        let a = render(SAMPLE, None, &cfg, &pal, None).unwrap();
+        let b = render(SAMPLE, None, &cfg, &pal, None).unwrap();
         assert_eq!(a, b);
         assert!(a.element_count() > 20);
         assert!(a.view_box.w > 780.0);
@@ -2144,5 +2266,132 @@ mod tests {
         assert!(compact);
         assert_eq!(assign_rows(&g, true), (vec![Some(0), Some(0), Some(0)], 1));
         assert_eq!(assign_rows(&g, false).1, 3);
+    }
+
+    /// The `today` line(s) of a full render at `now`: `(x, y1, y2, paint)`.
+    fn today_lines(src: &str, now: Option<i64>) -> Vec<(f64, f64, f64, Paint)> {
+        let env = crate::render::RenderEnv { now_ms: now };
+        let r = crate::render::render_with_env(src, &MermaidConfig::default(), &env).unwrap();
+        fn walk(els: &[Element], out: &mut Vec<(f64, f64, f64, Paint)>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        paint,
+                        class: Some(c),
+                    } if c == "today" => {
+                        let [geom::PathCmd::MoveTo(a), geom::PathCmd::LineTo(b)] = cmds.as_slice()
+                        else {
+                            panic!("{cmds:?}")
+                        };
+                        assert_eq!(a.x, b.x);
+                        out.push((a.x, a.y, b.y, paint.clone()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&r.scene.elements, &mut out);
+        out
+    }
+
+    /// 2024-01-24T15:30:00Z, the `new Date()` the references below were rendered at.
+    const NOW: i64 = 1_706_110_200_000;
+    const PLAN: &str = "gantt\n    dateFormat YYYY-MM-DD\n    section A\n    One   :a1, 2024-01-10, 10d\n    Two   :after a1, 12d\n    section B\n    Three :2024-01-15, 15d\n";
+
+    #[test]
+    fn today_line_follows_the_supplied_clock() {
+        // mermaid 12.3.0 with `Date` fixed at NOW:
+        // <line x1="497" x2="497" y1="25" y2="147" class="today">, `.today` red, 2px.
+        let lines = today_lines(PLAN, Some(NOW));
+        assert_eq!(lines.len(), 1);
+        let (x, y1, y2, p) = &lines[0];
+        assert_eq!((*x, *y1, *y2), (497.0, 25.0, 147.0));
+        assert_eq!(
+            (p.stroke.css(), p.stroke_width, p.fill.is_none()),
+            ("red", 2.0, true)
+        );
+        // No clock, no line; `todayMarker off` hides it.
+        assert!(today_lines(PLAN, None).is_empty());
+        let off = PLAN.replace("YYYY-MM-DD\n", "YYYY-MM-DD\n    todayMarker off\n");
+        assert!(today_lines(&off, Some(NOW)).is_empty());
+        // No tasks: the scale's domain is empty and x is NaN, drawn at 0
+        // (<line x1="NaN" ... y1="25" y2="75">).
+        let empty = today_lines("gantt\n  tickInterval 1week\n", Some(NOW));
+        assert_eq!(
+            empty.iter().map(|l| (l.0, l.1, l.2)).collect::<Vec<_>>(),
+            [(0.0, 25.0, 75.0)]
+        );
+    }
+
+    #[test]
+    fn today_marker_styles_the_line() {
+        // style="stroke-width:5px;stroke:#0f0;opacity:0.5"
+        let src = PLAN.replace(
+            "YYYY-MM-DD\n",
+            "YYYY-MM-DD\n    todayMarker stroke-width:5px,stroke:#0f0,opacity:0.5\n",
+        );
+        let p = &today_lines(&src, Some(NOW))[0].3;
+        assert_eq!(
+            (p.stroke.css(), p.stroke_width, p.opacity),
+            ("#0f0", 5.0, Some(0.5))
+        );
+        // style="stroke-dasharray:4 2;stroke:rgb(0;0;255);stroke-width:3": the broken
+        // rgb() is dropped, so the stroke stays `.today`'s red.
+        let src = PLAN.replace(
+            "YYYY-MM-DD\n",
+            "YYYY-MM-DD\n    todayMarker stroke-dasharray:4 2,stroke:rgb(0,0,255),stroke-width:3\n",
+        );
+        let p = &today_lines(&src, Some(NOW))[0].3;
+        assert_eq!((p.stroke.css(), p.stroke_width), ("red", 3.0));
+        assert_eq!(p.dash.as_deref(), Some(&[4.0, 2.0][..]));
+    }
+
+    #[test]
+    fn today_line_color_per_theme() {
+        // Computed `.today` strokes in mermaid 12.3.0.
+        let color = |front: &str| {
+            today_lines(&format!("---\nconfig:\n{front}---\n{PLAN}"), Some(NOW))[0]
+                .3
+                .stroke
+                .css()
+                .to_string()
+        };
+        assert_eq!(color("  theme: dark\n"), "#DB5757");
+        assert_eq!(color("  theme: neutral\n"), "#d42");
+        // neutral's line is its own critBkgColor, not an overridden one.
+        assert_eq!(
+            color("  theme: neutral\n  themeVariables:\n    critBkgColor: \"#00aa00\"\n"),
+            "#d42"
+        );
+        assert_eq!(
+            color("  themeVariables:\n    todayLineColor: \"#123456\"\n"),
+            "#123456"
+        );
+    }
+
+    #[test]
+    fn formats_without_a_date_take_todays() {
+        // dateFormat HH:mm parses "17:49" as today 17:49 (dayjs), so a 15:30 "now"
+        // lands left of the chart: <line x1="-3757" ... y2="171">.
+        let src = "gantt\n    dateFormat HH:mm\n    axisFormat %H:%M\n    Initial milestone : milestone, m1, 17:49, 2m\n    Task A : 10m\n    Task B : 5m\n    Final milestone : milestone, m2, 18:08, 4m\n";
+        let lines = today_lines(src, Some(NOW));
+        assert_eq!((lines[0].0, lines[0].2), (-3757.0, 171.0));
+        let today = NOW - NOW.rem_euclid(DAY_MS);
+        assert_eq!(
+            parse_date_at("17:49", "HH:mm", Some(NOW)),
+            Some(today + 17 * HOUR_MS + 49 * MINUTE_MS)
+        );
+        assert_eq!(
+            parse_date_at("2023", "YYYY", Some(NOW)),
+            Some(d(2023, 1, 1))
+        );
+        assert_eq!(parse_date_at("03", "MM", Some(NOW)), Some(d(2024, 3, 1)));
+        assert_eq!(
+            parse_date_at("17:49", "HH:mm", None),
+            Some(17 * HOUR_MS + 49 * MINUTE_MS)
+        );
     }
 }

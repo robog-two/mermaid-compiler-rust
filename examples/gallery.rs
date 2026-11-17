@@ -11,6 +11,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
+/// 2024-01-24T12:00:00Z.
+const GALLERY_NOW_MS: i64 = 1_706_097_600_000;
+
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src_dir = root.join("examples/diagrams");
@@ -27,6 +30,11 @@ fn main() {
     #[cfg(feature = "png")]
     let rast = mmdc::output::png::Rasterizer::new();
     let cfg = MermaidConfig::default();
+    // A fixed "now" keeps the gallery reproducible; inside the gantt example's
+    // plan, so its today line shows (`mmdc` reads the clock or SOURCE_DATE_EPOCH).
+    let env = render::RenderEnv {
+        now_ms: Some(GALLERY_NOW_MS),
+    };
     let enc = EncodeOptions {
         scale: 1.5,
         ..EncodeOptions::default()
@@ -45,7 +53,7 @@ fn main() {
             .into_owned();
         let source = std::fs::read_to_string(path).expect("read example");
         let t = Instant::now();
-        let rendered = match render::render(&source, &cfg) {
+        let rendered = match render::render_with_env(&source, &cfg, &env) {
             Ok(r) => r,
             Err(e) => {
                 failures += 1;
