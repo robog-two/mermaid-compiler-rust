@@ -941,19 +941,24 @@ mod tests {
         assert_eq!(dash(&classic), Some(vec![5.0]));
     }
 
-    /// Choice and note outlines are rough.js paths at its 1.3px.
+    /// Choice and note outlines are rough.js paths at its 1.3px (`stroke-width`
+    /// attribute) under the classic look; under the (default) neo look the shared
+    /// `[data-look="neo"].node path { stroke-width: 2px }` (the default redux
+    /// theme's `strokeWidth`) wins: Chromium computes 2 for both in mermaid 12.3.0.
     #[test]
     fn choice_and_note_outlines_are_rough_width() {
-        let shapes = stroked(NOTED);
-        let width = |part: &str| {
-            shapes
-                .iter()
+        let width = |src: &str, part: &str| {
+            stroked(src)
+                .into_iter()
                 .find(|(g, _)| g.starts_with("state-") && g.contains(part))
                 .map(|(_, p)| p.stroke_width)
         };
-        assert_eq!(width("-c-"), Some(1.3));
-        assert_eq!(width("-note"), Some(1.3));
-        assert_ne!(width("-A-"), Some(1.3));
+        assert_eq!(width(NOTED, "-c-"), Some(2.0));
+        assert_eq!(width(NOTED, "-note"), Some(2.0));
+        let classic = format!("---\nconfig:\n  look: classic\n---\n{NOTED}");
+        assert_eq!(width(&classic, "-c-"), Some(1.3));
+        assert_eq!(width(&classic, "-note"), Some(1.3));
+        assert_ne!(width(&classic, "-A-"), Some(1.3));
     }
 
     fn render_dagre(src: &str) -> crate::scene::Scene {

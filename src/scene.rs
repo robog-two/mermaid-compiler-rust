@@ -44,14 +44,47 @@ pub struct Paint {
     pub multiply: bool,
 }
 
-/// A two-stop `<linearGradient gradientUnits="userSpaceOnUse">` along x: `from`
-/// at `x1` (and left of it), `to` at `x2` (and right of it).
+/// A two-stop horizontal `<linearGradient>`: `from` at `x1` (and left of it),
+/// `to` at `x2` (and right of it). With `bbox`, `x1` and `x2` are fractions of
+/// the painted shape's bounding box (`gradientUnits="objectBoundingBox"`),
+/// otherwise user-space coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gradient {
     pub x1: f64,
     pub x2: f64,
     pub from: Color,
     pub to: Color,
+    pub bbox: bool,
+}
+
+impl Gradient {
+    /// `from` at the left edge of each shape's bounding box to `to` at its right
+    /// edge (mermaid's `{id}-gradient`, `x1="0%" x2="100%"`).
+    pub fn across_bbox(from: &Color, to: &Color) -> Self {
+        Gradient {
+            x1: 0.0,
+            x2: 1.0,
+            from: from.clone(),
+            to: to.clone(),
+            bbox: true,
+        }
+    }
+
+    /// The gradient in user space for a shape of geometry `geom`; `None` where
+    /// a bounding-box gradient has no box to span (a shape without width or
+    /// height, which SVG then leaves unpainted).
+    pub fn in_user_space(&self, geom: &Geometry) -> Option<Gradient> {
+        if !self.bbox {
+            return Some(self.clone());
+        }
+        let b = geom.bbox()?;
+        (b.w > 0.0 && b.h > 0.0).then(|| Gradient {
+            x1: b.x + self.x1 * b.w,
+            x2: b.x + self.x2 * b.w,
+            bbox: false,
+            ..self.clone()
+        })
+    }
 }
 
 /// A CSS `drop-shadow(dx dy blur color)`: the shape's silhouette offset and
@@ -141,6 +174,16 @@ pub enum Geometry {
 }
 
 impl Geometry {
+    /// The fill bounding box (SVG `getBBox()`: curves by their extremes, strokes
+    /// left out); `None` for an empty path.
+    pub fn bbox(&self) -> Option<Rect> {
+        match self {
+            Geometry::Rect { rect, .. } => Some(*rect),
+            Geometry::Circle { c, r } => Some(Rect::new(c.x - r, c.y - r, 2.0 * r, 2.0 * r)),
+            Geometry::Path(cmds) => crate::geom::path_bbox(cmds),
+        }
+    }
+
     /// The same geometry moved by `(dx, dy)`.
     pub fn translated(&self, dx: f64, dy: f64) -> Geometry {
         let mv = |p: &Point| Point::new(p.x + dx, p.y + dy);

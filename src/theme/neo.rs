@@ -441,18 +441,23 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         (true, dark) => DropShadow {
             dx: 4.0,
             dy: 4.0,
+            std_dev: 0.0,
             color: c(if dark { "#FFFFFF" } else { "#000000" }),
             opacity: 0.06,
         },
+        // `drop-shadow( 0px 1px 2px rgba(0, 0, 0, 0.25))`
         (false, false) => DropShadow {
             dx: 0.0,
             dy: 1.0,
+            std_dev: 1.0,
             color: c("#000000"),
             opacity: 0.25,
         },
+        // `drop-shadow( 1px 2px 2px rgba(185,185,185,0.2))`
         (false, true) => DropShadow {
             dx: 1.0,
             dy: 2.0,
+            std_dev: 1.0,
             color: c("#b9b9b9"),
             opacity: 0.2,
         },

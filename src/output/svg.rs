@@ -135,12 +135,19 @@ impl Filters<'_> {
         }
         let mut out = String::from("<defs>");
         for (k, g) in self.gradients.iter().enumerate() {
+            let (units, x1, x2) = if g.bbox {
+                (
+                    "objectBoundingBox",
+                    format!("{}%", num(g.x1 * 100.0)),
+                    format!("{}%", num(g.x2 * 100.0)),
+                )
+            } else {
+                ("userSpaceOnUse", num(g.x1), num(g.x2))
+            };
             let _ = write!(
                 out,
-                "<linearGradient id=\"{}-gradient-{k}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" x2=\"{}\" y1=\"0\" y2=\"0\"><stop offset=\"0%\" stop-color=\"{}\"/><stop offset=\"100%\" stop-color=\"{}\"/></linearGradient>",
+                "<linearGradient id=\"{}-gradient-{k}\" gradientUnits=\"{units}\" x1=\"{x1}\" x2=\"{x2}\" y1=\"0\" y2=\"0\"><stop offset=\"0%\" stop-color=\"{}\"/><stop offset=\"100%\" stop-color=\"{}\"/></linearGradient>",
                 self.id,
-                num(g.x1),
-                num(g.x2),
                 esc(g.from.css()),
                 esc(g.to.css())
             );

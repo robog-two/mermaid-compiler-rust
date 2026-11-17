@@ -576,7 +576,21 @@ impl MermaidConfig {
         self.refresh_global_appearance();
         if let Some(vars) = j.get("themeVariables").and_then(Json::as_object) {
             for (k, v) in vars {
-                if let Some(s) = v.to_scalar_string() {
+                if let Some(mut s) = v.to_scalar_string() {
+                    // `sanitizeDirective` empties a directive's string theme variable
+                    // with any character outside `[\d "#%(),.;A-Za-z]`, so a
+                    // `drop-shadow(...)` (its hyphen) never survives one: the filter
+                    // becomes `none`. Only `dropShadow` is emptied here; the other
+                    // variables keep their value.
+                    let unsafe_char =
+                        |c: char| !(c.is_ascii_alphanumeric() || " \"#%(),.;".contains(c));
+                    if directive
+                        && k == "dropShadow"
+                        && matches!(v, Json::String(_))
+                        && (s.is_empty() || s.chars().any(unsafe_char))
+                    {
+                        s.clear();
+                    }
                     self.theme_variables.push((k.clone(), s));
                 }
             }

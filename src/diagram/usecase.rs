@@ -24,7 +24,7 @@ use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::json::{self, Json};
 use crate::layout::{self, Direction, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode};
-use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
+use crate::scene::{Color, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Text};
 use crate::text::{decode_entities, line_width};
 use crate::theme::{ColorSlot, DropShadow, Palette, SlotColors, ThemeName};
 
@@ -2802,14 +2802,9 @@ fn role_colors(theme: ThemeName, vars: &[(String, String)], pal: &Palette) -> Ro
             })
             .unwrap_or_else(|| fallback.clone())
     };
-    // Themes whose `actorBorder` is their primary border colour (`border1`).
-    let actor_border = match theme {
-        ThemeName::Forest | ThemeName::Neutral => &pal.actor_border,
-        _ => &pal.node_border,
-    };
     RoleColors {
         actor_bkg: var("usecaseActorBkg", &pal.actor_bkg),
-        actor_border: var("usecaseActorBorder", actor_border),
+        actor_border: var("usecaseActorBorder", &pal.actor_border),
         bkg: var("usecaseBkg", &pal.main_bkg),
         border: var("usecaseBorder", &pal.node_border),
         boundary_bkg: var("usecaseBoundaryBkg", &pal.cluster_bkg),
@@ -3197,6 +3192,19 @@ fn measure_json(
     )
 }
 
+/// Push `el` casting the neo look's drop shadow `sh`: a blurred CSS
+/// `drop-shadow()` as the shape's own filter, a hard one (`stdDeviation="0"`)
+/// as an offset copy of its silhouette drawn first.
+fn push_shadowed(els: &mut Vec<Element>, mut el: Element, sh: Option<&DropShadow>) {
+    if let (Some(sh), Element::Shape { geom, paint, .. }) = (sh, &mut el) {
+        match sh.blurred() {
+            Some(b) => paint.shadow = Some(b),
+            None => els.extend(shadow(geom, Some(sh))),
+        }
+    }
+    els.push(el);
+}
+
 /// The neo look's drop shadow under a filled shape.
 fn shadow(geom: &Geometry, sh: Option<&DropShadow>) -> Option<Element> {
     let sh = sh?;
@@ -3205,6 +3213,21 @@ fn shadow(geom: &Geometry, sh: Option<&DropShadow>) -> Option<Element> {
         Paint::fill(&sh.color).with_opacity(sh.opacity),
         "drop-shadow",
     ))
+}
+
+/// `[data-look="neo"].node rect, polygon, path` and `.cluster rect` (the shared
+/// stylesheet): the outline in `nodeBorder`, or with the theme's `useGradient`
+/// the `{id}-gradient` across the shape's bounding box. A `style` / `classDef`
+/// stroke is inline and wins, as does a palette slot's colour rule.
+fn neo_outline(paint: &mut Paint, pal: &Palette, styled: bool) {
+    if styled {
+        return;
+    }
+    paint.stroke = pal.node_border.clone();
+    paint.stroke_gradient = pal
+        .node_gradient
+        .as_ref()
+        .map(|(from, to)| Gradient::across_bbox(from, to));
 }
 
 fn painted(
@@ -3276,16 +3299,19 @@ fn draw_node(
                         c: Point::new(g.x, g.y - 23.0),
                         r: 9.0,
                     };
-                    if let Some(sh) = sh {
-                        els.push(Element::classed_shape(
+                    let mut head_paint = line.clone();
+                    match sh {
+                        Some(sh) if sh.blurred().is_some() => head_paint.shadow = sh.blurred(),
+                        Some(sh) => els.push(Element::classed_shape(
                             head.translated(sh.dx, sh.dy),
                             Paint::stroke(&sh.color, line.stroke_width).with_opacity(sh.opacity),
                             "drop-shadow",
-                        ));
+                        )),
+                        None => {}
                     }
                     els.push(Element::classed_shape(
                         head,
-                        line.clone(),
+                        head_paint,
                         "usecase-actor-hollow-head",
                     ));
                     els.push(Element::classed_shape(
@@ -3304,27 +3330,29 @@ fn draw_node(
                     // Both rects are `.node rect`s, which neo strokes in the node
                     // border and gives the drop shadow.
                     let mut frame_paint = paint.clone();
-                    if o.neo() && n.style.stroke.is_none() {
-                        frame_paint.stroke = pal.node_border.clone();
+                    if o.neo() {
+                        neo_outline(&mut frame_paint, pal, n.style.stroke.is_some());
                     }
                     let frame = Geometry::Rect {
                         rect: Rect::new(g.x - 26.0, g.y - 28.0, 52.0, 52.0),
                         rx: 4.0,
                     };
-                    els.extend(shadow(&frame, sh));
-                    els.push(Element::classed_shape(
-                        frame,
-                        frame_paint,
-                        "usecase-actor-icon-frame",
-                    ));
+                    push_shadowed(
+                        &mut els,
+                        Element::classed_shape(frame, frame_paint, "usecase-actor-icon-frame"),
+                        sh,
+                    );
                     let ir = Rect::new(g.x - 21.0, g.y - 23.0, 42.0, 42.0);
                     let fallback = Geometry::Rect { rect: ir, rx: 0.0 };
-                    els.extend(shadow(&fallback, sh));
-                    els.push(Element::classed_shape(
-                        fallback,
-                        Paint::fill(&Color::new("#087ebf")),
-                        "usecase-actor-icon-fallback",
-                    ));
+                    push_shadowed(
+                        &mut els,
+                        Element::classed_shape(
+                            fallback,
+                            Paint::fill(&Color::new("#087ebf")),
+                            "usecase-actor-icon-fallback",
+                        ),
+                        sh,
+                    );
                     els.push(super::archicons::unknown(ir));
                 }
             }
@@ -3417,8 +3445,11 @@ fn draw_node(
         Shape::Rect { label } => {
             let paint = painted(&n.style, slot, &role.bkg, &role.border, 2.0);
             let geom = Geometry::Rect { rect: r, rx: 0.0 };
-            els.extend(shadow(&geom, sh));
-            els.push(Element::classed_shape(geom, paint, "basic label-container"));
+            push_shadowed(
+                &mut els,
+                Element::classed_shape(geom, paint, "basic label-container"),
+                sh,
+            );
             let color = n
                 .style
                 .color
@@ -3438,8 +3469,16 @@ fn draw_node(
             } else {
                 (&pal.note_border, 1.3)
             };
-            let paint = painted(&n.style, None, &pal.note_bkg, stroke, width);
-            els.extend(shadow(&Geometry::Rect { rect: r, rx: 0.0 }, sh));
+            let mut paint = painted(&n.style, None, &pal.note_bkg, stroke, width);
+            if o.neo() {
+                neo_outline(&mut paint, pal, n.style.stroke.is_some());
+            }
+            // The filter is on the rough.js group (`.outer-path`): its
+            // silhouette is the fill path's, outline included.
+            let blurred = sh.and_then(DropShadow::blurred);
+            if blurred.is_none() {
+                els.extend(shadow(&Geometry::Rect { rect: r, rx: 0.0 }, sh));
+            }
             let corners = [
                 Point::new(r.x, r.y),
                 Point::new(r.x + r.w, r.y),
@@ -3451,6 +3490,7 @@ fn draw_node(
                 fill.stroke = Color::none();
                 fill.stroke_width = 0.0;
             }
+            fill.shadow = blurred;
             els.push(Element::classed_shape(
                 Geometry::Path(vec![
                     PathCmd::MoveTo(corners[0]),
@@ -3497,13 +3537,15 @@ fn draw_node(
         } => {
             let mut paint = painted(&n.style, None, &pal.main_bkg, &pal.node_border, 1.0);
             paint.stroke_width = *border;
+            if o.neo() {
+                neo_outline(&mut paint, pal, n.style.stroke.is_some());
+            }
             let outer = Geometry::Rect { rect: r, rx: 0.0 };
-            els.extend(shadow(&outer, sh));
-            els.push(Element::classed_shape(
-                outer,
-                paint.clone(),
-                "label-container usecase-json-border",
-            ));
+            push_shadowed(
+                &mut els,
+                Element::classed_shape(outer, paint.clone(), "label-container usecase-json-border"),
+                sh,
+            );
             let color = n
                 .style
                 .color
@@ -3518,12 +3560,11 @@ fn draw_node(
                     rect: Rect::new(x, y, w, h),
                     rx: 0.0,
                 };
-                els.extend(shadow(&geom, sh));
-                els.push(Element::classed_shape(
-                    geom,
-                    paint.clone(),
-                    "usecase-json-cell",
-                ));
+                push_shadowed(
+                    els,
+                    Element::classed_shape(geom, paint.clone(), "usecase-json-cell"),
+                    sh,
+                );
             };
             cell(&mut els, left, y, inner_w, *title_h);
             els.push(title.text(Point::new(left + inner_w / 2.0, y + title_h / 2.0), &color));
@@ -3826,13 +3867,20 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         };
         let r = Rect::centered(lr.center(), w, h);
         bounds.add_rect(r);
-        let paint = painted(
+        let mut paint = painted(
             &c.style,
             c.slot.as_ref(),
             &o.role.boundary_bkg,
             &o.role.boundary_border,
             1.0,
         );
+        if o.neo() {
+            neo_outline(
+                &mut paint,
+                pal,
+                c.style.stroke.is_some() || c.slot.is_some(),
+            );
+        }
         let mut children = Vec::new();
         let body = Geometry::Rect {
             rect: Rect::new(r.x, r.y + tab_h, w, h - tab_h),
@@ -3849,21 +3897,30 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
                 rect: Rect::new(r.x, r.y, tab_w, tab_h),
                 rx: 0.0,
             };
-            children.extend(shadow(&tab, shadow_of));
-            children.push(Element::classed_shape(
-                tab,
-                paint.clone(),
-                "boundary-tab system-boundary-package-tab",
-            ));
-            children.extend(shadow(&body, shadow_of));
-            children.push(Element::classed_shape(body, paint, "boundary-body"));
+            push_shadowed(
+                &mut children,
+                Element::classed_shape(
+                    tab,
+                    paint.clone(),
+                    "boundary-tab system-boundary-package-tab",
+                ),
+                shadow_of,
+            );
+            push_shadowed(
+                &mut children,
+                Element::classed_shape(body, paint, "boundary-body"),
+                shadow_of,
+            );
             children.push(c.title.text(
                 Point::new(r.x + tab_w / 2.0, r.y + tab_h / 2.0),
                 &title_color,
             ));
         } else {
-            children.extend(shadow(&body, shadow_of));
-            children.push(Element::classed_shape(body, paint, "boundary-body"));
+            push_shadowed(
+                &mut children,
+                Element::classed_shape(body, paint, "boundary-body"),
+                shadow_of,
+            );
             children.push(c.title.text(
                 Point::new(r.center().x, r.y + c.title.h / 2.0),
                 &title_color,

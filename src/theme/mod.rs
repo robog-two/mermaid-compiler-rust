@@ -146,6 +146,16 @@ pub struct Palette {
     pub requirement_edge_label_background: Option<Color>,
     /// The drop shadow the neo look applies to nodes and clusters (`dropShadow`).
     pub drop_shadow: Option<DropShadow>,
+    /// `useGradient`: the neo look strokes nodes and clusters with a horizontal
+    /// `gradientStart` → `gradientStop` gradient across each shape's bounding box
+    /// (`insertLookDefs`' `{id}-gradient`).
+    pub node_gradient: Option<(Color, Color)>,
+    /// `nodeShadow` (the redux themes): state start / end circles (and the
+    /// flowchart shapes drawn by `stateStart.ts` / `stateEnd.ts`) carry an inline
+    /// `filter: url(#{id}-drop-shadow-small)` in every look but hand-drawn.
+    pub node_shadow: bool,
+    /// `stateBorder`: the inner disc of a state end (`stateBorder ?? nodeBorder`).
+    pub state_border: Option<Color>,
     /// `quadrant1Fill`: the theme's `primaryColor` (the neo / redux light themes use
     /// their gantt-block `#ECECFE`); quadrants 2..4 add 5 per RGB channel each.
     pub quadrant_fill: Color,
@@ -191,17 +201,138 @@ pub struct SlotColors {
     pub fill: Option<Color>,
 }
 
-/// A hard drop shadow: an offset, translucent copy of the shape's silhouette.
+/// The theme's `dropShadow`: the shape's silhouette offset by (`dx`, `dy`),
+/// blurred with a Gaussian of standard deviation `std_dev`, in `color` at `opacity`.
 ///
-/// The redux themes' `feDropShadow` has `stdDeviation="0"`, so a solid offset copy
-/// reproduces it exactly in every backend. The neo themes use a CSS `drop-shadow()`
-/// with a 2px blur, which is approximated without the blur.
+/// The redux themes' `url(#drop-shadow)` is `insertLookDefs`' `feDropShadow` with
+/// `stdDeviation="0"`, which a solid offset copy reproduces exactly in every
+/// backend. The classic and neo themes use a CSS `drop-shadow(dx dy blur color)`,
+/// whose blur radius is twice the standard deviation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DropShadow {
     pub dx: f64,
     pub dy: f64,
+    pub std_dev: f64,
     pub color: Color,
     pub opacity: f64,
+}
+
+impl DropShadow {
+    /// `insertLookDefs`' `feDropShadow` filters: `{id}-drop-shadow` (`offset` 4)
+    /// and `{id}-drop-shadow-small` (2), unblurred, 6% of white for a theme with
+    /// "dark" in its name and of black otherwise.
+    pub fn look_defs(theme: ThemeName, offset: f64) -> Self {
+        DropShadow {
+            dx: offset,
+            dy: offset,
+            std_dev: 0.0,
+            color: c(if theme.name().contains("dark") {
+                "#FFFFFF"
+            } else {
+                "#000000"
+            }),
+            opacity: 0.06,
+        }
+    }
+
+    /// The CSS `drop-shadow()` of the classic and neo themes.
+    fn css(dx: f64, dy: f64, blur: f64, rgb: &str, opacity: f64) -> Self {
+        DropShadow {
+            dx,
+            dy,
+            std_dev: blur / 2.0,
+            color: c(rgb),
+            opacity,
+        }
+    }
+
+    /// Parse a CSS `drop-shadow(<dx> <dy> [<blur>] [<color>])` (lengths in px, the
+    /// colour first or last); `None` for anything else.
+    pub fn parse_css(s: &str) -> Option<Self> {
+        let inner = s
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .strip_prefix("drop-shadow(")?
+            .strip_suffix(')')?;
+        // Split on whitespace outside parentheses.
+        let mut parts: Vec<String> = Vec::new();
+        let mut depth = 0usize;
+        let mut cur = String::new();
+        for ch in inner.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if ch.is_whitespace() && depth == 0 {
+                if !cur.is_empty() {
+                    parts.push(std::mem::take(&mut cur));
+                }
+            } else {
+                cur.push(ch);
+            }
+        }
+        if !cur.is_empty() {
+            parts.push(cur);
+        }
+        let len = |p: &str| -> Option<f64> {
+            match p.strip_suffix("px") {
+                Some(v) => v.parse().ok(),
+                None if p == "0" => Some(0.0),
+                None => None,
+            }
+        };
+        // `[ <color>? && <length>{2,3} ]`: the colour before or after the lengths.
+        let (col, lens) = match parts.as_slice() {
+            [first, rest @ ..] if len(first).is_none() => (Some(first), rest),
+            [rest @ .., last] if len(last).is_none() => (Some(last), rest),
+            all => (None, all),
+        };
+        let lens: Vec<f64> = lens.iter().map(|p| len(p)).collect::<Option<_>>()?;
+        if !(2..=3).contains(&lens.len()) || lens.get(2).is_some_and(|b| *b < 0.0) {
+            return None;
+        }
+        let col = match col {
+            Some(p) => Some(color::parse(p)?),
+            None => None,
+        };
+        // An omitted colour is `currentcolor`, which on an SVG shape is black
+        // unless a `color` is set.
+        let col = col.unwrap_or(Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 1.0,
+        });
+        Some(DropShadow {
+            dx: lens[0],
+            dy: lens[1],
+            std_dev: lens.get(2).copied().unwrap_or(0.0) / 2.0,
+            color: hex(Rgba { a: 1.0, ..col }),
+            opacity: col.a,
+        })
+    }
+
+    /// The blurred shadow as a scene paint shadow (`None` for a hard one, which
+    /// is drawn as an offset copy instead).
+    pub fn blurred(&self) -> Option<crate::scene::Shadow> {
+        (self.std_dev > 0.0).then(|| crate::scene::Shadow {
+            dx: self.dx,
+            dy: self.dy,
+            std_dev: self.std_dev,
+            color: match color::parse(self.color.css()) {
+                Some(c) => Color::new(format!(
+                    "rgba({}, {}, {}, {})",
+                    c.r,
+                    c.g,
+                    c.b,
+                    crate::output::svg::num(c.a * self.opacity)
+                )),
+                None => self.color.clone(),
+            },
+        })
+    }
 }
 
 impl CategoricalPalette {
@@ -302,7 +433,12 @@ fn default_palette() -> Palette {
         er_row_even: None,
         er_edge_label_background: None,
         requirement_edge_label_background: None,
-        drop_shadow: None,
+        // theme-default.js: `dropShadow = 'drop-shadow(1px 2px 2px rgba(185, 185, 185, 1))'`,
+        // `useGradient = false`.
+        drop_shadow: Some(DropShadow::css(1.0, 2.0, 2.0, "#b9b9b9", 1.0)),
+        node_gradient: None,
+        node_shadow: false,
+        state_border: None,
         quadrant_fill: c("#ECECFF"),
         // invert(#ECECFF); mkBorder(#ECECFF) = adjust(s: -40, l: -10).
         primary_text: c("#131300"),
@@ -563,6 +699,79 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
         if let Some(pie) = sc.pie {
             p.pie_colors = pie;
         }
+    }
+    // `dropShadow`, `useGradient`, `gradientStart` / `gradientStop` as each theme's
+    // constructor sets them (base: in `updateColors`, so from the overridden
+    // border colours).
+    let var = |k: &str| {
+        vars.iter()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.trim())
+    };
+    let (mut use_gradient, mut gradient) = match theme {
+        ThemeName::Default | ThemeName::Null => (
+            false,
+            (p.primary_border.clone(), p.flow_container_stroke.clone()),
+        ),
+        ThemeName::Dark | ThemeName::Forest | ThemeName::Neutral | ThemeName::Base => {
+            let stop = match (theme, var("secondaryBorderColor")) {
+                (ThemeName::Base, Some(v)) => c(v),
+                _ => p.flow_container_stroke.clone(),
+            };
+            (true, (p.primary_border.clone(), stop))
+        }
+        ThemeName::Neo | ThemeName::NeoDark => (true, (c("#0042eb"), c("#eb0042"))),
+        ThemeName::Redux
+        | ThemeName::ReduxDark
+        | ThemeName::ReduxColor
+        | ThemeName::ReduxDarkColor => (false, (c("#0042eb"), c("#eb0042"))),
+    };
+    match theme {
+        ThemeName::Dark | ThemeName::Neutral | ThemeName::Base => {
+            p.drop_shadow = Some(DropShadow::css(1.0, 2.0, 2.0, "#b9b9b9", 1.0));
+        }
+        ThemeName::Forest => p.drop_shadow = Some(DropShadow::css(1.0, 2.0, 2.0, "#b9b9b9", 0.5)),
+        _ => {}
+    }
+    if let Some(v) = var("useGradient") {
+        use_gradient = v == "true";
+    } else if theme == ThemeName::Base && var("nodeBorder").is_some() {
+        // theme-base.js: a custom `nodeBorder` turns the gradient off unless
+        // `useGradient` is given too.
+        use_gradient = false;
+    }
+    if let Some(v) = var("gradientStart") {
+        gradient.0 = c(v);
+    }
+    if let Some(v) = var("gradientStop") {
+        gradient.1 = c(v);
+    }
+    p.node_gradient = use_gradient.then_some(gradient);
+    p.node_shadow = match var("nodeShadow") {
+        Some(v) => v == "true",
+        None => matches!(
+            theme,
+            ThemeName::Redux
+                | ThemeName::ReduxDark
+                | ThemeName::ReduxColor
+                | ThemeName::ReduxDarkColor
+        ),
+    };
+    p.state_border = match (var("stateBorder"), theme) {
+        (Some(v), _) => Some(c(v)),
+        (None, ThemeName::Neutral) => Some(c("#000")),
+        (None, ThemeName::Neo) => Some(c("#000000")),
+        (None, ThemeName::Redux | ThemeName::ReduxColor) => Some(c("#28253D")),
+        (None, ThemeName::ReduxDark | ThemeName::ReduxDarkColor) => Some(c("#FFFFFF")),
+        (None, _) => None,
+    };
+    if let Some(v) = var("dropShadow") {
+        p.drop_shadow = if v.contains("url(#drop-shadow)") {
+            Some(DropShadow::look_defs(theme, 4.0))
+        } else {
+            DropShadow::parse_css(v)
+        };
     }
     let git = classic::git_label_colors(theme, vars);
     p.commit_label_color = git.commit_text;

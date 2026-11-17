@@ -790,6 +790,7 @@ pub fn render(
                 x2: x1,
                 from: sc.clone(),
                 to: tc.clone(),
+                bbox: false,
             }),
             "source" => Paint::stroke(sc, w),
             "target" => Paint::stroke(tc, w),

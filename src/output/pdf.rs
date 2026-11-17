@@ -751,6 +751,7 @@ mod tests {
             x2: 590.0,
             from: Color::new("#4e79a7"),
             to: Color::new("#e15759"),
+            bbox: false,
         });
         let scene = Scene {
             kind: DiagramKind::Sankey,

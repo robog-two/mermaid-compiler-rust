@@ -10,7 +10,7 @@ use crate::layout::{
     self, Direction, EdgeRouting, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode, OrthoSpacing,
 };
 use crate::linejump;
-use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
+use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Text};
 use crate::text::TextBlock;
 use crate::theme::{ColorSlot, DropShadow, Palette, SlotColors};
 use std::collections::HashMap;
@@ -497,6 +497,147 @@ fn slot_styled(style: &StyleOverrides, slot: Option<&SlotColors>) -> StyleOverri
         stroke: style.stroke.clone().or_else(|| Some(sc.border.clone())),
         fill: style.fill.clone().or_else(|| sc.fill.clone()),
         ..style.clone()
+    }
+}
+
+/// Whether a node's outline is one the neo look's `filter` reaches: not an
+/// invisible node, nor a state choice (a rough.js path in a plain group, neither
+/// a `polygon` nor an `.outer-path`).
+/// The same holds for `forkJoin.ts`' bar and the flowchart's `f-circ`
+/// (`filledCircle.ts`), both rough.js paths in a plain group.
+fn casts_shadow(kind: DiagramKind, shape: Shape) -> bool {
+    !matches!(
+        (kind, shape),
+        (_, Shape::Invisible | Shape::ForkBar)
+            | (DiagramKind::State, Shape::Choice)
+            | (DiagramKind::Flowchart, Shape::StateStart)
+    )
+}
+
+/// The neo look's shadow on every `circle` of the node (`.node circle` casts
+/// one each): the two rings of a `dbl-circ`.
+fn cast_shadows(els: &mut Vec<Element>, sh: &DropShadow, shape: Shape) {
+    if shape != Shape::DoubleCircle {
+        cast_shadow(els, sh);
+        return;
+    }
+    let mut out = Vec::with_capacity(els.len() + 2);
+    for el in els.drain(..) {
+        if matches!(
+            &el,
+            Element::Shape {
+                geom: Geometry::Circle { .. },
+                ..
+            }
+        ) {
+            let mut one = vec![el];
+            cast_shadow(&mut one, sh);
+            out.extend(one);
+        } else {
+            out.push(el);
+        }
+    }
+    *els = out;
+}
+
+/// `stateStart.ts` / `stateEnd.ts` under the theme's `nodeShadow`: a circle
+/// narrower than 25px gets an inline `filter: url(#{id}-drop-shadow-small)`,
+/// which wins over the stylesheet's filter, in every look but hand-drawn.
+fn small_shadow(
+    kind: DiagramKind,
+    shape: Shape,
+    w: f64,
+    look: ConfigLook,
+    pal: &Palette,
+) -> Option<DropShadow> {
+    // (A flowchart `f-circ` is `filledCircle.ts`, not `stateStart.ts`.)
+    let state_circle = match shape {
+        Shape::StateStart => kind != DiagramKind::Flowchart,
+        Shape::SmallCircle | Shape::StateEnd => true,
+        _ => false,
+    };
+    (pal.node_shadow && look != ConfigLook::HandDrawn && w < 25.0 && state_circle)
+        .then(|| DropShadow::look_defs(pal.theme, 2.0))
+}
+
+/// The neo look's drop shadow cast by `els[0]`: a blurred CSS `drop-shadow()`
+/// as that shape's own filter, a hard one (`stdDeviation="0"`) as an offset copy
+/// of its silhouette drawn before it.
+fn cast_shadow(els: &mut Vec<Element>, sh: &DropShadow) {
+    match sh.blurred() {
+        Some(blurred) => {
+            if let Some(Element::Shape { paint, .. }) = els.first_mut()
+                && !(paint.fill.is_none() && paint.stroke.is_none())
+            {
+                paint.shadow = Some(blurred);
+            }
+        }
+        None => {
+            if let Some(s) = els.first().and_then(|e| drop_shadow(e, sh)) {
+                els.insert(0, s);
+            }
+        }
+    }
+}
+
+/// `.cluster rect` of the neo look: with the theme's `useGradient`, the
+/// outline is stroked with the `{id}-gradient` across its own bounding box. A
+/// `style` / `classDef` stroke is an inline style, which wins over the stylesheet.
+fn gradient_strokes(els: &mut [Element], pal: &Palette, user_stroke: bool) {
+    let Some((from, to)) = pal.node_gradient.as_ref().filter(|_| !user_stroke) else {
+        return;
+    };
+    for el in els {
+        match el {
+            Element::Shape { paint, class, .. }
+                if !paint.stroke.is_none() && class.as_deref() != Some("drop-shadow") =>
+            {
+                paint.stroke_gradient = Some(Gradient::across_bbox(from, to));
+            }
+            Element::Group { children, .. } => gradient_strokes(children, pal, user_stroke),
+            _ => {}
+        }
+    }
+}
+
+/// The neo look's shared node rules (`[data-look="neo"].node rect, polygon,
+/// path, circle`): every outline in `nodeBorder`, or with the theme's
+/// `useGradient` in the `{id}-gradient` across its own bounding box, and every
+/// path `strokeWidth` wide (1px by default). A node `style` / `classDef` value is
+/// an inline style, which wins over the stylesheet.
+/// Whether mermaid draws every outline of the node as a rough.js `path` (which
+/// the scene keeps as a rect or circle).
+fn drawn_as_paths(kind: DiagramKind, shape: Shape) -> bool {
+    matches!(
+        (kind, shape),
+        (_, Shape::ForkBar | Shape::StateEnd) | (DiagramKind::State, Shape::Note | Shape::Choice)
+    )
+}
+
+fn neo_node_css(els: &mut [Element], pal: &Palette, style: &StyleOverrides, paths: bool) {
+    for el in els {
+        match el {
+            Element::Shape { geom, paint, class }
+                if !paint.stroke.is_none()
+                    && !matches!(
+                        class.as_deref(),
+                        Some("drop-shadow" | "collapsed-separator")
+                    ) =>
+            {
+                if style.stroke.is_none() {
+                    paint.stroke = pal.node_border.clone();
+                    paint.stroke_gradient = pal
+                        .node_gradient
+                        .as_ref()
+                        .map(|(from, to)| Gradient::across_bbox(from, to));
+                }
+                if (paths || matches!(geom, Geometry::Path(_))) && style.stroke_width.is_none() {
+                    paint.stroke_width = pal.stroke_width.unwrap_or(1.0);
+                }
+            }
+            Element::Group { children, .. } => neo_node_css(children, pal, style, paths),
+            _ => {}
+        }
     }
 }
 
@@ -1384,9 +1525,12 @@ pub fn render_with(
         let mut children: Vec<Element> = Vec::new();
         if empty_of[ci].is_none() {
             let alt = depth(&g.clusters, ClusterId(ci)) % 2 == 1;
-            let shapes = cluster_shapes(c, r, t, alt, pal, &lk, cfg.look, g.kind);
-            if let Some(s) = shadow.and_then(|sh| shapes.first().and_then(|e| drop_shadow(e, sh))) {
-                children.push(s);
+            let mut shapes = cluster_shapes(c, r, t, alt, pal, &lk, cfg.look, g.kind);
+            if let Some(sh) = shadow {
+                cast_shadow(&mut shapes, sh);
+            }
+            if lk.neo {
+                gradient_strokes(&mut shapes, pal, c.style.stroke.is_some());
             }
             children.extend(shapes);
         }
@@ -1441,10 +1585,15 @@ pub fn render_with(
             n
         };
         let (mut els, boundary) = node_elements(n, m, c, pal, &lk, font, g.kind);
-        if let Some(sh) = shadow.filter(|_| n.shape != Shape::Invisible) {
-            if let Some(s) = els.first().and_then(|e| drop_shadow(e, sh)) {
-                els.insert(0, s);
-            }
+        let small = small_shadow(g.kind, n.shape, m.w, cfg.look, pal);
+        if let Some(sh) = small
+            .as_ref()
+            .or(shadow.filter(|_| casts_shadow(g.kind, n.shape)))
+        {
+            cast_shadows(&mut els, sh, n.shape);
+        }
+        if lk.neo && !(g.kind == DiagramKind::Class && n.shape == Shape::Note) {
+            neo_node_css(&mut els, pal, &n.style, drawn_as_paths(g.kind, n.shape));
         }
         bounds.add_rect(Rect::centered(c, m.w, m.h));
         boundaries.push(boundary);
@@ -3323,8 +3472,15 @@ pub fn draw_node(
         .drop_shadow
         .as_ref()
         .filter(|_| cfg.look == ConfigLook::Neo && n.shape != Shape::Invisible);
-    if let Some(s) = shadow.and_then(|sh| els.first().and_then(|e| drop_shadow(e, sh))) {
-        els.insert(0, s);
+    let small = small_shadow(kind, n.shape, m.w, cfg.look, pal);
+    if let Some(sh) = small
+        .as_ref()
+        .or(shadow.filter(|_| casts_shadow(kind, n.shape)))
+    {
+        cast_shadows(&mut els, sh, n.shape);
+    }
+    if cfg.look == ConfigLook::Neo {
+        neo_node_css(&mut els, pal, &n.style, drawn_as_paths(kind, n.shape));
     }
     let class = ["node", "default"]
         .into_iter()
@@ -3469,7 +3625,13 @@ fn cluster_shapes(
                 .fill
                 .clone()
                 .or_else(|| slot.as_ref().and_then(|s| s.fill.clone()))
-                .or_else(|| pal.composite_title_background.clone())
+                // `[data-look="neo"].statediagram-cluster rect { fill: mainBkg }`
+                // outranks the theme's `compositeTitleBackground`.
+                .or_else(|| {
+                    pal.composite_title_background
+                        .clone()
+                        .filter(|_| look != ConfigLook::Neo)
+                })
                 .unwrap_or_else(|| pal.main_bkg.clone());
             let body = if alt {
                 pal.alt_background
@@ -4244,6 +4406,8 @@ fn node_elements(
     // stroke-width: 2px }`) overrides the state shapes' own attributes; `f-circ` keeps
     // its inline `fill: nodeBorder !important`.
     let flow_css = kind == DiagramKind::Flowchart;
+    // ... whose `stroke-width` is the theme's `strokeWidth` (1px by default).
+    let flow_width = pal.stroke_width.unwrap_or(1.0);
     let r = Rect::centered(c, w, h);
     let (x0, y0, x1) = (r.x, r.y, r.right());
     let default_fill = match n.shape {
@@ -4265,9 +4429,13 @@ fn node_elements(
         .stroke
         .clone()
         .unwrap_or_else(|| default_stroke.clone());
-    // A state's choice and note outlines are rough.js paths no stylesheet rule
-    // reaches: `strokeWidth` falls back to rough's 1.3 (`userNodeOverrides`).
+    // A state's choice and note outlines are rough.js paths: `strokeWidth` falls
+    // back to rough's 1.3 (`userNodeOverrides`), which under neo the shared
+    // `[data-look="neo"].node path { stroke-width }` replaces.
     let default_width = match (kind, n.shape) {
+        (DiagramKind::State, Shape::Choice | Shape::Note) if lk.neo => {
+            pal.stroke_width.unwrap_or(1.0)
+        }
         (DiagramKind::State, Shape::Choice | Shape::Note) => ROUGH_STROKE_WIDTH,
         // requirementBox's outline is a rough.js path too, outside neo's
         // `.node path { stroke-width }`.
@@ -4350,7 +4518,7 @@ fn node_elements(
             Shape::StateStart => {
                 els.push(Element::shape(
                     Geometry::Circle { c, r: 7.0 },
-                    Paint::both(&fill, &stroke, if flow_css { 2.0 } else { 1.0 }),
+                    Paint::both(&fill, &stroke, if flow_css { flow_width } else { 1.0 }),
                 ));
                 Boundary::Ellipse(c, 7.0, 7.0)
             }
@@ -4362,27 +4530,44 @@ fn node_elements(
                 Boundary::Ellipse(c, 7.0, 7.0)
             }
             // stateEnd.ts: rough circles of diameter 14 and 14·5/14 = 5, both
-            // stroked 2px.
+            // stroked 2px. Under neo the state diagram leaves rough's own fills
+            // (`mainBkg`, then `stateBorder ?? nodeBorder` inside) and the shared
+            // `.node path` rule sets the width (the stroke follows in
+            // `neo_node_css`).
             Shape::StateEnd => {
-                let inner = if flow_css {
-                    n.style.fill.as_ref().unwrap_or(&pal.main_bkg)
+                let neo_state = lk.neo && !flow_css;
+                let (outer, inner, width) = if flow_css {
+                    let fill = n.style.fill.as_ref().unwrap_or(&pal.main_bkg);
+                    (fill, fill, pal.stroke_width.unwrap_or(1.0))
                 } else {
-                    &stroke
+                    (
+                        n.style.fill.as_ref().unwrap_or(&pal.main_bkg),
+                        pal.state_border.as_ref().unwrap_or(&pal.node_border),
+                        if neo_state {
+                            n.style
+                                .stroke_width
+                                .unwrap_or(pal.stroke_width.unwrap_or(1.0))
+                        } else {
+                            2.0
+                        },
+                    )
                 };
+                // The inner disc is stroked in its own fill.
+                let inner_stroke = if flow_css { &stroke } else { inner };
                 els.push(Element::shape(
                     Geometry::Circle { c, r: 7.0 },
-                    Paint::both(&pal.background, &stroke, 2.0),
+                    Paint::both(outer, &stroke, width),
                 ));
                 els.push(Element::shape(
                     Geometry::Circle { c, r: 2.5 },
-                    Paint::both(inner, &stroke, 2.0),
+                    Paint::both(inner, inner_stroke, width),
                 ));
                 Boundary::Ellipse(c, 7.0, 7.0)
             }
             Shape::ForkBar => {
                 els.push(Element::shape(
                     Geometry::Rect { rect: r, rx: 0.0 },
-                    Paint::both(&fill, &stroke, if flow_css { 2.0 } else { 1.0 }),
+                    Paint::both(&fill, &stroke, if flow_css { flow_width } else { 1.0 }),
                 ));
                 Boundary::Rect(r)
             }
@@ -4565,12 +4750,20 @@ fn node_elements(
                 dot.clone(),
                 "collapsed-indicator",
             );
-            if let Some(sh) = shadow {
-                let mut faded = sh.clone();
-                faded.opacity *= dot_opacity;
-                els.extend(drop_shadow(&el, &faded));
+            match shadow {
+                Some(sh) if sh.blurred().is_none() => {
+                    let mut faded = sh.clone();
+                    faded.opacity *= dot_opacity;
+                    els.extend(drop_shadow(&el, &faded));
+                    els.push(el);
+                }
+                Some(sh) => {
+                    let mut one = vec![el];
+                    cast_shadow(&mut one, sh);
+                    els.extend(one);
+                }
+                None => els.push(el),
             }
-            els.push(el);
         }
     }
     if !m.block.is_empty() && shapes::shows_label(n.shape) {
