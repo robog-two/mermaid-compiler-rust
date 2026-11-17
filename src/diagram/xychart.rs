@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::geom::{self, Point, Rect};
 use crate::json::Json;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
-use crate::text::{line_width, normalize_label};
+use crate::text::{Baseline, baseline_shift, line_width, normalize_label};
 use crate::theme::{Palette, ThemeName};
 
 // ---------------------------------------------------------------------------
@@ -823,24 +823,19 @@ pub(crate) fn tspan_height(s: &str, font_size: f64) -> f64 {
     font_size * 1.115 + if desc { 0.6 } else { 0.0 }
 }
 
-/// mermaid's `getMaxDimension`: the widest and tallest of `texts`.
+/// mermaid's `getMaxDimension`: the widest and tallest of `texts`, as the
+/// tspans' `getBoundingClientRect` (ink boxes rounded out to pixels).
 fn max_dimension<S: AsRef<str>>(texts: &[S], font_size: f64) -> (f64, f64) {
     texts.iter().fold((0.0, 0.0), |(w, h), t| {
         let t = t.as_ref();
         (
-            f64::max(w, line_width(t, font_size, false)),
+            f64::max(w, crate::text::svg_bbox_width(t, font_size)),
             f64::max(h, tspan_height(t, font_size)),
         )
     })
 }
 
 // --- Drawing helpers -------------------------------------------------------
-
-/// Alphabetic-baseline offsets for SVG `dominant-baseline` values.
-/// (`middle` sits half an x-height above the baseline, not at `central`.)
-const BASELINE_MIDDLE: f64 = 0.27;
-const BASELINE_BEFORE_EDGE: f64 = 0.9;
-const BASELINE_HANGING: f64 = 0.72;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VPos {
@@ -861,11 +856,12 @@ fn text_elem(
     anchor: Anchor,
     rotation: f64,
 ) -> Element {
+    // Chromium's alphabetic offsets for `text-before-edge` and `middle`.
     let off = match vpos {
-        VPos::Top => BASELINE_BEFORE_EDGE,
-        VPos::Middle => BASELINE_MIDDLE,
+        VPos::Top => baseline_shift(Baseline::TextBeforeEdge, fs),
+        VPos::Middle => baseline_shift(Baseline::Middle, fs),
     };
-    let t = text_at(x, y + off * fs, &[s.to_string()], fs, anchor, fill);
+    let t = text_at(x, y + off, &[s.to_string()], fs, anchor, fill);
     let deg = rotation.rem_euclid(360.0);
     let deg = if deg > 180.0 { deg - 360.0 } else { deg };
     if deg == 0.0 {
@@ -1763,7 +1759,7 @@ fn bar_data_labels(
                 };
                 text_at(
                     x,
-                    r.y + r.h / 2.0 + BASELINE_MIDDLE * fs,
+                    r.y + r.h / 2.0 + baseline_shift(Baseline::Middle, fs),
                     std::slice::from_ref(s),
                     fs,
                     anchor,
@@ -1773,7 +1769,7 @@ fn bar_data_labels(
                 let y = if out {
                     r.y - MARGIN
                 } else {
-                    r.y + MARGIN + BASELINE_HANGING * fs
+                    r.y + MARGIN + baseline_shift(Baseline::Hanging, fs)
                 };
                 text_at(
                     r.x + r.w / 2.0,
