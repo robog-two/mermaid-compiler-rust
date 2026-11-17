@@ -207,7 +207,9 @@ pub struct SlotColors {
 /// The redux themes' `url(#drop-shadow)` is `insertLookDefs`' `feDropShadow` with
 /// `stdDeviation="0"`, which a solid offset copy reproduces exactly in every
 /// backend. The classic and neo themes use a CSS `drop-shadow(dx dy blur color)`,
-/// whose blur radius is twice the standard deviation.
+/// whose third length is the Gaussian's standard deviation itself (Filter
+/// Effects: unlike `box-shadow`'s blur radius, not twice it; Chromium's
+/// rendering of mermaid's 2px matches a standard deviation of 2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DropShadow {
     pub dx: f64,
@@ -240,7 +242,7 @@ impl DropShadow {
         DropShadow {
             dx,
             dy,
-            std_dev: blur / 2.0,
+            std_dev: blur,
             color: c(rgb),
             opacity,
         }
@@ -308,7 +310,7 @@ impl DropShadow {
         Some(DropShadow {
             dx: lens[0],
             dy: lens[1],
-            std_dev: lens.get(2).copied().unwrap_or(0.0) / 2.0,
+            std_dev: lens.get(2).copied().unwrap_or(0.0),
             color: hex(Rgba { a: 1.0, ..col }),
             opacity: col.a,
         })

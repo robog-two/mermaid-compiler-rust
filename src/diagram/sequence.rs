@@ -878,12 +878,12 @@ fn build_note_model(
 /// no element of the diagram (its own filter is `<id>-drop-shadow`), so
 /// nothing.
 fn css_shadow(theme: ThemeName) -> Option<Shadow> {
-    // `drop-shadow(dx dy blur color)`: the blur radius is twice the
-    // standard deviation.
+    // `drop-shadow(dx dy blur color)`: the blur length is the standard
+    // deviation itself.
     let shadow = |dx: f64, dy: f64, color: &str| Shadow {
         dx,
         dy,
-        std_dev: 1.0,
+        std_dev: 2.0,
         color: Color::new(color),
     };
     match theme {
@@ -2626,7 +2626,7 @@ mod tests {
         let want = Some(Shadow {
             dx: 1.0,
             dy: 2.0,
-            std_dev: 1.0,
+            std_dev: 2.0,
             color: Color::new("rgba(185, 185, 185, 1)"),
         });
         let shadows = |look: Look| -> Vec<(String, Option<Shadow>)> {

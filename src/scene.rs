@@ -88,7 +88,7 @@ impl Gradient {
 }
 
 /// A CSS `drop-shadow(dx dy blur color)`: the shape's silhouette offset and
-/// blurred with a Gaussian of standard deviation `blur / 2`.
+/// blurred with a Gaussian whose standard deviation is the `blur` length.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shadow {
     pub dx: f64,

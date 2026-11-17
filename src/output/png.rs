@@ -48,12 +48,28 @@ impl Rasterizer {
         Rasterizer { opt }
     }
 
-    /// Render `svg` (which must carry fixed width/height) to a `width`×`height` PNG.
+    /// Render `svg` (which must carry fixed width/height) to a `width`×`height` PNG,
+    /// scaled uniformly to fit (`preserveAspectRatio` `xMidYMid meet` without the
+    /// centring: the drawing starts at the top left).
     pub fn png(
         &self,
         svg: &str,
         width: u32,
         height: u32,
+        background: Option<crate::color::Rgba>,
+    ) -> Result<Vec<u8>, String> {
+        self.png_scaled(svg, width, height, None, background)
+    }
+
+    /// [`Rasterizer::png`] at `scale` device pixels per SVG pixel. The canvas is
+    /// the diagram's size rounded up to whole pixels, as Chromium's screenshot of
+    /// the `<svg>` crops it; the drawing is not stretched to fill that rounding.
+    pub fn png_scaled(
+        &self,
+        svg: &str,
+        width: u32,
+        height: u32,
+        scale: Option<f64>,
         background: Option<crate::color::Rgba>,
     ) -> Result<Vec<u8>, String> {
         let tree = usvg::Tree::from_str(svg, &self.opt)
@@ -69,11 +85,17 @@ impl Rasterizer {
             ));
         }
         let size = tree.size();
-        let sx = width as f32 / size.width().max(1.0);
-        let sy = height as f32 / size.height().max(1.0);
+        let k = scale.map_or_else(
+            || {
+                let sx = width as f32 / size.width().max(1.0);
+                let sy = height as f32 / size.height().max(1.0);
+                sx.min(sy)
+            },
+            |k| k as f32,
+        );
         resvg::render(
             &tree,
-            tiny_skia::Transform::from_scale(sx, sy),
+            tiny_skia::Transform::from_scale(k, k),
             &mut pixmap.as_mut(),
         );
         pixmap

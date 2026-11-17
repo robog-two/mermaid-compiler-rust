@@ -83,6 +83,9 @@ pub fn path_data(cmds: &[PathCmd]) -> String {
 /// (`{id}-gradient-{index}`).
 struct Filters<'a> {
     id: &'a str,
+    /// The drawing's extent: every shadow filter's region (in user space, so a
+    /// thin shape's blur is not clipped to a margin around its own box).
+    region: crate::geom::Rect,
     shadows: Vec<Shadow>,
     gradients: Vec<Gradient>,
 }
@@ -152,20 +155,35 @@ impl Filters<'_> {
                 esc(g.to.css())
             );
         }
+        // A CSS `drop-shadow()` spelt out: the alpha in the shadow colour (a colour
+        // matrix rather than `feFlood`, which resvg mistakes for linear RGB under
+        // `color-interpolation-filters="sRGB"`), blurred, offset, under the shape.
+        // sRGB, as CSS filter functions work.
+        let r = self.region;
+        let m = r.w.max(r.h);
         for (k, sh) in self.shadows.iter().enumerate() {
-            let (color, alpha) = match crate::color::parse(sh.color.css()) {
-                Some(c) => (format!("rgb({},{},{})", c.r, c.g, c.b), c.a),
-                None => (sh.color.css().to_string(), 1.0),
-            };
+            let c = crate::color::parse(sh.color.css()).unwrap_or(crate::color::Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 1.0,
+            });
+            let unit = |v: u8| num(f64::from(v) / 255.0);
             let _ = write!(
                 out,
-                "<filter id=\"{}-shadow-{k}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\"><feDropShadow dx=\"{}\" dy=\"{}\" stdDeviation=\"{}\" flood-color=\"{}\" flood-opacity=\"{}\"/></filter>",
+                "<filter id=\"{}-shadow-{k}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"sRGB\"><feColorMatrix in=\"SourceAlpha\" type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\"/><feGaussianBlur stdDeviation=\"{}\"/><feOffset dx=\"{}\" dy=\"{}\"/><feMerge><feMergeNode/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>",
                 self.id,
+                num(r.x - m),
+                num(r.y - m),
+                num(r.w + 2.0 * m),
+                num(r.h + 2.0 * m),
+                unit(c.r),
+                unit(c.g),
+                unit(c.b),
+                num(c.a),
+                num(sh.std_dev),
                 num(sh.dx),
                 num(sh.dy),
-                num(sh.std_dev),
-                esc(&color),
-                num(alpha)
             );
         }
         out.push_str("</defs>");
@@ -467,6 +485,7 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
     );
     let mut fx = Filters {
         id: &id,
+        region: scene.view_box,
         shadows: Vec::new(),
         gradients: Vec::new(),
     };
@@ -533,6 +552,7 @@ mod tests {
         let mut out = String::new();
         let mut fx = Filters {
             id: "d",
+            region: Rect::new(0.0, 0.0, 30.0, 10.0),
             shadows: Vec::new(),
             gradients: Vec::new(),
         };
@@ -543,9 +563,11 @@ mod tests {
         assert_eq!(out.matches("filter=\"url(#d-shadow-0)\"").count(), 2);
         assert_eq!(
             fx.defs(),
-            "<defs><filter id=\"d-shadow-0\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\">\
-             <feDropShadow dx=\"1\" dy=\"2\" stdDeviation=\"1\" flood-color=\"rgb(185,185,185)\" \
-             flood-opacity=\"0.5\"/></filter></defs>"
+            "<defs><filter id=\"d-shadow-0\" filterUnits=\"userSpaceOnUse\" x=\"-30\" y=\"-30\" \
+             width=\"90\" height=\"70\" color-interpolation-filters=\"sRGB\"><feColorMatrix \
+             in=\"SourceAlpha\" type=\"matrix\" values=\"0 0 0 0 0.725 0 0 0 0 0.725 0 0 0 0 0.725 \
+             0 0 0 0.5 0\"/><feGaussianBlur stdDeviation=\"1\"/><feOffset dx=\"1\" dy=\"2\"/>\
+             <feMerge><feMergeNode/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter></defs>"
         );
     }
 }

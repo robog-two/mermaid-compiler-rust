@@ -449,7 +449,7 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         (false, false) => DropShadow {
             dx: 0.0,
             dy: 1.0,
-            std_dev: 1.0,
+            std_dev: 2.0,
             color: c("#000000"),
             opacity: 0.25,
         },
@@ -457,7 +457,7 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         (false, true) => DropShadow {
             dx: 1.0,
             dy: 2.0,
-            std_dev: 1.0,
+            std_dev: 2.0,
             color: c("#b9b9b9"),
             opacity: 0.2,
         },

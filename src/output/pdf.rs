@@ -97,6 +97,9 @@ struct Ctx {
     embedded: [BTreeMap<u16, char>; 4],
     /// Stroke gradients, drawn as axial shading patterns `/P{index}`.
     gradients: Vec<Gradient>,
+    /// Blurred drop shadows: image XObjects `/Sh{index}` in the shadow colour
+    /// through their blurred-silhouette soft masks.
+    shadows: Vec<(Rgba, super::shadow::AlphaImage)>,
 }
 
 fn n(v: f64) -> String {
@@ -161,14 +164,31 @@ impl Ctx {
         if fill.is_none() && stroke.is_none() {
             return;
         }
+        // A bounding-box gradient in user space; one with no box to span paints
+        // nothing, as in SVG.
+        let grad = paint
+            .stroke_gradient
+            .as_ref()
+            .map(|g| g.in_user_space(geom));
+        let stroke = match grad {
+            Some(None) => None,
+            _ => stroke,
+        };
+        let grad = grad.flatten();
+        if let Some(sh) = &paint.shadow {
+            self.shadow(geom, paint, fill, stroke, sh);
+        }
         // A fill-only opacity: fill, then stroke over it, each with its own alpha.
         if let (Some(_), Some(_), Some(_)) = (paint.fill_opacity, fill, stroke) {
             let mut f = paint.clone();
             f.stroke = crate::scene::Color::none();
+            f.shadow = None;
             self.shape(geom, &f);
             let mut s = paint.clone();
             s.fill = crate::scene::Color::none();
             s.fill_opacity = None;
+            s.shadow = None;
+            s.stroke_gradient = grad;
             self.shape(geom, &s);
             return;
         }
@@ -187,7 +207,7 @@ impl Ctx {
             let _ = writeln!(self.out, "{} {} {} rg", n(r), n(g), n(b));
         }
         if let Some(c) = stroke {
-            if let Some(grad) = &paint.stroke_gradient {
+            if let Some(grad) = &grad {
                 let k = match self.gradients.iter().position(|x| x == grad) {
                     Some(k) => k,
                     None => {
@@ -231,6 +251,49 @@ impl Ctx {
             (false, false) => "n",
         };
         let _ = writeln!(self.out, "{op}\nQ");
+    }
+
+    /// A CSS `drop-shadow()`: the shape's silhouette (fill and stroke alpha)
+    /// blurred into a soft mask, offset, painted in the shadow colour under the
+    /// shape. The shape's `opacity` fades its shadow with it.
+    fn shadow(
+        &mut self,
+        geom: &Geometry,
+        paint: &Paint,
+        fill: Option<Rgba>,
+        stroke: Option<Rgba>,
+        sh: &crate::scene::Shadow,
+    ) {
+        let Some(c) = resolve(&sh.color) else { return };
+        let cmds = match geom {
+            Geometry::Rect { rect, rx } => rounded_rect(rect, *rx),
+            Geometry::Circle { c, r } => crate::geom::ellipse(*c, *r, *r),
+            Geometry::Path(cmds) => cmds.clone(),
+        };
+        let subpaths = super::shadow::flatten(&cmds);
+        let fill_a = fill.map_or(0.0, |f| f.a * paint.fill_opacity.unwrap_or(1.0));
+        let stroke_a = stroke.map_or(0.0, |s| s.a);
+        let Some(img) =
+            super::shadow::silhouette(&subpaths, fill_a, stroke_a, paint.stroke_width, sh.std_dev)
+        else {
+            return;
+        };
+        let r = img.rect;
+        let k = self.shadows.len();
+        self.shadows.push((c, img));
+        self.out.push_str("q\n");
+        if let Some(g) = self.gs_for(c.a * paint.opacity.unwrap_or(1.0), paint.multiply) {
+            self.out.push_str(&g);
+        }
+        // The image's unit square, its first row at the top (the page CTM flips y).
+        let _ = writeln!(
+            self.out,
+            "{} 0 0 {} {} {} cm /Sh{k} Do\nQ",
+            n(r.w),
+            n(-r.h),
+            n(r.x + sh.dx),
+            n(r.y + sh.dy + r.h)
+        );
     }
 
     /// A text block; with `outline`, each glyph is first stroked `width` wide in
@@ -598,6 +661,7 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         text_outline: None,
         embedded: Default::default(),
         gradients: Vec::new(),
+        shadows: Vec::new(),
     };
 
     // Page background (Puppeteer prints the body background) unless transparent.
@@ -660,6 +724,16 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
     } else {
         format!(" /Pattern <<{patterns} >>")
     };
+    // Shadow images follow the patterns, two objects each (the image, its mask).
+    let shadow_base = pattern_base + ctx.gradients.len();
+    let xobjects: String = (0..ctx.shadows.len())
+        .map(|i| format!(" /Sh{i} {} 0 R", shadow_base + 2 * i))
+        .collect();
+    let patterns = if xobjects.is_empty() {
+        patterns
+    } else {
+        format!("{patterns} /XObject <<{xobjects} >>")
+    };
     objects.push(format!(
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R{embedded} >> /ExtGState << {ext}>>{patterns} >> >>",
         n(page_w),
@@ -714,6 +788,30 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
             )
             .into_bytes(),
         );
+    }
+
+    // A 1×1 image of the shadow colour whose soft mask (any size) is the blurred
+    // silhouette: the mask's alpha over the image's unit square.
+    for (i, (c, img)) in ctx.shadows.iter().enumerate() {
+        let mask_obj = shadow_base + 2 * i + 1;
+        let mut base = format!(
+            "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask {mask_obj} 0 R /Length 3 >>\nstream\n"
+        )
+        .into_bytes();
+        base.extend_from_slice(&[c.r, c.g, c.b]);
+        base.extend_from_slice(b"\nendstream");
+        objects.push(base);
+        let data = super::shadow::run_length(&img.alpha);
+        let mut mask = format!(
+            "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Interpolate true /Filter /RunLengthDecode /Length {} >>\nstream\n",
+            img.w,
+            img.h,
+            data.len()
+        )
+        .into_bytes();
+        mask.extend_from_slice(&data);
+        mask.extend_from_slice(b"\nendstream");
+        objects.push(mask);
     }
 
     let mut pdf: Vec<u8> = format!("%PDF-{version}\n").into_bytes();

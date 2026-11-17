@@ -4,6 +4,7 @@
 pub mod pdf;
 #[cfg(feature = "png")]
 pub mod png;
+mod shadow;
 pub mod svg;
 
 use crate::render::Rendered;
@@ -145,13 +146,21 @@ pub fn encode_png(
         },
     );
     let (w, h) = png_dimensions(r, opt);
+    // Device pixels per SVG unit: the CSS size over the natural one (the svg is
+    // fitted, aspect kept), times the device scale factor.
+    let (cw, ch) = css_size(vb.w, vb.h, opt.size);
+    let fit = if vb.w > 0.0 && vb.h > 0.0 {
+        (cw / vb.w).min(ch / vb.h)
+    } else {
+        1.0
+    };
     // Puppeteer paints the page white unless the background is transparent.
     let bg = if opt.background.trim() == "transparent" {
         None
     } else {
         Some(crate::color::parse(&opt.background).unwrap_or(crate::color::Rgba::WHITE))
     };
-    rast.png(&svg_text, w, h, bg)
+    rast.png_scaled(&svg_text, w, h, Some(fit * opt.scale), bg)
 }
 
 #[cfg(test)]
