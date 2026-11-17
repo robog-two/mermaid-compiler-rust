@@ -8,11 +8,53 @@ use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, 
 use crate::text::{Baseline, baseline_shift, label_lines, svg_line_box};
 use crate::theme::{ColorSlot, Palette, SlotColors, ThemeName};
 use std::collections::HashMap;
+use std::f64::consts::PI;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParticipantKind {
     Participant,
     Actor,
+    Boundary,
+    Control,
+    Entity,
+    Database,
+    Collections,
+    Queue,
+}
+
+impl ParticipantKind {
+    /// A `type` from a participant's `@{ ... }` metadata.
+    fn from_type(t: &str) -> Option<ParticipantKind> {
+        Some(match t {
+            "participant" => ParticipantKind::Participant,
+            "actor" => ParticipantKind::Actor,
+            "boundary" => ParticipantKind::Boundary,
+            "control" => ParticipantKind::Control,
+            "entity" => ParticipantKind::Entity,
+            "database" => ParticipantKind::Database,
+            "collections" => ParticipantKind::Collections,
+            "queue" => ParticipantKind::Queue,
+            _ => return None,
+        })
+    }
+}
+
+/// The `type` and `alias` of a participant's `@{ ... }` metadata (a YAML flow
+/// mapping such as `"type": "database", "alias": "Users"`).
+fn participant_metadata(body: &str) -> (Option<String>, Option<String>) {
+    let (mut kind, mut alias) = (None, None);
+    for entry in body.split(',') {
+        let Some((k, v)) = entry.split_once(':') else {
+            continue;
+        };
+        let unquote = |x: &str| x.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+        match unquote(k).as_str() {
+            "type" => kind = Some(unquote(v)),
+            "alias" => alias = Some(unquote(v)),
+            _ => {}
+        }
+    }
+    (kind, alias)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -222,13 +264,29 @@ pub fn parse(body: &str, title: Option<String>) -> Result<SequenceDiagram> {
                 } else {
                     (lower.clone(), rest)
                 };
-                let rest = match rest.find("@{") {
-                    Some(p) => rest[..p].trim(),
-                    None => rest,
+                // `id@{ metadata } as label`: the metadata's `type` overrides the
+                // keyword, and its `alias` labels a participant that `as` does not.
+                let (rest, (meta_type, meta_alias)) = match rest.find("@{") {
+                    Some(p) => {
+                        let after = &rest[p + 2..];
+                        let end = after.find('}').unwrap_or(after.len());
+                        let tail = after.get(end + 1..).unwrap_or("");
+                        (
+                            format!("{}{tail}", &rest[..p]),
+                            participant_metadata(&after[..end]),
+                        )
+                    }
+                    None => (rest.to_string(), (None, None)),
                 };
+                let rest = rest.trim();
                 let (id, label) = match rest.find(" as ") {
                     Some(p) => (rest[..p].trim(), Some(rest[p + 4..].trim())),
                     None => (rest, None),
+                };
+                let label = match (label, meta_alias.as_deref()) {
+                    (Some(l), _) if l != id => Some(l),
+                    (_, Some(a)) => Some(a),
+                    (l, None) => l,
                 };
                 if id.is_empty() {
                     return Err(Error::parse(
@@ -240,7 +298,9 @@ pub fn parse(body: &str, title: Option<String>) -> Result<SequenceDiagram> {
                 if let Some(l) = label {
                     b.participants[idx].label = l.to_string();
                 }
-                if kind_word == "actor" {
+                if let Some(k) = meta_type.as_deref().and_then(ParticipantKind::from_type) {
+                    b.participants[idx].kind = k;
+                } else if kind_word == "actor" {
                     b.participants[idx].kind = ParticipantKind::Actor;
                 }
             }
@@ -468,16 +528,32 @@ fn js_round(x: f64) -> f64 {
 }
 
 /// `utils.calculateTextDimensions`: the widest line's rounded width and the sum
-/// of each line's rounded bounding-box height.
+/// of each line's rounded bounding-box height, measured once in `sans-serif` and
+/// once in the configured family. The sequence diagram's family does not take
+/// (its text is measured in the page's default font, "Times New Roman"), and the
+/// serif measurement wins unless the sans-serif one is larger in width, height
+/// and line height alike.
 fn text_dims(lines: &[String], font_size: f64) -> (f64, f64) {
     if lines.iter().all(|l| l.is_empty()) && lines.len() <= 1 {
         return (0.0, 0.0);
     }
-    let w = lines
-        .iter()
-        .map(|l| js_round(crate::text::line_width(l, font_size, false)))
-        .fold(0.0, f64::max);
-    let h = lines.iter().map(|l| svg_line_box(font_size, l)).sum();
+    let dims = |width: &dyn Fn(&str) -> f64, height: &dyn Fn(&str) -> f64| {
+        lines.iter().fold((0.0f64, 0.0, 0.0f64), |(w, h, lh), l| {
+            let line_h = height(l).round();
+            (w.max(js_round(width(l))), h + line_h, lh.max(line_h))
+        })
+    };
+    let sans = dims(&|l| crate::text::svg_bbox_width(l, font_size), &|l| {
+        svg_line_box(font_size, l)
+    });
+    let serif = dims(&|l| crate::text::serif::bbox_width(l, font_size), &|l| {
+        crate::text::serif::line_box(font_size, l)
+    });
+    let (w, h, _) = if sans.0 > serif.0 && sans.1 > serif.1 && sans.2 > serif.2 {
+        sans
+    } else {
+        serif
+    };
     (w, h)
 }
 
@@ -1916,6 +1992,374 @@ fn actor_elements(
             );
             (lowered, vec![Element::group("actor-man", els)])
         }
+        kind => {
+            let ctx = TypeCtx {
+                a,
+                y,
+                footer,
+                neo,
+                shadow,
+                border: actor_border,
+                bkg: actor_bkg,
+                // `.actor { stroke-width }` (classes `actor`), and the stylesheet's
+                // `.actor-man circle, line { fill: actorBkg; stroke-width: 2px }`.
+                actor_w: pal.stroke_width.unwrap_or(1.0),
+                man_fill: &pal.actor_bkg,
+                text: &pal.actor_text,
+                fs,
+                box_text_margin: cfg.box_text_margin,
+            };
+            let (lifeline_y, lowered_figure, figure) = typed_actor(kind, &ctx);
+            let mut low: Vec<Element> = if footer {
+                Vec::new()
+            } else {
+                lifeline(lifeline_y).into_iter().collect()
+            };
+            low.extend(lowered_figure);
+            (Element::group("actor", low), figure)
+        }
+    }
+}
+
+/// What [`typed_actor`] draws a participant with.
+struct TypeCtx<'a> {
+    a: &'a ActorBox,
+    y: f64,
+    footer: bool,
+    neo: bool,
+    shadow: Option<&'a Color>,
+    border: &'a Color,
+    bkg: &'a Color,
+    actor_w: f64,
+    man_fill: &'a Color,
+    text: &'a Color,
+    fs: f64,
+    box_text_margin: f64,
+}
+
+/// actorBands.ts: where a glyph participant's lifeline starts, its glyph band
+/// ends and its label is centred, under the neo look.
+struct Bands {
+    lifeline: f64,
+    glyph_bottom: f64,
+    label_center: f64,
+}
+
+impl TypeCtx<'_> {
+    fn bands(&self) -> Option<Bands> {
+        if !self.neo {
+            return None;
+        }
+        let th = self.a.text_h;
+        Some(if self.footer {
+            let glyph_bottom = self.y + LABEL_LIFELINE_GAP + GLYPH_BAND_H;
+            Bands {
+                lifeline: 0.0,
+                glyph_bottom,
+                label_center: glyph_bottom + GLYPH_LABEL_GAP + th / 2.0,
+            }
+        } else {
+            let lifeline = self.y + self.a.height;
+            Bands {
+                lifeline,
+                glyph_bottom: lifeline - LABEL_LIFELINE_GAP - th - GLYPH_LABEL_GAP,
+                label_center: lifeline - LABEL_LIFELINE_GAP - th / 2.0,
+            }
+        })
+    }
+
+    /// The label drawn by `_drawTextCandidateFunc` in a box of the actor's
+    /// height whose top is `top` (centred, `dominant-baseline: central`).
+    fn label(&self, cx: f64, top: f64, class: &str) -> Vec<Element> {
+        tspan_lines(
+            cx,
+            top + self.a.height / 2.0,
+            &self.a.lines,
+            self.fs,
+            self.text,
+        )
+        .into_iter()
+        .map(|t| Element::classed_text(t, class))
+        .collect()
+    }
+
+    /// The theme's hard drop shadow (`feDropShadow` 4px down and right, 6%) of
+    /// a shape, drawn as an offset copy of its silhouette.
+    fn shadow_of(&self, geom: &Geometry, filled: bool, stroke_w: f64) -> Option<Element> {
+        let sh = self.shadow?;
+        let moved = geom.translated(4.0, 4.0);
+        let paint = if filled {
+            Paint::both(sh, sh, stroke_w)
+        } else {
+            Paint::stroke(sh, stroke_w)
+        };
+        Some(Element::classed_shape(
+            moved,
+            paint.with_opacity(0.06),
+            "drop-shadow",
+        ))
+    }
+}
+
+/// svgDraw's `drawActorType{Boundary,Control,Entity,Database,Collections,Queue}`:
+/// where the lifeline starts, what is drawn in the lowered group (with the
+/// lifeline) and what in the diagram body.
+fn typed_actor(kind: ParticipantKind, t: &TypeCtx) -> (f64, Vec<Element>, Vec<Element>) {
+    let a = t.a;
+    let (x, y, w) = (a.x, t.y, a.width);
+    let cx = a.center();
+    let bands = t.bands();
+    let r = 22.0;
+    let man = Paint::both(t.man_fill, t.border, 2.0);
+    let mut shadows = Vec::new();
+    let mut els = Vec::new();
+    match kind {
+        ParticipantKind::Boundary => {
+            // Classic draws at fixed offsets, the group moved down r/2 + 10.
+            let dy = if bands.is_some() { 0.0 } else { r / 2.0 + 10.0 };
+            let icy = bands.as_ref().map_or(y + 12.0, |b| b.glyph_bottom - r) + dy;
+            let left = cx - r * 2.5;
+            let parts = [
+                (
+                    Geometry::Path(vec![
+                        PathCmd::MoveTo(Point::new(left, icy)),
+                        PathCmd::LineTo(Point::new(cx - 15.0, icy)),
+                    ]),
+                    false,
+                ),
+                (
+                    Geometry::Path(vec![
+                        PathCmd::MoveTo(Point::new(left, icy - 10.0)),
+                        PathCmd::LineTo(Point::new(left, icy + 10.0)),
+                    ]),
+                    false,
+                ),
+                (
+                    Geometry::Circle {
+                        c: Point::new(cx, icy),
+                        r,
+                    },
+                    true,
+                ),
+            ];
+            for (g, filled) in parts {
+                if t.neo {
+                    shadows.extend(t.shadow_of(&g, filled, 2.0));
+                }
+                let paint = if filled {
+                    man.clone()
+                } else {
+                    Paint::stroke(t.border, 2.0)
+                };
+                els.push(Element::shape(g, paint));
+            }
+            let top = bands
+                .as_ref()
+                .map_or(y + 15.0 + dy, |b| b.label_center - a.height / 2.0);
+            els.extend(t.label(cx, top, "actor actor-man"));
+            let lifeline = bands.as_ref().map_or(y + 80.0, |b| b.lifeline);
+            shadows.extend(els);
+            (
+                lifeline,
+                Vec::new(),
+                vec![Element::group("actor-man", shadows)],
+            )
+        }
+        ParticipantKind::Control => {
+            let cy = bands.as_ref().map_or(y + 32.0, |b| b.glyph_bottom - r);
+            let circle = Geometry::Circle {
+                c: Point::new(cx, cy),
+                r,
+            };
+            if t.neo {
+                els.extend(t.shadow_of(&circle, true, 2.0));
+            }
+            els.push(Element::shape(circle, man));
+            // A zero-length line at the circle's top whose `filled-head-control`
+            // marker (refX 11, refY 5.8, `orient="172.5"`, scaled by the line's
+            // 2px width) is the arrowhead; it paints in the group's colours with
+            // the marker's `stroke-width: 1.2`.
+            let tip = Point::new(cx, cy - r);
+            let (s, c) = 172.5f64.to_radians().sin_cos();
+            let at = |px: f64, py: f64| {
+                let (dx, dy) = (2.0 * (px - 11.0), 2.0 * (py - 5.8));
+                Point::new(tip.x + dx * c - dy * s, tip.y + dx * s + dy * c)
+            };
+            els.push(Element::shape(
+                Geometry::Path(vec![
+                    PathCmd::MoveTo(at(14.4, 5.6)),
+                    PathCmd::LineTo(at(7.2, 10.4)),
+                    PathCmd::LineTo(at(8.8, 5.6)),
+                    PathCmd::LineTo(at(7.2, 0.8)),
+                    PathCmd::Close,
+                ]),
+                Paint::both(t.bkg, t.border, 2.4),
+            ));
+            let top = bands
+                .as_ref()
+                .map_or(y + r + if t.footer { 5.0 } else { 12.0 }, |b| {
+                    b.label_center - a.height / 2.0
+                });
+            els.extend(t.label(cx, top, "actor actor-man"));
+            let lifeline = bands.as_ref().map_or(y + 75.0, |b| b.lifeline);
+            (lifeline, Vec::new(), vec![Element::group("actor-man", els)])
+        }
+        ParticipantKind::Entity => {
+            // Classic moves the group down (r / 2 - 5, or r in the footer).
+            let dy = match (&bands, t.footer) {
+                (Some(_), _) => 0.0,
+                (None, true) => r,
+                (None, false) => r / 2.0 - 5.0,
+            };
+            let cy = bands
+                .as_ref()
+                .map_or(y + if t.footer { 10.0 } else { 25.0 }, |b| {
+                    b.glyph_bottom - r
+                })
+                + dy;
+            let paint = Paint::both(t.bkg, t.border, t.actor_w);
+            let parts = [
+                (
+                    Geometry::Circle {
+                        c: Point::new(cx, cy),
+                        r,
+                    },
+                    true,
+                    paint,
+                ),
+                (
+                    Geometry::Path(vec![
+                        PathCmd::MoveTo(Point::new(cx - r, cy + r)),
+                        PathCmd::LineTo(Point::new(cx + r, cy + r)),
+                    ]),
+                    false,
+                    Paint::stroke(t.border, 2.0),
+                ),
+            ];
+            for (g, filled, p) in parts {
+                if t.neo {
+                    shadows.extend(t.shadow_of(&g, filled, p.stroke_width));
+                }
+                els.push(Element::shape(g, p));
+            }
+            let top = bands
+                .as_ref()
+                .map_or(y + if t.footer { 15.0 } else { 30.0 } + dy, |b| {
+                    b.label_center - a.height / 2.0
+                });
+            els.extend(t.label(cx, top, "actor actor-man"));
+            let lifeline = bands.as_ref().map_or(y + 75.0, |b| b.lifeline);
+            shadows.extend(els);
+            (lifeline, Vec::new(), vec![Element::group("actor", shadows)])
+        }
+        ParticipantKind::Database => {
+            // A cylinder a third of the actor wide, moved right by that third.
+            let cw = w / 3.0;
+            let rx = cw / 2.0;
+            let ry = rx / (2.5 + cw / 50.0);
+            let h = if bands.is_some() { GLYPH_BAND_H } else { cw };
+            let top = bands.as_ref().map_or(y, |b| b.glyph_bottom - h - ry) + ry;
+            let (l, rt) = (x + cw, x + 2.0 * cw);
+            let mid = Point::new(l + rx, top + ry);
+            let bot = Point::new(l + rx, top + h - ry);
+            let mut d = vec![PathCmd::MoveTo(Point::new(l, top + ry))];
+            // The top ellipse (both halves), the left side, the bottom front
+            // half, the right side back up.
+            d.extend(geom::elliptic_arc_cubics(mid, rx, ry, PI, 0.0));
+            d.extend(geom::elliptic_arc_cubics(mid, rx, ry, 0.0, -PI));
+            d.push(PathCmd::LineTo(Point::new(l, top + h - ry)));
+            d.extend(geom::elliptic_arc_cubics(bot, rx, ry, PI, 0.0));
+            d.push(PathCmd::LineTo(Point::new(rt, top + ry)));
+            let g = Geometry::Path(d);
+            let mut low = Vec::new();
+            if t.neo {
+                low.extend(t.shadow_of(&g, true, t.actor_w));
+            }
+            low.push(Element::classed_shape(
+                g,
+                Paint::both(t.bkg, t.border, t.actor_w),
+                "actor",
+            ));
+            let label_top = bands
+                .as_ref()
+                .map_or(y + 35.0, |b| b.label_center - a.height / 2.0);
+            low.extend(t.label(cx, label_top, "actor actor-box"));
+            let lifeline = bands
+                .as_ref()
+                .map_or(y + a.height + 2.0 * t.box_text_margin, |b| b.lifeline);
+            (lifeline, low, Vec::new())
+        }
+        ParticipantKind::Collections => {
+            // Two rects, the second 6px left and down; neo makes them 6px shorter.
+            let off = 6.0;
+            let h = if t.neo { a.height - off } else { a.height };
+            let front = Rect::new(x, y, w, h);
+            let back = Rect::new(x - off, y + off, w, h);
+            let mut low = Vec::new();
+            for r in [front, back] {
+                let g = Geometry::Rect { rect: r, rx: 0.0 };
+                if t.neo {
+                    shadows.extend(t.shadow_of(&g, true, t.actor_w));
+                }
+                low.push(Element::classed_shape(
+                    g,
+                    Paint::both(t.bkg, t.border, t.actor_w),
+                    "actor",
+                ));
+            }
+            shadows.extend(low);
+            let mut low = shadows;
+            low.extend(
+                tspan_lines(cx - off, y + off + h / 2.0, &a.lines, t.fs, t.text)
+                    .into_iter()
+                    .map(|txt| Element::classed_text(txt, "actor actor-box")),
+            );
+            (y + a.height, low, Vec::new())
+        }
+        _ => {
+            // Queue: a horizontal cylinder the actor's size, its front arc on
+            // the right.
+            let h = a.height;
+            let ry = h / 2.0;
+            let rx = ry / (2.5 + h / 50.0);
+            let (l, rt) = (x + rx, x + w - rx);
+            let cy = y + ry;
+            let mut d = vec![PathCmd::MoveTo(Point::new(l, y))];
+            d.extend(geom::elliptic_arc_cubics(
+                Point::new(l, cy),
+                rx,
+                ry,
+                -PI / 2.0,
+                -3.0 * PI / 2.0,
+            ));
+            d.push(PathCmd::LineTo(Point::new(rt, y + h)));
+            d.extend(geom::elliptic_arc_cubics(
+                Point::new(rt, cy),
+                rx,
+                ry,
+                PI / 2.0,
+                -PI / 2.0,
+            ));
+            d.push(PathCmd::Close);
+            let body = Geometry::Path(d);
+            let mut arc = vec![PathCmd::MoveTo(Point::new(rt, y))];
+            arc.extend(geom::elliptic_arc_cubics(
+                Point::new(rt, cy),
+                rx,
+                ry,
+                -PI / 2.0,
+                -3.0 * PI / 2.0,
+            ));
+            let paint = Paint::both(t.bkg, t.border, t.actor_w);
+            let mut low = Vec::new();
+            if t.neo {
+                low.extend(t.shadow_of(&body, true, t.actor_w));
+            }
+            low.push(Element::shape(body, paint.clone()));
+            low.push(Element::shape(Geometry::Path(arc), paint));
+            low.extend(t.label(cx, y, "actor actor-box"));
+            (y + a.height, vec![Element::group("actor", low)], Vec::new())
+        }
     }
 }
 
@@ -2309,6 +2753,101 @@ mod tests {
             Look::Classic,
         );
         assert!(long.view_box.w > short.view_box.w);
+    }
+
+    #[test]
+    fn messages_are_measured_in_the_pages_default_serif_font() {
+        // mermaid 12.3.0: calculateTextDimensions measures the label in the
+        // default font ("Hello John, how are you?" 163.97px wide in Times New
+        // Roman, rounded to 164), so John's box starts 84px after Alice's.
+        assert_eq!(
+            text_dims(&["Hello John, how are you?".into()], 16.0),
+            (164.0, 18.0)
+        );
+        let s = draw(
+            "sequenceDiagram\nAlice->>John: Hello John, how are you?",
+            Look::Neo,
+        );
+        assert_eq!(lifeline_xs(&s), [75.0, 309.0]);
+        // At 14px the sans-serif box (16px tall, the serif one 15px) is larger
+        // in every dimension, so it wins.
+        let sans_w = js_round(crate::text::svg_bbox_width("Hello world", 14.0));
+        assert_eq!(text_dims(&["Hello world".into()], 14.0), (sans_w, 16.0));
+    }
+
+    #[test]
+    fn participant_types_from_metadata() {
+        let d = parse(
+            r#"sequenceDiagram
+participant API@{ "type": "boundary" } as Public API
+actor DB@{ "type": "database", "alias": "Users" }
+participant Q@{ "type" : "queue", "alias": "Jobs" } as Q
+API->>DB: x"#,
+            None,
+        )
+        .unwrap();
+        let p = |i: usize| (d.participants[i].kind, d.participants[i].label.as_str());
+        assert_eq!(p(0), (ParticipantKind::Boundary, "Public API"));
+        assert_eq!(p(1), (ParticipantKind::Database, "Users"));
+        assert_eq!(p(2), (ParticipantKind::Queue, "Jobs"));
+    }
+
+    #[test]
+    fn typed_participants_draw_mermaids_glyphs() {
+        // mermaid 12.3.0 (neo): the boundary's circle (75, 22) r 22 and its
+        // torso from x 20 to 60; the database cylinder's top at 0 and bottom at
+        // 44, a third of the box wide; the label centred 58.5 down.
+        let s = draw(
+            r#"sequenceDiagram
+participant A@{ "type": "boundary" }
+participant D@{ "type": "database" }
+A->>D: x"#,
+            Look::Neo,
+        );
+        let circles: Vec<(Point, f64)> = all(&s)
+            .into_iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Circle { c, r },
+                    class: None,
+                    ..
+                } => Some((*c, *r)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(circles[0], (Point::new(75.0, 22.0), 22.0));
+        let ends: Vec<Point> = shapes(&s, "actor")
+            .into_iter()
+            .filter_map(|g| match g {
+                Geometry::Path(cmds) => Some(
+                    cmds.iter()
+                        .filter_map(|c| match c {
+                            PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => {
+                                Some(*p)
+                            }
+                            PathCmd::Close => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .find(|pts: &Vec<Point>| pts.iter().all(|p| p.y < 100.0))
+            .unwrap();
+        let ext = |f: fn(&Point) -> f64| {
+            let v: Vec<f64> = ends.iter().map(f).collect();
+            (
+                v.iter().copied().fold(f64::MAX, f64::min),
+                v.iter().copied().fold(f64::MIN, f64::max),
+            )
+        };
+        assert_eq!(ext(|p| p.x), (250.0, 300.0));
+        let (top, bottom) = ext(|p| p.y);
+        assert!(
+            top.abs() < 1e-9 && (bottom - 44.0).abs() < 1e-9,
+            "{top} {bottom}"
+        );
+        let label = texts(&s).into_iter().find(|t| t.lines == ["A"]).unwrap();
+        assert_eq!(label.x, 75.0);
     }
 
     #[test]

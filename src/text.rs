@@ -4,6 +4,8 @@
 //! (the same metrics the PDF backend's built-in Helvetica uses), which gives sizes
 //! within a few percent of the browser's "trebuchet ms"/arial rendering.
 
+pub mod serif;
+
 use crate::geom::Point;
 use crate::scene::{Color, Text};
 
@@ -51,9 +53,14 @@ pub mod mark {
     pub const BOLD_OFF: char = '\u{E001}';
     pub const ITALIC_ON: char = '\u{E002}';
     pub const ITALIC_OFF: char = '\u{E003}';
+    /// Starts a new run (its own `<tspan>`) in the same style, as mermaid's
+    /// `createText` puts each word of an SVG label in a tspan of its own. Placed
+    /// in finished display lines only; it changes neither measurement nor
+    /// kerning.
+    pub const RUN: char = '\u{E004}';
 
     pub fn is_mark(c: char) -> bool {
-        matches!(c, BOLD_ON | BOLD_OFF | ITALIC_ON | ITALIC_OFF)
+        matches!(c, BOLD_ON | BOLD_OFF | ITALIC_ON | ITALIC_OFF | RUN)
     }
 }
 
@@ -95,6 +102,19 @@ pub fn plain(line: &str) -> String {
     line.chars().filter(|&c| !mark::is_mark(c)).collect()
 }
 
+/// A display line split into one run per word ([`mark::RUN`] before each space),
+/// as mermaid's `createText` draws SVG labels (see [`svg_word_runs_box`]).
+pub fn word_runs(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 8);
+    for (i, c) in line.chars().enumerate() {
+        if c == ' ' && i > 0 {
+            out.push(mark::RUN);
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Split a display line into runs of one style (`bold` is the text's base weight).
 /// Empty runs are dropped; a line without marks is one run.
 pub fn styled_runs(line: &str, bold: bool) -> Vec<StyledRun> {
@@ -103,6 +123,16 @@ pub fn styled_runs(line: &str, bold: bool) -> Vec<StyledRun> {
     let mut cur = String::new();
     let mut cur_style = (bold, false);
     for c in line.chars() {
+        if c == mark::RUN {
+            if !cur.is_empty() {
+                out.push(StyledRun {
+                    text: std::mem::take(&mut cur),
+                    bold: cur_style.0,
+                    italic: cur_style.1,
+                });
+            }
+            continue;
+        }
         if st.apply(c) {
             let style = (bold || st.bold > 0, st.italic > 0);
             if style != cur_style {
@@ -406,6 +436,7 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
     let mut st = Emphasis::default();
     let mut prev: Option<char> = None;
     text.chars()
+        .filter(|&c| c != mark::RUN)
         .map(|c| {
             if st.apply(c) {
                 // A change of style starts a new run, which is not kerned across.
@@ -524,6 +555,104 @@ const ARIAL_INK: [(i16, i16); 94] = [
     (92, 1104),
 ];
 
+/// [`ARIAL_INK`] for Arial Bold (Liberation Sans Bold's `glyf`).
+const ARIAL_BOLD_INK: [(i16, i16); 94] = [
+    (193, 487),
+    (135, 836),
+    (35, 1106),
+    (27, 1110),
+    (51, 1767),
+    (90, 1415),
+    (109, 381),
+    (102, 680),
+    (2, 580),
+    (6, 795),
+    (86, 1113),
+    (139, 432),
+    (80, 600),
+    (139, 428),
+    (20, 549),
+    (81, 1055),
+    (129, 1082),
+    (71, 1057),
+    (47, 1065),
+    (31, 1128),
+    (63, 1082),
+    (75, 1065),
+    (88, 1049),
+    (65, 1076),
+    (71, 1063),
+    (197, 485),
+    (195, 487),
+    (86, 1113),
+    (85, 1112),
+    (86, 1113),
+    (94, 1133),
+    (117, 1878),
+    (51, 1425),
+    (137, 1386),
+    (84, 1423),
+    (137, 1393),
+    (137, 1286),
+    (137, 1176),
+    (84, 1466),
+    (137, 1341),
+    (137, 432),
+    (31, 999),
+    (137, 1460),
+    (137, 1188),
+    (137, 1569),
+    (137, 1341),
+    (84, 1507),
+    (137, 1296),
+    (84, 1507),
+    (137, 1437),
+    (59, 1286),
+    (23, 1229),
+    (123, 1354),
+    (14, 1352),
+    (2, 1931),
+    (18, 1348),
+    (35, 1333),
+    (61, 1192),
+    (115, 657),
+    (21, 550),
+    (25, 567),
+    (45, 1151),
+    (-20, 1157),
+    (66, 575),
+    (60, 1152),
+    (135, 1167),
+    (80, 1079),
+    (84, 1116),
+    (80, 1069),
+    (35, 686),
+    (84, 1114),
+    (143, 1124),
+    (143, 424),
+    (-32, 425),
+    (143, 1141),
+    (143, 424),
+    (135, 1694),
+    (135, 1124),
+    (80, 1171),
+    (135, 1167),
+    (84, 1114),
+    (135, 766),
+    (72, 1055),
+    (25, 657),
+    (127, 1116),
+    (8, 1130),
+    (-6, 1597),
+    (14, 1124),
+    (16, 1128),
+    (82, 950),
+    (33, 754),
+    (156, 418),
+    (43, 766),
+    (81, 1119),
+];
+
 /// Width of an SVG `<text>`'s `getBBox()` in Chromium (regular weight): the run's
 /// advance (kerned, rounded up to 1/64 px) united with each glyph's ink box,
 /// which Skia rounds out to whole pixels from the glyph's origin. So a label
@@ -531,21 +660,27 @@ const ARIAL_INK: [(i16, i16); 94] = [
 /// 8.898 advance). White space collapses as SVG's does, and none takes room at
 /// either end. Characters outside ASCII count by their advance alone.
 pub fn svg_bbox_width(text: &str, font_size: f64) -> f64 {
+    svg_bbox_width_weight(text, font_size, false)
+}
+
+/// [`svg_bbox_width`] in regular or bold weight.
+pub fn svg_bbox_width_weight(text: &str, font_size: f64, bold: bool) -> f64 {
+    let ink_table = if bold { &ARIAL_BOLD_INK } else { &ARIAL_INK };
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut x = 0.0f64;
     let (mut left, mut right) = (0.0f64, 0.0f64);
     let mut prev: Option<char> = None;
     for c in text.chars().filter(|&c| !mark::is_mark(c)) {
         if let Some(p) = prev {
-            x += kerning_em(p, c, false) * font_size;
+            x += kerning_em(p, c, bold) * font_size;
         }
         if let 0x21..=0x7E = c as u32 {
-            let (lo, hi) = ARIAL_INK[(c as u32 - 0x21) as usize];
+            let (lo, hi) = ink_table[(c as u32 - 0x21) as usize];
             let ink = |u: i16| f64::from(u) / 2048.0 * font_size;
             left = left.min(x + (ink(lo) + 0.005).floor());
             right = right.max(x + (ink(hi) - 0.005).ceil());
         }
-        x += char_width_em(c, false) * font_size;
+        x += char_width_em(c, bold) * font_size;
         prev = Some(c);
     }
     right.max(layout_unit_ceil(x)) - left
@@ -557,6 +692,45 @@ pub fn layout_unit_ceil(w: f64) -> f64 {
     ((w * 64.0) - 1e-6).ceil().max(0.0) / 64.0
 }
 
+/// The font size Chromium shapes text at: the CSS size truncated to 1/64 px
+/// (11.48px text is laid out at 11.46875px; measured in headless Chromium at
+/// 9.6, 10.5, 11.48, 12.6, 13.12 and 14.4px).
+pub fn shaping_size(font_size: f64) -> f64 {
+    (font_size * 64.0 + 1e-9).floor() / 64.0
+}
+
+/// The box of one SVG text line drawn as mermaid's `createText` draws SVG labels,
+/// one `<tspan>` per word (each after the first keeps its leading space), with
+/// `text-anchor: start` at 0: `(x, width, advance)` of its `getBBox()` and its
+/// advance. Chromium kerns across the tspans (a pair's kerning is part of the
+/// first glyph's advance) but lays each tspan out as a fragment whose width is
+/// rounded up to 1/64 px, so the line is a little wider than one run; the box
+/// unites that advance with each glyph's ink, rounded out to whole pixels from
+/// the glyph's origin, as [`svg_bbox_width`] does. Characters outside ASCII
+/// count by their advance alone.
+pub fn svg_word_runs_box(line: &str, font_size: f64, bold: bool) -> (f64, f64, f64) {
+    let size = shaping_size(font_size);
+    let ink_table = if bold { &ARIAL_BOLD_INK } else { &ARIAL_INK };
+    let chars: Vec<char> = line.chars().filter(|&c| !mark::is_mark(c)).collect();
+    let (mut x, mut run) = (0.0f64, 0.0f64);
+    let (mut left, mut right) = (0.0f64, 0.0f64);
+    for (i, &c) in chars.iter().enumerate() {
+        if c == ' ' && i > 0 {
+            x += layout_unit_ceil(run);
+            run = 0.0;
+        }
+        if let 0x21..=0x7E = c as u32 {
+            let (lo, hi) = ink_table[(c as u32 - 0x21) as usize];
+            let ink = |u: i16| f64::from(u) / 2048.0 * size;
+            left = left.min(x + run + (ink(lo) + 0.005).floor());
+            right = right.max(x + run + (ink(hi) - 0.005).ceil());
+        }
+        let kern = chars.get(i + 1).map_or(0.0, |&n| kerning_em(c, n, bold));
+        run += (char_width_em(c, bold) + kern) * size;
+    }
+    x += layout_unit_ceil(run);
+    (left, right.max(x) - left, x)
+}
 /// An SVG `dominant-baseline` value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Baseline {
@@ -1697,5 +1871,34 @@ mod tests {
         // ... and 8824/64 px from a whole unit (as Chromium sizes both boxes).
         let paras = ["theta internationalization eta alpha lambda".to_string()];
         assert_eq!(html_wrap_width(&paras, 120.0, 16.0, false), 137.875);
+    }
+
+    #[test]
+    fn word_runs_box_as_chromium_lays_out_create_text_tspans() {
+        // getBBox() of one tspan per word in headless Chromium (Liberation Sans):
+        // (x, width, advance) with text-anchor start.
+        let b = |s: &str, f: f64| svg_word_runs_box(s, f, false);
+        assert_eq!(b("Stores all of the core banking", 11.48).1, 148.609375);
+        assert_eq!(b("A customer of the bank, with", 11.48).1, 144.140625);
+        assert_eq!(b("A customer of the bank, with", 16.0).1, 201.03125);
+        assert_eq!(b("A customer of the bank, with", 10.5).2, 131.953125);
+        assert_eq!(b("[Software System]", 10.5).1, 85.283447265625);
+        assert_eq!(b("Banking System G Queue", 16.0).1, 185.1015625);
+        // One run: no per-tspan rounding, the kerned advance.
+        assert_eq!(b("[Person]", 11.48).1, 42.71875);
+        assert_eq!(shaping_size(11.48), 11.46875);
+        assert_eq!(shaping_size(14.0), 14.0);
+    }
+
+    #[test]
+    fn run_marks_split_tspans_but_not_measurement() {
+        let l = word_runs("A customer of");
+        assert_eq!(plain(&l), "A customer of");
+        assert_eq!(
+            line_width(&l, 16.0, false),
+            line_width("A customer of", 16.0, false)
+        );
+        let runs: Vec<String> = styled_runs(&l, false).into_iter().map(|r| r.text).collect();
+        assert_eq!(runs, ["A", " customer", " of"]);
     }
 }
