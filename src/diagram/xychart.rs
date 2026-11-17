@@ -423,6 +423,9 @@ pub struct AxisConfig {
     /// `labelRotation` in degrees; 0 when outside -90..=90 (mermaid's
     /// `normalizedLabelRotationInRad`). Only an axis drawn at the bottom uses it.
     pub label_rotation: f64,
+    /// Screen pixels per user unit while mermaid measures texts (see
+    /// [`XyConfig::measure_scale`]).
+    pub measure_scale: f64,
 }
 
 impl Default for AxisConfig {
@@ -440,6 +443,7 @@ impl Default for AxisConfig {
             show_axis_line: true,
             axis_line_width: 2.0,
             label_rotation: 0.0,
+            measure_scale: 1.0,
         }
     }
 }
@@ -468,6 +472,7 @@ impl AxisConfig {
             } else {
                 0.0
             },
+            measure_scale: 1.0,
         }
     }
 }
@@ -489,7 +494,16 @@ pub struct XyConfig {
     pub plot_reserved_percent: f64,
     pub x_axis: AxisConfig,
     pub y_axis: AxisConfig,
+    /// Screen pixels per user unit while mermaid measures the chart's texts: it
+    /// reads `getBoundingClientRect()` of texts drawn in the svg, whose viewBox
+    /// already maps `width` onto the page. With `useMaxWidth` that is mmdc's
+    /// 784px container, so a chart wider than it measures its texts shrunk.
+    pub measure_scale: f64,
 }
+
+/// The width of the element mmdc renders into: its 800px page less the body's
+/// 8px margins.
+const CONTAINER_WIDTH: f64 = 784.0;
 
 impl Default for XyConfig {
     fn default() -> Self {
@@ -508,6 +522,7 @@ impl Default for XyConfig {
             plot_reserved_percent: 50.0,
             x_axis: AxisConfig::default(),
             y_axis: AxisConfig::default(),
+            measure_scale: 1.0,
         }
     }
 }
@@ -536,7 +551,26 @@ impl XyConfig {
             ),
             x_axis: AxisConfig::from_config(cfg, "xAxis"),
             y_axis: AxisConfig::from_config(cfg, "yAxis"),
+            measure_scale: 1.0,
         }
+        .measured_at(if cfg.use_max_width("xyChart") {
+            (CONTAINER_WIDTH / cfg.section_f64(s, "width", d.width)).min(1.0)
+        } else {
+            1.0
+        })
+    }
+
+    /// The config measuring texts at `scale` (see [`XyConfig::measure_scale`]).
+    pub fn measured_at(mut self, scale: f64) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        self.measure_scale = scale;
+        self.x_axis.measure_scale = scale;
+        self.y_axis.measure_scale = scale;
+        self
     }
 }
 
@@ -820,17 +854,22 @@ pub(crate) fn tspan_height(s: &str, font_size: f64) -> f64 {
         let (a, b) = TSPAN_HEIGHTS[font_size as usize - 6];
         return f64::from(if desc { b } else { a });
     }
-    font_size * 1.115 + if desc { 0.6 } else { 0.0 }
+    // Between the measured sizes: the rounded ascent and descent (the table's
+    // model, e.g. 20px drawn at 17.4px is 16 + 4).
+    crate::text::svg_line_box(font_size, s)
 }
 
 /// mermaid's `getMaxDimension`: the widest and tallest of `texts`, as the
-/// tspans' `getBoundingClientRect` (ink boxes rounded out to pixels).
-fn max_dimension<S: AsRef<str>>(texts: &[S], font_size: f64) -> (f64, f64) {
+/// tspans' `getBoundingClientRect` (ink boxes rounded out to screen pixels),
+/// divided by the screen CTM's scale: drawn at `font_size · scale` (see
+/// [`XyConfig::measure_scale`]), measured, and scaled back.
+fn max_dimension<S: AsRef<str>>(texts: &[S], font_size: f64, scale: f64) -> (f64, f64) {
+    let fs = font_size * scale;
     texts.iter().fold((0.0, 0.0), |(w, h), t| {
         let t = t.as_ref();
         (
-            f64::max(w, crate::text::svg_bbox_width(t, font_size)),
-            f64::max(h, tspan_height(t, font_size)),
+            f64::max(w, crate::text::svg_bbox_width(t, fs) / scale),
+            f64::max(h, tspan_height(t, fs) / scale),
         )
     })
 }
@@ -1148,7 +1187,11 @@ impl Axis {
     }
 
     fn label_dimension(&self) -> (f64, f64) {
-        max_dimension(&self.tick_labels(), self.cfg.label_font)
+        max_dimension(
+            &self.tick_labels(),
+            self.cfg.label_font,
+            self.cfg.measure_scale,
+        )
     }
 
     pub fn recalculate_outer_padding_to_draw_bar(&mut self) {
@@ -1183,7 +1226,7 @@ impl Axis {
             avail -= c.tick_length;
         }
         if c.show_title && !self.title.is_empty() {
-            let (_, th) = max_dimension(&[&self.title], c.title_font);
+            let (_, th) = max_dimension(&[&self.title], c.title_font, c.measure_scale);
             let need = th + c.title_padding * 2.0;
             self.title_text_height = th;
             if need <= avail {
@@ -1216,7 +1259,7 @@ impl Axis {
             avail -= c.tick_length;
         }
         if c.show_title && !self.title.is_empty() {
-            let (_, th) = max_dimension(&[&self.title], c.title_font);
+            let (_, th) = max_dimension(&[&self.title], c.title_font, c.measure_scale);
             let need = th + c.title_padding * 2.0;
             self.title_text_height = th;
             if need <= avail {
@@ -1490,7 +1533,7 @@ struct ChartTitle {
 
 impl ChartTitle {
     fn calculate_space(&mut self, data: &ChartData, c: &XyConfig, aw: f64, ah: f64) -> (f64, f64) {
-        let (tw, th) = max_dimension(&[&data.title], c.title_font);
+        let (tw, th) = max_dimension(&[&data.title], c.title_font, c.measure_scale);
         let need_h = th + 2.0 * c.title_padding;
         if need_h <= ah && c.show_title && !data.title.is_empty() {
             self.bbox.w = tw.max(aw);
@@ -1541,7 +1584,7 @@ impl Legend {
             .iter()
             .map(|&i| data.plots[i].title.as_str())
             .collect();
-        let (tw, _) = max_dimension(&titles, fs);
+        let (tw, _) = max_dimension(&titles, fs, c.measure_scale);
         let n = self.visible.len() as f64;
         let w = c.legend_padding * 2.0
             + fs * LEGEND_MARKER_TO_FONT_RATIO
@@ -2146,6 +2189,36 @@ mod tests {
         assert_eq!(l.legend.bbox.x, l.plot.x + l.plot.w);
         assert!(l.legend.bbox.y > l.plot.y);
         assert!(l.plot.x + l.plot.w + l.legend.bbox.w <= 700.0 + 1e-9);
+    }
+
+    #[test]
+    fn wide_charts_measure_texts_shrunk_onto_the_page() {
+        // A 900px chart in mmdc's 784px container: getMaxDimension measures the
+        // texts at 784/900 of their size (pixel-rounded) and divides the scale
+        // back out. mermaid 12.3.0 puts the 20px title's box (20 / 0.8711 tall,
+        // plus 2·10) above a plot starting at y 42.959 and the "Sales Revenue"
+        // glyphs at y 8.761 (box top).
+        let src = "---\nconfig:\n    xyChart:\n        width: 900\n        height: 600\n---\nxychart\n    title \"Sales Revenue\"\n    x-axis [jan, feb, mar]\n    y-axis \"Revenue (in $)\" 4000 --> 11000\n    bar [5000, 6000, 7500]\n";
+        let pre = crate::diagram::preprocess(src).unwrap();
+        let mut cfg = MermaidConfig::default();
+        for l in &pre.config_layers {
+            cfg = cfg.with_directive(l).unwrap();
+        }
+        let xc = XyConfig::from_config(&cfg);
+        assert!((xc.measure_scale - 784.0 / 900.0).abs() < 1e-12);
+        let chart = parse(&pre.body, None).unwrap();
+        let theme = default_theme();
+        let l = layout(&chart_data(&chart, &theme.plot_colors), &xc, &theme, false);
+        assert!(
+            (l.plot.y - (20.0 / (784.0 / 900.0) + 20.0)).abs() < 1e-9,
+            "{}",
+            l.plot.y
+        );
+        // At the default 700px width nothing is scaled.
+        assert_eq!(
+            XyConfig::from_config(&MermaidConfig::default()).measure_scale,
+            1.0
+        );
     }
 
     /// Every `(class, rects)` of bar plot groups.
