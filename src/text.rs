@@ -936,6 +936,10 @@ pub struct TextBlock {
     /// than as an HTML label: [`TextBlock::centered_text`] places its baselines the
     /// way `createFormattedText` does.
     pub svg: bool,
+    /// Per line, how far left of centre it is drawn: a line an HTML label
+    /// wrapped at a space keeps that space (`white-space: break-spaces`, see
+    /// [`break_space_shift`]). Empty: no line is shifted.
+    pub shifts: Vec<f64>,
 }
 
 /// Line pitch of SVG text labels in em (`createFormattedText`'s `lineHeight`).
@@ -1038,6 +1042,7 @@ impl TextBlock {
             width,
             height,
             svg: false,
+            shifts: Vec::new(),
         }
     }
 

@@ -354,12 +354,11 @@ fn mmdc_at(epoch: Option<&str>, src: &str) -> Output {
         None => cmd.env_remove("SOURCE_DATE_EPOCH"),
     };
     let mut child = cmd.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(src.as_bytes())
-        .unwrap();
+    // A bad SOURCE_DATE_EPOCH stops mmdc before it reads its input: the pipe
+    // may be closed by the time this writes.
+    if let Err(e) = child.stdin.take().unwrap().write_all(src.as_bytes()) {
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+    }
     child.wait_with_output().unwrap()
 }
 

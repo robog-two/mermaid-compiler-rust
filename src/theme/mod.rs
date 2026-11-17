@@ -77,6 +77,9 @@ pub struct Palette {
     pub title_color: Color,
     pub cluster_bkg: Color,
     pub cluster_border: Color,
+    /// `flowContainerStroke` (`secondaryBorderColor` unless set): an agentflow
+    /// collapsed flow's own stroke, which its separator line keeps.
+    pub flow_container_stroke: Color,
     pub edge_label_background: Color,
     pub actor_bkg: Color,
     pub actor_border: Color,
@@ -235,6 +238,7 @@ fn default_palette() -> Palette {
         title_color: c("#333"),
         cluster_bkg: c("#ffffde"),
         cluster_border: c("#aaaa33"),
+        flow_container_stroke: c("hsl(60, 60%, 83.5294117647%)"),
         edge_label_background: c("rgba(232,232,232, 0.8)"),
         actor_bkg: c("#ECECFF"),
         // theme-default.js resolves `actorBorder` / `actorLineColor` to `border1`.
@@ -320,6 +324,7 @@ fn forest_palette() -> Palette {
     p.quadrant_fill = c("#cde498");
     p.primary_text = c("#321b67");
     p.primary_border = c("hsl(78.1578947368, 18.4615384615%, 64.5098039216%)");
+    p.flow_container_stroke = c("hsl(98.961038961, 60%, 74.9019607843%)");
     p.node_border = c("#13540c");
     p.node_text = c("#000000");
     p.line_color = c("#000000"); // theme-forest.js: `lineColor = invert(background)`
@@ -345,6 +350,7 @@ fn forest_palette() -> Palette {
 fn dark_palette() -> Palette {
     let mut p = default_palette();
     p.alt_background = Some(c("#555"));
+    p.flow_container_stroke = c("hsl(180, 0%, 18.3529411765%)");
     p.background = c("#333");
     p.main_bkg = c("#1f2020");
     p.quadrant_fill = c("#1f2020");
@@ -387,6 +393,7 @@ fn dark_palette() -> Palette {
 fn neutral_palette() -> Palette {
     let mut p = default_palette();
     p.alt_background = Some(c("#f4f4f4"));
+    p.flow_container_stroke = c("hsl(0, 0%, 88.9215686275%)");
     p.main_bkg = c("#eee");
     p.quadrant_fill = c("#eee");
     p.primary_text = c("#111111");
@@ -488,6 +495,7 @@ fn base_palette(vars: &[(String, String)]) -> Palette {
     // border `mkBorder(..)` and every sequence text `textColor`.
     p.cluster_bkg = hex(tertiary);
     p.cluster_border = hex(mk_border(tertiary));
+    p.flow_container_stroke = hex(mk_border(secondary));
     p.edge_label_background = hex(secondary);
     p.actor_bkg = hex(primary);
     p.actor_border = hex(border);
@@ -642,6 +650,7 @@ fn apply_variable(p: &mut Palette, key: &str, value: &str) {
             }
         }
         "background" => p.background = v,
+        "flowContainerStroke" | "secondaryBorderColor" => p.flow_container_stroke = v,
         "primaryColor" | "mainBkg" => {
             // The neo / redux light themes derive `quadrant1Fill` from a local constant.
             if key == "primaryColor"

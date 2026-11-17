@@ -17,7 +17,6 @@ use super::graph::{
     self, Cluster, ClusterId, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId,
     RenderOptions, Shape, StyleOverrides,
 };
-use super::timeline::wrap_text;
 use crate::config::{GraphConfig, MermaidConfig};
 use crate::error::{Error, Result};
 use crate::layout::Direction;
@@ -1398,9 +1397,6 @@ impl Scanner {
 /// Shared options of the conversion (agentflow config + palette length).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConvertOptions {
-    /// `agentflow.wrappingWidth`: node labels wrap at this width.
-    pub wrapping_width: f64,
-    pub font_size: f64,
     /// Length of the theme's categorical palette (0 when the theme has none).
     pub palette_len: usize,
     /// `flowchart.inheritDir` (agentflow's `addSubGraph` reads the flowchart section):
@@ -1556,13 +1552,6 @@ pub fn to_graph(af: &Agentflow, opts: &ConvertOptions) -> GraphDiagram {
         })
         .collect();
 
-    let wrap = |label: &str| -> String {
-        if opts.wrapping_width <= 0.0 {
-            return label.to_string();
-        }
-        wrap_text(label, opts.wrapping_width, opts.font_size, false).join("<br>")
-    };
-
     // Nodes: collapsed containers (reverse completion order, as getData pushes them),
     // then vertices in first-mention order.
     let mut nodes = Vec::new();
@@ -1597,7 +1586,7 @@ pub fn to_graph(af: &Agentflow, opts: &ConvertOptions) -> GraphDiagram {
             AfShape::LinedDocument => Shape::LinedDocument,
             AfShape::Hexagon => Shape::Hexagon,
         };
-        let mut n = Node::new(v.id.clone(), wrap(&v.label), shape);
+        let mut n = Node::new(v.id.clone(), v.label.clone(), shape);
         n.cluster = cluster_parent(&v.id);
         n.style = v.style.clone();
         n.classes = std::iter::once(format!("af-kind-{}", kind_name(v.kind())))
@@ -1707,14 +1696,15 @@ pub fn render(
 ) -> Result<Scene> {
     let af = parse(body, title)?;
     let opts = ConvertOptions {
-        wrapping_width: cfg.section_f64("agentflow", "wrappingWidth", 120.0),
-        font_size: pal.font_size,
         palette_len: pal.color_slots.as_ref().map_or(0, |p| p.border.len()),
         inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
     };
     let g = to_graph(&af, &opts);
     let ro = RenderOptions {
         min_label_width: cfg.section_f64("agentflow", "minNodeWidth", 120.0),
+        // Node labels wrap at `agentflow.wrappingWidth` (in the graph's measure,
+        // which keeps the space a line broke at: `white-space: break-spaces`).
+        node_wrap: Some(cfg.section_f64("agentflow", "wrappingWidth", 120.0)),
         subgraph_title_margin: cfg.subgraph_title_margin(),
         ..Default::default()
     };
@@ -1735,8 +1725,6 @@ mod tests {
         to_graph(
             &p(src),
             &ConvertOptions {
-                wrapping_width: 0.0,
-                font_size: 16.0,
                 palette_len: 12,
                 inherit_dir: false,
             },
@@ -2042,8 +2030,6 @@ end";
         let inherited = to_graph(
             &af,
             &ConvertOptions {
-                wrapping_width: 0.0,
-                font_size: 16.0,
                 palette_len: 12,
                 inherit_dir: true,
             },
@@ -2275,8 +2261,6 @@ linkStyle 0 stroke:#00f");
         let g = to_graph(
             &af,
             &ConvertOptions {
-                wrapping_width: 120.0,
-                font_size: pal.font_size,
                 palette_len: 12,
                 inherit_dir: false,
             },
@@ -2309,5 +2293,159 @@ linkStyle 0 stroke:#00f");
         }
         // minNodeWidth: every node label is at least 120 wide.
         assert!(nd("city").w >= 120.0);
+    }
+
+    fn render_default(src: &str) -> crate::scene::Scene {
+        let cfg = MermaidConfig::default().scoped("agentflow");
+        let pal = cfg.palette();
+        render(src, None, &cfg, &pal).unwrap()
+    }
+
+    fn shapes_in<'a>(els: &'a [Element], out: &mut Vec<&'a Element>) {
+        for el in els {
+            match el {
+                Element::Group { children, .. } => shapes_in(children, out),
+                other => out.push(other),
+            }
+        }
+    }
+
+    /// mermaid 12.3.0: "Check the claims" wraps at 120px (16px font) after
+    /// "Check the ", whose space stays (`white-space: break-spaces`): the line
+    /// is drawn 2.227 left of the node's centre.
+    #[test]
+    fn wrapped_labels_keep_the_space_they_broke_at() {
+        let mut cfg = MermaidConfig::default().scoped("agentflow");
+        cfg.theme = crate::theme::ThemeName::Default;
+        cfg.look = crate::config::Look::Classic;
+        let src = "agentflow-beta TB\n  check[\"Check the claims\"]@{ shape: task }";
+        let s = render(src, None, &cfg, &cfg.palette()).unwrap();
+        let mut nodes = Vec::new();
+        boxes(&s.elements, "agentflow-", &mut nodes);
+        let cx = nodes[0].1.center().x;
+        let mut els = Vec::new();
+        shapes_in(&s.elements, &mut els);
+        let line = |l: &str| {
+            els.iter()
+                .find_map(|e| match e {
+                    Element::Text { text, .. } if text.lines == [l] => Some(text.x),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let shift = crate::text::break_space_shift("Check the", 16.0, false);
+        assert!((cx - line("Check the") - shift).abs() < 1e-9);
+        assert!((shift - 2.227).abs() < 0.01, "{shift}");
+        assert!((line("claims") - cx).abs() < 1e-9);
+    }
+
+    /// mermaid 12.3.0 hands ELK the flows last-closed first: with nothing
+    /// between them, the later flow comes out on the left.
+    #[test]
+    fn flows_reach_elk_last_closed_first() {
+        let s = render_default(
+            "agentflow-beta TB
+  global
+    corpus[\"Shared corpus\"]@{ shape: refdoc }
+  end
+  flow summariser[\"Summariser\"]
+    summarise[\"Summarise\"]@{ shape: task }
+    summarise -.- corpus
+  end
+  flow indexer[\"Indexer\"]
+    index[\"Build index\"]@{ shape: task }
+    index -.- corpus
+  end",
+        );
+        let mut clusters = Vec::new();
+        boxes(&s.elements, "cluster-", &mut clusters);
+        let x = |id: &str| clusters.iter().find(|(c, _)| c == id).unwrap().1.x;
+        assert!(x("indexer") < x("summariser"));
+    }
+
+    /// collapsedGroup.ts under agentflow's styles: the separator keeps the flow's
+    /// own stroke (`flowContainerStroke`), the dots are nodeBorder at 50% and,
+    /// under neo, cast drop shadows.
+    #[test]
+    fn collapsed_flow_markers() {
+        let s = render_default(
+            "agentflow-beta TB
+  flow processing[\"Processing\"]
+    validate[\"Validate\"]@{ shape: task }
+  end
+  processing@{ view: \"collapsed\" }",
+        );
+        let mut els = Vec::new();
+        shapes_in(&s.elements, &mut els);
+        let classed = |c: &str| {
+            els.iter()
+                .filter_map(|e| match e {
+                    Element::Shape { paint, class, .. } if class.as_deref() == Some(c) => {
+                        Some(paint.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let sep = classed("collapsed-separator");
+        assert_eq!(sep.len(), 1);
+        assert_eq!(sep[0].stroke.css(), "hsl(-120, 0%, 70%)");
+        let dots = classed("collapsed-indicator");
+        assert_eq!(dots.len(), 3);
+        assert!(
+            dots.iter()
+                .all(|d| d.fill.css() == "#28253D" && d.opacity == Some(0.5))
+        );
+        let shadows = els
+            .iter()
+            .filter(|e| {
+                matches!(e, Element::Shape { geom: Geometry::Circle { .. }, class, .. }
+                    if class.as_deref() == Some("drop-shadow"))
+            })
+            .count();
+        assert_eq!(shadows, 3);
+    }
+
+    /// mermaid 12.3.0: the edge into a `refdoc` (lined document, 167.2 wide)
+    /// ends on its bounding box, not at the frame line inside.
+    #[test]
+    fn edges_end_on_the_lined_document_outline() {
+        let s = render_default(
+            "agentflow-beta LR
+  draft[\"Draft copy\"]@{ shape: task }
+  guide[\"Style guide\"]@{ shape: refdoc }
+  draft -.- guide",
+        );
+        let mut nodes = Vec::new();
+        boxes(&s.elements, "agentflow-", &mut nodes);
+        let guide = nodes
+            .iter()
+            .find(|(n, _)| n.starts_with("guide"))
+            .unwrap()
+            .1;
+        let mut els = Vec::new();
+        shapes_in(&s.elements, &mut els);
+        let end = els
+            .iter()
+            .find_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Path(cmds),
+                    class,
+                    ..
+                } if class
+                    .as_deref()
+                    .is_some_and(|c| c.contains("flowchart-link")) =>
+                {
+                    cmds.iter().rev().find_map(|c| match *c {
+                        PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(p),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .unwrap();
+        // (The node's box, its drop shadow aside, starts at its left side.)
+        assert!((end.x - guide.x).abs() < 1e-3, "{end:?} {guide:?}");
+        assert!((guide.w - 4.0 - 167.2).abs() < 1e-3, "{guide:?}");
     }
 }

@@ -25,7 +25,7 @@ use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::json::{self, Json};
 use crate::layout::{self, Direction, LayoutCluster, LayoutEdge, LayoutInput, LayoutNode};
 use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{decode_entities, line_width, normalize_label};
+use crate::text::{decode_entities, line_width};
 use crate::theme::{ColorSlot, DropShadow, Palette, SlotColors, ThemeName};
 
 // ───────────────────────────── model ─────────────────────────────
@@ -2672,6 +2672,8 @@ const CELL_PAD_X: f64 = 8.0;
 const CELL_PAD_Y: f64 = 4.0;
 /// `.relationship-label, .edgeLabel { font-size: 10px }`.
 const EDGE_LABEL_FONT: f64 = 10.0;
+/// `createText`'s default width, at which edge labels wrap.
+const EDGE_LABEL_WRAP: f64 = 200.0;
 /// `.labelBkg { padding: 0 2px }` (usecase `styles.ts`).
 const LABEL_BKG_PAD_X: f64 = 2.0;
 
@@ -2873,8 +2875,8 @@ impl Options {
 fn label_lines(label: &Label) -> Vec<String> {
     let lines: Vec<String> = match label.kind {
         LabelKind::Text => vec![decode_entities(label.text.trim())],
-        LabelKind::Markdown => normalize_label(&format!("`{}`", label.text))
-            .split('\n')
+        LabelKind::Markdown => crate::text::label_lines(&format!("`{}`", label.text))
+            .iter()
             .map(|l| l.trim().to_string())
             .collect(),
     };
@@ -2922,7 +2924,7 @@ impl Block {
     /// as wide as its text in layout units; else wrapped in a box of that width
     /// (or its widest unbreakable piece), `break-spaces`.
     fn wrapped(lines: &[String], font: f64, bold: bool, max: f64) -> Block {
-        use crate::text::{BreakRule, break_space_shift, html_wrap_width, layout_unit_ceil};
+        use crate::text::{BreakRule, break_space_shift, html_line_width, html_wrap_width};
         let flagged = crate::text::wrap_lines_flagged(lines, max, font, bold, BreakRule::Browser);
         let natural = lines
             .iter()
@@ -2945,10 +2947,15 @@ impl Block {
             })
             .collect();
         let mut b = Block::new(flagged.into_iter().map(|(l, _)| l).collect(), font, bold);
+        // Chromium sizes each styled run (a `<strong>`, an `<em>`, the text
+        // between) in layout units.
         b.w = if natural > max {
             html_wrap_width(lines, max, font, bold)
         } else {
-            layout_unit_ceil(b.w)
+            b.lines
+                .iter()
+                .map(|l| html_line_width(l, font, bold))
+                .fold(0.0, f64::max)
         };
         b.shifts = shifts;
         b
@@ -3101,7 +3108,12 @@ fn measure_use_case(u: &UseCase, o: &Options) -> (Shape, f64, f64) {
             .max(o.min_width)
             .max(stereotype.as_ref().map_or(0.0, |s| s.w));
         let label_h = label.h + stereotype.as_ref().map_or(0.0, |s| s.h + STEREOTYPE_GAP);
-        let (rx, ry) = (label_w / 2.0 + NODE_PADDING, label_h / 2.0 + NODE_PADDING);
+        // A use case's padding is 20 (`getData`), so `halfPadding` is 10 and
+        // the radii reach two of those past the labels.
+        let (rx, ry) = (
+            label_w / 2.0 + 2.0 * NODE_PADDING,
+            label_h / 2.0 + 2.0 * NODE_PADDING,
+        );
         return (
             Shape::Business {
                 label,
@@ -3238,13 +3250,24 @@ fn draw_node(
         } => {
             let paint = painted(&n.style, slot, &role.actor_bkg, &role.actor_border, 2.0);
             let line = Paint::stroke(&paint.stroke, paint.stroke_width);
+            // The glyph's paths take neo's `.node path { stroke-width: strokeWidth
+            // ?? 1 }` over the actor's 2px (its head, a circle, and the business
+            // marker, which `.usecase-business-marker` sets, keep that).
+            let path_w = n.style.stroke_width.unwrap_or(if o.neo() {
+                pal.stroke_width.unwrap_or(1.0)
+            } else {
+                2.0
+            });
+            let path_line = Paint::stroke(&paint.stroke, path_w);
+            let mut path_paint = paint.clone();
+            path_paint.stroke_width = path_w;
             let content_h = n.h - 2.0 * NODE_PADDING;
             let top = c.y - content_h / 2.0;
             let g = Point::new(c.x, top + FIGURE_H / 2.0);
             match kind {
                 ActorType::Normal => els.push(Element::classed_shape(
                     Geometry::Path(svg_path(STICK_FIGURE, g)),
-                    paint.clone(),
+                    path_paint.clone(),
                     "usecase-actor-stick",
                 )),
                 ActorType::Hollow => {
@@ -3267,13 +3290,13 @@ fn draw_node(
                     ));
                     els.push(Element::classed_shape(
                         Geometry::Path(svg_path(HOLLOW_BODY, g)),
-                        line.clone(),
+                        path_line.clone(),
                         "usecase-actor-hollow-body",
                     ));
                 }
                 ActorType::Awesome => els.push(Element::classed_shape(
                     Geometry::Path(svg_path(AWESOME_SILHOUETTE, g)),
-                    paint.clone(),
+                    path_paint.clone(),
                     "usecase-actor-awesome-silhouette",
                 )),
                 ActorType::Icon => {
@@ -3355,7 +3378,15 @@ fn draw_node(
             ry,
         } => {
             let paint = painted(&n.style, slot, &role.bkg, &role.border, 2.0);
-            let line = Paint::stroke(&paint.stroke, paint.stroke_width);
+            // The marker is a `.node path` (see the actor's glyph).
+            let line = Paint::stroke(
+                &paint.stroke,
+                n.style.stroke_width.unwrap_or(if o.neo() {
+                    pal.stroke_width.unwrap_or(1.0)
+                } else {
+                    2.0
+                }),
+            );
             els.push(Element::classed_shape(
                 Geometry::Path(geom::ellipse(c, *rx, *ry)),
                 paint,
@@ -3397,16 +3428,56 @@ fn draw_node(
             (els, Clip::Rect(r))
         }
         Shape::Note { label } => {
-            // Under neo the `.node path` rule repaints the note outline with nodeBorder.
+            // `note.ts`: a rough.js rectangle (roughness 0, solid fill): an
+            // open four-corner fill path, then each side stroked twice. Under
+            // neo the `.node path` rule repaints both paths' outline with
+            // nodeBorder (the fill path's three sides included); a classic
+            // note keeps rough's own noteBorder at 1.3.
             let (stroke, width) = if o.neo() {
                 (&pal.node_border, pal.stroke_width.unwrap_or(1.0))
             } else {
-                (&pal.note_border, 1.0)
+                (&pal.note_border, 1.3)
             };
             let paint = painted(&n.style, None, &pal.note_bkg, stroke, width);
-            let geom = Geometry::Rect { rect: r, rx: 0.0 };
-            els.extend(shadow(&geom, sh));
-            els.push(Element::classed_shape(geom, paint, "basic label-container"));
+            els.extend(shadow(&Geometry::Rect { rect: r, rx: 0.0 }, sh));
+            let corners = [
+                Point::new(r.x, r.y),
+                Point::new(r.x + r.w, r.y),
+                Point::new(r.x + r.w, r.y + r.h),
+                Point::new(r.x, r.y + r.h),
+            ];
+            let mut fill = paint.clone();
+            if !o.neo() && n.style.stroke.is_none() {
+                fill.stroke = Color::none();
+                fill.stroke_width = 0.0;
+            }
+            els.push(Element::classed_shape(
+                Geometry::Path(vec![
+                    PathCmd::MoveTo(corners[0]),
+                    PathCmd::LineTo(corners[1]),
+                    PathCmd::LineTo(corners[2]),
+                    PathCmd::LineTo(corners[3]),
+                ]),
+                fill,
+                "basic label-container",
+            ));
+            let sides: Vec<PathCmd> = (0..4)
+                .flat_map(|i| {
+                    // rough.js draws each side as a cubic whose control
+                    // points (randomised, roughness 0) lie on the side.
+                    let (a, b) = (corners[i], corners[(i + 1) % 4]);
+                    let at = |t: f64| Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+                    let side = PathCmd::CubicTo(at(1.0 / 3.0), at(2.0 / 3.0), b);
+                    [PathCmd::MoveTo(a), side, PathCmd::MoveTo(a), side]
+                })
+                .collect();
+            let mut outline = paint;
+            outline.fill = Color::none();
+            els.push(Element::classed_shape(
+                Geometry::Path(sides),
+                outline,
+                "basic label-container",
+            ));
             let color = n
                 .style
                 .color
@@ -3440,22 +3511,27 @@ fn draw_node(
                 .unwrap_or_else(|| pal.primary_text.clone());
             let inner_w = key_w + value_w;
             let (left, mut y) = (r.x + border, r.y + border);
-            let cell = |x: f64, y: f64, w: f64, h: f64| {
-                Element::classed_shape(
-                    Geometry::Rect {
-                        rect: Rect::new(x, y, w, h),
-                        rx: 0.0,
-                    },
+            // Each cell is a `rect` of the node, so under neo it casts its own
+            // drop shadow (`.node rect { filter }`), painted over what came before.
+            let cell = |els: &mut Vec<Element>, x: f64, y: f64, w: f64, h: f64| {
+                let geom = Geometry::Rect {
+                    rect: Rect::new(x, y, w, h),
+                    rx: 0.0,
+                };
+                els.extend(shadow(&geom, sh));
+                els.push(Element::classed_shape(
+                    geom,
                     paint.clone(),
                     "usecase-json-cell",
-                )
+                ));
             };
-            els.push(cell(left, y, inner_w, *title_h));
+            cell(&mut els, left, y, inner_w, *title_h);
             els.push(title.text(Point::new(left + inner_w / 2.0, y + title_h / 2.0), &color));
             y += title_h;
             for ((k, v), h) in rows.iter().zip(row_h) {
-                els.push(cell(left, y, *key_w, *h));
-                els.push(cell(left + key_w, y, *value_w, *h));
+                // `usecaseJsonTable` draws a row's value cell before its key cell.
+                cell(&mut els, left + key_w, y, *value_w, *h);
+                cell(&mut els, left, y, *key_w, *h);
                 let cy = y + h / 2.0;
                 els.push(k.text(Point::new(left + key_w / 2.0, cy), &color));
                 els.push(v.text(Point::new(left + key_w + value_w / 2.0, cy), &color));
@@ -3623,8 +3699,9 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         edges.push(VEdge {
             from,
             to,
+            // `insertEdgeLabel`: an HTML label of `createText`'s default width.
             label: text
-                .map(|t| Block::new(t, EDGE_LABEL_FONT, false))
+                .map(|t| Block::wrapped(&t, EDGE_LABEL_FONT, false, EDGE_LABEL_WRAP))
                 .filter(|b| b.h > 0.0),
             minlen: r.minlen,
             kind: Some(r.kind),
@@ -3668,6 +3745,10 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
                 width: n.w,
                 height: n.h,
                 cluster: n.cluster,
+                // `getData` marks ellipse and business use cases `spreadPorts`,
+                // which the ELK adapter turns into `portAlignment.default: CENTER`.
+                centered_ports: elk
+                    && matches!(n.shape, Shape::Ellipse { .. } | Shape::Business { .. }),
             })
             .collect(),
         edges: edges
@@ -3815,32 +3896,114 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
 
     // Edges.
     let neo = o.neo();
-    let edge_width = if neo {
-        pal.stroke_width.unwrap_or(1.0)
-    } else {
-        1.0
-    };
+    // `.edge-thickness-normal { stroke-width: strokeWidth ?? 1 }`, whatever the look.
+    let edge_width = pal.stroke_width.unwrap_or(1.0);
     let mut edge_els = Vec::new();
     let mut label_els = Vec::new();
     // Every edge's points for ELK's line hops (`applyElkLineJumps`).
     let mut hop_edges = Vec::new();
+    // Clipped routes and label centres, first for every edge: under ELK mermaid
+    // post-processes them all together (`applyElkEdgeLayout`).
+    let mut routes: Vec<Option<Vec<Point>>> = Vec::with_capacity(edges.len());
+    let mut label_at: Vec<Option<Point>> = Vec::with_capacity(edges.len());
+    // Per edge: the ports mermaid's clipped route holds beside its outline points.
+    let mut kept: Vec<[Option<Point>; 2]> = Vec::with_capacity(edges.len());
     for (e, route) in edges.iter().zip(&out.edges) {
         let mut pts = route.points.clone();
+        label_at.push(route.label);
         if pts.len() < 2 {
+            routes.push(None);
+            kept.push([None, None]);
             continue;
         }
-        let elk = o.layout == LayoutAlgorithm::Elk;
+        let mut keep = [None, None];
         if elk {
             // Orthogonal routes start and end at ports on the bounding boxes.
+            let ports = (pts[0], pts[pts.len() - 1]);
             pts[0] = super::graph::clip_along(&clips[e.from], pts[0], pts[1]);
             pts.reverse();
             pts[0] = super::graph::clip_target_end(&clips[e.to], &pts, true);
             pts.reverse();
+            let offset = |h: Head| markers::pullback_for(h, neo).max(markers::hidden_end(h, true));
+            let rect = |i: usize| Rect::centered(out.nodes[i], nodes[i].w, nodes[i].h);
+            keep[0] = super::graph::kept_port(
+                ports.0,
+                Some(pts[0]),
+                offset(e.start),
+                rect(e.from),
+                false,
+            );
+            keep[1] = super::graph::kept_port(
+                ports.1,
+                Some(pts[pts.len() - 1]),
+                offset(e.end),
+                rect(e.to),
+                true,
+            );
         } else if e.from != e.to {
             pts[0] = clips[e.from].clip(pts[1]);
             let last = pts.len() - 1;
             pts[last] = clips[e.to].clip(pts[last - 1]);
         }
+        routes.push(Some(pts));
+        kept.push(keep);
+    }
+    if elk {
+        // `straightenEdgeTerminals` on mermaid's routes (ports kept), then
+        // `separateOppositeEdgeLabels`.
+        let mut labels: Vec<Option<super::elkedges::Label>> = edges
+            .iter()
+            .zip(&label_at)
+            .map(|(e, at)| {
+                let b = e.label.as_ref()?;
+                Some(super::elkedges::Label {
+                    center: (*at)?,
+                    width: b.w + 2.0 * LABEL_BKG_PAD_X,
+                    height: b.h,
+                })
+            })
+            .collect();
+        let theirs: Vec<Option<Vec<Point>>> = routes
+            .iter()
+            .zip(&kept)
+            .map(|(r, k)| {
+                let mut r = r.clone()?;
+                if let Some(p) = k[0] {
+                    r.insert(1, p);
+                }
+                if let Some(p) = k[1] {
+                    r.insert(r.len() - 1, p);
+                }
+                Some(r)
+            })
+            .collect();
+        let mut straightened = theirs.clone();
+        super::elkedges::straighten_edge_terminals(
+            &mut straightened,
+            &mut labels,
+            super::graph::ELK_ORIGIN,
+        );
+        for (((r, before), after), k) in routes.iter_mut().zip(theirs).zip(straightened).zip(&kept)
+        {
+            if after != before {
+                *r = after.map(|a| super::graph::without_kept_ports(a, *k));
+            }
+        }
+        let pairs: Vec<(usize, usize)> = edges
+            .iter()
+            .map(|e| (e.from.min(e.to), e.from.max(e.to)))
+            .collect();
+        super::elkedges::separate_opposite_edge_labels(&mut labels, &pairs);
+        for (at, l) in label_at.iter_mut().zip(labels) {
+            if let Some(l) = l {
+                *at = Some(l.center);
+            }
+        }
+    }
+    for ((e, route), label_pos) in edges.iter().zip(routes).zip(label_at) {
+        let Some(mut pts) = route else {
+            continue;
+        };
         if elk {
             hop_edges.push(crate::linejump::EdgeGeom {
                 points: pts.clone(),
@@ -3931,7 +4094,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             class: Some("edgePath".into()),
             children,
         });
-        if let (Some(b), Some(at)) = (&e.label, route.label) {
+        if let (Some(b), Some(at)) = (&e.label, label_pos) {
             let r = Rect::centered(at, b.w + 2.0 * LABEL_BKG_PAD_X, b.h);
             bounds.add_rect(r);
             let color = e
@@ -3943,6 +4106,13 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
                 "edgeLabel",
                 vec![
                     Element::rect(r, 0.0, Paint::fill(&pal.edge_label_background)),
+                    // `.edgeLabel p` paints the same background again under the
+                    // text itself (inside `.labelBkg`'s padding).
+                    Element::rect(
+                        Rect::centered(at, b.w, b.h),
+                        0.0,
+                        Paint::fill(&pal.edge_label_background),
+                    ),
                     b.text(at, &color),
                 ],
             ));
@@ -4156,7 +4326,11 @@ mod tests {
             d.relationships[0].label.as_ref().unwrap().text,
             "opens **form**"
         );
-        assert_eq!(label_lines(&d.actors[0].label), ["User", "role"]);
+        // Markdown emphasis stays, as marks.
+        let lines = label_lines(&d.actors[0].label);
+        let plain: Vec<String> = lines.iter().map(|l| crate::text::plain(l)).collect();
+        assert_eq!(plain, ["User", "role"]);
+        assert!(crate::text::has_marks(&lines[0]));
         assert_eq!(
             label_lines(&Label::text("Open #40;safe#41;")),
             ["Open (safe)"]
@@ -4633,5 +4807,204 @@ mod tests {
         texts(&r.scene.elements, &mut t);
         let c = t.iter().find(|t| t.lines == ["Checkout"]).unwrap();
         assert_eq!(c.fill.css(), "#131300");
+    }
+
+    /// The end points of every command of a group's first path.
+    fn path_points(els: &[Element]) -> Vec<Point> {
+        let Some(Element::Shape {
+            geom: Geometry::Path(cmds),
+            ..
+        }) = els.first()
+        else {
+            panic!("no path");
+        };
+        cmds.iter()
+            .filter_map(|c| match *c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(p),
+                PathCmd::Close => None,
+            })
+            .collect()
+    }
+
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() < 2e-3
+    }
+
+    fn all_texts(els: &[Element], out: &mut Vec<Text>) {
+        for e in els {
+            match e {
+                Element::Text { text, .. } => out.push(text.clone()),
+                Element::Group { children, .. } => all_texts(children, out),
+                _ => {}
+            }
+        }
+    }
+
+    const MULTI_EDGES: &str = "usecase-beta
+actor User
+actor Support
+Start
+Finish
+User --> Start
+Start <-- Support
+Start -- Finish
+User --o Start
+Start o-- Support
+User --x Finish
+Finish x-- Support";
+
+    /// mermaid 12.3.0 (ELK): an ellipse use case's ports stand one port spacing
+    /// apart about its middle (`spreadPorts`, `portAlignment.default: CENTER`),
+    /// crammed to 19 apart for three on a 58px side; `straightenEdgeTerminals`
+    /// then pulls the long edge's channel onto its target's port.
+    #[test]
+    fn ellipse_ports_are_centred_and_terminal_jogs_straightened() {
+        let s = scene(MULTI_EDGES);
+        let edge =
+            |id: &str| path_points(find_group(&s.elements, &format!("usecase-{id}")).unwrap());
+        // User --> Start and User --o Start reach Start's west side at 56.5 / 76.5.
+        let e0 = edge("edge-0");
+        let last = e0[e0.len() - 1];
+        assert!(near(last.x, 128.907) && near(last.y, 56.5), "{last:?}");
+        let e3 = edge("edge-3");
+        assert!(near(e3[e3.len() - 1].y, 76.5), "{e3:?}");
+        // Start <-- Support leaves Start at 47.5 and runs at Support's port,
+        // 47.25, from x = 308 on (ELK left it at 44.375 between two jogs).
+        let e1 = edge("edge-1");
+        assert!(near(e1[0].x, 272.438) && near(e1[0].y, 47.5), "{e1:?}");
+        let end = e1[e1.len() - 1];
+        assert!(near(end.x, 528.0) && near(end.y, 47.25), "{e1:?}");
+        assert!(
+            e1.iter().filter(|p| p.x > 308.5).all(|p| near(p.y, 47.25)),
+            "{e1:?}"
+        );
+        // Start o-- Support keeps Start's port, 66.5, as far as x = 505.
+        let e4 = edge("edge-4");
+        assert!(
+            e4.iter().filter(|p| p.x < 505.0).all(|p| near(p.y, 66.5)),
+            "{e4:?}"
+        );
+        // Start's third east port: 85.5.
+        assert!(near(edge("edge-2")[0].y, 85.5));
+        // As wide as mermaid's drawing: no extra layer.
+        assert!(near(s.view_box.w, 632.0), "{:?}", s.view_box);
+    }
+
+    #[test]
+    fn business_use_case_radii_reach_twice_the_half_padding() {
+        // mermaid 12.3.0: a 160x78 ellipse (label 120x38, plus 2 x halfPadding 10).
+        let s = scene(
+            "usecase-beta\nQuote(\"Prepare quote\")@{ business: true } <<Core>>\nactor A\nA --> Quote",
+        );
+        let r = extent(find_group(&s.elements, "usecase-Quote").unwrap());
+        assert!(near(r.w, 160.0) && near(r.h, 78.0), "{r:?}");
+    }
+
+    #[test]
+    fn notes_are_rough_rectangles() {
+        // note.ts: an open fill path of the four corners, then every side
+        // stroked twice; classic keeps rough's 1.3 noteBorder stroke.
+        let note = |src: &str, look: Look| {
+            let mut cfg = MermaidConfig::default().scoped("usecase");
+            cfg.look = look;
+            let s = render(src, None, &cfg, &cfg.palette()).unwrap();
+            find_group(&s.elements, "usecase-note-0")
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        paint,
+                        class,
+                    } if class.as_deref() != Some("drop-shadow") => {
+                        Some((cmds.clone(), paint.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let neo = note("usecase-beta\nA\nnote for A \"hello note\"", Look::Neo);
+        assert_eq!(neo.len(), 2);
+        assert_eq!(neo[0].0.len(), 4);
+        assert!(!neo[0].0.contains(&PathCmd::Close));
+        assert_eq!(neo[1].0.len(), 16);
+        assert!(neo[1].1.fill.is_none());
+        assert_eq!(neo[0].1.stroke_width, 2.0);
+        let classic = note("usecase-beta\nA\nnote for A \"hello note\"", Look::Classic);
+        assert!(classic[0].1.stroke.is_none());
+        assert_eq!(classic[1].1.stroke_width, 1.3);
+    }
+
+    #[test]
+    fn json_cells_cast_their_own_shadows_value_first() {
+        let s = scene("usecase-beta\njson Data@{ \"status\": \"pending\" }");
+        let g = find_group(&s.elements, "usecase-Data").unwrap();
+        let shapes: Vec<(Option<&str>, Rect)> = g
+            .iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    class,
+                    ..
+                } => Some((class.as_deref(), *rect)),
+                _ => None,
+            })
+            .collect();
+        // The border, the title cell, the value cell and the key cell.
+        let shadows = shapes.iter().filter(|s| s.0 == Some("drop-shadow")).count();
+        assert_eq!(shadows, 4);
+        let cells: Vec<Rect> = shapes
+            .iter()
+            .filter(|s| s.0 == Some("usecase-json-cell"))
+            .map(|s| s.1)
+            .collect();
+        assert_eq!(cells.len(), 3);
+        assert!(cells[1].x > cells[2].x, "value cell before key cell");
+    }
+
+    #[test]
+    fn markdown_labels_keep_their_emphasis() {
+        let s = scene(
+            "usecase-beta\nactor R\nF(\"`**Formatted** label`\")\nR -- \"`opens **form**`\" --> F",
+        );
+        let mut t = Vec::new();
+        all_texts(&s.elements, &mut t);
+        let has_bold = |plain: &str| {
+            t.iter().any(|t| {
+                t.lines.iter().any(|l| {
+                    crate::text::plain(l) == plain
+                        && crate::text::styled_runs(l, false).iter().any(|r| r.bold)
+                })
+            })
+        };
+        assert!(has_bold("Formatted label"));
+        assert!(has_bold("opens form"));
+        // `.labelBkg` (2px padding a side) and its `p` under the text: mermaid
+        // 12.3.0 sizes `opens **form**` 52.265625 wide (its runs each in layout units).
+        let mut rects = Vec::new();
+        fn label_rects(els: &[Element], inside: bool, out: &mut Vec<Rect>) {
+            for e in els {
+                match e {
+                    Element::Group {
+                        class, children, ..
+                    } => label_rects(
+                        children,
+                        inside || class.as_deref() == Some("edgeLabel"),
+                        out,
+                    ),
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        ..
+                    } if inside => out.push(*rect),
+                    _ => {}
+                }
+            }
+        }
+        label_rects(&s.elements, false, &mut rects);
+        assert_eq!(rects.len(), 2, "{rects:?}");
+        assert!(
+            near(rects[0].w, 56.265625) && near(rects[1].w, 52.265625),
+            "{rects:?}"
+        );
     }
 }

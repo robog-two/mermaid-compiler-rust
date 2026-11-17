@@ -2199,11 +2199,13 @@ fn level_input(
                 width: box_size[b].0,
                 height: box_size[b].1,
                 cluster: tree.parent[b].and_then(|p| flat_of[p]),
+                centered_ports: false,
             },
             Item::Ext(_) => LayoutNode {
                 width: 0.0,
                 height: 0.0,
                 cluster: None,
+                centered_ports: false,
             },
         })
         .collect();
@@ -2882,6 +2884,7 @@ mod tests {
             width: 80.0,
             height: 40.0,
             cluster,
+            centered_ports: false,
         }
     }
 

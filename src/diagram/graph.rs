@@ -653,7 +653,27 @@ fn measure_node(
         block = TextBlock::svg(lines, font, bold);
     } else if wrap_width > 0.0 && !block.is_empty() {
         let raw = block.lines.clone();
-        block = TextBlock::new(wrap_lines(&raw, wrap_width, font, bold), font, bold).html();
+        let flagged = crate::text::wrap_lines_flagged(
+            &raw,
+            wrap_width,
+            font,
+            bold,
+            crate::text::BreakRule::Browser,
+        );
+        let shifts: Vec<f64> = flagged
+            .iter()
+            .map(|(l, at_space)| {
+                if *at_space {
+                    crate::text::break_space_shift(l, font, bold)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        block = TextBlock::new(flagged.into_iter().map(|(l, _)| l).collect(), font, bold).html();
+        if shifts.iter().any(|&s| s != 0.0) {
+            block.shifts = shifts;
+        }
         // A label too wide for one line is laid out in a `display: table` box of
         // the wrapping width (or its widest word): the label's box is that wide
         // however short its lines come out.
@@ -793,6 +813,9 @@ pub struct RenderOptions {
     /// ER under dagre: groups drawn as mermaid's dagre wrapper draws its cluster
     /// nodes (see [`nest_cluster_nodes`]).
     pub cluster_nodes: bool,
+    /// The width node labels wrap at, when it is not the configuration's
+    /// `wrapping_width` (agentflow's `agentflow.wrappingWidth`).
+    pub node_wrap: Option<f64>,
 }
 
 /// Edge labels wrap at 200px: `insertEdgeLabel` calls `createText` without a
@@ -820,7 +843,7 @@ fn edge_label_block(label: &str, font: f64) -> TextBlock {
 /// the label's bounding box, and so its size in the layout, includes it.
 const SVG_EDGE_LABEL_PAD: f64 = 2.0;
 /// Where ELK's coordinates start in ours: the root's 12px padding.
-const ELK_ORIGIN: f64 = 12.0;
+pub(crate) const ELK_ORIGIN: f64 = 12.0;
 
 /// [`edge_label_block`] for `htmlLabels: false`: SVG text wrapped at the same 200px.
 fn svg_edge_label_block(label: &str, font: f64) -> TextBlock {
@@ -831,13 +854,6 @@ fn svg_edge_label_block(label: &str, font: f64) -> TextBlock {
         false,
     );
     TextBlock::svg(lines, font, false)
-}
-
-/// Word-wrap already-decoded label lines at `width` with the browser's line breaking,
-/// as labelHelper's `createText` does (mermaid 12 wraps flowchart / state node labels
-/// at `wrappingWidth`).
-fn wrap_lines(lines: &[String], width: f64, font: f64, bold: bool) -> Vec<String> {
-    crate::text::wrap_lines(lines, width, font, bold, crate::text::BreakRule::Browser)
 }
 
 /// The diagram with Font Awesome references (`fa:fa-car`) in its HTML labels
@@ -981,7 +997,7 @@ pub fn render_with(
                 {
                     0.0
                 } else {
-                    cfg.wrapping_width
+                    opts.node_wrap.unwrap_or(cfg.wrapping_width)
                 },
                 !cfg.html_labels,
                 if opts.er_scaled_padding { 1.25 } else { 1.0 },
@@ -1146,6 +1162,7 @@ pub fn render_with(
                 width: browser_size(measured[i].w, elk, drawn_as_circle(&nodes[i], cfg.look)),
                 height: browser_size(measured[i].h, elk, drawn_as_circle(&nodes[i], cfg.look)),
                 cluster: nodes[i].cluster.map(|c| c.0),
+                centered_ports: false,
             })
             .collect(),
         edges: g
@@ -2908,7 +2925,7 @@ const ELK_MIN_MARKER_SEGMENT: f64 = 8.0;
 /// segment for the end's marker (`offset`) goes too
 /// (`ensureStart/EndMarkerSegmentLength`). `clip`: `None` for an outline
 /// point that differs from the port only by rounding.
-fn kept_port(
+pub(crate) fn kept_port(
     port: Point,
     clip: Option<Point>,
     offset: f64,
@@ -3138,7 +3155,10 @@ fn collinear(a: Point, b: Point, c: Point) -> bool {
 
 /// A straightened route without the ports [`kept_port`] put in, where they
 /// are still where they were.
-fn without_kept_ports(mut pts: Vec<Point>, [start, end]: [Option<Point>; 2]) -> Vec<Point> {
+pub(crate) fn without_kept_ports(
+    mut pts: Vec<Point>,
+    [start, end]: [Option<Point>; 2],
+) -> Vec<Point> {
     if let Some(p) = end
         && pts.len() > 2
         && pts[pts.len() - 2] == p
@@ -3500,10 +3520,14 @@ fn cluster_shapes(
 /// The order in which mermaid hands nodes to the layout. flowDb pushes its subgraphs
 /// last-declared first and the vertices after them, so at every level the child
 /// subgraphs come in reverse, before the level's own nodes; ELK keeps that model order.
-/// erDb's `getData` does the same with its groups (kept here in closing order).
-/// Other diagrams keep declaration order.
+/// erDb's `getData` does the same with its groups (kept here in closing order), and
+/// agentflow's with its flows. Other diagrams keep declaration order.
 fn model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> Vec<usize> {
-    if !matches!(g.kind, DiagramKind::Flowchart | DiagramKind::Er) || g.clusters.is_empty() {
+    if !matches!(
+        g.kind,
+        DiagramKind::Flowchart | DiagramKind::Er | DiagramKind::Agentflow
+    ) || g.clusters.is_empty()
+    {
         return (0..nodes.len()).collect();
     }
     let placeholder: Vec<bool> = {
@@ -3513,43 +3537,59 @@ fn model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> 
         }
         v
     };
-    fn visit(
-        scope: Option<ClusterId>,
-        g: &GraphDiagram,
-        nodes: &[Node],
-        empty_of: &[Option<usize>],
-        placeholder: &[bool],
-        out: &mut Vec<usize>,
-        depth: usize,
-    ) {
-        if depth > g.clusters.len() {
+    // Where each subgraph comes in getData's walk (last closed first); a
+    // collapsed one (a node) comes after the `group_seq` expanded ones before it.
+    let mut rank = vec![0usize; g.clusters.len()];
+    for (j, ci) in closing_order(&g.clusters).into_iter().rev().enumerate() {
+        rank[ci] = j;
+    }
+    struct Walk<'a> {
+        g: &'a GraphDiagram,
+        nodes: &'a [Node],
+        empty_of: &'a [Option<usize>],
+        placeholder: &'a [bool],
+        rank: &'a [usize],
+    }
+    fn visit(w: &Walk, scope: Option<ClusterId>, out: &mut Vec<usize>, depth: usize) {
+        if depth > w.g.clusters.len() {
             return;
         }
-        for ci in (0..g.clusters.len()).rev() {
-            if g.clusters[ci].parent != scope || Some(ClusterId(ci)) == scope {
-                continue;
-            }
-            match empty_of[ci] {
-                Some(p) => out.push(p),
-                None => visit(
-                    Some(ClusterId(ci)),
-                    g,
-                    nodes,
-                    empty_of,
-                    placeholder,
-                    out,
-                    depth + 1,
-                ),
+        // (place in the walk, cluster or node)
+        let mut subgraphs: Vec<(f64, Result<usize, usize>)> = (0..w.g.clusters.len())
+            .filter(|&ci| w.g.clusters[ci].parent == scope && Some(ClusterId(ci)) != scope)
+            .map(|ci| (w.rank[ci] as f64, Ok(ci)))
+            .collect();
+        subgraphs.extend(w.nodes.iter().enumerate().filter_map(|(i, n)| {
+            let k = n
+                .group_seq
+                .filter(|_| n.cluster == scope && !w.placeholder[i])?;
+            Some((k as f64 - 0.5, Err(i)))
+        }));
+        subgraphs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, item) in subgraphs {
+            match item {
+                Err(i) => out.push(i),
+                Ok(ci) => match w.empty_of[ci] {
+                    Some(p) => out.push(p),
+                    None => visit(w, Some(ClusterId(ci)), out, depth + 1),
+                },
             }
         }
-        for (i, n) in nodes.iter().enumerate() {
-            if n.cluster == scope && !placeholder[i] {
+        for (i, n) in w.nodes.iter().enumerate() {
+            if n.cluster == scope && !w.placeholder[i] && n.group_seq.is_none() {
                 out.push(i);
             }
         }
     }
+    let walk = Walk {
+        g,
+        nodes,
+        empty_of,
+        placeholder: &placeholder,
+        rank: &rank,
+    };
     let mut out = Vec::with_capacity(nodes.len());
-    visit(None, g, nodes, empty_of, &placeholder, &mut out, 0);
+    visit(&walk, None, &mut out, 0);
     // Anything unreachable (a malformed parent chain) keeps its place at the end.
     let mut seen = vec![false; nodes.len()];
     for &i in &out {
@@ -4489,12 +4529,25 @@ fn node_elements(
     };
     if n.shape == Shape::CollapsedGroup {
         // collapsedGroup.ts: a dashed separator 8px below the title, inset 8px, and three
-        // dots centred in the 20px indicator row. flowchart/styles.ts paints both
-        // clusterBorder (the dots at 60%), or the palette slot's border colour.
+        // dots centred in the 20px indicator row, all in the collapsed style's stroke.
+        // flowchart/styles.ts repaints both clusterBorder (the dots at 60%), or the
+        // palette slot's border colour; agentflow's styles.ts leaves the separator
+        // its own stroke (a flow's `flowContainerStroke`) and paints the dots
+        // nodeBorder at 50%.
+        let agentflow = kind == DiagramKind::Agentflow;
         let marker =
             slot_colors(n.color_slot, pal).map_or(pal.cluster_border.clone(), |s| s.border);
+        let (sep_color, dot_color, dot_opacity) = if agentflow {
+            (
+                pal.flow_container_stroke.clone(),
+                pal.node_border.clone(),
+                0.5,
+            )
+        } else {
+            (marker.clone(), marker, 0.6)
+        };
         let sep_y = y0 + shapes::COLLAPSED_PAD + m.block.height + 8.0;
-        let mut sep = Paint::stroke(&marker, 0.75);
+        let mut sep = Paint::stroke(&sep_color, 0.75);
         sep.dash = Some(vec![3.0, 3.0]);
         els.push(Element::classed_shape(
             Geometry::Path(vec![
@@ -4504,17 +4557,26 @@ fn node_elements(
             sep,
             "collapsed-separator",
         ));
-        let mut dot = Paint::fill(&marker);
-        dot.opacity = Some(0.6);
+        let mut dot = Paint::fill(&dot_color);
+        dot.opacity = Some(dot_opacity);
+        // `[data-look="neo"].node circle` casts the neo drop shadow, which the
+        // dot's own opacity then fades with it.
+        let shadow = pal.drop_shadow.as_ref().filter(|_| lk.neo);
         for i in [-1.0, 0.0, 1.0] {
-            els.push(Element::classed_shape(
+            let el = Element::classed_shape(
                 Geometry::Circle {
                     c: Point::new(c.x + 10.0 * i, sep_y + 10.0),
                     r: 2.5,
                 },
                 dot.clone(),
                 "collapsed-indicator",
-            ));
+            );
+            if let Some(sh) = shadow {
+                let mut faded = sh.clone();
+                faded.opacity *= dot_opacity;
+                els.extend(drop_shadow(&el, &faded));
+            }
+            els.push(el);
         }
     }
     if !m.block.is_empty() && shapes::shows_label(n.shape) {
@@ -4531,9 +4593,35 @@ fn node_elements(
             t = t.anchored(Anchor::Start, at.x - m.label_w / 2.0);
         }
         t.bold = m.block.bold;
-        els.push(Element::classed_text(t, "nodeLabel"));
+        els.push(shifted_lines(t, &m.block.shifts, "nodeLabel"));
     }
     (els, boundary)
+}
+
+/// `t` as one text element, or, where a line is drawn off centre (`shifts`,
+/// see [`TextBlock::shifts`]), one per line in a group.
+fn shifted_lines(t: Text, shifts: &[f64], class: &str) -> Element {
+    if shifts.iter().all(|&s| s == 0.0) {
+        return Element::classed_text(t, class);
+    }
+    let lines = t
+        .lines
+        .iter()
+        .zip(shifts)
+        .enumerate()
+        .map(|(i, (l, sh))| {
+            Element::classed_text(
+                Text {
+                    x: t.x - sh,
+                    y: t.y + i as f64 * t.line_height,
+                    lines: vec![l.clone()],
+                    ..t.clone()
+                },
+                class,
+            )
+        })
+        .collect();
+    Element::group("label", lines)
 }
 
 /// Shapes whose label transform subtracts the label's `bbox.y` (`- (bbox.y -
