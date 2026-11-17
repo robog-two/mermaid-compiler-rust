@@ -1927,6 +1927,18 @@ fn with_alpha(c: &Color, alpha: f64) -> Color {
 }
 
 fn shift_lightness(c: &Color, delta: f64) -> Color {
+    // khroma keeps an `hsl()` colour's channels exact; going through 8-bit RGB
+    // first would move its hue (80° → 79.9°) and so the result's rounding.
+    let css = c.css().trim();
+    if let Some(args) = css.strip_prefix("hsl(").and_then(|r| r.strip_suffix(')')) {
+        let v: Vec<f64> = args
+            .split(',')
+            .filter_map(|x| x.trim().trim_end_matches('%').trim().parse().ok())
+            .collect();
+        if let [h, s, l] = v[..] {
+            return Color::new(Rgba::from_hsl(h, s, (l + delta).clamp(0.0, 100.0), 1.0).to_hex());
+        }
+    }
     match color::parse(c.css()) {
         Some(rgb) => {
             let (h, s, l) = rgb.to_hsl();
