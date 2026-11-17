@@ -590,16 +590,29 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
                 glyphs: Vec::new(),
             }
         }
-        Shape::Subroutine | Shape::LinedRect => {
+        // subroutine.ts: one polygon (`insertPolygonShape`) tracing the inner
+        // frame, FRAME_WIDTH in from each side, then the outer box.
+        Shape::Subroutine => Outline {
+            parts: vec![body_poly(&[
+                p(x0 + FRAME, y1),
+                p(x1 - FRAME, y1),
+                p(x1 - FRAME, y0),
+                p(x0 + FRAME, y0),
+                p(x0 + FRAME, y1),
+                p(x0, y1),
+                p(x1, y1),
+                p(x1, y0),
+                p(x0, y0),
+                p(x0, y1),
+            ])],
+            boundary: Boundary::Rect(r),
+            glyphs: Vec::new(),
+        },
+        Shape::LinedRect => {
             let mut o = rect(0.0);
-            // subroutine.ts: inner frame lines FRAME_WIDTH in from each side;
             // shadedProcess.ts: a single line on the left.
             o.parts
                 .push(line(seg(p(x0 + FRAME, y0), p(x0 + FRAME, y1))));
-            if shape == Shape::Subroutine {
-                o.parts
-                    .push(line(seg(p(x1 - FRAME, y0), p(x1 - FRAME, y1))));
-            }
             o
         }
         Shape::Cylinder | Shape::LinedCylinder => {
@@ -962,7 +975,13 @@ impl Local {
         } else {
             let min_x = self.clip.iter().map(|q| q.x).fold(f64::INFINITY, f64::min);
             let min_y = self.clip.iter().map(|q| q.y).fold(f64::INFINITY, f64::min);
-            Boundary::Outline(c, shifted(&self.clip, r.x - min_x, r.y - min_y))
+            // `intersect.polygon` aligns the points on `node.x - node.width / 2`,
+            // the width `updateNodeBounds` took from `getBBox()` (single precision).
+            let (left, top) = (
+                c.x - geom::chromium_f32(r.w) / 2.0,
+                c.y - geom::chromium_f32(r.h) / 2.0,
+            );
+            Boundary::Outline(c, shifted(&self.clip, left - min_x, top - min_y))
         };
         Outline {
             parts: self

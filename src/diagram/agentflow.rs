@@ -17,7 +17,6 @@ use super::graph::{
     self, Cluster, ClusterId, Edge, Endpoint, GraphDiagram, Head, LineKind, Node, NodeId,
     RenderOptions, Shape, StyleOverrides,
 };
-use super::timeline::wrap_text;
 use crate::config::{GraphConfig, MermaidConfig};
 use crate::error::{Error, Result};
 use crate::layout::Direction;
@@ -1398,9 +1397,6 @@ impl Scanner {
 /// Shared options of the conversion (agentflow config + palette length).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConvertOptions {
-    /// `agentflow.wrappingWidth`: node labels wrap at this width.
-    pub wrapping_width: f64,
-    pub font_size: f64,
     /// Length of the theme's categorical palette (0 when the theme has none).
     pub palette_len: usize,
     /// `flowchart.inheritDir` (agentflow's `addSubGraph` reads the flowchart section):
@@ -1556,13 +1552,6 @@ pub fn to_graph(af: &Agentflow, opts: &ConvertOptions) -> GraphDiagram {
         })
         .collect();
 
-    let wrap = |label: &str| -> String {
-        if opts.wrapping_width <= 0.0 {
-            return label.to_string();
-        }
-        wrap_text(label, opts.wrapping_width, opts.font_size, false).join("<br>")
-    };
-
     // Nodes: collapsed containers (reverse completion order, as getData pushes them),
     // then vertices in first-mention order.
     let mut nodes = Vec::new();
@@ -1597,7 +1586,7 @@ pub fn to_graph(af: &Agentflow, opts: &ConvertOptions) -> GraphDiagram {
             AfShape::LinedDocument => Shape::LinedDocument,
             AfShape::Hexagon => Shape::Hexagon,
         };
-        let mut n = Node::new(v.id.clone(), wrap(&v.label), shape);
+        let mut n = Node::new(v.id.clone(), v.label.clone(), shape);
         n.cluster = cluster_parent(&v.id);
         n.style = v.style.clone();
         n.classes = std::iter::once(format!("af-kind-{}", kind_name(v.kind())))
@@ -1707,14 +1696,15 @@ pub fn render(
 ) -> Result<Scene> {
     let af = parse(body, title)?;
     let opts = ConvertOptions {
-        wrapping_width: cfg.section_f64("agentflow", "wrappingWidth", 120.0),
-        font_size: pal.font_size,
         palette_len: pal.color_slots.as_ref().map_or(0, |p| p.border.len()),
         inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
     };
     let g = to_graph(&af, &opts);
     let ro = RenderOptions {
         min_label_width: cfg.section_f64("agentflow", "minNodeWidth", 120.0),
+        // Node labels wrap at `agentflow.wrappingWidth` (in the graph's measure,
+        // which keeps the space a line broke at: `white-space: break-spaces`).
+        node_wrap: Some(cfg.section_f64("agentflow", "wrappingWidth", 120.0)),
         subgraph_title_margin: cfg.subgraph_title_margin(),
         ..Default::default()
     };
@@ -1735,8 +1725,6 @@ mod tests {
         to_graph(
             &p(src),
             &ConvertOptions {
-                wrapping_width: 0.0,
-                font_size: 16.0,
                 palette_len: 12,
                 inherit_dir: false,
             },
@@ -2042,8 +2030,6 @@ end";
         let inherited = to_graph(
             &af,
             &ConvertOptions {
-                wrapping_width: 0.0,
-                font_size: 16.0,
                 palette_len: 12,
                 inherit_dir: true,
             },
@@ -2268,8 +2254,6 @@ linkStyle 0 stroke:#00f");
         let g = to_graph(
             &af,
             &ConvertOptions {
-                wrapping_width: 120.0,
-                font_size: pal.font_size,
                 palette_len: 12,
                 inherit_dir: false,
             },

@@ -277,6 +277,11 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
     p.font_size = 14.0;
     p.radius = Some(if v.redux { 12.0 } else { 3.0 });
     p.stroke_width = Some(if v.dark && !v.redux { 1.0 } else { 2.0 });
+    p.flow_container_stroke = c(if v.dark {
+        "hsl(180, 0%, 18.3529411765%)"
+    } else {
+        "hsl(-120, 0%, 70%)"
+    });
     p.er_row_odd = None; // rowOdd/rowEven are not defined by this family.
 
     if !v.dark {
