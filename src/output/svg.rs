@@ -355,7 +355,10 @@ fn write_line(out: &mut String, line: &str, t: &Text) {
     }
     let bold = t.bold;
     let word_runs = line.contains(crate::text::mark::RUN);
-    for run in crate::text::styled_runs(line, false) {
+    // Only text with its own CSS weight tells a marked run inside bold text
+    // apart; other text takes its runs merged with its weight.
+    let base = bold && t.weight.is_none();
+    for run in crate::text::styled_runs(line, base) {
         let strong = (run.bold && bold).then_some(t.weight).flatten();
         if (run.bold || bold) == bold && !run.italic && !word_runs && strong.is_none() {
             out.push_str(&esc(&run.text));
