@@ -747,6 +747,13 @@ fn segment_bounds(start: (f32, f32), segs: &[Segment]) -> ((f32, f32), (f32, f32
 /// l0,-h`), as `(width, height)`: what `updateNodeBounds` makes the node's
 /// size, in single precision.
 pub fn cylinder_box(w: f64, h: f64, rx: f64, ry: f64) -> (f64, f64) {
+    cylinder_box_at((0.0, ry), w, h, rx, ry)
+}
+
+/// [`cylinder_box`] for the path started at `start` instead of `(0, ry)`
+/// (sequence's database glyph draws it at the participant's own coordinates,
+/// and the single-precision arcs land differently there).
+pub fn cylinder_box_at(start: (f64, f64), w: f64, h: f64, rx: f64, ry: f64) -> (f64, f64) {
     let arc = |dx: f64| {
         Segment::Arc(RelArc {
             rx,
@@ -765,7 +772,7 @@ pub fn cylinder_box(w: f64, h: f64, rx: f64, ry: f64) -> (f64, f64) {
         arc(w),
         Segment::Line(0.0, -h),
     ];
-    let (lo, hi, _) = segment_bounds((0.0, js_f32(ry)), &segs);
+    let (lo, hi, _) = segment_bounds((js_f32(start.0), js_f32(start.1)), &segs);
     (f64::from(span(lo.0, hi.0)), f64::from(span(lo.1, hi.1)))
 }
 

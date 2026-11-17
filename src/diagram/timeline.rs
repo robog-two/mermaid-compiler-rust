@@ -27,13 +27,8 @@ fn wrap_words(raw: &str, max_width: f64, font_size: f64, bold: bool) -> Vec<Stri
 
 /// Darker (light themes) or lighter (dark themes) shade of a CSS colour.
 pub(crate) fn shade(c: &Color, dark_theme: bool, amount: f64) -> Color {
-    match color::parse(c.css()) {
-        Some(rgb) => Color::new(
-            rgb.lighten(if dark_theme { amount } else { -amount })
-                .to_hex(),
-        ),
-        None => c.clone(),
-    }
+    let dl = if dark_theme { amount } else { -amount };
+    color::adjust(c.css(), 0.0, 0.0, dl).map_or_else(|| c.clone(), |x| Color::new(x.to_hex()))
 }
 
 #[derive(Debug, Clone, PartialEq)]

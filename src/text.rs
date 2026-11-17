@@ -692,11 +692,18 @@ pub fn layout_unit_ceil(w: f64) -> f64 {
     ((w * 64.0) - 1e-6).ceil().max(0.0) / 64.0
 }
 
-/// The font size Chromium shapes text at: the CSS size truncated to 1/64 px
-/// (11.48px text is laid out at 11.46875px; measured in headless Chromium at
-/// 9.6, 10.5, 11.48, 12.6, 13.12 and 14.4px).
+/// The font size Chromium shapes text at. Blink's
+/// `FontDescription::EffectiveFontSize()` cuts the computed size (a `float`)
+/// to 1/100 px in single precision, `floorf(size * 100) / 100`, and Skia hands
+/// that to FreeType in 26.6 fixed point, `(int)(size * 64)`: 11.48px is laid
+/// out at 11.46875px, and 9.9px (`9.9f * 100` is 989.99994) at 9.875px. Fitted
+/// exactly to the advances Chromium measures for 9401 sizes from 6 to 60px.
+/// (Blink's font cache keys sizes by `(unsigned)(effective * 100)`, so two
+/// effective sizes a hundredth apart can share the first one's font; a page
+/// that uses only one of them is not affected.)
 pub fn shaping_size(font_size: f64) -> f64 {
-    (font_size * 64.0 + 1e-9).floor() / 64.0
+    let effective = (font_size as f32 * 100.0).floor() / 100.0;
+    f64::from((effective * 64.0) as i32) / 64.0
 }
 
 /// The box of one SVG text line drawn as mermaid's `createText` draws SVG labels,
@@ -1893,6 +1900,28 @@ mod tests {
         assert_eq!(b("[Person]", 11.48).1, 42.71875);
         assert_eq!(shaping_size(11.48), 11.46875);
         assert_eq!(shaping_size(14.0), 14.0);
+    }
+
+    #[test]
+    fn shaping_size_follows_blinks_effective_font_size() {
+        // 64× the size Chromium's advances scale with (getComputedTextLength of
+        // a long string against its length at 2048px), each in a fresh page.
+        for (size, fdot6) in [
+            (9.6, 614),
+            (9.9, 632),
+            (10.0, 640),
+            (11.48, 734),
+            (12.6, 806),
+            (14.4, 921),
+            (15.9, 1017),
+            (16.22, 1037),
+            (16.8, 1074),
+            (17.3, 1106),
+            (40.1, 2565),
+            (8.15625, 521),
+        ] {
+            assert_eq!(shaping_size(size) * 64.0, f64::from(fdot6), "{size}px");
+        }
     }
 
     #[test]

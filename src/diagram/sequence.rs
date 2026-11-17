@@ -498,8 +498,6 @@ fn parse_message(s: &str, b: &mut Builder) -> Option<Message> {
 
 /// `activationWidth`.
 const ACTIVATION_W: f64 = 10.0;
-/// `labelBoxHeight` (sequence config default).
-const LABEL_BOX_H: f64 = 20.0;
 /// `labelBoxWidth` (sequence config default).
 const LABEL_BOX_W: f64 = 50.0;
 /// `bottomMarginAdj`.
@@ -1295,7 +1293,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
                     + if title.is_empty() {
                         0.0
                     } else {
-                        text_dims(&title, mf).1.max(LABEL_BOX_H)
+                        text_dims(&title, mf).1.max(cfg.label_box_height)
                     };
                 b.items.push(LoopModel {
                     kind,
@@ -1316,7 +1314,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
                     + if title.is_empty() {
                         0.0
                     } else {
-                        text_dims(&title, mf).1.max(LABEL_BOX_H)
+                        text_dims(&title, mf).1.max(cfg.label_box_height)
                     };
                 let y = b.vpos;
                 if let Some(l) = b.items.last_mut() {
@@ -1410,11 +1408,37 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
     }
     if cfg.mirror_actors {
         b.bump(2.0 * bm);
+        // Classic: the footer draws each participant at the height its header
+        // drawing left (see [`classic_height`]) and is as tall as the tallest.
+        let lbh = cfg.label_box_height;
+        let footer_boxes: Vec<ActorBox> = d
+            .participants
+            .iter()
+            .zip(&actors)
+            .map(|(p, a)| ActorBox {
+                height: if neo {
+                    a.height
+                } else {
+                    classic_height(p.kind, a, actor_top, lbh)
+                },
+                lines: a.lines.clone(),
+                ..*a
+            })
+            .collect();
+        let footer_h = if neo {
+            row_h
+        } else {
+            d.participants
+                .iter()
+                .zip(&footer_boxes)
+                .map(|(p, a)| classic_height(p.kind, a, footer_y, lbh))
+                .fold(0.0, f64::max)
+        };
         for (i, p) in d.participants.iter().enumerate() {
             let (lowered_el, figure) = actor_elements(
                 p,
                 i,
-                &actors[i],
+                &footer_boxes[i],
                 footer_y,
                 true,
                 None,
@@ -1426,7 +1450,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
             body.extend(figure);
         }
         if n > 0 {
-            b.bump(row_h + bm);
+            b.bump(footer_h + bm);
         }
     }
     for l in &backgrounds {
@@ -1784,7 +1808,7 @@ fn frame_elements(l: &LoopModel, pal: &Palette, cfg: &SequenceConfig) -> Element
     for (y, _) in &l.sections {
         els.push(seg((sx, *y), (ex, *y), &section_line));
     }
-    let tag_h = LABEL_BOX_H + if cfg.look == Look::Neo { 15.0 } else { 0.0 };
+    let tag_h = cfg.label_box_height + if cfg.look == Look::Neo { 15.0 } else { 0.0 };
     let cut = 7.0;
     els.push(Element::classed_shape(
         Geometry::Path(geom::polygon(&[
@@ -2021,6 +2045,32 @@ fn actor_elements(
     }
 }
 
+/// The height svgDraw leaves on a classic participant drawn at `y`: the glyph
+/// types re-measure themselves with `getBBox()` (single precision) after
+/// drawing and add `labelBoxHeight` room for the label (twice for control),
+/// a stick figure is `ACTOR_GLYPH_HEIGHT`. Mermaid stores it in `actor.height`,
+/// so the footer is drawn with the header's value, and the footer row is as
+/// tall as the tallest footer participant returns.
+fn classic_height(kind: ParticipantKind, a: &ActorBox, y: f64, label_box: f64) -> f64 {
+    // A 22 unit circle; the lines and the marker stay inside its box.
+    let circle = 44.0;
+    match kind {
+        ParticipantKind::Participant | ParticipantKind::Collections | ParticipantKind::Queue => {
+            f64::from(a.height as f32)
+        }
+        ParticipantKind::Actor => ACTOR_GLYPH_BOTTOM - ACTOR_GLYPH_TOP,
+        ParticipantKind::Boundary | ParticipantKind::Entity => circle + label_box,
+        ParticipantKind::Control => circle + 2.0 * label_box,
+        ParticipantKind::Database => {
+            let cw = a.width / 3.0;
+            let rx = cw / 2.0;
+            let ry = rx / (2.5 + cw / 50.0);
+            let (_, h) = super::svgbbox::cylinder_box_at((a.x, y + ry), cw, cw - 2.0 * ry, rx, ry);
+            h + label_box
+        }
+    }
+}
+
 /// What [`typed_actor`] draws a participant with.
 struct TypeCtx<'a> {
     a: &'a ActorBox,
@@ -2099,6 +2149,34 @@ impl TypeCtx<'_> {
             "drop-shadow",
         ))
     }
+
+    /// The same shadow of the label texts in `els`, for glyphs whose whole group
+    /// (label included) carries the filter: each text moved 4px down and right
+    /// in the shadow colour at 6% of the text's own alpha.
+    fn text_shadows(&self, els: &[Element]) -> Vec<Element> {
+        let Some(sh) = self.shadow.and_then(|c| color::parse(c.css())) else {
+            return Vec::new();
+        };
+        els.iter()
+            .filter_map(|e| match e {
+                Element::Text { text, .. } => {
+                    let alpha = color::parse(text.fill.css()).map_or(1.0, |c| c.a);
+                    let mut t = text.clone();
+                    t.x += 4.0;
+                    t.y += 4.0;
+                    t.fill = Color::new(format!(
+                        "rgba({}, {}, {}, {})",
+                        sh.r,
+                        sh.g,
+                        sh.b,
+                        0.06 * sh.a * alpha
+                    ));
+                    Some(Element::classed_text(t, "drop-shadow"))
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// svgDraw's `drawActorType{Boundary,Control,Entity,Database,Collections,Queue}`:
@@ -2156,7 +2234,12 @@ fn typed_actor(kind: ParticipantKind, t: &TypeCtx) -> (f64, Vec<Element>, Vec<El
             let top = bands
                 .as_ref()
                 .map_or(y + 15.0 + dy, |b| b.label_center - a.height / 2.0);
-            els.extend(t.label(cx, top, "actor actor-man"));
+            let label = t.label(cx, top, "actor actor-man");
+            if t.neo {
+                // The filter is on the whole group, so the label casts the shadow too.
+                shadows.extend(t.text_shadows(&label));
+            }
+            els.extend(label);
             let lifeline = bands.as_ref().map_or(y + 80.0, |b| b.lifeline);
             shadows.extend(els);
             (
@@ -2247,7 +2330,12 @@ fn typed_actor(kind: ParticipantKind, t: &TypeCtx) -> (f64, Vec<Element>, Vec<El
                 .map_or(y + if t.footer { 15.0 } else { 30.0 } + dy, |b| {
                     b.label_center - a.height / 2.0
                 });
-            els.extend(t.label(cx, top, "actor actor-man"));
+            let label = t.label(cx, top, "actor actor-man");
+            if t.neo {
+                // The filter is on the whole group, so the label casts the shadow too.
+                shadows.extend(t.text_shadows(&label));
+            }
+            els.extend(label);
             let lifeline = bands.as_ref().map_or(y + 75.0, |b| b.lifeline);
             shadows.extend(els);
             (lifeline, Vec::new(), vec![Element::group("actor", shadows)])
@@ -2737,12 +2825,69 @@ mod tests {
     }
 
     #[test]
+    fn classic_glyph_participants_take_their_drawn_height_into_the_footer() {
+        // mermaid 12.3.0 (headless Chromium): control is 44 + 2 * labelBoxHeight
+        // tall after drawing, so the footer row grows from 65 to 84.
+        let src = "sequenceDiagram\nparticipant A@{ \"type\" : \"control\" }\nparticipant Bob\nA->>Bob: hi";
+        assert_eq!(draw(src, Look::Classic).view_box.h, 234.0);
+        // The database is its cylinder's single-precision getBBox() + 20.
+        let c = SequenceConfig {
+            width: 220.0,
+            height: 40.0,
+            ..cfg(Look::Classic)
+        };
+        let src = "sequenceDiagram\nparticipant D@{ \"type\" : \"database\" }\nparticipant C@{ \"type\" : \"control\" }\nD->>C: wide";
+        let s = render(&parse(src, None).unwrap(), &c, &pal());
+        assert_eq!(s.view_box.h, 218.3269500732422);
+        // A boundary's footer label is centred in its 64 tall (44 + 20) box.
+        let src = "sequenceDiagram\nparticipant Alice@{ \"type\" : \"boundary\" }\nparticipant Bob\nAlice->>Bob: Request from boundary\nBob->>Alice: Response to boundary";
+        let s = draw(src, Look::Classic);
+        let ys: Vec<f64> = texts(&s)
+            .iter()
+            .filter(|t| t.lines == ["Alice"])
+            .map(|t| t.y)
+            .collect();
+        assert_eq!(ys.len(), 2);
+        assert_eq!(ys[1] - ys[0], 224.0 - 47.5);
+    }
+
+    #[test]
+    fn neo_boundary_and_entity_labels_cast_the_group_shadow() {
+        for kind in ["boundary", "entity"] {
+            let src =
+                format!("sequenceDiagram\nparticipant A@{{ \"type\" : \"{kind}\" }}\nA->>A: x");
+            let s = draw(&src, Look::Neo);
+            let labels: Vec<&Text> = texts(&s).into_iter().filter(|t| t.lines == ["A"]).collect();
+            let shadows: Vec<&&Text> = labels
+                .iter()
+                .filter(|t| t.fill.css().starts_with("rgba"))
+                .collect();
+            assert_eq!(shadows.len(), 2, "{kind}");
+            let solid = labels
+                .iter()
+                .find(|t| !t.fill.css().starts_with("rgba"))
+                .unwrap();
+            assert!(
+                shadows
+                    .iter()
+                    .any(|t| t.x == solid.x + 4.0 && t.y == solid.y + 4.0)
+            );
+        }
+        // Control's filter is on its circle only.
+        let s = draw(
+            "sequenceDiagram\nparticipant A@{ \"type\" : \"control\" }\nA->>A: x",
+            Look::Neo,
+        );
+        assert!(texts(&s).iter().all(|t| !t.fill.css().starts_with("rgba")));
+    }
+
+    #[test]
     fn frame_spacing_follows_mermaid() {
         // loop title: boxMargin before the frame, boxMargin + boxTextMargin + max(text, 20) after.
         let h = |src: &str| draw(src, Look::Classic).view_box.h;
         let titled = h("sequenceDiagram\nA->>B: x\nloop L\nA->>B: y\nend");
         let bare = h("sequenceDiagram\nA->>B: x\nloop\nA->>B: y\nend");
-        assert_eq!(titled - bare, LABEL_BOX_H);
+        assert_eq!(titled - bare, SequenceConfig::default().label_box_height);
     }
 
     #[test]
@@ -2846,7 +2991,10 @@ A->>D: x"#,
             top.abs() < 1e-9 && (bottom - 44.0).abs() < 1e-9,
             "{top} {bottom}"
         );
-        let label = texts(&s).into_iter().find(|t| t.lines == ["A"]).unwrap();
+        let label = texts(&s)
+            .into_iter()
+            .find(|t| t.lines == ["A"] && !t.fill.css().starts_with("rgba"))
+            .unwrap();
         assert_eq!(label.x, 75.0);
     }
 

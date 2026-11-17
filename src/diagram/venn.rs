@@ -1927,13 +1927,7 @@ fn with_alpha(c: &Color, alpha: f64) -> Color {
 }
 
 fn shift_lightness(c: &Color, delta: f64) -> Color {
-    match color::parse(c.css()) {
-        Some(rgb) => {
-            let (h, s, l) = rgb.to_hsl();
-            Color::new(Rgba::from_hsl(h, s, (l + delta).clamp(0.0, 100.0), rgb.a).to_hex())
-        }
-        None => c.clone(),
-    }
+    color::adjust(c.css(), 0.0, 0.0, delta).map_or_else(|| c.clone(), |x| Color::new(x.to_hex()))
 }
 
 fn parse_num(s: &str) -> Option<f64> {

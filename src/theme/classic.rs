@@ -714,7 +714,7 @@ mod tests {
             &[
                 ("cScale0", "#555555"),
                 ("cScale1", "#f4f4f4"),
-                ("cScalePeer2", "#3b3b3b"),
+                ("cScalePeer2", "#3c3c3c"),
                 ("cScaleInv0", "#aaaaaa"),
                 ("cScaleLabel0", "#f4f4f4"),
                 ("cScaleLabel1", "#333333"),
@@ -731,16 +731,16 @@ mod tests {
             ThemeName::Base,
             &[],
             &[
-                ("cScale0", "#ffcb5d"),
-                ("cScale1", "#cb5dff"),
+                ("cScale0", "#ffcb5e"),
+                ("cScale1", "#cb5eff"),
                 ("cScale2", "#77a3ff"),
                 // adjust(primary, { h: 210, l: 150 }) is white with a hue; darken keeps it.
                 ("cScale8", "#9680ff"),
-                ("cScalePeer2", "#4480ff"),
+                ("cScalePeer2", "#4481ff"),
                 ("cScaleInv0", "#0034a2"),
                 ("cScaleLabel0", "#333333"),
                 ("fillType2", "#e6ffdd"),
-                ("git0", "#ffcb5d"),
+                ("git0", "#ffcb5e"),
             ],
         );
     }
