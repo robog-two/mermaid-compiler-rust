@@ -1925,7 +1925,9 @@ fn actor_elements(
                         rect: Rect::new(r.x + 4.0, r.y + 4.0, r.w, r.h),
                         rx,
                     },
-                    Paint::fill(sh).with_opacity(0.06),
+                    // The filter offsets the box's whole silhouette, its stroke
+                    // (half outside the box) included.
+                    Paint::both(sh, sh, pal.stroke_width.unwrap_or(1.0)).with_opacity(0.06),
                     "drop-shadow",
                 ));
             }
@@ -2153,6 +2155,48 @@ impl TypeCtx<'_> {
         ))
     }
 
+    /// The shadows of a glyph whose whole group carries the filter, composited
+    /// as one layer at 6%: the filter offsets the group's silhouette, so where
+    /// its parts overlap the shadow is no darker. `parts` come from
+    /// [`Self::shadow_of`] and [`Self::text_shadows`].
+    fn group_shadow(&self, parts: Vec<Element>) -> Vec<Element> {
+        if parts.is_empty() {
+            return parts;
+        }
+        let opaque = parts
+            .into_iter()
+            .map(|e| match e {
+                Element::Shape {
+                    geom,
+                    mut paint,
+                    class,
+                } => {
+                    paint.opacity = None;
+                    Element::Shape { geom, paint, class }
+                }
+                Element::Text { mut text, class } => {
+                    // Undo the 6% `text_shadows` put on the text alone.
+                    if let Some(c) = color::parse(text.fill.css()) {
+                        text.fill = Color::new(format!(
+                            "rgba({}, {}, {}, {})",
+                            c.r,
+                            c.g,
+                            c.b,
+                            (c.a / 0.06 * 1e6).round() / 1e6
+                        ));
+                    }
+                    Element::Text { text, class }
+                }
+                other => other,
+            })
+            .collect();
+        vec![Element::Faded {
+            opacity: 0.06,
+            class: Some("drop-shadow".into()),
+            children: opaque,
+        }]
+    }
+
     /// The same shadow of the label texts in `els`, for glyphs whose whole group
     /// (label included) carries the filter: each text moved 4px down and right
     /// in the shadow colour at 6% of the text's own alpha.
@@ -2244,6 +2288,7 @@ fn typed_actor(kind: ParticipantKind, t: &TypeCtx) -> (f64, Vec<Element>, Vec<El
             }
             els.extend(label);
             let lifeline = bands.as_ref().map_or(y + 80.0, |b| b.lifeline);
+            let mut shadows = t.group_shadow(shadows);
             shadows.extend(els);
             (
                 lifeline,
@@ -2340,6 +2385,7 @@ fn typed_actor(kind: ParticipantKind, t: &TypeCtx) -> (f64, Vec<Element>, Vec<El
             }
             els.extend(label);
             let lifeline = bands.as_ref().map_or(y + 75.0, |b| b.lifeline);
+            let mut shadows = t.group_shadow(shadows);
             shadows.extend(els);
             (lifeline, Vec::new(), vec![Element::group("actor", shadows)])
         }
@@ -2398,6 +2444,7 @@ fn typed_actor(kind: ParticipantKind, t: &TypeCtx) -> (f64, Vec<Element>, Vec<El
                     "actor",
                 ));
             }
+            let mut shadows = t.group_shadow(shadows);
             shadows.extend(low);
             let mut low = shadows;
             low.extend(
@@ -2531,7 +2578,7 @@ mod tests {
     /// Every element of the scene, depth first.
     fn walk<'a>(e: &'a Element, out: &mut Vec<&'a Element>) {
         out.push(e);
-        if let Element::Group { children, .. } = e {
+        if let Element::Group { children, .. } | Element::Faded { children, .. } = e {
             for c in children {
                 walk(c, out);
             }

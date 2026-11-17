@@ -68,49 +68,24 @@ impl K {
     fn rgb(self) -> (f64, f64, f64) {
         match self {
             K::Rgb(r, g, b) => (r, g, b),
-            K::Hsl(h, s, l) => {
-                let (h, s, l) = (h.rem_euclid(360.0) / 360.0, s / 100.0, l / 100.0);
-                if s == 0.0 {
-                    let v = l * 255.0;
-                    return (v, v, v);
-                }
-                let q = if l < 0.5 {
-                    l * (1.0 + s)
-                } else {
-                    l + s - l * s
-                };
-                let p = 2.0 * l - q;
-                let f = |mut t: f64| {
-                    if t < 0.0 {
-                        t += 1.0;
-                    }
-                    if t > 1.0 {
-                        t -= 1.0;
-                    }
-                    let v = if t < 1.0 / 6.0 {
-                        p + (q - p) * 6.0 * t
-                    } else if t < 0.5 {
-                        q
-                    } else if t < 2.0 / 3.0 {
-                        p + (q - p) * (2.0 / 3.0 - t) * 6.0
-                    } else {
-                        p
-                    };
-                    v * 255.0
-                };
-                (f(h + 1.0 / 3.0), f(h), f(h - 1.0 / 3.0))
-            }
+            K::Hsl(h, s, l) => (
+                super::khroma::hsl_to_rgb(h, s, l, 0),
+                super::khroma::hsl_to_rgb(h, s, l, 1),
+                super::khroma::hsl_to_rgb(h, s, l, 2),
+            ),
         }
     }
 
     /// khroma `adjust(c, { h, s, l })`: hue is taken `% 360`, saturation and lightness
     /// clamp to `0..=100`.
     pub(super) fn adjust(self, dh: f64, ds: f64, dl: f64) -> K {
+        // Printed and read back between operations: ten decimals.
+        let r = super::khroma::round10;
         let (h, s, l) = self.hsl();
         K::Hsl(
-            (h + dh) % 360.0,
-            (s + ds).clamp(0.0, 100.0),
-            (l + dl).clamp(0.0, 100.0),
+            r((h + dh) % 360.0),
+            r((s + ds).clamp(0.0, 100.0)),
+            r((l + dl).clamp(0.0, 100.0)),
         )
     }
 
@@ -128,7 +103,8 @@ impl K {
 
     pub(super) fn invert(self) -> K {
         let (r, g, b) = self.rgb();
-        K::Rgb(255.0 - r, 255.0 - g, 255.0 - b)
+        let k = super::khroma::round10;
+        K::Rgb(k(255.0 - r), k(255.0 - g), k(255.0 - b))
     }
 
     pub(super) fn to_color(self) -> Color {
@@ -139,6 +115,11 @@ impl K {
             return Color::new(format!("hsl({}, {}%, {}%)", r(h), r(s), r(l)));
         }
         let (r, g, b) = self.rgb();
+        // khroma prints channels that are not whole numbers as `rgb(..)` (the
+        // browser rounds them, halves up).
+        if [r, g, b].iter().any(|v| v.fract() != 0.0) {
+            return Color::new(super::khroma::rgb_string(r, g, b));
+        }
         let ch = |v: f64| v.round().clamp(0.0, 255.0) as u8;
         Color::new(
             Rgba {
@@ -858,7 +839,7 @@ mod tests {
 
     /// The colour as hex (an `hsl()` string as the browser rounds it).
     fn hexed(c: &Color) -> String {
-        if c.css().starts_with("hsl") {
+        if c.css().starts_with("hsl") || c.css().starts_with("rgb") {
             return color::parse(c.css()).unwrap().to_hex();
         }
         c.css().to_string()

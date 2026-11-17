@@ -821,7 +821,7 @@ mod tests {
 
     #[test]
     fn layering_overrides_fields() {
-        let j = crate::json::parse(r##"{"theme":"forest","flowchart":{"nodeSpacing":80,"curve":"linear"},"themeVariables":{"primaryColor":"#f00"}}"##).unwrap();
+        let j = crate::json::parse(r##"{"theme":"forest","flowchart":{"nodeSpacing":80,"curve":"linear"},"themeVariables":{"mainBkg":"#f00"}}"##).unwrap();
         let c = MermaidConfig::default().with_json(&j).unwrap();
         assert_eq!(c.theme, ThemeName::Forest);
         assert_eq!(c.flowchart.node_spacing, 80.0);

@@ -100,6 +100,9 @@ struct Ctx {
     /// Blurred drop shadows: image XObjects `/Sh{index}` in the shadow colour
     /// through their blurred-silhouette soft masks.
     shadows: Vec<(Rgba, super::shadow::AlphaImage)>,
+    /// Faded groups: the content streams of transparency-group form XObjects
+    /// `/L{index}`, each drawn at its group's opacity.
+    layers: Vec<String>,
 }
 
 fn n(v: f64) -> String {
@@ -444,6 +447,22 @@ impl Ctx {
                 children.iter().for_each(|c| self.element(c));
                 self.out.push_str("Q\n");
             }
+            Element::Faded {
+                opacity, children, ..
+            } => {
+                // A transparency group: the children composited together, then
+                // the whole drawn at `opacity`.
+                let outer = std::mem::take(&mut self.out);
+                children.iter().for_each(|c| self.element(c));
+                let body = std::mem::replace(&mut self.out, outer);
+                self.layers.push(body);
+                let idx = self.layers.len() - 1;
+                self.out.push_str("q\n");
+                if let Some(gs) = self.gs_for(*opacity, false) {
+                    self.out.push_str(&gs);
+                }
+                let _ = writeln!(self.out, "/L{idx} Do\nQ");
+            }
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
             Element::Text { text, .. } => self.text(text, None),
             Element::OutlinedText {
@@ -685,6 +704,7 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         embedded: Default::default(),
         gradients: Vec::new(),
         shadows: Vec::new(),
+        layers: Vec::new(),
     };
 
     // Page background (Puppeteer prints the body background) unless transparent.
@@ -749,19 +769,28 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
     };
     // Shadow images follow the patterns, two objects each (the image, its mask).
     let shadow_base = pattern_base + ctx.gradients.len();
+    // Faded groups' form XObjects follow the shadow images, one object each.
+    let layer_base = shadow_base + 2 * ctx.shadows.len();
     let xobjects: String = (0..ctx.shadows.len())
         .map(|i| format!(" /Sh{i} {} 0 R", shadow_base + 2 * i))
+        .chain((0..ctx.layers.len()).map(|i| format!(" /L{i} {} 0 R", layer_base + i)))
         .collect();
     let patterns = if xobjects.is_empty() {
         patterns
     } else {
         format!("{patterns} /XObject <<{xobjects} >>")
     };
-    objects.push(format!(
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R{embedded} >> /ExtGState << {ext}>>{patterns} >> >>",
-        n(page_w),
-        n(page_h)
-    ).into_bytes());
+    let resources = format!(
+        "<< /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R{embedded} >> /ExtGState << {ext}>>{patterns} >>"
+    );
+    objects.push(
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources {resources} >>",
+            n(page_w),
+            n(page_h)
+        )
+        .into_bytes(),
+    );
     objects.push(
         format!(
             "<< /Length {} >>\nstream\n{}endstream",
@@ -835,6 +864,17 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         mask.extend_from_slice(&data);
         mask.extend_from_slice(b"\nendstream");
         objects.push(mask);
+    }
+
+    // Form XObjects in the user space they are drawn in (bounded generously).
+    for body in &ctx.layers {
+        objects.push(
+            format!(
+                "<< /Type /XObject /Subtype /Form /BBox [-100000 -100000 100000 100000] /Group << /S /Transparency /CS /DeviceRGB >> /Resources {resources} /Length {} >>\nstream\n{body}endstream",
+                body.len()
+            )
+            .into_bytes(),
+        );
     }
 
     let mut pdf: Vec<u8> = format!("%PDF-{version}\n").into_bytes();

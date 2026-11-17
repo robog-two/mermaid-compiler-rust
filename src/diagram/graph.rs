@@ -12,7 +12,7 @@ use crate::layout::{
 use crate::linejump;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Text};
 use crate::text::TextBlock;
-use crate::theme::{ColorSlot, DropShadow, Palette, SlotColors};
+use crate::theme::{ColorSlot, DropShadow, Palette, SlotColors, ThemeName};
 use std::collections::HashMap;
 
 /// Index into `GraphDiagram::nodes`.
@@ -904,7 +904,7 @@ fn measure_node(
                 (w, h)
             }
             Shape::EntityTable => {
-                let t = table_metrics(node, pad, cell_pad, font, table_scale);
+                let t = table_metrics(node, pad, cell_pad, font, table_scale, !svg);
                 let size = (t.w, t.h);
                 table = Some(t);
                 size
@@ -979,6 +979,14 @@ fn edge_label_block(label: &str, font: f64) -> TextBlock {
     )
     .html()
 }
+
+/// khroma's `fade(c, alpha)`: the colour with its alpha set.
+fn faded(c: &Color, alpha: f64) -> Color {
+    Color::new(crate::theme::khroma::with_alpha(c.css(), alpha))
+}
+
+/// erDiagram's `.edgeLabel .label { font-size: 14px }`.
+const ER_EDGE_LABEL_FONT_SIZE: f64 = 14.0;
 
 /// Padding of an SVG edge label's background on each side (`createFormattedText`):
 /// the label's bounding box, and so its size in the layout, includes it.
@@ -1271,6 +1279,13 @@ pub fn render_with(
             }
         }
     };
+    // The ER stylesheet sets `.edgeLabel .label { font-size: 14px }`, whatever the
+    // theme's font size.
+    let edge_font = if g.kind == DiagramKind::Er {
+        ER_EDGE_LABEL_FONT_SIZE
+    } else {
+        font
+    };
     let edge_labels: Vec<Option<TextBlock>> = g
         .edges
         .iter()
@@ -1279,11 +1294,11 @@ pub fn render_with(
                 .as_ref()
                 .map(|l| {
                     if !cfg.html_edge_labels {
-                        svg_edge_label_block(l, font)
+                        svg_edge_label_block(l, edge_font)
                     } else if opts.markdown_no_wrap && crate::text::is_markdown_string(l) {
-                        TextBlock::label(l, font).html()
+                        TextBlock::label(l, edge_font).html()
                     } else {
-                        edge_label_block(l, font)
+                        edge_label_block(l, edge_font)
                     }
                 })
                 .filter(|b| !b.is_empty())
@@ -2205,11 +2220,14 @@ pub fn render_with(
             children,
         });
 
-        let text_color = e
-            .style
-            .color
-            .clone()
-            .unwrap_or_else(|| pal.text_color.clone());
+        let text_color = e.style.color.clone().unwrap_or_else(|| {
+            if g.kind == DiagramKind::Class {
+                // classDiagram's `.edgeLabel { color: classText }`.
+                pal.class_text.clone()
+            } else {
+                pal.text_color.clone()
+            }
+        });
         let (mt, mb) = opts.subgraph_title_margin;
         let label_at = label_at.map(|p| Point::new(p.x, p.y + (mt + mb) / 2.0));
         if let (Some(block), Some(at)) = (&edge_labels[ei], label_at) {
@@ -2229,9 +2247,15 @@ pub fn render_with(
                 )
             } else {
                 // An HTML label's background is its `<p>`'s: the text box itself.
+                // The ER stylesheet's `.labelBkg` (the label's `div`) takes
+                // `fade(tertiaryColor, 0.5)` outside the colour themes.
+                let fill = match (g.kind, &pal.er_edge_label_background) {
+                    (DiagramKind::Er, None) => faded(&pal.tertiary, 0.5),
+                    _ => edge_label_bg.clone(),
+                };
                 (
                     Rect::centered(at, block.width, block.height),
-                    Paint::fill(edge_label_bg),
+                    Paint::fill(&fill),
                 )
             };
             // The drawing's bbox holds an HTML label's `foreignObject`, the text
@@ -3685,6 +3709,9 @@ fn cluster_shapes(
 /// erDb's `getData` does the same with its groups (kept here in closing order), and
 /// agentflow's with its flows. Other diagrams keep declaration order.
 fn model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> Vec<usize> {
+    if g.kind == DiagramKind::Class && !g.clusters.is_empty() {
+        return class_model_order(g, nodes, empty_of);
+    }
     if !matches!(
         g.kind,
         DiagramKind::Flowchart | DiagramKind::Er | DiagramKind::Agentflow
@@ -3759,6 +3786,67 @@ fn model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> 
     }
     out.extend((0..nodes.len()).filter(|&i| !seen[i]));
     out.dedup();
+    out
+}
+
+/// classDb's `getData` order as mermaid's ELK adapter walks it: at every level the
+/// siblings in the order getData pushes them (the namespaces, then the classes, then
+/// the notes; [`Node::model_seq`]), each namespace's own children in its place.
+fn class_model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> Vec<usize> {
+    let mut is_placeholder = vec![false; nodes.len()];
+    for p in empty_of.iter().flatten() {
+        is_placeholder[*p] = true;
+    }
+    fn visit(
+        g: &GraphDiagram,
+        nodes: &[Node],
+        empty_of: &[Option<usize>],
+        is_placeholder: &[bool],
+        scope: Option<ClusterId>,
+        out: &mut Vec<usize>,
+        depth: usize,
+    ) {
+        if depth > g.clusters.len() {
+            return;
+        }
+        // (place in getData, cluster or node)
+        let mut items: Vec<(usize, Result<usize, usize>)> = (0..g.clusters.len())
+            .filter(|&ci| g.clusters[ci].parent == scope && Some(ClusterId(ci)) != scope)
+            .map(|ci| (g.clusters[ci].model_seq.unwrap_or(usize::MAX), Ok(ci)))
+            .collect();
+        items.extend(
+            nodes
+                .iter()
+                .enumerate()
+                .filter(|&(i, n)| n.cluster == scope && !is_placeholder[i])
+                .map(|(i, n)| (n.model_seq.unwrap_or(usize::MAX), Err(i))),
+        );
+        items.sort_by_key(|&(k, _)| k);
+        for (_, item) in items {
+            match item {
+                Err(i) => out.push(i),
+                Ok(ci) => match empty_of[ci] {
+                    Some(p) => out.push(p),
+                    None => visit(
+                        g,
+                        nodes,
+                        empty_of,
+                        is_placeholder,
+                        Some(ClusterId(ci)),
+                        out,
+                        depth + 1,
+                    ),
+                },
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(nodes.len());
+    visit(g, nodes, empty_of, &is_placeholder, None, &mut out, 0);
+    let mut seen = vec![false; nodes.len()];
+    for &i in &out {
+        seen[i] = true;
+    }
+    out.extend((0..nodes.len()).filter(|&i| !seen[i]));
     out
 }
 
@@ -4285,7 +4373,14 @@ struct TableMetrics {
 /// slack) and `cell_pad` is `er.diagramPadding` (PADDING, per-column slack). A
 /// table scales both by `scale` (1.25 without root `htmlLabels`); the plain box is
 /// drawn before that scaling.
-fn table_metrics(node: &Node, text_pad: f64, cell_pad: f64, font: f64, scale: f64) -> TableMetrics {
+fn table_metrics(
+    node: &Node,
+    text_pad: f64,
+    cell_pad: f64,
+    font: f64,
+    scale: f64,
+    html: bool,
+) -> TableMetrics {
     let ncols = node
         .sections
         .iter()
@@ -4322,6 +4417,12 @@ fn table_metrics(node: &Node, text_pad: f64, cell_pad: f64, font: f64, scale: f6
         for (j, cell) in row.lines.iter().enumerate() {
             if !cell.is_empty() {
                 let tw = crate::text::line_width(cell, font, false);
+                // An HTML cell's box is its text's width in layout units.
+                let tw = if html {
+                    crate::text::layout_unit_ceil(tw)
+                } else {
+                    tw
+                };
                 widest = widest.max(tw);
                 cols[j] = cols[j].max(tw + cell_pad);
             }
@@ -4453,6 +4554,22 @@ fn node_elements(
     let text_color = n.style.color.clone().unwrap_or_else(|| {
         if n.shape == Shape::Note {
             pal.note_text.clone()
+        } else if kind == DiagramKind::Class {
+            // classDiagram's `.nodeLabel { color: classText }`.
+            pal.class_text.clone()
+        } else if kind == DiagramKind::Er
+            && matches!(
+                pal.theme,
+                ThemeName::Default
+                    | ThemeName::Null
+                    | ThemeName::Dark
+                    | ThemeName::Forest
+                    | ThemeName::Neutral
+            )
+        {
+            // erDiagram's `.label { color: nodeTextColor || textColor }`: the
+            // classic themes define no `nodeTextColor`.
+            pal.text_color.clone()
         } else {
             pal.node_text.clone()
         }
@@ -4870,7 +4987,7 @@ fn entity_table_elements(
     colors: TableColors<'_>,
     font: f64,
 ) -> Vec<Element> {
-    let (x0, y0, x1, y1) = (r.x, r.y, r.right(), r.bottom());
+    let (x0, y0, y1) = (r.x, r.y, r.bottom());
     let mut els = vec![Element::classed_shape(
         Geometry::Rect { rect: r, rx: 0.0 },
         colors.paint.clone(),
@@ -4902,20 +5019,19 @@ fn entity_table_elements(
         } else {
             (colors.even_row, "row-rect-even")
         };
+        // erBox draws each row as a rectangle of its own, filled with
+        // `rowOdd` / `rowEven` (unfilled where the theme has none) and outlined.
+        let mut row_paint = line_paint.clone();
         if let Some(fill) = row_fill {
-            els.push(Element::classed_shape(
-                Geometry::Rect {
-                    rect: Rect::new(x0, ry, r.w, t.row_h),
-                    rx: 0.0,
-                },
-                Paint::fill(fill),
-                class,
-            ));
+            row_paint.fill = fill.clone();
         }
-        els.push(Element::line(
-            Point::new(x0, ry),
-            Point::new(x1, ry),
-            line_paint.clone(),
+        els.push(Element::classed_shape(
+            Geometry::Rect {
+                rect: Rect::new(x0, ry, r.w, t.row_h),
+                rx: 0.0,
+            },
+            row_paint,
+            class,
         ));
         let mut x = x0;
         for (j, cw) in t.cols.iter().enumerate() {
@@ -4938,7 +5054,12 @@ fn entity_table_elements(
         }
     }
     if !n.sections.is_empty() {
-        // Column dividers below the header.
+        // erBox's dividers: the header's bottom edge, then the columns below it.
+        els.push(Element::line(
+            Point::new(x0, y0 + t.header_h),
+            Point::new(r.right(), y0 + t.header_h),
+            line_paint.clone(),
+        ));
         let used: Vec<f64> = t.cols.iter().copied().filter(|c| *c > 0.0).collect();
         let mut x = x0;
         for cw in used.iter().take(used.len().saturating_sub(1)) {

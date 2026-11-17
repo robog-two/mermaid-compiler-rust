@@ -99,11 +99,6 @@ struct Marker {
 }
 
 const DIAMOND: &[(f64, f64)] = &[(18.0, 7.0), (9.0, 13.0), (1.0, 7.0), (9.0, 1.0)];
-const FOOT_END: &[Seg] = &[
-    Seg::M(9.0, 18.0),
-    Seg::Q(27.0, 0.0, 45.0, 18.0),
-    Seg::Q(27.0, 36.0, 9.0, 18.0),
-];
 const FOOT_MANY_END: &[Seg] = &[
     Seg::M(21.0, 18.0),
     Seg::Q(39.0, 0.0, 57.0, 18.0),
@@ -475,18 +470,26 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
             end: def(
                 27.0,
                 18.0,
-                &[
-                    Part::Path(&[Seg::M(3.0, 9.0), Seg::L(3.0, 27.0)]),
-                    Part::Path(FOOT_END),
-                ],
+                // One path, bar then foot, as `oneOrMoreEnd` draws it.
+                &[Part::Path(&[
+                    Seg::M(3.0, 9.0),
+                    Seg::L(3.0, 27.0),
+                    Seg::M(9.0, 18.0),
+                    Seg::Q(27.0, 0.0, 45.0, 18.0),
+                    Seg::Q(27.0, 36.0, 9.0, 18.0),
+                ])],
             ),
             start: Some(def(
                 18.0,
                 18.0,
-                &[
-                    Part::Path(FOOT_START),
-                    Part::Path(&[Seg::M(42.0, 9.0), Seg::L(42.0, 27.0)]),
-                ],
+                // One path, foot then bar, as `oneOrMoreStart` draws it.
+                &[Part::Path(&[
+                    Seg::M(0.0, 18.0),
+                    Seg::Q(18.0, 0.0, 36.0, 18.0),
+                    Seg::Q(18.0, 36.0, 0.0, 18.0),
+                    Seg::M(42.0, 9.0),
+                    Seg::L(42.0, 27.0),
+                ])],
             )),
             start_scale: None,
             scale: Scale::StrokeWidth,

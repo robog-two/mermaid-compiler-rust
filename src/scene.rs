@@ -385,6 +385,14 @@ pub enum Element {
         dy: f64,
         children: Vec<Element>,
     },
+    /// Children composited as one layer at `opacity` (SVG `<g opacity>`): where
+    /// they overlap they do not darken each other, as the silhouette a filter
+    /// offsets for a whole group's drop shadow does not.
+    Faded {
+        opacity: f64,
+        class: Option<String>,
+        children: Vec<Element>,
+    },
 }
 
 impl Element {
@@ -443,6 +451,15 @@ impl Element {
             },
             Element::Clipped { rect, children } => Element::Clipped {
                 rect: Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h),
+                children: all(children),
+            },
+            Element::Faded {
+                opacity,
+                class,
+                children,
+            } => Element::Faded {
+                opacity,
+                class,
                 children: all(children),
             },
             Element::Shape { geom, paint, class } => Element::Shape {

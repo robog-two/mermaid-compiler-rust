@@ -283,6 +283,12 @@ pub(super) fn palette(theme: ThemeName, base: Palette) -> Palette {
         "hsl(-120, 0%, 70%)"
     });
     p.er_row_odd = None; // rowOdd/rowEven are not defined by this family.
+    // `tertiaryColor`: `#ffffff`, or the dark variants' `adjust('#1f2020', { h: -160 })`.
+    p.tertiary = c(if v.dark {
+        "hsl(20, 1.5873015873%, 12.3529411765%)"
+    } else {
+        "#ffffff"
+    });
 
     if !v.dark {
         let background = rgb("#ffffff");
@@ -472,9 +478,9 @@ mod tests {
 
     use crate::theme::ColorSlot;
 
-    /// The colour as hex (an `hsl()` string as the browser rounds it).
+    /// The colour as hex (an `hsl()` or `rgb()` string as the browser rounds it).
     fn css(c: &Color) -> String {
-        if c.css().starts_with("hsl") {
+        if c.css().starts_with("hsl") || c.css().starts_with("rgb") {
             return crate::color::parse(c.css()).unwrap().to_hex();
         }
         c.css().to_ascii_lowercase()

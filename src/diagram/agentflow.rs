@@ -2163,9 +2163,9 @@ linkStyle 0 stroke:#00f");
             *r = Rect::new(x0, y0, x1 - x0, y1 - y0);
         };
         match el {
-            Element::Group { children, .. } | Element::Clipped { children, .. } => {
-                children.iter().for_each(|c| bbox(c, out))
-            }
+            Element::Group { children, .. }
+            | Element::Clipped { children, .. }
+            | Element::Faded { children, .. } => children.iter().for_each(|c| bbox(c, out)),
             Element::Shape { geom, .. } => match geom {
                 Geometry::Rect { rect, .. } => {
                     add(crate::geom::Point::new(rect.x, rect.y));

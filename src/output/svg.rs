@@ -132,6 +132,7 @@ impl Filters<'_> {
                 Element::Group { children, .. }
                 | Element::Rotated { children, .. }
                 | Element::Translated { children, .. }
+                | Element::Faded { children, .. }
                 | Element::Clipped { children, .. } => {
                     self.collect(children);
                 }
@@ -469,6 +470,24 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
         }
         Element::Text { text, class } | Element::OutlinedText { text, class, .. } => {
             write_text(out, text, class)
+        }
+        Element::Faded {
+            opacity,
+            class,
+            children,
+        } => {
+            if children.is_empty() {
+                return;
+            }
+            let cls = class
+                .as_ref()
+                .map(|c| format!(" class=\"{}\"", esc(c)))
+                .unwrap_or_default();
+            let _ = write!(out, "<g{cls} opacity=\"{}\">", num(*opacity));
+            for c in children {
+                write_element(out, c, fx);
+            }
+            out.push_str("</g>");
         }
         Element::Clipped { rect, children } => {
             // A nested viewport over the same user coordinates clips its content.

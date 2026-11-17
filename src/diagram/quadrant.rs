@@ -797,7 +797,11 @@ mod tests {
         let rc = crate::theme::palette(crate::theme::ThemeName::ReduxColor, &[]);
         let q = colors(&cfg, &rc);
         assert_eq!(css(&q.fills[0]), "#ececfe");
-        assert_eq!(css(&q.internal), "#181818"); // hsl(247.5, 0%, 9.2157%)
+        // hsl(247.5, 0%, 9.2156862745%), which the browser paints #181818.
+        assert_eq!(
+            crate::color::parse(&css(&q.internal)).unwrap().to_hex(),
+            "#181818"
+        );
         assert_eq!(css(&q.point), "#28253d");
     }
 }

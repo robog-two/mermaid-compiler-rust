@@ -1,7 +1,9 @@
 //! mermaid themes and `themeVariables`.
 
 mod classic;
+pub(crate) mod khroma;
 mod neo;
+mod vars;
 
 use crate::color::{self, Rgba};
 use crate::scene::Color;
@@ -75,6 +77,11 @@ pub struct Palette {
     pub line_color: Color,
     pub text_color: Color,
     pub title_color: Color,
+    /// `classText`: class diagram labels (`.nodeLabel, .edgeLabel`). The classic
+    /// themes set it to `primaryTextColor`, base and the neo family to `textColor`.
+    pub class_text: Color,
+    /// `tertiaryColor` (ER relationship-label backgrounds: `fade(tertiaryColor, 0.5)`).
+    pub tertiary: Color,
     pub cluster_bkg: Color,
     pub cluster_border: Color,
     /// `flowContainerStroke` (`secondaryBorderColor` unless set): an agentflow
@@ -369,6 +376,8 @@ fn default_palette() -> Palette {
         line_color: c("#333333"),
         text_color: c("#333"),
         title_color: c("#333"),
+        class_text: c("#131300"),
+        tertiary: c("hsl(80, 100%, 96.2745098039%)"),
         cluster_bkg: c("#ffffde"),
         cluster_border: c("#aaaa33"),
         flow_container_stroke: c("hsl(60, 60%, 83.5294117647%)"),
@@ -468,6 +477,7 @@ fn forest_palette() -> Palette {
     p.line_color = c("#000000"); // theme-forest.js: `lineColor = invert(background)`
     p.text_color = c("#000000");
     p.title_color = c("#333");
+    p.tertiary = c("hsl(78.1578947368, 58.4615384615%, 84.5098039216%)");
     p.cluster_bkg = c("#cdffb2");
     p.cluster_border = c("#6eaa49");
     p.edge_label_background = c("#e8e8e8");
@@ -499,6 +509,7 @@ fn dark_palette() -> Palette {
     p.line_color = c("lightgrey");
     p.text_color = c("#ccc");
     p.title_color = c("#F9FFFE");
+    p.tertiary = c("hsl(20, 1.5873015873%, 12.3529411765%)");
     p.cluster_bkg = c("hsl(180, 1.5873015873%, 28.3529411765%)");
     p.cluster_border = c("rgba(255, 255, 255, 0.25)");
     p.edge_label_background = c("hsl(0, 0%, 34.4117647059%)");
@@ -540,6 +551,7 @@ fn neutral_palette() -> Palette {
     p.node_text = c("#333");
     p.line_color = c("#666");
     p.cluster_bkg = c("hsl(0, 0%, 98.9215686275%)");
+    p.tertiary = c("hsl(-160, 0%, 93.3333333333%)");
     p.cluster_border = c("#707070");
     // theme-neutral.js: `actorBorder = lighten(border1, 23)`, texts `text` (#333).
     p.actor_text = c("#333");
@@ -784,6 +796,76 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
     for (k, v) in vars {
         apply_variable(&mut p, k, v);
     }
+    // The classic themes' variables as their theme objects resolve them, the
+    // overrides included (`vars`): these replace the hand-derived values above.
+    if let Some(tv) = vars::resolve(theme, vars) {
+        let fields: [(&str, &mut Color); 34] = [
+            ("background", &mut p.background),
+            ("mainBkg", &mut p.main_bkg),
+            ("nodeBorder", &mut p.node_border),
+            ("lineColor", &mut p.line_color),
+            ("textColor", &mut p.text_color),
+            ("titleColor", &mut p.title_color),
+            ("tertiaryColor", &mut p.tertiary),
+            ("clusterBkg", &mut p.cluster_bkg),
+            ("clusterBorder", &mut p.cluster_border),
+            ("flowContainerStroke", &mut p.flow_container_stroke),
+            ("edgeLabelBackground", &mut p.edge_label_background),
+            ("actorBkg", &mut p.actor_bkg),
+            ("actorBorder", &mut p.actor_border),
+            ("actorTextColor", &mut p.actor_text),
+            ("actorLineColor", &mut p.actor_line),
+            ("signalColor", &mut p.signal_color),
+            ("signalTextColor", &mut p.signal_text),
+            ("labelBoxBkgColor", &mut p.label_box_bkg),
+            ("labelBoxBorderColor", &mut p.label_box_border),
+            ("labelTextColor", &mut p.label_text),
+            ("loopTextColor", &mut p.loop_text),
+            ("noteBkgColor", &mut p.note_bkg),
+            ("noteBorderColor", &mut p.note_border),
+            ("noteTextColor", &mut p.note_text),
+            ("activationBkgColor", &mut p.activation_bkg),
+            ("activationBorderColor", &mut p.activation_border),
+            ("sequenceNumberColor", &mut p.sequence_number),
+            ("specialStateColor", &mut p.special_state),
+            ("primaryTextColor", &mut p.primary_text),
+            ("primaryBorderColor", &mut p.primary_border),
+            ("pieTitleTextColor", &mut p.pie_title_text),
+            ("pieSectionTextColor", &mut p.pie_section_text),
+            ("pieLegendTextColor", &mut p.pie_legend_text),
+            ("classText", &mut p.class_text),
+        ];
+        for (k, f) in fields {
+            if let Some(v) = tv.get(k) {
+                *f = c(v);
+            }
+        }
+        if theme == ThemeName::Base
+            && let Some(v) = tv.get("nodeTextColor")
+        {
+            p.node_text = c(v);
+        }
+        return finish_rows(theme, p, vars);
+    }
+    // `classText`: `this.classText = this.primaryTextColor` in the classic themes'
+    // `updateColors` (rerun after the overrides are copied in), `classText ||
+    // textColor` in base and the neo family.
+    p.class_text = match var("classText") {
+        Some(v) => c(v),
+        None => match theme {
+            ThemeName::Default
+            | ThemeName::Null
+            | ThemeName::Dark
+            | ThemeName::Forest
+            | ThemeName::Neutral => p.primary_text.clone(),
+            _ => p.text_color.clone(),
+        },
+    };
+    finish_rows(theme, p, vars)
+}
+
+/// The ER row stripes, unless overridden (the neo family has none).
+fn finish_rows(theme: ThemeName, mut p: Palette, vars: &[(String, String)]) -> Palette {
     if p.er_row_odd.is_some() {
         let (odd, even) = er_rows(theme, &p, vars);
         let set = |k: &str| vars.iter().any(|(n, _)| n == k);
@@ -800,27 +882,19 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
 /// `rowOdd` / `rowEven` of the classic themes, from the (overridden) `mainBkg`:
 /// `lighten(mainBkg, 75)` and a theme-specific shade (`theme-*.js` `updateColors`).
 fn er_rows(theme: ThemeName, p: &Palette, vars: &[(String, String)]) -> (Color, Color) {
-    let m = color::parse(p.main_bkg.css()).unwrap_or(Rgba::WHITE);
+    let m = p.main_bkg.css();
     let dark_mode = vars
         .iter()
         .any(|(k, v)| k == "darkMode" && v.trim() == "true");
     let (odd, even) = match theme {
-        ThemeName::Dark => (m.lighten(5.0), m.darken(10.0)),
-        ThemeName::Neutral => (
-            m.lighten(75.0),
-            Rgba {
-                r: 0xf4,
-                g: 0xf4,
-                b: 0xf4,
-                a: 1.0,
-            },
-        ),
-        ThemeName::Forest => (m.lighten(75.0), m.lighten(20.0)),
-        ThemeName::Base if dark_mode => (m.darken(5.0), m.darken(10.0)),
-        ThemeName::Base => (m.lighten(75.0), m.lighten(5.0)),
-        _ => (m.lighten(75.0), m.lighten(1.0)),
+        ThemeName::Dark => (khroma::lighten(m, 5.0), khroma::darken(m, 10.0)),
+        ThemeName::Neutral => (khroma::lighten(m, 75.0), "#f4f4f4".to_string()),
+        ThemeName::Forest => (khroma::lighten(m, 75.0), khroma::lighten(m, 20.0)),
+        ThemeName::Base if dark_mode => (khroma::darken(m, 5.0), khroma::darken(m, 10.0)),
+        ThemeName::Base => (khroma::lighten(m, 75.0), khroma::lighten(m, 5.0)),
+        _ => (khroma::lighten(m, 75.0), khroma::lighten(m, 1.0)),
     };
-    (hex(odd), hex(even))
+    (c(&odd), c(&even))
 }
 
 impl Palette {
@@ -904,7 +978,7 @@ fn apply_variable(p: &mut Palette, key: &str, value: &str) {
         "compositeTitleBackground" => p.composite_title_background = Some(v),
         "compositeBackground" => p.composite_background = Some(v),
         "altBackground" => p.alt_background = Some(v),
-        "tertiaryColor" => {}
+        "tertiaryColor" => p.tertiary = v,
         "edgeLabelBackground" => p.edge_label_background = v,
         "rowOdd" => p.er_row_odd = Some(v),
         "rowEven" => p.er_row_even = Some(v),
@@ -994,8 +1068,13 @@ mod tests {
                 ("pie3".into(), "red".into()),
             ],
         );
-        assert_eq!(p.main_bkg.css(), "#ff0000");
+        // mermaid 12.3.0: the default theme's constructor sets `mainBkg`, which
+        // `updateColors` does not derive again from an overridden `primaryColor`.
+        assert_eq!(p.main_bkg.css(), "#ECECFF");
         assert_eq!(p.pie_colors[2].css(), "red");
+        let p = palette(ThemeName::Default, &[("mainBkg".into(), "#ff0000".into())]);
+        assert_eq!(p.main_bkg.css(), "#ff0000");
+        assert_eq!(p.actor_bkg.css(), "#ff0000");
     }
 
     #[test]
@@ -1007,7 +1086,7 @@ mod tests {
         assert_eq!(p.main_bkg.css(), "#003366");
         // mermaid 12.3.0 `theme-base.js`: `primaryTextColor ||= darkMode ? '#eee' : '#333'`,
         // whatever the primary colour.
-        assert_eq!(p.node_text.css(), "#333333");
+        assert_eq!(p.node_text.css(), "#333");
         let p = palette(
             ThemeName::Base,
             &[
@@ -1015,7 +1094,7 @@ mod tests {
                 ("darkMode".into(), "true".into()),
             ],
         );
-        assert_eq!(p.node_text.css(), "#eeeeee");
+        assert_eq!(p.node_text.css(), "#eee");
     }
 
     /// `commitLabelColor`, `commitLabelBackground`, `tagLabelColor`,
@@ -1243,18 +1322,22 @@ mod tests {
     /// Values checked against mermaid 12.3.0's resolved `themeVariables`.
     #[test]
     fn classic_variables_match_upstream() {
-        let css = |c: &Color| c.css().to_ascii_lowercase();
+        // As the browser paints them.
+        let css = |c: &Color| color::parse(c.css()).unwrap().to_hex();
         let base = palette(ThemeName::Base, &[]);
         assert_eq!(css(&base.pie_legend_text), "#333333");
         assert_eq!(css(&base.pie_title_text), "#333333");
+        // `titleColor = invert(tertiaryColor)` is rgb(8.5000000002, 5.75.., 0).
+        assert_eq!(css(&base.title_color), "#090600");
+        assert_eq!(css(&base.background), "#f4f4f4");
         assert_eq!(css(&base.line_color), "#0b0b0b"); // invert(#f4f4f4)
         assert_eq!(css(&base.note_bkg), "#fff5ad");
         let neutral = palette(ThemeName::Neutral, &[]);
-        assert_eq!(css(&neutral.pie_legend_text), "#333");
+        assert_eq!(css(&neutral.pie_legend_text), "#333333");
         assert_eq!(css(&neutral.text_color), "#000000");
         let dark = palette(ThemeName::Dark, &[]);
         assert_eq!(css(&dark.special_state), "#f4f4f4");
-        assert_eq!(css(&dark.pie_section_text), "#ccc");
+        assert_eq!(css(&dark.pie_section_text), "#cccccc");
         // rowOdd = lighten(#1f2020, 5), rowEven = darken(#1f2020, 10).
         assert_eq!(dark.er_row_odd.as_ref().map(css), Some("#2c2d2d".into()));
         assert_eq!(dark.er_row_even.as_ref().map(css), Some("#060606".into()));
@@ -1279,11 +1362,38 @@ mod tests {
     /// mermaid's variable names, for diffing against the reference's `themeVariables`.
     #[test]
     fn dump_palette() {
-        if std::env::var("DUMP_PALETTE").is_err() {
+        let Ok(path) = std::env::var("DUMP_PALETTE") else {
             return;
-        }
-        for (name, t) in ThemeName::ALL {
-            let p = palette(t, &[]);
+        };
+        // `DUMP_PALETTE=<cases.json>`: `[{"name", "theme", "vars": {..}}]`; otherwise
+        // every theme without overrides.
+        let cases: Vec<(String, ThemeName, Vec<(String, String)>)> =
+            match std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| crate::json::parse(&s).ok())
+            {
+                Some(crate::json::Json::Array(items)) => items
+                    .iter()
+                    .map(|c| {
+                        let name = c.get("name").and_then(|v| v.as_str()).unwrap().to_string();
+                        let theme = c.get("theme").and_then(|v| v.as_str()).unwrap();
+                        let vars = c
+                            .get("vars")
+                            .and_then(|v| v.as_object())
+                            .unwrap_or(&[])
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.to_scalar_string().unwrap()))
+                            .collect();
+                        (name, theme.parse().unwrap(), vars)
+                    })
+                    .collect(),
+                _ => ThemeName::ALL
+                    .iter()
+                    .map(|&(n, t)| (n.to_string(), t, Vec::new()))
+                    .collect(),
+            };
+        for (name, t, vars) in cases {
+            let p = palette(t, &vars);
             let one = |k: &str, c: &Color| println!("{name} {k} {}", c.css());
             for (prefix, set) in [
                 ("cScale", &p.scale),
@@ -1310,6 +1420,10 @@ mod tests {
                 ("pieOuterStrokeColor", &p.pie_outer_stroke),
                 ("textColor", &p.text_color),
                 ("titleColor", &p.title_color),
+                ("classText", &p.class_text),
+                ("primaryTextColor", &p.primary_text),
+                ("primaryBorderColor", &p.primary_border),
+                ("flowContainerStroke", &p.flow_container_stroke),
                 ("mainBkg", &p.main_bkg),
                 ("nodeBorder", &p.node_border),
                 ("nodeTextColor", &p.node_text),

@@ -2504,7 +2504,8 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
                     Element::Group { children, .. }
                     | Element::Rotated { children, .. }
                     | Element::Translated { children, .. }
-                    | Element::Clipped { children, .. } => walk(children, out),
+                    | Element::Clipped { children, .. }
+                    | Element::Faded { children, .. } => walk(children, out),
                     Element::Shape { .. } => {}
                 }
             }

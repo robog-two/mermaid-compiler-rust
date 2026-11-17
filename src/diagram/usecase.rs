@@ -4799,7 +4799,8 @@ mod tests {
                     Element::Group { children, .. }
                     | Element::Rotated { children, .. }
                     | Element::Translated { children, .. }
-                    | Element::Clipped { children, .. } => dashes(children, out),
+                    | Element::Clipped { children, .. }
+                    | Element::Faded { children, .. } => dashes(children, out),
                     Element::Text { .. } | Element::OutlinedText { .. } => {}
                 }
             }
