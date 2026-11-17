@@ -356,7 +356,8 @@ impl Engine {
                     y += self.target_top(s, tgt) * v;
                     w += v;
                 }
-                if !(w > 0.0) {
+                // `if (!(w > 0)) continue;`
+                if w.is_nan() || w <= 0.0 {
                     continue;
                 }
                 let dy = (y / w - self.nodes[tgt].y0) * alpha;
@@ -379,7 +380,8 @@ impl Engine {
                     y += self.source_top(src, t) * v;
                     w += v;
                 }
-                if !(w > 0.0) {
+                // `if (!(w > 0)) continue;`
+                if w.is_nan() || w <= 0.0 {
                     continue;
                 }
                 let dy = (y / w - self.nodes[src].y0) * alpha;
