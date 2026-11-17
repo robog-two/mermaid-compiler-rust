@@ -3535,43 +3535,57 @@ fn model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> 
         }
         v
     };
-    fn visit(
-        scope: Option<ClusterId>,
-        g: &GraphDiagram,
-        nodes: &[Node],
-        empty_of: &[Option<usize>],
-        placeholder: &[bool],
-        out: &mut Vec<usize>,
-        depth: usize,
-    ) {
-        if depth > g.clusters.len() {
+    // Where each subgraph comes in getData's walk (last closed first); a
+    // collapsed one (a node) comes after the `group_seq` expanded ones before it.
+    let mut rank = vec![0usize; g.clusters.len()];
+    for (j, ci) in closing_order(&g.clusters).into_iter().rev().enumerate() {
+        rank[ci] = j;
+    }
+    struct Walk<'a> {
+        g: &'a GraphDiagram,
+        nodes: &'a [Node],
+        empty_of: &'a [Option<usize>],
+        placeholder: &'a [bool],
+        rank: &'a [usize],
+    }
+    fn visit(w: &Walk, scope: Option<ClusterId>, out: &mut Vec<usize>, depth: usize) {
+        if depth > w.g.clusters.len() {
             return;
         }
-        for ci in (0..g.clusters.len()).rev() {
-            if g.clusters[ci].parent != scope || Some(ClusterId(ci)) == scope {
-                continue;
-            }
-            match empty_of[ci] {
-                Some(p) => out.push(p),
-                None => visit(
-                    Some(ClusterId(ci)),
-                    g,
-                    nodes,
-                    empty_of,
-                    placeholder,
-                    out,
-                    depth + 1,
-                ),
+        // (place in the walk, cluster or node)
+        let mut subgraphs: Vec<(f64, Result<usize, usize>)> = (0..w.g.clusters.len())
+            .filter(|&ci| w.g.clusters[ci].parent == scope && Some(ClusterId(ci)) != scope)
+            .map(|ci| (w.rank[ci] as f64, Ok(ci)))
+            .collect();
+        subgraphs.extend(w.nodes.iter().enumerate().filter_map(|(i, n)| {
+            let k = n.group_seq.filter(|_| n.cluster == scope && !w.placeholder[i])?;
+            Some((k as f64 - 0.5, Err(i)))
+        }));
+        subgraphs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, item) in subgraphs {
+            match item {
+                Err(i) => out.push(i),
+                Ok(ci) => match w.empty_of[ci] {
+                    Some(p) => out.push(p),
+                    None => visit(w, Some(ClusterId(ci)), out, depth + 1),
+                },
             }
         }
-        for (i, n) in nodes.iter().enumerate() {
-            if n.cluster == scope && !placeholder[i] {
+        for (i, n) in w.nodes.iter().enumerate() {
+            if n.cluster == scope && !w.placeholder[i] && n.group_seq.is_none() {
                 out.push(i);
             }
         }
     }
+    let walk = Walk {
+        g,
+        nodes,
+        empty_of,
+        placeholder: &placeholder,
+        rank: &rank,
+    };
     let mut out = Vec::with_capacity(nodes.len());
-    visit(None, g, nodes, empty_of, &placeholder, &mut out, 0);
+    visit(&walk, None, &mut out, 0);
     // Anything unreachable (a malformed parent chain) keeps its place at the end.
     let mut seen = vec![false; nodes.len()];
     for &i in &out {

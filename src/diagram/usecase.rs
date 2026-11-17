@@ -2672,6 +2672,8 @@ const CELL_PAD_X: f64 = 8.0;
 const CELL_PAD_Y: f64 = 4.0;
 /// `.relationship-label, .edgeLabel { font-size: 10px }`.
 const EDGE_LABEL_FONT: f64 = 10.0;
+/// `createText`'s default width, at which edge labels wrap.
+const EDGE_LABEL_WRAP: f64 = 200.0;
 /// `.labelBkg { padding: 0 2px }` (usecase `styles.ts`).
 const LABEL_BKG_PAD_X: f64 = 2.0;
 
@@ -2922,7 +2924,7 @@ impl Block {
     /// as wide as its text in layout units; else wrapped in a box of that width
     /// (or its widest unbreakable piece), `break-spaces`.
     fn wrapped(lines: &[String], font: f64, bold: bool, max: f64) -> Block {
-        use crate::text::{BreakRule, break_space_shift, html_wrap_width, layout_unit_ceil};
+        use crate::text::{BreakRule, break_space_shift, html_line_width, html_wrap_width};
         let flagged = crate::text::wrap_lines_flagged(lines, max, font, bold, BreakRule::Browser);
         let natural = lines
             .iter()
@@ -2945,10 +2947,15 @@ impl Block {
             })
             .collect();
         let mut b = Block::new(flagged.into_iter().map(|(l, _)| l).collect(), font, bold);
+        // Chromium sizes each styled run (a `<strong>`, an `<em>`, the text
+        // between) in layout units.
         b.w = if natural > max {
             html_wrap_width(lines, max, font, bold)
         } else {
-            layout_unit_ceil(b.w)
+            b.lines
+                .iter()
+                .map(|l| html_line_width(l, font, bold))
+                .fold(0.0, f64::max)
         };
         b.shifts = shifts;
         b
@@ -3243,13 +3250,24 @@ fn draw_node(
         } => {
             let paint = painted(&n.style, slot, &role.actor_bkg, &role.actor_border, 2.0);
             let line = Paint::stroke(&paint.stroke, paint.stroke_width);
+            // The glyph's paths take neo's `.node path { stroke-width: strokeWidth
+            // ?? 1 }` over the actor's 2px (its head, a circle, and the business
+            // marker, which `.usecase-business-marker` sets, keep that).
+            let path_w = n.style.stroke_width.unwrap_or(if o.neo() {
+                pal.stroke_width.unwrap_or(1.0)
+            } else {
+                2.0
+            });
+            let path_line = Paint::stroke(&paint.stroke, path_w);
+            let mut path_paint = paint.clone();
+            path_paint.stroke_width = path_w;
             let content_h = n.h - 2.0 * NODE_PADDING;
             let top = c.y - content_h / 2.0;
             let g = Point::new(c.x, top + FIGURE_H / 2.0);
             match kind {
                 ActorType::Normal => els.push(Element::classed_shape(
                     Geometry::Path(svg_path(STICK_FIGURE, g)),
-                    paint.clone(),
+                    path_paint.clone(),
                     "usecase-actor-stick",
                 )),
                 ActorType::Hollow => {
@@ -3272,13 +3290,13 @@ fn draw_node(
                     ));
                     els.push(Element::classed_shape(
                         Geometry::Path(svg_path(HOLLOW_BODY, g)),
-                        line.clone(),
+                        path_line.clone(),
                         "usecase-actor-hollow-body",
                     ));
                 }
                 ActorType::Awesome => els.push(Element::classed_shape(
                     Geometry::Path(svg_path(AWESOME_SILHOUETTE, g)),
-                    paint.clone(),
+                    path_paint.clone(),
                     "usecase-actor-awesome-silhouette",
                 )),
                 ActorType::Icon => {
@@ -3360,7 +3378,15 @@ fn draw_node(
             ry,
         } => {
             let paint = painted(&n.style, slot, &role.bkg, &role.border, 2.0);
-            let line = Paint::stroke(&paint.stroke, paint.stroke_width);
+            // The marker is a `.node path` (see the actor's glyph).
+            let line = Paint::stroke(
+                &paint.stroke,
+                n.style.stroke_width.unwrap_or(if o.neo() {
+                    pal.stroke_width.unwrap_or(1.0)
+                } else {
+                    2.0
+                }),
+            );
             els.push(Element::classed_shape(
                 Geometry::Path(geom::ellipse(c, *rx, *ry)),
                 paint,
@@ -3673,8 +3699,9 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         edges.push(VEdge {
             from,
             to,
+            // `insertEdgeLabel`: an HTML label of `createText`'s default width.
             label: text
-                .map(|t| Block::new(t, EDGE_LABEL_FONT, false))
+                .map(|t| Block::wrapped(&t, EDGE_LABEL_FONT, false, EDGE_LABEL_WRAP))
                 .filter(|b| b.h > 0.0),
             minlen: r.minlen,
             kind: Some(r.kind),
