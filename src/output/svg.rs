@@ -106,7 +106,7 @@ impl Filters<'_> {
                         self.gradients.push(g.clone());
                     }
                 }
-                Element::Text { .. } => {}
+                Element::Text { .. } | Element::OutlinedText { .. } => {}
             }
         }
     }
@@ -367,7 +367,9 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 }
             }
         }
-        Element::Text { text, class } => write_text(out, text, class),
+        Element::Text { text, class } | Element::OutlinedText { text, class, .. } => {
+            write_text(out, text, class)
+        }
         Element::Rotated {
             deg,
             about,

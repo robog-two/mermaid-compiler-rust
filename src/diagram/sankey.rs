@@ -748,7 +748,17 @@ pub fn render(
                 fill: pal.text_color.clone(),
             };
             bounds.add_rect(label_box(&t));
-            label_els.push(Element::classed_text(t, *class));
+            label_els.push(if *class == "sankey-label-bg" {
+                // `.sankey-label-bg` in the CSS below; PDF output strokes it itself.
+                Element::OutlinedText {
+                    text: t,
+                    class: Some((*class).to_string()),
+                    color: pal.main_bkg.clone(),
+                    width: 4.0,
+                }
+            } else {
+                Element::classed_text(t, *class)
+            });
         }
     }
 
@@ -787,7 +797,7 @@ pub fn render(
         };
         link_els.push(Element::classed_shape(
             Geometry::Path(d),
-            paint.with_opacity(0.5),
+            paint.with_opacity(0.5).with_multiply(),
             "link",
         ));
     }

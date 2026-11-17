@@ -39,6 +39,9 @@ pub struct Paint {
     pub shadow: Option<Shadow>,
     /// A horizontal linear gradient the stroke is painted with instead of `stroke`.
     pub stroke_gradient: Option<Gradient>,
+    /// Composited with `mix-blend-mode: multiply`. SVG output gets this from the
+    /// scene's CSS; PDF output, which has no CSS, sets the blend mode itself.
+    pub multiply: bool,
 }
 
 /// A two-stop `<linearGradient gradientUnits="userSpaceOnUse">` along x: `from`
@@ -73,6 +76,7 @@ impl Paint {
             fill_opacity: None,
             shadow: None,
             stroke_gradient: None,
+            multiply: false,
         }
     }
     pub fn stroke(c: &Color, w: f64) -> Self {
@@ -85,6 +89,7 @@ impl Paint {
             fill_opacity: None,
             shadow: None,
             stroke_gradient: None,
+            multiply: false,
         }
     }
     pub fn both(fill: &Color, stroke: &Color, w: f64) -> Self {
@@ -97,6 +102,7 @@ impl Paint {
             fill_opacity: None,
             shadow: None,
             stroke_gradient: None,
+            multiply: false,
         }
     }
     pub fn dashed(mut self, d: Vec<f64>) -> Self {
@@ -105,6 +111,10 @@ impl Paint {
     }
     pub fn with_opacity(mut self, o: f64) -> Self {
         self.opacity = Some(o);
+        self
+    }
+    pub fn with_multiply(mut self) -> Self {
+        self.multiply = true;
         self
     }
     pub fn with_fill_opacity(mut self, o: f64) -> Self {
@@ -256,6 +266,16 @@ pub enum Element {
         text: Text,
         class: Option<String>,
     },
+    /// Text drawn with an outline of `width` in `color` under its fill (CSS
+    /// `stroke` with `stroke-linejoin: round; paint-order: stroke`). SVG output
+    /// writes plain text and leaves the outline to the scene's CSS, as mermaid
+    /// does; PDF output, which has no CSS, strokes it itself.
+    OutlinedText {
+        text: Text,
+        class: Option<String>,
+        color: Color,
+        width: f64,
+    },
     /// Children drawn rotated by `deg` degrees (clockwise, SVG `rotate(deg cx cy)`)
     /// about `about` — e.g. vertical axis titles or labels running along a line.
     Rotated {
@@ -328,6 +348,21 @@ impl Element {
                 text.x += dx;
                 text.y += dy;
                 Element::Text { text, class }
+            }
+            Element::OutlinedText {
+                mut text,
+                class,
+                color,
+                width,
+            } => {
+                text.x += dx;
+                text.y += dy;
+                Element::OutlinedText {
+                    text,
+                    class,
+                    color,
+                    width,
+                }
             }
             Element::Rotated {
                 deg,
