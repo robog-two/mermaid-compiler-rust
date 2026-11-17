@@ -273,8 +273,9 @@ fn write_line(out: &mut String, line: &str, bold: bool) {
         out.push_str(&esc(line));
         return;
     }
+    let word_runs = line.contains(crate::text::mark::RUN);
     for run in crate::text::styled_runs(line, bold) {
-        if run.bold == bold && !run.italic {
+        if run.bold == bold && !run.italic && !word_runs {
             out.push_str(&esc(&run.text));
             continue;
         }

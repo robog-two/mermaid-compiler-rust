@@ -148,10 +148,11 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Journey> {
 }
 
 /// svgDraw `drawFace`: a radius-15 face at `c`, eyes 5 up and to each side, and
-/// a mouth by score: smile (> 3, a lower half arc 2 down), sad (< 3, an upper
-/// half arc 7 down) or a flat 10px line 7 down. The arcs are d3 annuli of radii
-/// 7.5 and 6.8, drawn here as their centre line.
-fn face(c: Point, score: f64) -> Vec<Element> {
+/// a mouth by score: smile (> 3, the lower half of a d3 annulus of radii 7.5 and
+/// 15/2.2, 2 down), sad (< 3, its upper half, 7 down) or a flat 10px line 7
+/// down. The annulus has no fill of its own, so it paints in the root's `fill`
+/// (`ink`, the theme's `textColor`) under the `.mouth` stroke (#666, 1px).
+fn face(c: Point, score: f64, ink: &Color) -> Vec<Element> {
     let r = 15.0;
     let grey = Color::new("#666666");
     let mut els = vec![
@@ -175,33 +176,39 @@ fn face(c: Point, score: f64) -> Vec<Element> {
             Paint::both(&grey, &grey, 2.0),
         ),
     ];
-    let mid = (r / 2.0 + r / 2.2) / 2.0;
-    let arc = |center: Point, a0: f64, a1: f64| {
-        let mut cmds = vec![PathCmd::MoveTo(Point::new(
-            center.x + mid * a0.cos(),
-            center.y + mid * a0.sin(),
-        ))];
-        cmds.extend(geom::arc_cubics(center, mid, a0, a1));
+    // d3.arc from `start` to `start + π` (clockwise from 12 o'clock): the outer
+    // arc, a radial line in, the inner arc back and close.
+    let (outer, inner) = (r / 2.0, r / 2.2);
+    let annulus = |center: Point, a0: f64| {
+        let a1 = a0 + PI;
+        let at = |rad: f64, a: f64| Point::new(center.x + rad * a.cos(), center.y + rad * a.sin());
+        let mut cmds = vec![PathCmd::MoveTo(at(outer, a0))];
+        cmds.extend(geom::arc_cubics(center, outer, a0, a1));
+        cmds.push(PathCmd::LineTo(at(inner, a1)));
+        cmds.extend(geom::arc_cubics(center, inner, a1, a0));
+        cmds.push(PathCmd::Close);
         cmds
     };
-    let (m, w) = if score > 3.0 {
-        (arc(Point::new(c.x, c.y + 2.0), 0.0, PI), 1.7)
+    let (m, paint) = if score > 3.0 {
+        (
+            annulus(Point::new(c.x, c.y + 2.0), 0.0),
+            Paint::both(ink, &grey, 1.0),
+        )
     } else if score < 3.0 {
-        (arc(Point::new(c.x, c.y + 7.0), -PI, 0.0), 1.7)
+        (
+            annulus(Point::new(c.x, c.y + 7.0), PI),
+            Paint::both(ink, &grey, 1.0),
+        )
     } else {
         (
             vec![
                 PathCmd::MoveTo(Point::new(c.x - 5.0, c.y + 7.0)),
                 PathCmd::LineTo(Point::new(c.x + 5.0, c.y + 7.0)),
             ],
-            1.0,
+            Paint::stroke(&grey, 1.0),
         )
     };
-    els.push(Element::classed_shape(
-        Geometry::Path(m),
-        Paint::stroke(&grey, w),
-        "mouth",
-    ));
+    els.push(Element::classed_shape(Geometry::Path(m), paint, "mouth"));
     els
 }
 
@@ -317,7 +324,7 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             } else {
                 300.0 + (5.0 - task.score) * 30.0
             };
-            fore.extend(face(Point::new(cx, fy), task.score));
+            fore.extend(face(Point::new(cx, fy), task.score, &pal.text_color));
             let tr = Rect::new(tx, task_y, task_w, task_h);
             fore.push(Element::classed_shape(
                 Geometry::Rect { rect: tr, rx: 3.0 },
@@ -460,9 +467,40 @@ mod tests {
 
     #[test]
     fn faces_differ_by_mood() {
-        let mouth = |s: f64| face(Point::new(0.0, 0.0), s).pop().unwrap();
+        let mouth = |s: f64| {
+            face(Point::new(0.0, 0.0), s, &Color::new("#333"))
+                .pop()
+                .unwrap()
+        };
         assert_ne!(mouth(5.0), mouth(1.0));
         assert_ne!(mouth(3.0), mouth(5.0));
+    }
+
+    #[test]
+    fn smiles_are_d3_annuli() {
+        // mermaid 12.3.0: the smile is d3.arc() of radii 7.5 and 15/2.2 from 90°
+        // to 270°, 2px below the face centre, filled with the root's colour.
+        let Some(Element::Shape {
+            geom: Geometry::Path(cmds),
+            paint,
+            ..
+        }) = face(Point::new(0.0, 0.0), 5.0, &Color::new("#333")).pop()
+        else {
+            panic!("no mouth");
+        };
+        assert_eq!(paint.fill, Color::new("#333"));
+        let pts: Vec<Point> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(*p),
+                PathCmd::Close => None,
+            })
+            .collect();
+        let near = |p: Point, x: f64, y: f64| (p.x - x).abs() < 1e-9 && (p.y - y).abs() < 1e-9;
+        assert!(near(pts[0], 7.5, 2.0));
+        assert!(pts.iter().any(|&p| near(p, 0.0, 9.5)));
+        assert!(pts.iter().any(|&p| near(p, -15.0 / 2.2, 2.0)));
+        assert!(pts.iter().any(|&p| near(p, 0.0, 2.0 + 15.0 / 2.2)));
     }
 
     #[test]

@@ -1041,7 +1041,9 @@ struct Section {
     bold: bool,
     top: f64,
     height: f64,
+    /// Width and left edge of the section's text box, its lines centred on 0.
     width: f64,
+    box_x: f64,
 }
 
 impl Section {
@@ -1054,10 +1056,20 @@ impl Section {
         // createText measures candidate lines while its tspans still carry
         // `font-weight: normal`, so the bold name wraps at regular-weight widths.
         let lines = wrap(raw, font, false, wrap_w);
-        let width = lines
-            .iter()
-            .map(|l| text::line_width(l, font, bold))
-            .fold(0.0, f64::max);
+        // The section's getBBox(): each line one tspan per word, centred on 0.
+        let (left, right) =
+            lines
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, r), line| {
+                    let (x, w, adv) = text::svg_word_runs_box(line, font, bold);
+                    let x = x - adv / 2.0;
+                    (l.min(x), r.max(x + w))
+                });
+        let (box_x, width) = if left.is_finite() {
+            (left, right - left)
+        } else {
+            (0.0, 0.0)
+        };
         // The section's SVG text box: rows 1.1em apart, from the first row's top
         // to the last row's bottom, whose descent depends on its glyphs.
         let extra = (lines.len().max(1) - 1) as f64;
@@ -1071,6 +1083,7 @@ impl Section {
             top: 0.0,
             height,
             width,
+            box_x,
         }
     }
     /// Baseline of the first line below the section top (font ascent).
@@ -1298,7 +1311,7 @@ fn calc_text_wh(raw: &str, font: f64, bold: bool, wrap_to: Option<f64>) -> TextW
         Some(w) => w,
         None => lines
             .iter()
-            .map(|l| js_round(text::line_width(l, font, bold)))
+            .map(|l| js_round(text::svg_bbox_width_weight(l, font, bold)))
             .fold(0.0, f64::max),
     };
     let height = lines.iter().map(|l| text::svg_line_box(font, l)).sum();
@@ -1853,10 +1866,11 @@ fn draw_shape(s: &Shape, card: &CardLayout, r: Rect, conf: &C4Conf) -> Element {
             SectionKind::Type => "c4-type",
             SectionKind::Descr => "c4-descr",
         };
+        // c4LabelHelper centres each section's box (not its advance) on the label.
         let t = Text {
-            x,
+            x: x - sec.box_x - sec.width / 2.0,
             y: label_top + sec.top + sec.ascent(),
-            lines: sec.lines.clone(),
+            lines: sec.lines.iter().map(|l| text::word_runs(l)).collect(),
             line_height: 1.1 * sec.font,
             font_size: sec.font,
             bold: sec.bold,
@@ -2095,6 +2109,32 @@ mod tests {
 
     fn p(src: &str) -> C4Diagram {
         parse(src, None).unwrap()
+    }
+
+    #[test]
+    fn sections_are_centred_by_their_word_tspan_boxes() {
+        // mermaid 12.3.0: c4LabelHelper's type section "[Person]" (10.5px, one
+        // tspan per word) has getBBox x -19.5546875, width 39.18603515625; under
+        // a 144.140625px description it sits at translate(72.031982421875, ...).
+        let ty = Section::new(SectionKind::Type, "[Person]", 14.0, 184.0);
+        assert_eq!((ty.box_x, ty.width), (-19.5546875, 39.18603515625));
+        let descr = Section::new(
+            SectionKind::Descr,
+            "A customer of the bank, with",
+            14.0,
+            184.0,
+        );
+        assert_eq!(descr.width, 144.140625);
+        let total = descr.width;
+        assert!((total / 2.0 - ty.box_x - ty.width / 2.0 - 72.031982421875).abs() < 1e-9);
+    }
+
+    #[test]
+    fn relation_labels_are_as_wide_as_their_rounded_bounding_box() {
+        // calculateTextWidth rounds getBBox().width, ink included:
+        // "1: Submits credentials to" at 12px is 131.72px (131.5 advance).
+        let wh = calc_text_wh("1: Submits credentials to", 12.0, false, None);
+        assert_eq!(wh.width, 132.0);
     }
 
     #[test]

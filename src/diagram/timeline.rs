@@ -213,7 +213,25 @@ fn node_height(lines: &[String], font: f64) -> f64 {
 }
 
 fn padded_node_height(lines: &[String], font: f64, pad: f64) -> f64 {
-    text::TextBlock::svg(lines.to_vec(), font, false).height + font * 1.1 * 0.5 + pad
+    middle_text_height(lines, font) + font * 1.1 * 0.5 + pad
+}
+
+/// `getBBox().height` of the node text: lines 1.1em apart, `dominant-baseline:
+/// middle`. Chromium shifts the baseline by half the x-height (1082/2048 em) and
+/// snaps the box's edges to 1/64 px, a tie moving each edge outwards: at 16px the
+/// shift is 270.5/64 px, so a line whose bottom is its font's descent (no deep
+/// descender) is 1/64 px taller than [`text::svg_line_box`] (17.015625px,
+/// measured for 8 to 36px).
+fn middle_text_height(lines: &[String], font: f64) -> f64 {
+    let h = text::TextBlock::svg(lines.to_vec(), font, false).height;
+    if h == 0.0 {
+        return h;
+    }
+    let last = lines.last().map_or("", String::as_str);
+    let shift64 = 1082.0 / 2048.0 * font / 2.0 * 64.0;
+    let tie = (shift64 - shift64.floor() - 0.5).abs() < 1e-9;
+    let at_descent = text::svg_line_box(font, last) == text::svg_line_box(font, "");
+    if tie && at_descent { h + 1.0 / 64.0 } else { h }
 }
 
 /// What `drawNode` needs besides the node itself.
@@ -270,7 +288,9 @@ fn draw_node(
 }
 
 /// The title: a bold `4ex` text at (`x`, 20). Chromium's `ex` is the font's
-/// x-height (1082/2048 em) and its text box the rounded ascent and descent.
+/// x-height (1082/2048 em) and its text box the rounded ascent and descent. It
+/// has no class or fill of its own, so it paints in the diagram root's `fill`,
+/// the theme's `textColor`.
 fn title_text(t: &str, x: f64, font: f64, pal: &Palette) -> (Element, Rect) {
     let size = 4.0 * 1082.0 / 2048.0 * font;
     let line = crate::text::label_lines(t).join(" ");
@@ -285,7 +305,7 @@ fn title_text(t: &str, x: f64, font: f64, pal: &Palette) -> (Element, Rect) {
             font_size: size,
             bold: true,
             anchor: crate::scene::Anchor::Start,
-            fill: pal.title_color.clone(),
+            fill: pal.text_color.clone(),
         },
         "titleText",
     );
@@ -757,6 +777,18 @@ mod tests {
     2005 : YouTube
     Slot : Meeting at 10:30
 ";
+
+    #[test]
+    fn node_text_boxes_as_chromium_measures_middle_baselines() {
+        // getBBox() in headless Chromium of the node text (dy 1em, then 1.1em,
+        // dominant-baseline middle) at 16px: 17.015625 for a line ending on the
+        // font's descent, 18 with a descender, 1.1em more per line.
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(middle_text_height(&l(&["xxxx"]), 16.0), 17.015625);
+        assert_eq!(middle_text_height(&l(&["gggg"]), 16.0), 18.0);
+        assert!((middle_text_height(&l(&["a", "b"]), 16.0) - 34.615625).abs() < 1e-9);
+        assert_eq!(middle_text_height(&l(&["xxxx"]), 14.0), 16.0);
+    }
 
     #[test]
     fn colons_follow_the_jison_lexer() {
