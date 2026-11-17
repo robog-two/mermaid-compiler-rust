@@ -71,10 +71,13 @@ Unicode works too: 🤓`\"]
       id3[Regular labels still works]
 ");
     assert!(s.contains("<tspan font-weight=\"bold\">Root</tspan> with"));
-    assert!(s.contains(">a second line</tspan>"));
+    // (A label with a line that broke at a space is drawn one `<text>` per line.)
+    let line =
+        |l: &str| s.contains(&format!(">{l}</tspan>")) || s.contains(&format!(">{l}</text>"));
+    assert!(line("a second line"));
     // Rect nodes wrap at `flowchart.wrappingWidth` (120) as mermaid 12.3 does.
-    assert!(s.contains(">Unicode works</tspan>"));
-    assert!(s.contains(">Regular labels</tspan>"));
+    assert!(line("Unicode works"));
+    assert!(line("Regular labels"));
     assert!(s.contains("<tspan font-style=\"italic\">very</tspan>"));
     assert!(!s.contains("**") && !s.contains('`'));
 }
