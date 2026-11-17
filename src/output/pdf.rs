@@ -8,6 +8,7 @@ use crate::color::{self, Rgba};
 use crate::geom::{PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, Element, Geometry, Paint, Scene, Text};
 use crate::text::line_width;
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::str::FromStr;
 
@@ -87,6 +88,8 @@ const PX_TO_PT: f64 = 0.75;
 struct Ctx {
     out: String,
     alphas: Vec<u32>,
+    /// Glyphs drawn with each embedded TeX Gyre Heros face, with their characters.
+    embedded: [BTreeMap<u16, char>; 4],
 }
 
 fn n(v: f64) -> String {
@@ -211,7 +214,6 @@ impl Ctx {
     fn text(&mut self, t: &Text) {
         let Some(c) = resolve(&t.fill) else { return };
         let (r, g, b) = c.unit();
-        let font = if t.bold { "F2" } else { "F1" };
         self.out.push_str("q\n");
         if let Some(gs) = self.gs_for(c.a) {
             self.out.push_str(&gs);
@@ -228,40 +230,83 @@ impl Ctx {
                 Anchor::End => t.x - w,
             };
             let y = t.y + i as f64 * t.line_height;
-            // The page CTM flips y; flip glyphs back with a negative d in Tm.
-            if !crate::text::has_marks(line) {
-                let _ = writeln!(
-                    self.out,
-                    "BT /{font} 1 Tf {} 0 0 {} {} {} Tm ({}) Tj ET",
-                    n(t.font_size),
-                    n(-t.font_size),
-                    n(x),
-                    n(y),
-                    pdf_string(line)
-                );
+            if crate::icons::has_icons(line) {
+                self.line_with_icons(line, x, y, t);
                 continue;
             }
-            // Markdown emphasis: one font switch per run, in one text object.
-            let _ = write!(
-                self.out,
-                "BT {} 0 0 {} {} {} Tm",
-                n(t.font_size),
-                n(-t.font_size),
-                n(x),
-                n(y),
-            );
-            for run in crate::text::styled_runs(line, t.bold) {
-                let f = match (run.bold, run.italic) {
-                    (false, false) => "F1",
-                    (true, false) => "F2",
-                    (false, true) => "F3",
-                    (true, true) => "F4",
-                };
-                let _ = write!(self.out, " /{f} 1 Tf ({}) Tj", pdf_string(&run.text));
-            }
-            self.out.push_str(" ET\n");
+            self.line(line, x, y, t.font_size, t.bold);
         }
         self.out.push_str("Q\n");
+    }
+
+    /// A display line with Font Awesome icons: its text runs where the layout put
+    /// them and each icon's outline filled in the text colour.
+    fn line_with_icons(&mut self, line: &str, x0: f64, y: f64, t: &Text) {
+        for piece in crate::icons::line_pieces(line, t.font_size, t.bold) {
+            match piece {
+                crate::icons::Piece::Text { x, text } => {
+                    if !crate::text::plain(&text).is_empty() {
+                        self.line(&text, x0 + x, y, t.font_size, t.bold);
+                    }
+                }
+                crate::icons::Piece::Icon { x, icon } => {
+                    let d = crate::icons::outline(icon);
+                    if d.is_empty() {
+                        continue;
+                    }
+                    let (tx, ty, s) = crate::icons::placement(icon, x0 + x, y, t.font_size);
+                    let _ = writeln!(self.out, "q {s:.7} 0 0 {s:.7} {} {} cm", n(tx), n(ty));
+                    self.path(&d);
+                    self.out.push_str("f\nQ\n");
+                }
+            }
+        }
+    }
+
+    /// One line of text starting at `x` on baseline `y`: one text object, a font
+    /// switch per run of emphasis, and the bundled TeX Gyre Heros for characters
+    /// the standard Helvetica fonts lack ([`crate::fonts`]).
+    fn line(&mut self, line: &str, x: f64, y: f64, font_size: f64, bold: bool) {
+        // The page CTM flips y; flip glyphs back with a negative d in Tm.
+        let _ = write!(
+            self.out,
+            "BT {} 0 0 {} {} {} Tm",
+            n(font_size),
+            n(-font_size),
+            n(x),
+            n(y),
+        );
+        for run in crate::text::styled_runs(line, bold) {
+            let face = crate::fonts::face_index(run.bold, run.italic);
+            let mut rest = run.text.as_str();
+            while !rest.is_empty() {
+                let embedded = |c: char| win_ansi(c).is_none() && embedded_glyph(face, c).is_some();
+                let split =
+                    |p: &dyn Fn(char) -> bool| rest.find(|c: char| !p(c)).unwrap_or(rest.len());
+                if embedded(rest.chars().next().unwrap_or(' ')) {
+                    let end = split(&embedded);
+                    let mut hex = String::new();
+                    for c in rest[..end].chars() {
+                        if let Some(g) = embedded_glyph(face, c) {
+                            self.embedded[face].insert(g, c);
+                            let _ = write!(hex, "{g:04X}");
+                        }
+                    }
+                    let _ = write!(self.out, " /H{} 1 Tf <{hex}> Tj", face + 1);
+                    rest = &rest[end..];
+                } else {
+                    let end = split(&|c| !embedded(c));
+                    let _ = write!(
+                        self.out,
+                        " /F{} 1 Tf ({}) Tj",
+                        face + 1,
+                        pdf_string(&rest[..end])
+                    );
+                    rest = &rest[end..];
+                }
+            }
+        }
+        self.out.push_str(" ET\n");
     }
 
     fn element(&mut self, el: &Element) {
@@ -348,31 +393,55 @@ fn rounded_rect(r: &Rect, rx: f64) -> Vec<PathCmd> {
     c
 }
 
-/// Encode text as a PDF literal string in WinAnsiEncoding.
+/// A character's code in WinAnsiEncoding (Windows-1252), if it has one.
+fn win_ansi(ch: char) -> Option<u8> {
+    Some(match ch {
+        ' '..='~' | '\u{a0}'..='\u{ff}' => ch as u32 as u8,
+        '€' => 0x80,
+        '‚' => 0x82,
+        'ƒ' => 0x83,
+        '„' => 0x84,
+        '…' => 0x85,
+        '†' => 0x86,
+        '‡' => 0x87,
+        'ˆ' => 0x88,
+        '‰' => 0x89,
+        'Š' => 0x8A,
+        '‹' => 0x8B,
+        'Œ' => 0x8C,
+        'Ž' => 0x8E,
+        '‘' => 0x91,
+        '’' => 0x92,
+        '“' => 0x93,
+        '”' => 0x94,
+        '•' => 0x95,
+        '–' => 0x96,
+        '—' => 0x97,
+        '˜' => 0x98,
+        '™' => 0x99,
+        'š' => 0x9A,
+        '›' => 0x9B,
+        'œ' => 0x9C,
+        'ž' => 0x9E,
+        'Ÿ' => 0x9F,
+        _ => return None,
+    })
+}
+
+/// The bundled face's glyph for a character (none without the `fonts` feature).
+fn embedded_glyph(face: usize, c: char) -> Option<u16> {
+    crate::fonts::face(face)?.glyph(c)
+}
+
+/// Encode text as a PDF literal string in WinAnsiEncoding (`?` for characters it
+/// lacks).
 fn pdf_string(s: &str) -> String {
     let mut out = String::new();
     for ch in s.chars() {
-        let byte: u8 = match ch {
-            '(' | ')' | '\\' => {
-                out.push('\\');
-                ch as u8
-            }
-            c if (' '..='~').contains(&c) => c as u8,
-            '\u{a0}'..='\u{ff}' => ch as u32 as u8,
-            '€' => 0x80,
-            '‚' => 0x82,
-            '„' => 0x84,
-            '…' => 0x85,
-            '‘' => 0x91,
-            '’' => 0x92,
-            '“' => 0x93,
-            '”' => 0x94,
-            '•' => 0x95,
-            '–' => 0x96,
-            '—' => 0x97,
-            '™' => 0x99,
-            _ => b'?',
-        };
+        let byte = win_ansi(ch).unwrap_or(b'?');
+        if matches!(byte, b'(' | b')' | b'\\') {
+            out.push('\\');
+        }
         if byte >= 0x80 {
             let _ = write!(out, "\\{byte:03o}");
         } else {
@@ -380,6 +449,75 @@ fn pdf_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// The PDF objects that embed one TeX Gyre Heros face, numbered from `first`: a
+/// Type0 font over an OpenType CIDFont (CIDs are glyph ids, `Identity-H`), its
+/// descriptor, the font file, and a ToUnicode map so the text can be copied.
+fn embedded_font_objects(face: usize, glyphs: &BTreeMap<u16, char>, first: usize) -> Vec<Vec<u8>> {
+    let Some(f) = crate::fonts::face(face) else {
+        return Vec::new();
+    };
+    let name = crate::fonts::POSTSCRIPT_NAMES[face];
+    let scale = 1000.0 / f64::from(f.units_per_em);
+    let widths: String = glyphs
+        .keys()
+        .map(|&g| format!("{g} [{}] ", n(f64::from(f.advance(g)) * scale)))
+        .collect();
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def /CMapType 2 def\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n",
+    );
+    let entries: Vec<_> = glyphs.iter().collect();
+    for chunk in entries.chunks(100) {
+        let _ = writeln!(cmap, "{} beginbfchar", chunk.len());
+        for (g, c) in chunk {
+            let mut units = [0u16; 2];
+            let hex: String = c
+                .encode_utf16(&mut units)
+                .iter()
+                .map(|u| format!("{u:04X}"))
+                .collect();
+            let _ = writeln!(cmap, "<{g:04X}> <{hex}>");
+        }
+        cmap.push_str("endbfchar\n");
+    }
+    cmap.push_str("endcmap CMapName currentdict /CMap defineresource pop end end\n");
+    let flags = 32 + if f.italic_angle != 0.0 { 64 } else { 0 };
+    let [x0, y0, x1, y1] = f.bbox.map(|v| n(f64::from(v) * scale));
+    let mut file = format!(
+        "<< /Subtype /OpenType /Length {} >>\nstream\n",
+        f.data.len()
+    )
+    .into_bytes();
+    file.extend_from_slice(f.data);
+    file.extend_from_slice(b"\nendstream");
+    vec![
+        format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /{name} /Encoding /Identity-H /DescendantFonts [{} 0 R] /ToUnicode {} 0 R >>",
+            first + 1,
+            first + 4
+        )
+        .into_bytes(),
+        format!(
+            "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /{name} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 0 /W [{widths}] >>",
+            first + 2
+        )
+        .into_bytes(),
+        format!(
+            "<< /Type /FontDescriptor /FontName /{name} /Flags {flags} /FontBBox [{x0} {y0} {x1} {y1}] /ItalicAngle {} /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile3 {} 0 R >>",
+            n(f.italic_angle),
+            n(f64::from(f.ascent) * scale),
+            n(f64::from(f.descent) * scale),
+            n(f64::from(f.cap_height) * scale),
+            first + 3
+        )
+        .into_bytes(),
+        file,
+        format!("<< /Length {} >>\nstream\n{cmap}endstream", cmap.len()).into_bytes(),
+    ]
 }
 
 /// Serialise a scene to a single-page PDF.
@@ -403,6 +541,7 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
     let mut ctx = Ctx {
         out: String::new(),
         alphas: Vec::new(),
+        embedded: Default::default(),
     };
 
     // Page background (Puppeteer prints the body background) unless transparent.
@@ -432,45 +571,73 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
     }
     ctx.out.push_str("Q\n");
 
-    let mut objects: Vec<String> = Vec::new();
-    objects.push("<< /Type /Catalog /Pages 2 0 R >>".into());
-    objects.push("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into());
+    let mut objects: Vec<Vec<u8>> = Vec::new();
+    objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
+    objects.push(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec());
     let gs_base = 9;
     let ext: String = (0..ctx.alphas.len())
         .map(|i| format!("/GS{i} {} 0 R ", gs_base + i))
         .collect();
+    // Embedded faces follow the graphics states, five objects each.
+    let mut embedded = String::new();
+    let mut font_objects = Vec::new();
+    for (face, glyphs) in ctx.embedded.iter().enumerate() {
+        if glyphs.is_empty() {
+            continue;
+        }
+        let first = gs_base + ctx.alphas.len() + font_objects.len();
+        let objs = embedded_font_objects(face, glyphs, first);
+        if !objs.is_empty() {
+            let _ = write!(embedded, " /H{} {first} 0 R", face + 1);
+            font_objects.extend(objs);
+        }
+    }
     objects.push(format!(
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R >> /ExtGState << {ext}>> >> >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R{embedded} >> /ExtGState << {ext}>> >> >>",
         n(page_w),
         n(page_h)
-    ));
-    objects.push(format!(
-        "<< /Length {} >>\nstream\n{}endstream",
-        ctx.out.len(),
-        ctx.out
-    ));
+    ).into_bytes());
     objects.push(
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+        format!(
+            "<< /Length {} >>\nstream\n{}endstream",
+            ctx.out.len(),
+            ctx.out
+        )
+        .into_bytes(),
     );
-    objects.push(
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"
-            .into(),
-    );
-    for face in ["Helvetica-Oblique", "Helvetica-BoldOblique"] {
-        objects.push(format!(
-            "<< /Type /Font /Subtype /Type1 /BaseFont /{face} /Encoding /WinAnsiEncoding >>"
-        ));
+    for face in [
+        "Helvetica",
+        "Helvetica-Bold",
+        "Helvetica-Oblique",
+        "Helvetica-BoldOblique",
+    ] {
+        objects.push(
+            format!(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /{face} /Encoding /WinAnsiEncoding >>"
+            )
+            .into_bytes(),
+        );
     }
     for &alpha in &ctx.alphas {
         let v = n(alpha as f64 / 1000.0);
-        objects.push(format!("<< /Type /ExtGState /ca {v} /CA {v} >>"));
+        objects.push(format!("<< /Type /ExtGState /ca {v} /CA {v} >>").into_bytes());
     }
+    let version = if font_objects.is_empty() {
+        "1.4"
+    } else {
+        // An OpenType font file (`FontFile3 /OpenType`) needs PDF 1.6.
+        "1.6"
+    };
+    objects.extend(font_objects);
 
-    let mut pdf: Vec<u8> = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let mut pdf: Vec<u8> = format!("%PDF-{version}\n").into_bytes();
+    pdf.extend_from_slice(b"%\xe2\xe3\xcf\xd3\n");
     let mut offsets = Vec::with_capacity(objects.len());
     for (i, obj) in objects.iter().enumerate() {
         offsets.push(pdf.len());
-        pdf.extend_from_slice(format!("{} 0 obj\n{obj}\nendobj\n", i + 1).as_bytes());
+        pdf.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        pdf.extend_from_slice(obj);
+        pdf.extend_from_slice(b"\nendobj\n");
     }
     let xref = pdf.len();
     let mut tail = format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);

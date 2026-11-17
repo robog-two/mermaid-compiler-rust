@@ -1,0 +1,52 @@
+Third-party material bundled with mmdc (Rust)
+=============================================
+
+The code in this repository is covered by LICENSE.txt. The following assets are
+included under their own licenses; the license texts are in LICENSES/.
+
+
+Font Awesome Free 7.3.1
+-----------------------
+
+  assets/fontawesome/icons.bin   (compiled in with the `icons` cargo feature)
+
+  Font Awesome Free by Fonticons, Inc. (https://fontawesome.com)
+  Copyright (c) 2026 Fonticons, Inc.
+  Source: the npm package @fortawesome/fontawesome-free@7.3.1
+  License: https://fontawesome.com/license/free
+    Icons: Creative Commons Attribution 4.0 International (CC BY 4.0)
+           LICENSES/CC-BY-4.0.txt
+    Fonts: SIL Open Font License 1.1 (with Reserved Font Name "Font Awesome")
+    Code:  MIT License
+  The package's own license file is LICENSES/FontAwesome-Free-LICENSE.txt
+  (it includes the full SIL Open Font License 1.1).
+
+  Changes: the icon outlines from the package's svgs/{solid,regular,brands}
+  directories and the class names (with aliases) from its css/fontawesome.css
+  and css/brands.css were re-encoded into a compact binary file by
+  tools/gen_fa_icons.py; the shapes themselves are unchanged. The file also
+  holds the `.notdef` outline of each of the package's three web fonts
+  (webfonts/fa-*.woff2, SIL OFL 1.1), drawn where the browser would show it.
+  No font file is included.
+
+
+TeX Gyre Heros 2.004
+--------------------
+
+  assets/fonts/texgyreheros-regular.otf
+  assets/fonts/texgyreheros-bold.otf
+  assets/fonts/texgyreheros-italic.otf
+  assets/fonts/texgyreheros-bolditalic.otf
+  (compiled in with the `fonts` cargo feature)
+
+  TeX Gyre Heros by Bogusław Jackowski and Janusz M. Nowacki for GUST, the
+  Polish TeX Users Group (https://www.gust.org.pl/projects/e-foundry/tex-gyre/heros)
+  Copyright 2007--2009 for TeX Gyre extensions by B. Jackowski and
+  J.M. Nowacki (on behalf of TeX Users Groups). Vietnamese characters were
+  added by Han The Thanh. Based on URW Nimbus Sans L by URW++ Design and
+  Development Inc.
+  License: GUST Font License (GFL), an instance of the LaTeX Project Public
+  License 1.3c: LICENSES/GUST-FONT-LICENSE.txt and LICENSES/LPPL-1.3c.txt
+  The fonts are the unmodified OpenType files of version 2.004;
+  assets/fonts/README-TeX-Gyre-Heros.txt and MANIFEST-TeX-Gyre-Heros.txt are
+  the package's own readme and manifest.

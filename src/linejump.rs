@@ -270,6 +270,15 @@ struct Jump {
     r: f64,
 }
 
+/// `fmt` of `lineJump.ts`: `Math.round(n * 1e3) / 1e3`.
+fn fmt(n: f64) -> f64 {
+    (n * 1e3 + 0.5).floor() / 1e3
+}
+
+fn fmt_point(p: Point) -> Point {
+    Point::new(fmt(p.x), fmt(p.y))
+}
+
 /// `rewriteEdgePath`: the edge's path with a hop at each of its crossings.
 fn rewrite(edge: &EdgeGeom, jumps: &[Crossing], radius: f64, style: LineHops) -> Vec<PathCmd> {
     let points = with_marker_offsets(edge);
@@ -334,20 +343,15 @@ fn rewrite(edge: &EdgeGeom, jumps: &[Crossing], radius: f64, style: LineHops) ->
             }
         }
         for j in seg_jumps.iter().filter(|j| j.r >= min_useful) {
-            let pre = j.point.minus(u.scale(j.r));
-            let post = j.point.plus(u.scale(j.r));
+            // `emitJump` writes the hop with its numbers rounded to 3 decimals
+            // (`fmt`): the browser draws the arc from those, so a hop whose ends
+            // round to less than its diameter apart is a little under a semicircle.
+            let pre = fmt_point(j.point.minus(u.scale(j.r)));
+            let post = fmt_point(j.point.plus(u.scale(j.r)));
             out.push(PathCmd::LineTo(pre));
             match style {
                 LineHops::Gap => out.push(PathCmd::MoveTo(post)),
-                _ => {
-                    let a0 = (-u.y).atan2(-u.x);
-                    let sweep = if clockwise {
-                        std::f64::consts::PI
-                    } else {
-                        -std::f64::consts::PI
-                    };
-                    out.extend(geom::arc_cubics(j.point, j.r, a0, a0 + sweep));
-                }
+                _ => out.extend(geom::svg_circle_arc_cubics(pre, fmt(j.r), clockwise, post)),
             }
         }
         match upcoming {
@@ -535,7 +539,9 @@ mod tests {
         let cmds = out[1].as_ref().unwrap();
         let r = 15.0 - 5.0 * 2f64.sqrt() - 2.0;
         assert_eq!(arcs(cmds), 3);
-        assert!(matches!(cmds[3], PathCmd::LineTo(p) if p.dist(Point::new(25.0 - r, 50.0)) < 1e-9));
+        // The hop's ends are written to 3 decimals (`fmt`).
+        let pre = Point::new(fmt(25.0 - r), 50.0);
+        assert!(matches!(cmds[3], PathCmd::LineTo(p) if p == pre));
     }
 
     #[test]

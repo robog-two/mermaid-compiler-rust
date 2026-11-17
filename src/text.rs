@@ -173,6 +173,9 @@ pub fn char_width_em(c: char, bold: bool) -> f64 {
     if mark::is_mark(c) {
         return 0.0;
     }
+    if crate::icons::is_icon(c) {
+        return crate::icons::ADVANCE_EM;
+    }
     let units = match code {
         0x20..=0x7E => f64::from(table[(code - 0x20) as usize]) * 1000.0 / 2048.0,
         0xA0..=0x24F => 556.0,
@@ -986,7 +989,11 @@ fn segments(para: &str, rule: BreakRule) -> Vec<String> {
             n != ' '
         } else if rule == BreakRule::Spaces || n == ' ' {
             false
-        } else if (is_cjk(c) || is_cjk(n)) && !no_break_before(n) && !no_break_after(c) {
+        } else if (is_cjk(c) || is_cjk(n) || crate::icons::is_icon(c) || crate::icons::is_icon(n))
+            && !no_break_before(n)
+            && !no_break_after(c)
+        {
+            // An icon is an inline-block: the line may break on either side of it.
             true
         } else {
             // `DELIVERY-ADDRESS` breaks after the hyphen (UAX #14 HY before a letter).
