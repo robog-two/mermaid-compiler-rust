@@ -528,6 +528,9 @@ fn parse_edge(d: &Architecture, s: &str, line: usize) -> Result<ArchEdge> {
 
 /// Positioned diagram: full item boxes plus the icon box of each node.
 struct Layout {
+    /// Icon plus title: what the tests check against the groups (drawing
+    /// takes the titles' text boxes instead).
+    #[cfg_attr(not(test), allow(dead_code))]
     node_box: Vec<Rect>,
     icon_box: Vec<Rect>,
     group_box: Vec<Rect>,
@@ -555,17 +558,22 @@ fn group_border_color(pal: &Palette) -> Color {
 
 /// svgDraw.ts: arrowSize = iconSize / 6, base as wide as it is long, tip 2px
 /// past the edge end (`ArchitectureDirectionArrowShift`).
-fn arrow(end: Point, dir: Point, color: &Color, icon: f64) -> Element {
+/// The arrow's corners also widen the drawing's box (`getBBox`).
+fn arrow(end: Point, dir: Point, color: &Color, icon: f64, bounds: &mut Bounds) -> Element {
     let size = icon / 6.0;
     let perp = Point::new(-dir.y, dir.x);
     let tip = end.plus(dir.scale(2.0));
     let base = tip.minus(dir.scale(size));
+    let pts = [
+        tip,
+        base.plus(perp.scale(size / 2.0)),
+        base.minus(perp.scale(size / 2.0)),
+    ];
+    for p in pts {
+        bounds.add_point(p);
+    }
     Element::classed_shape(
-        Geometry::Path(geom::polygon(&[
-            tip,
-            base.plus(perp.scale(size / 2.0)),
-            base.minus(perp.scale(size / 2.0)),
-        ])),
+        Geometry::Path(geom::polygon(&pts)),
         Paint::fill(color),
         "arrow",
     )
@@ -808,23 +816,32 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             "node-bkg",
         )];
         // Icon (padding * 0.75 square) in the top-left corner, title after it.
+        // The title is SVG text (`createText`, tspans 1.1em apart, the first
+        // baseline 1em down) from 2px below the box's top, alphabetic
+        // (`dominant-baseline: start` is no value).
         let mut x = r.x + 4.0;
-        let mut label_cy = r.y + 12.0;
+        let mut baseline = r.y + 2.0 + font;
         if let Some(icon) = &g.icon {
             let ir = Rect::new(r.x + 1.0, r.y + 1.0, group_icon, group_icon);
             children.push(Element::rect(ir, 0.0, Paint::fill(&icon_bg)));
             children.extend(icon_glyph(Some(icon), ir));
             x = ir.right() + 3.0;
             // svgDraw.ts: the title moves down `fontSize / 2 - 3` past an icon.
-            label_cy += ac.font_size / 2.0 - 3.0;
+            baseline += ac.font_size / 2.0 - 3.0;
         }
         if let Some(t) = g.title.as_ref().map(|t| TextBlock::label(t, font)) {
             if !t.is_empty() {
-                let extra = t.line_height * (t.lines.len() as f64 - 1.0) / 2.0;
-                let center = Point::new(x, label_cy + extra);
                 children.push(Element::classed_text(
-                    Text::centered(center, &t.lines, font, t.line_height, &pal.text_color)
-                        .anchored(Anchor::Start, x),
+                    Text {
+                        x,
+                        y: baseline,
+                        lines: t.lines.clone(),
+                        line_height: font * crate::text::SVG_LINE_HEIGHT,
+                        font_size: font,
+                        bold: false,
+                        anchor: Anchor::Start,
+                        fill: pal.text_color.clone(),
+                    },
                     "architecture-group-label",
                 ));
             }
@@ -838,8 +855,8 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
 
     for (i, n) in d.nodes.iter().enumerate() {
         let ib = lay.icon_box[i];
-        let nb = lay.node_box[i];
-        bounds.add_rect(nb);
+        // The title (when any) adds its own text box below.
+        bounds.add_rect(ib);
         let children = match &n.kind {
             // mermaid draws junctions as fully transparent icon-sized rects.
             NodeKind::Junction => vec![Element::shape(
@@ -870,10 +887,36 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 }
                 if let Some(b) = title.as_ref().map(|t| TextBlock::label(t, font)) {
                     if !b.is_empty() {
-                        let center = Point::new(ib.center().x, ib.bottom() + 6.0 + b.height / 2.0);
-                        bounds.add_rect(Rect::centered(center, b.width, b.height));
+                        // `createText` under the icon's bottom centre: tspans
+                        // 1.1em apart from 1em down, on the group's inherited
+                        // `dominant-baseline: middle`.
+                        let lh = font * crate::text::SVG_LINE_HEIGHT;
+                        let first = ib.bottom()
+                            + font
+                            + crate::text::baseline_shift(crate::text::Baseline::Middle, font);
+                        let last = b.lines.last().map_or("", String::as_str);
+                        let top = first - (0.905 * font).round();
+                        let bottom = first
+                            + lh * (b.lines.len() as f64 - 1.0)
+                            + crate::text::svg_line_box(font, last)
+                            - (0.905 * font).round();
+                        bounds.add_rect(Rect::new(
+                            ib.center().x - b.width / 2.0,
+                            top,
+                            b.width,
+                            bottom - top,
+                        ));
                         v.push(Element::classed_text(
-                            Text::centered(center, &b.lines, font, b.line_height, &pal.text_color),
+                            Text {
+                                x: ib.center().x,
+                                y: first,
+                                lines: b.lines.clone(),
+                                line_height: lh,
+                                font_size: font,
+                                bold: false,
+                                anchor: Anchor::Middle,
+                                fill: pal.text_color.clone(),
+                            },
                             "architecture-service-label",
                         ));
                     }
@@ -901,6 +944,7 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 e.lhs.side.out().scale(-1.0),
                 &pal.line_color,
                 ac.icon_size,
+                &mut bounds,
             ));
         }
         if e.rhs.arrow {
@@ -909,6 +953,7 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 e.rhs.side.out().scale(-1.0),
                 &pal.line_color,
                 ac.icon_size,
+                &mut bounds,
             ));
         }
         let mut children = vec![Element::classed_shape(
