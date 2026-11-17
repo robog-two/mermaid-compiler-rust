@@ -236,13 +236,26 @@ impl Label {
             .fold(0.0, f64::max)
     }
 
-    /// Approximation of the browser's `getBBox()`.
+    /// Approximation of the browser's `getBBox()`: each line's advance, anchored,
+    /// united with its glyphs' ink rounded out to whole pixels
+    /// ([`crate::text::svg_bbox_extent_styled`]).
     pub fn bbox(&self) -> Rect {
-        let w = self.width();
-        let x = match self.anchor {
-            Anchor::Start => self.x,
-            Anchor::Middle => self.x - w / 2.0,
-            Anchor::End => self.x - w,
+        let (mut x0, mut x1) = (f64::INFINITY, f64::NEG_INFINITY);
+        for l in &self.lines {
+            let adv = line_width(l, self.font_size, self.bold);
+            let start = match self.anchor {
+                Anchor::Start => self.x,
+                Anchor::Middle => self.x - adv / 2.0,
+                Anchor::End => self.x - adv,
+            };
+            let (lo, hi) = crate::text::svg_bbox_extent_styled(l, self.font_size, self.bold, false);
+            x0 = x0.min(start + lo);
+            x1 = x1.max(start + hi);
+        }
+        let (x, w) = if x0.is_finite() {
+            (x0, x1 - x0)
+        } else {
+            (self.x, 0.0)
         };
         let fs = self.font_size;
         let last = self.lines.last().map_or("", String::as_str);
@@ -506,10 +519,16 @@ pub fn layout(root: &Cause, fs: f64) -> Layout {
     head_label.line_height = fs * 1.05;
     head_label.bold = true;
     head_label.y = -(head_label.lines.len() as f64 - 1.0) * head_label.line_height / 2.0;
-    let tb = head_label.bbox();
+    let mut tb = head_label.bbox();
+    // drawHead measures the label before the svg is sized, where Chromium's text
+    // box is the rounded ascent plus descent (16px at 14px, as `svg_line_box`).
+    let last = head_label.lines.last().map_or("", String::as_str);
+    tb.h = (head_label.lines.len() as f64 - 1.0) * head_label.line_height
+        + crate::text::svg_line_box(HEAD_FONT, last);
     let w = (tb.w + 6.0).max(60.0);
     let h = (tb.h * 2.0 + 40.0).max(40.0);
-    head_label.x = w / 2.0 + 3.0;
+    // translate((w - tb.width) / 2 - tb.x + 3): the label was laid out at x 0.
+    head_label.x = (w - tb.w) / 2.0 - tb.x + 3.0;
     // Centre the block vertically on the spine (mermaid's -tb.y - tb.height/2).
     head_label.y -= tb.y + tb.h / 2.0;
 
@@ -863,9 +882,44 @@ mod tests {
         let cfg = MermaidConfig::default();
         let s = render("ishikawa\n  Effect\n", None, &cfg, &cfg.palette()).unwrap();
         assert_eq!(s.kind, DiagramKind::Ishikawa);
-        // head 60 wide → curve reaches x = 72; h = 2 × text height + 40; padded by 20
+        // head 60 wide → curve reaches x = 72; h = 2 × text height + 40; padded by
+        // 20. mermaid 12.3.0: viewBox "-20 194 112 112" (the 14px label box is 16).
         assert!((s.view_box.right() - 92.0).abs() < 1e-9);
-        let th = crate::diagram::treeview::text_height("Effect", HEAD_FONT);
-        assert!((s.view_box.h - (th * 2.0 + 40.0 + 40.0)).abs() < 1e-9);
+        assert_eq!((s.view_box.y, s.view_box.h), (194.0, 112.0));
+    }
+
+    #[test]
+    fn label_boxes_and_head_follow_get_bbox() {
+        // mermaid 12.3.0 (the gallery chart): "Environment" / "User" boxes are
+        // 130.375 / 74.453125 wide: their texts' getBBox() (ink rounded out to
+        // pixels, here past the advance) plus 40.
+        let cfg = MermaidConfig::default();
+        let s = render(
+            "ishikawa\n  Blurry Photo\n    Environment\n      Low light\n    User\n      Shaky hands\n",
+            None,
+            &cfg,
+            &cfg.palette(),
+        )
+        .unwrap();
+        fn rects(els: &[Element], out: &mut Vec<f64>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => rects(children, out),
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        class: Some(c),
+                        ..
+                    } if c == "ishikawa-label-box" => out.push(rect.w),
+                    _ => {}
+                }
+            }
+        }
+        let mut w = Vec::new();
+        rects(&s.elements, &mut w);
+        w.sort_by(f64::total_cmp);
+        assert!(
+            (w[0] - 74.453125).abs() < 1e-3 && (w[1] - 130.375).abs() < 1e-3,
+            "{w:?}"
+        );
     }
 }

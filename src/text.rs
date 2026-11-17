@@ -623,6 +623,104 @@ const ARIAL_ITALIC_INK: [(i16, i16); 94] = [
     (122, 1134),
 ];
 
+/// [`ARIAL_INK`] for Liberation Sans Bold (advances: the bold [`char_width_em`]).
+const ARIAL_BOLD_INK: [(i16, i16); 94] = [
+    (193, 487),
+    (135, 836),
+    (35, 1106),
+    (27, 1110),
+    (51, 1767),
+    (90, 1415),
+    (109, 381),
+    (102, 680),
+    (2, 580),
+    (6, 795),
+    (86, 1113),
+    (139, 432),
+    (80, 600),
+    (139, 428),
+    (20, 549),
+    (81, 1055),
+    (129, 1082),
+    (71, 1057),
+    (47, 1065),
+    (31, 1128),
+    (63, 1082),
+    (75, 1065),
+    (88, 1049),
+    (65, 1076),
+    (71, 1063),
+    (197, 485),
+    (195, 487),
+    (86, 1113),
+    (85, 1112),
+    (86, 1113),
+    (94, 1133),
+    (117, 1878),
+    (51, 1425),
+    (137, 1386),
+    (84, 1423),
+    (137, 1393),
+    (137, 1286),
+    (137, 1176),
+    (84, 1466),
+    (137, 1341),
+    (137, 432),
+    (31, 999),
+    (137, 1460),
+    (137, 1188),
+    (137, 1569),
+    (137, 1341),
+    (84, 1507),
+    (137, 1296),
+    (84, 1507),
+    (137, 1437),
+    (59, 1286),
+    (23, 1229),
+    (123, 1354),
+    (14, 1352),
+    (2, 1931),
+    (18, 1348),
+    (35, 1333),
+    (61, 1192),
+    (115, 657),
+    (21, 550),
+    (25, 567),
+    (45, 1151),
+    (-20, 1157),
+    (66, 575),
+    (60, 1152),
+    (135, 1167),
+    (80, 1079),
+    (84, 1116),
+    (80, 1069),
+    (35, 686),
+    (84, 1114),
+    (143, 1124),
+    (143, 424),
+    (-32, 425),
+    (143, 1141),
+    (143, 424),
+    (135, 1694),
+    (135, 1124),
+    (80, 1171),
+    (135, 1167),
+    (84, 1114),
+    (135, 766),
+    (72, 1055),
+    (25, 657),
+    (127, 1116),
+    (8, 1130),
+    (-6, 1597),
+    (14, 1124),
+    (16, 1128),
+    (82, 950),
+    (33, 754),
+    (156, 418),
+    (43, 766),
+    (81, 1119),
+];
+
 /// Width of an SVG `<text>`'s `getBBox()` in Chromium (regular weight): the run's
 /// advance (kerned, rounded up to 1/64 px) united with each glyph's ink box,
 /// which Skia rounds out to whole pixels from the glyph's origin. So a label
@@ -638,7 +736,15 @@ pub fn svg_bbox_width(text: &str, font_size: f64) -> f64 {
 /// start (see [`svg_bbox_width`]), upright or italic (`font-style: italic`,
 /// whose glyphs lean past their advance).
 pub fn svg_bbox_extent(text: &str, font_size: f64, italic: bool) -> (f64, f64) {
-    let table = if italic {
+    svg_bbox_extent_styled(text, font_size, false, italic)
+}
+
+/// [`svg_bbox_extent`] for any weight: bold (`font-weight` 600 and up, drawn
+/// with the bold face) takes the bold advances and ink.
+pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bool) -> (f64, f64) {
+    let table = if bold {
+        &ARIAL_BOLD_INK
+    } else if italic {
         &ARIAL_ITALIC_INK
     } else {
         &ARIAL_INK
@@ -649,7 +755,7 @@ pub fn svg_bbox_extent(text: &str, font_size: f64, italic: bool) -> (f64, f64) {
     let mut prev: Option<char> = None;
     for c in text.chars().filter(|&c| !mark::is_mark(c)) {
         if let Some(p) = prev {
-            x += kerning_em(p, c, false) * font_size;
+            x += kerning_em(p, c, bold) * font_size;
         }
         if let 0x21..=0x7E = c as u32 {
             let (lo, hi) = table[(c as u32 - 0x21) as usize];
@@ -657,7 +763,7 @@ pub fn svg_bbox_extent(text: &str, font_size: f64, italic: bool) -> (f64, f64) {
             left = left.min(x + (ink(lo) + 0.005).floor());
             right = right.max(x + (ink(hi) - 0.005).ceil());
         }
-        x += char_width_em(c, false) * font_size;
+        x += char_width_em(c, bold) * font_size;
         prev = Some(c);
     }
     (left, right.max(layout_unit_ceil(x)))
