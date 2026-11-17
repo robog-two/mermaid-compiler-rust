@@ -796,47 +796,32 @@ pub struct TextBlock {
 /// Line pitch of SVG text labels in em (`createFormattedText`'s `lineHeight`).
 pub const SVG_LINE_HEIGHT: f64 = 1.1;
 
-/// Whether a glyph reaches below the font's descent line, which grows the browser's
-/// `getBBox()` of an SVG text line (`g`, `p`, brackets, `_`, ...).
-fn has_deep_descender(c: char) -> bool {
-    matches!(
-        c,
-        'g' | 'j'
-            | 'p'
-            | 'q'
-            | 'y'
-            | '('
-            | ')'
-            | '['
-            | ']'
-            | '{'
-            | '}'
-            | '|'
-            | '_'
-            | '@'
-            | '$'
-            | 'ç'
-            | 'Ç'
-            | 'µ'
-            | 'þ'
-            | 'ÿ'
-            | 'ý'
-    )
+/// How far below the baseline a glyph's ink reaches, in em, for the glyphs that
+/// can reach past the font's rounded descent (0 for the rest). Measured in
+/// Chromium as the font sizes (6..40px) at which a lone glyph's `getBBox()`
+/// grows: `g`, `p`, brackets, ... from about 0.2075em, `|` and the cedillas
+/// further, `Q` and `_` less (only where the descent rounds down by more than
+/// 0.01em); `@` and `$` never.
+fn descender_depth(c: char) -> f64 {
+    match c {
+        '|' | 'ç' | 'Ç' => 0.22,
+        'g' | 'j' | 'p' | 'q' | 'y' | '(' | ')' | '[' | ']' | '{' | '}' | 'µ' | 'þ' | 'ÿ' | 'ý' => {
+            0.2075
+        }
+        'Q' | '_' => 0.195,
+        _ => 0.0,
+    }
 }
 
 /// Height of one SVG text line's bounding box, as Chromium's `getBBox()` reports it
 /// for mermaid's fonts (Arial metrics, ascent 0.905em and descent 0.212em, each
-/// rounded to whole pixels; a deep descender rounds the descent up instead):
-/// 16px at 14px, 17px (18px with a descender) at 16px.
+/// rounded to whole pixels; a glyph whose ink reaches further down extends it to
+/// that ink, rounded out): 16px at 14px, 17px (18px with a `g`) at 16px.
 pub fn svg_line_box(font_size: f64, line: &str) -> f64 {
     let ascent = (0.905 * font_size).round();
     let descent = (0.212 * font_size).round();
-    let descent = if line.chars().any(has_deep_descender) {
-        descent.max((0.212 * font_size - 1e-6).ceil())
-    } else {
-        descent
-    };
-    ascent + descent
+    let ink = line.chars().map(descender_depth).fold(0.0, f64::max);
+    ascent + descent.max((ink * font_size - 1e-9).ceil())
 }
 
 impl TextBlock {
@@ -1588,6 +1573,16 @@ mod tests {
         assert_eq!(svg_line_box(16.0, "Christmas"), 17.0);
         assert_eq!(svg_line_box(16.0, "Laptop"), 18.0);
         assert_eq!(svg_line_box(16.0, "(x)"), 18.0);
+        // Chromium (mermaid's fonts): `_` and `Q` reach below the rounded descent
+        // at 16px but not at 10px; `@` and `$` never; `g` at 10px does.
+        assert_eq!(svg_line_box(10.0, "RC_1"), 11.0);
+        assert_eq!(svg_line_box(16.0, "RC_1"), 18.0);
+        assert_eq!(svg_line_box(11.0, "Q"), svg_line_box(11.0, "g"));
+        assert_eq!(svg_line_box(16.0, "@$"), 17.0);
+        assert_eq!(svg_line_box(10.0, "g"), 12.0);
+        // `|` also at 19px, where `g` stays within.
+        assert_eq!(svg_line_box(19.0, "|"), svg_line_box(19.0, "x") + 1.0);
+        assert_eq!(svg_line_box(19.0, "g"), svg_line_box(19.0, "x"));
     }
 
     #[test]

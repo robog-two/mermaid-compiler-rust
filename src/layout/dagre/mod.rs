@@ -8,6 +8,7 @@
 mod core;
 mod graph;
 
+pub(crate) use self::core::js_sort;
 use self::core::{InEdge, InNode, Opts, Pt, RankDir};
 use self::graph::Graph;
 use super::{Direction, EdgeRoute, LayoutInput, LayoutOutput};

@@ -2116,6 +2116,7 @@ fn translate_element(e: Element, dy: f64) -> Element {
         return e;
     }
     match e {
+        e @ Element::OutlinedText { .. } => e.translated(0.0, dy),
         Element::Group {
             id,
             class,

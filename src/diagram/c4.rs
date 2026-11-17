@@ -2495,7 +2495,9 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         fn walk(e: &[Element], out: &mut Vec<Text>) {
             for el in e {
                 match el {
-                    Element::Text { text, .. } => out.push(text.clone()),
+                    Element::Text { text, .. } | Element::OutlinedText { text, .. } => {
+                        out.push(text.clone())
+                    }
                     Element::Group { children, .. } | Element::Rotated { children, .. } => {
                         walk(children, out)
                     }

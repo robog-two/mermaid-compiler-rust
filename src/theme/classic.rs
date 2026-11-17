@@ -613,6 +613,117 @@ pub(super) fn section_colors(theme: ThemeName, vars: &[(String, String)]) -> Opt
     })
 }
 
+/// The git graph's label colours: `commitLabelColor` / `commitLabelBackground` and
+/// `tagLabelColor` / `tagLabelBackground` / `tagLabelBorder`.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct GitLabelColors {
+    pub commit_text: Color,
+    pub commit_bkg: Color,
+    pub tag_text: Color,
+    pub tag_bkg: Color,
+    pub tag_border: Color,
+}
+
+/// Every theme's `updateColors()` sets `commitLabelColor ||= secondaryTextColor`,
+/// `commitLabelBackground ||= secondaryColor`, `tagLabelColor ||= primaryTextColor`,
+/// `tagLabelBackground ||= primaryColor` and (every run, not `||=`) `tagLabelBorder =
+/// tagBorder || primaryBorderColor`. What feeds them depends on where the theme
+/// computes those inputs:
+///
+/// * `default` runs `updateColors()` in its constructor, so all but the border keep
+///   the stock values whatever `themeVariables` says;
+/// * `dark`, `forest`, `neutral` and the dark neo / redux themes compute primary /
+///   secondary colours and their text colours in the constructor (an override
+///   replaces one value; nothing is re-derived from it);
+/// * `base`, `neo`, `redux` and `redux-color` derive them in `updateColors()` from the
+///   (overridden) `primaryColor`: `secondaryColor = adjust(primary, h: -120)`, its text
+///   colour inverted, the border `mkBorder(primary)` (`neo` / `redux*` fix the border in
+///   the constructor).
+pub(super) fn git_label_colors(theme: ThemeName, vars: &[(String, String)]) -> GitLabelColors {
+    let raw = |k: &str| {
+        vars.iter()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.trim().to_string())
+    };
+    let ov = |k: &str| raw(k).and_then(|v| K::parse(&v));
+    let dark_mode = raw("darkMode").is_some_and(|v| v == "true");
+    // theme-helpers.js `mkBorder(c, darkMode)`.
+    let mk_border = |c: K, dark: bool| c.adjust(0.0, -40.0, if dark { 10.0 } else { -10.0 });
+    // (primary, secondary, primaryText, secondaryText, primaryBorder)
+    let (p, s, pt, st, pb) = match theme {
+        ThemeName::Default | ThemeName::Null => {
+            let p = hex("#ECECFF");
+            let s = hex("#ffffde");
+            (
+                p,
+                s,
+                p.invert(),
+                s.invert(),
+                ov("primaryBorderColor").unwrap_or(mk_border(p, false)),
+            )
+        }
+        ThemeName::Dark | ThemeName::NeoDark | ThemeName::ReduxDark | ThemeName::ReduxDarkColor => {
+            let p = hex("#1f2020");
+            let s = p.lighten(16.0);
+            (
+                ov("primaryColor").unwrap_or(p),
+                ov("secondaryColor").unwrap_or(s),
+                ov("primaryTextColor").unwrap_or(p.invert()),
+                ov("secondaryTextColor").unwrap_or(s.invert()),
+                // `invert(background)` of the stock `#333`.
+                ov("primaryBorderColor").unwrap_or(hex("#333").invert()),
+            )
+        }
+        ThemeName::Forest | ThemeName::Neutral => {
+            let (p, s) = if theme == ThemeName::Forest {
+                (hex("#cde498"), hex("#cdffb2"))
+            } else {
+                (hex("#eee"), hex("#707070").lighten(55.0))
+            };
+            (
+                ov("primaryColor").unwrap_or(p),
+                ov("secondaryColor").unwrap_or(s),
+                ov("primaryTextColor").unwrap_or(p.invert()),
+                ov("secondaryTextColor").unwrap_or(s.invert()),
+                ov("primaryBorderColor").unwrap_or(mk_border(p, false)),
+            )
+        }
+        ThemeName::Base | ThemeName::Neo | ThemeName::Redux | ThemeName::ReduxColor => {
+            let (stock, text) = match theme {
+                ThemeName::Base => ("#fff4dd", "#333"),
+                ThemeName::Neo => ("#cccccc", "#333"),
+                _ => ("#cccccc", "#28253D"),
+            };
+            let p = ov("primaryColor").unwrap_or(hex(stock));
+            let s = ov("secondaryColor").unwrap_or(p.hue(-120.0));
+            let border = match theme {
+                ThemeName::Base => mk_border(p, dark_mode),
+                ThemeName::Neo => mk_border(hex("#cccccc"), false),
+                _ => mk_border(hex("#28253D"), false),
+            };
+            (
+                p,
+                s,
+                ov("primaryTextColor").unwrap_or(hex(if dark_mode { "#eee" } else { text })),
+                ov("secondaryTextColor").unwrap_or(s.invert()),
+                ov("primaryBorderColor").unwrap_or(border),
+            )
+        }
+    };
+    let pick = |k: &str, v: K| raw(k).map(Color::new).unwrap_or_else(|| v.to_color());
+    GitLabelColors {
+        commit_text: pick("commitLabelColor", st),
+        commit_bkg: pick("commitLabelBackground", s),
+        tag_text: pick("tagLabelColor", pt),
+        tag_bkg: pick("tagLabelBackground", p),
+        tag_border: raw("tagLabelBorder")
+            .or_else(|| raw("tagBorder"))
+            .map(Color::new)
+            .unwrap_or_else(|| pb.to_color()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

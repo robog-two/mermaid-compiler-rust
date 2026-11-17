@@ -1429,7 +1429,7 @@ mod tests {
                     }
                 }
             },
-            Element::Text { .. } | Element::Rotated { .. } => {}
+            Element::Text { .. } | Element::OutlinedText { .. } | Element::Rotated { .. } => {}
         }
     }
 
