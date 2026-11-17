@@ -90,7 +90,7 @@ impl Rgba {
             }
             let k = ((n + h / 30.0) as f64 % 12.0) as f32;
             let a = s * l.min(1.0 - l);
-            l - a * (k - 3.0).min(9.0 - k).min(1.0).max(-1.0)
+            l - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
         };
         let to = |c: f32| {
             (((c + 1e-7) as f64 * 255.0) as f32 as f64)
