@@ -3248,11 +3248,20 @@ fn draw_node(
                     "usecase-actor-stick",
                 )),
                 ActorType::Hollow => {
+                    // A `.node circle`: neo's drop shadow, of its ring (it is unfilled).
+                    let head = Geometry::Circle {
+                        c: Point::new(g.x, g.y - 23.0),
+                        r: 9.0,
+                    };
+                    if let Some(sh) = sh {
+                        els.push(Element::classed_shape(
+                            head.translated(sh.dx, sh.dy),
+                            Paint::stroke(&sh.color, line.stroke_width).with_opacity(sh.opacity),
+                            "drop-shadow",
+                        ));
+                    }
                     els.push(Element::classed_shape(
-                        Geometry::Circle {
-                            c: Point::new(g.x, g.y - 23.0),
-                            r: 9.0,
-                        },
+                        head,
                         line.clone(),
                         "usecase-actor-hollow-head",
                     ));
@@ -3269,24 +3278,31 @@ fn draw_node(
                 )),
                 ActorType::Icon => {
                     // Icon packs are not bundled: draw mermaid's unknown-icon fallback.
+                    // Both rects are `.node rect`s, which neo strokes in the node
+                    // border and gives the drop shadow.
+                    let mut frame_paint = paint.clone();
+                    if o.neo() && n.style.stroke.is_none() {
+                        frame_paint.stroke = pal.node_border.clone();
+                    }
+                    let frame = Geometry::Rect {
+                        rect: Rect::new(g.x - 26.0, g.y - 28.0, 52.0, 52.0),
+                        rx: 4.0,
+                    };
+                    els.extend(shadow(&frame, sh));
                     els.push(Element::classed_shape(
-                        Geometry::Rect {
-                            rect: Rect::new(g.x - 26.0, g.y - 28.0, 52.0, 52.0),
-                            rx: 4.0,
-                        },
-                        paint.clone(),
+                        frame,
+                        frame_paint,
                         "usecase-actor-icon-frame",
                     ));
+                    let ir = Rect::new(g.x - 21.0, g.y - 23.0, 42.0, 42.0);
+                    let fallback = Geometry::Rect { rect: ir, rx: 0.0 };
+                    els.extend(shadow(&fallback, sh));
                     els.push(Element::classed_shape(
-                        Geometry::Rect {
-                            rect: Rect::new(g.x - 21.0, g.y - 23.0, 42.0, 42.0),
-                            rx: 0.0,
-                        },
+                        fallback,
                         Paint::fill(&Color::new("#087ebf")),
                         "usecase-actor-icon-fallback",
                     ));
-                    let q = Block::new(vec!["?".into()], 35.57, false);
-                    els.push(q.text(Point::new(g.x, g.y - 1.5), &Color::new("#fff")));
+                    els.push(super::archicons::unknown(ir));
                 }
             }
             if *business {
@@ -3326,7 +3342,7 @@ fn draw_node(
                 .style
                 .color
                 .clone()
-                .unwrap_or_else(|| pal.node_text.clone());
+                .unwrap_or_else(|| pal.primary_text.clone());
             els.push(label.text(c, &color));
             (els, Clip::Ellipse(c, *rx, *ry))
         }
@@ -3360,7 +3376,7 @@ fn draw_node(
                 .style
                 .color
                 .clone()
-                .unwrap_or_else(|| pal.node_text.clone());
+                .unwrap_or_else(|| pal.primary_text.clone());
             if let Some(s) = stereotype {
                 els.push(s.text(Point::new(c.x, c.y - label_h / 2.0 + s.h / 2.0), &color));
             }
@@ -3376,7 +3392,7 @@ fn draw_node(
                 .style
                 .color
                 .clone()
-                .unwrap_or_else(|| pal.node_text.clone());
+                .unwrap_or_else(|| pal.primary_text.clone());
             els.push(label.text(c, &color));
             (els, Clip::Rect(r))
         }
@@ -3421,7 +3437,7 @@ fn draw_node(
                 .style
                 .color
                 .clone()
-                .unwrap_or_else(|| pal.node_text.clone());
+                .unwrap_or_else(|| pal.primary_text.clone());
             let inner_w = key_w + value_w;
             let (left, mut y) = (r.x + border, r.y + border);
             let cell = |x: f64, y: f64, w: f64, h: f64| {
@@ -3922,7 +3938,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
                 .style
                 .color
                 .clone()
-                .unwrap_or_else(|| pal.node_text.clone());
+                .unwrap_or_else(|| pal.primary_text.clone());
             label_els.push(Element::group(
                 "edgeLabel",
                 vec![
