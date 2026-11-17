@@ -1425,6 +1425,7 @@ mod tests {
                             PathCmd::MoveTo(p) | PathCmd::LineTo(p) => add(*p),
                             PathCmd::CubicTo(_, _, p) => add(*p),
                             PathCmd::Close => {}
+                            PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => {}
                         }
                     }
                 }

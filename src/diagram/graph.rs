@@ -2617,7 +2617,7 @@ fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> 
         }
     };
     let mut d = String::new();
-    for c in cmds {
+    for c in geom::flatten_arcs(cmds).iter() {
         match *c {
             geom::PathCmd::MoveTo(a) => {
                 let a = local(a);
@@ -2640,6 +2640,8 @@ fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> 
                 )
             }
             geom::PathCmd::Close => d += "Z",
+            // Flattened above.
+            geom::PathCmd::MoveBy(_) | geom::PathCmd::ArcTo { .. } => {}
         }
     }
     d.contains(&js_round(p.x)) || d.contains(&js_round(p.y))
@@ -5453,6 +5455,7 @@ mod tests {
             .filter_map(|c| match c {
                 PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(*p),
                 PathCmd::Close => None,
+                PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => None,
             })
             .collect()
     }

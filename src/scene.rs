@@ -157,6 +157,20 @@ impl Geometry {
                         PathCmd::LineTo(p) => PathCmd::LineTo(mv(p)),
                         PathCmd::CubicTo(a, b, p) => PathCmd::CubicTo(mv(a), mv(b), mv(p)),
                         PathCmd::Close => PathCmd::Close,
+                        PathCmd::MoveBy(d) => PathCmd::MoveBy(*d),
+                        &PathCmd::ArcTo {
+                            r,
+                            large,
+                            sweep,
+                            to,
+                            rel,
+                        } => PathCmd::ArcTo {
+                            r,
+                            large,
+                            sweep,
+                            to: if rel { to } else { mv(&to) },
+                            rel,
+                        },
                     })
                     .collect(),
             ),

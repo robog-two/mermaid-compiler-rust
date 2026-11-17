@@ -222,6 +222,20 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
                     PathCmd::LineTo(p) => PathCmd::LineTo(sc(p)),
                     PathCmd::CubicTo(a, b, p) => PathCmd::CubicTo(sc(a), sc(b), sc(p)),
                     PathCmd::Close => PathCmd::Close,
+                    PathCmd::MoveBy(d) => PathCmd::MoveBy(d.scale(k)),
+                    &PathCmd::ArcTo {
+                        r,
+                        large,
+                        sweep,
+                        to,
+                        rel,
+                    } => PathCmd::ArcTo {
+                        r: r * k,
+                        large,
+                        sweep,
+                        to: if rel { to.scale(k) } else { sc(&to) },
+                        rel,
+                    },
                 })
                 .collect();
             paint.stroke_width *= k;

@@ -2971,6 +2971,7 @@ A->>D: x"#,
                                 Some(*p)
                             }
                             PathCmd::Close => None,
+                            PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => None,
                         })
                         .collect(),
                 ),

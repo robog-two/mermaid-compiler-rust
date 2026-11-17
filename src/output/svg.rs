@@ -51,9 +51,15 @@ pub fn esc(s: &str) -> String {
 
 /// Path data string for path commands.
 pub fn path_data(cmds: &[PathCmd]) -> String {
+    use crate::diagram::xychart::js_num;
+    // A path with SVG arcs is venn.js's: every number in full.
+    let arcs = cmds.iter().any(|c| matches!(c, PathCmd::ArcTo { .. }));
     let mut d = String::new();
     for c in cmds {
         match c {
+            PathCmd::MoveTo(p) if arcs => {
+                let _ = write!(d, "M {} {} ", js_num(p.x), js_num(p.y));
+            }
             PathCmd::MoveTo(p) => {
                 let _ = write!(d, "M{},{}", num(p.x), num(p.y));
             }
@@ -73,7 +79,35 @@ pub fn path_data(cmds: &[PathCmd]) -> String {
                 );
             }
             PathCmd::Close => d.push('Z'),
+            // venn.js's spelling (`circlePath`, `intersectionAreaPath`), its
+            // numbers as JavaScript prints them, so the browser parses the same
+            // floats it parses from mermaid's markup.
+            PathCmd::MoveBy(p) => {
+                let _ = write!(d, "m {} {} ", js_num(p.x), js_num(p.y));
+            }
+            PathCmd::ArcTo {
+                r,
+                large,
+                sweep,
+                to,
+                rel,
+            } => {
+                let _ = write!(
+                    d,
+                    "{} {} {} 0 {} {} {} {} ",
+                    if *rel { 'a' } else { 'A' },
+                    js_num(*r),
+                    js_num(*r),
+                    u8::from(*large),
+                    u8::from(*sweep),
+                    js_num(to.x),
+                    js_num(to.y)
+                );
+            }
         }
+    }
+    if arcs {
+        d.truncate(d.trim_end().len());
     }
     d
 }

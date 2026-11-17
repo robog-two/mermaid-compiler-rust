@@ -1024,7 +1024,7 @@ fn geometry_points(g: &Geometry, out: &mut Vec<Point>) {
         }
         Geometry::Path(cmds) => {
             let mut cur = Point::default();
-            for cmd in cmds {
+            for cmd in crate::geom::flatten_arcs(cmds).iter() {
                 match *cmd {
                     PathCmd::MoveTo(q) | PathCmd::LineTo(q) => {
                         out.push(q);
@@ -1043,7 +1043,8 @@ fn geometry_points(g: &Geometry, out: &mut Vec<Point>) {
                         }
                         cur = e;
                     }
-                    PathCmd::Close => {}
+                    // Flattened above.
+                    PathCmd::Close | PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => {}
                 }
             }
         }

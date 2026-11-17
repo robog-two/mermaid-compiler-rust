@@ -494,6 +494,7 @@ mod tests {
             .filter_map(|c| match c {
                 PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(*p),
                 PathCmd::Close => None,
+                PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => None,
             })
             .collect();
         let near = |p: Point, x: f64, y: f64| (p.x - x).abs() < 1e-9 && (p.y - y).abs() < 1e-9;

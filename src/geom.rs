@@ -123,13 +123,78 @@ impl Bounds {
     }
 }
 
-/// Path commands understood by every output backend. Arcs are pre-converted to cubics.
+/// Path commands understood by every output backend.
+///
+/// Arcs are normally pre-converted to cubics. [`PathCmd::ArcTo`] and
+/// [`PathCmd::MoveBy`] exist for paths mermaid writes with SVG arcs and relative
+/// moves (venn.js's circles): SVG output writes them as such, so a browser builds
+/// the very curves it builds from mermaid's markup (Skia's own arc conversion,
+/// in single precision). Every other consumer reads [`flatten_arcs`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PathCmd {
     MoveTo(Point),
     LineTo(Point),
     CubicTo(Point, Point, Point),
     Close,
+    /// `m`: a move by an offset from the current point.
+    MoveBy(Point),
+    /// A circular arc of radius `r` (SVG `A r r 0 large sweep to`, or `a` with
+    /// `to` relative to the current point when `rel`).
+    ArcTo {
+        r: f64,
+        large: bool,
+        sweep: bool,
+        to: Point,
+        rel: bool,
+    },
+}
+
+/// `cmds` with [`PathCmd::MoveBy`] made absolute and [`PathCmd::ArcTo`] drawn as
+/// cubics (borrowed unchanged when it has neither).
+pub fn flatten_arcs(cmds: &[PathCmd]) -> std::borrow::Cow<'_, [PathCmd]> {
+    if !cmds
+        .iter()
+        .any(|c| matches!(c, PathCmd::MoveBy(_) | PathCmd::ArcTo { .. }))
+    {
+        return std::borrow::Cow::Borrowed(cmds);
+    }
+    let mut out = Vec::with_capacity(cmds.len() + 4);
+    let (mut cur, mut start) = (Point::default(), Point::default());
+    for c in cmds {
+        match *c {
+            PathCmd::MoveTo(p) => {
+                (cur, start) = (p, p);
+                out.push(*c);
+            }
+            PathCmd::MoveBy(d) => {
+                cur = cur.plus(d);
+                start = cur;
+                out.push(PathCmd::MoveTo(cur));
+            }
+            PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => {
+                cur = p;
+                out.push(*c);
+            }
+            PathCmd::Close => {
+                cur = start;
+                out.push(*c);
+            }
+            PathCmd::ArcTo {
+                r,
+                large,
+                sweep,
+                to,
+                rel,
+            } => {
+                let end = if rel { cur.plus(to) } else { to };
+                if cur != end {
+                    out.extend(svg_arc_cubics(cur, r, large, sweep, end));
+                }
+                cur = end;
+            }
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// A length as Chromium hands back an SVG attribute it was given (a `rect`'s
@@ -161,7 +226,7 @@ pub fn path_bbox(cmds: &[PathCmd]) -> Option<Rect> {
     let mut b = Bounds::default();
     let mut cur = Point::default();
     let mut start = cur;
-    for c in cmds {
+    for c in flatten_arcs(cmds).iter() {
         match *c {
             PathCmd::MoveTo(p) => {
                 b.add_point(p);
@@ -212,6 +277,8 @@ pub fn path_bbox(cmds: &[PathCmd]) -> Option<Rect> {
                 cur = p;
             }
             PathCmd::Close => cur = start,
+            // Flattened above.
+            PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => {}
         }
     }
     b.0
@@ -340,7 +407,7 @@ pub fn path_length(cmds: &[PathCmd]) -> f64 {
     const PIECES: usize = 8;
     let mut total = 0.0;
     let (mut cur, mut start) = (Point::default(), Point::default());
-    for c in cmds {
+    for c in flatten_arcs(cmds).iter() {
         match *c {
             PathCmd::MoveTo(p) => {
                 cur = p;
@@ -376,6 +443,8 @@ pub fn path_length(cmds: &[PathCmd]) -> f64 {
                 total += cur.dist(start);
                 cur = start;
             }
+            // Flattened above.
+            PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => {}
         }
     }
     total
@@ -459,6 +528,13 @@ pub fn fix_corners(points: &[Point]) -> Vec<Point> {
 /// notes F.6.5/F.6.6 for a circle: the small arc, its radius scaled up when the
 /// chord is longer than the diameter). The last cubic ends exactly at `to`.
 pub fn svg_circle_arc_cubics(from: Point, r: f64, sweep: bool, to: Point) -> Vec<PathCmd> {
+    svg_arc_cubics(from, r, false, sweep, to)
+}
+
+/// The SVG arc `A r,r 0 large sweep to` from `from` as cubics (SVG 1.1
+/// implementation notes F.6.5/F.6.6 for a circle, its radius scaled up when the
+/// chord is longer than the diameter). The last cubic ends exactly at `to`.
+pub fn svg_arc_cubics(from: Point, r: f64, large: bool, sweep: bool, to: Point) -> Vec<PathCmd> {
     let mut r = r.abs();
     if r == 0.0 || from == to {
         return vec![PathCmd::LineTo(to)];
@@ -472,7 +548,7 @@ pub fn svg_circle_arc_cubics(from: Point, r: f64, sweep: bool, to: Point) -> Vec
     let mut coef = ((r * r * r * r - r * r * d2) / (r * r * d2))
         .max(0.0)
         .sqrt();
-    if !sweep {
+    if large == sweep {
         coef = -coef;
     }
     let (cxp, cyp) = (coef * y1, -coef * x1);

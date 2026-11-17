@@ -11,7 +11,7 @@
 use crate::color::{self, Rgba};
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
-use crate::geom::{self, PathCmd, Point, Rect};
+use crate::geom::{PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::theme::{Palette, ThemeName};
 use std::collections::HashMap;
@@ -1758,7 +1758,30 @@ impl VennSolution {
     }
 }
 
-/// Boundary of the region common to `circles` as path commands (`intersectionAreaPath`).
+/// venn.js's `circlePath`: a circle as two relative half-circle arcs from its
+/// leftmost point. Kept as SVG arcs (see [`PathCmd::ArcTo`]): Chromium turns
+/// each into conics in single precision, the centre of an exact half circle
+/// drifting off the chord by up to ~0.1px (`1 / d - 0.25` in `SkPath::arcTo`
+/// rounds to a few ulps above zero), which `getBBox` and the pixels show.
+pub fn circle_path(c: &Circle) -> Vec<PathCmd> {
+    let r = c.radius;
+    let arc = |dx: f64| PathCmd::ArcTo {
+        r,
+        large: true,
+        sweep: false,
+        to: Point::new(dx, 0.0),
+        rel: true,
+    };
+    vec![
+        PathCmd::MoveTo(c.center()),
+        PathCmd::MoveBy(Point::new(-r, 0.0)),
+        arc(r * 2.0),
+        arc(-r * 2.0),
+    ]
+}
+
+/// Boundary of the region common to `circles` as path commands
+/// (`intersectionAreaPath`: absolute SVG arcs, open).
 pub fn intersection_path(circles: &[Circle]) -> Vec<PathCmd> {
     if circles.is_empty() {
         return Vec::new();
@@ -1766,25 +1789,18 @@ pub fn intersection_path(circles: &[Circle]) -> Vec<PathCmd> {
     let arcs = intersection_area(circles).arcs;
     match arcs.len() {
         0 => Vec::new(),
-        1 => {
-            let c = arcs[0].circle;
-            geom::ellipse(c.center(), c.radius, c.radius)
-        }
+        1 => circle_path(&arcs[0].circle),
         _ => {
             let mut cmds = vec![PathCmd::MoveTo(arcs[0].p2)];
-            let mut cur = arcs[0].p2;
             for a in &arcs {
-                let c = a.circle.center();
-                let a0 = (cur.y - c.y).atan2(cur.x - c.x);
-                let a1 = (a.p1.y - c.y).atan2(a.p1.x - c.x);
-                let mut delta = (a1 - a0).rem_euclid(TAU);
-                if delta < 1e-12 && a.large {
-                    delta = TAU;
-                }
-                cmds.extend(geom::arc_cubics(c, a.circle.radius, a0, a0 + delta));
-                cur = a.p1;
+                cmds.push(PathCmd::ArcTo {
+                    r: a.circle.radius,
+                    large: a.large,
+                    sweep: true,
+                    to: a.p1,
+                    rel: false,
+                });
             }
-            cmds.push(PathCmd::Close);
             cmds
         }
     }
@@ -2042,15 +2058,13 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             let stroke_w = style_get(&styles, &key, "stroke-width")
                 .and_then(parse_num)
                 .unwrap_or(5.0 * scale);
-            let c = circles[0];
-            let geom = Geometry::Path(geom::ellipse(c.center(), c.radius, c.radius));
+            // One path, filled and stroked, as venn.js draws it.
+            let mut paint = Paint::fill(&with_alpha(&base, fill_opacity));
+            paint.stroke = with_alpha(&stroke, 0.95);
+            paint.stroke_width = stroke_w;
             group.push(Element::shape(
-                geom.clone(),
-                Paint::fill(&with_alpha(&base, fill_opacity)),
-            ));
-            group.push(Element::shape(
-                geom,
-                Paint::stroke(&with_alpha(&stroke, 0.95), stroke_w),
+                Geometry::Path(circle_path(&circles[0])),
+                paint,
             ));
             style_get(&styles, &key, "color").map_or_else(
                 || shift_lightness(&base, if pal.dark { 30.0 } else { -30.0 }),
@@ -2153,6 +2167,64 @@ fn translate_element(e: Element, dy: f64) -> Element {
     }
 }
 
+/// A `<foreignObject>` box in Chromium's layout units (1/64 px): its float
+/// attribute cut toward zero, as `LayoutUnit(float)` does.
+fn layout_unit(v: f64) -> f64 {
+    (f64::from(v as f32) * 64.0).trunc() / 64.0
+}
+
+/// One text node's lines as Chromium lays out its `foreignObject` (`box_w` by
+/// `box_h` centred on `(x, y)`) holding a flex `span` that centres the text both
+/// ways: the box at layout units, the anonymous flex item (its lines, or the
+/// whole width once they wrap) centred in it and each line centred in the item,
+/// every half cut toward zero to a layout unit. One start-anchored text per line.
+#[allow(clippy::too_many_arguments)]
+fn fo_text_lines(
+    x: f64,
+    y: f64,
+    box_w: f64,
+    box_h: f64,
+    lines: &[String],
+    font: f64,
+    line_h: f64,
+    fill: &Color,
+) -> Vec<Element> {
+    let half = |v: f64| ((v * 64.0).round() / 2.0).trunc() / 64.0;
+    let (left, top) = (layout_unit(x - box_w / 2.0), layout_unit(y - box_h / 2.0));
+    let (w, h) = (layout_unit(box_w), layout_unit(box_h));
+    let widths: Vec<f64> = lines
+        .iter()
+        .map(|l| crate::text::html_line_width(l, font, false))
+        .collect();
+    // Shrink-to-fit: a single line's own width; wrapped lines fill the box
+    // (or a word too long for it).
+    let widest = widths.iter().copied().fold(0.0, f64::max);
+    let item_w = if lines.len() > 1 {
+        widest.max(w)
+    } else {
+        widest
+    };
+    let item_left = left + half(w - item_w);
+    let item_top = top + half(h - line_h * lines.len() as f64);
+    lines
+        .iter()
+        .zip(&widths)
+        .enumerate()
+        .map(|(i, (line, lw))| {
+            let top = item_top + line_h * i as f64;
+            let text = Text::centered(
+                Point::new(0.0, top + line_h / 2.0),
+                std::slice::from_ref(line),
+                font,
+                line_h,
+                fill,
+            )
+            .anchored(Anchor::Start, item_left + half(item_w - lw));
+            Element::classed_text(text, "venn-text-node")
+        })
+        .collect()
+}
+
 /// `renderTextNodes`: text nodes in a grid inside their region's inscribed circle.
 fn draw_text_nodes(
     venn: &Venn,
@@ -2172,7 +2244,8 @@ fn draw_text_nodes(
         }
     }
     let font = 40.0 * scale;
-    let line_h = font * 1.15;
+    // The span's `line-height: normal`.
+    let line_h = crate::text::normal_line_height(font);
     let mut out = Vec::new();
     for (key, nodes) in groups {
         // Later areas with the same key win (a Map built in data order).
@@ -2219,8 +2292,11 @@ fn draw_text_nodes(
         let cell_h = inner_h / rows as f64;
         let mut area = Vec::new();
         if debug {
-            area.push(Element::path(
-                geom::ellipse(*centre, inner, inner),
+            area.push(Element::shape(
+                Geometry::Circle {
+                    c: *centre,
+                    r: inner,
+                },
                 Paint::stroke(&Color::new("purple"), 1.5 * scale)
                     .dashed(vec![6.0 * scale, 4.0 * scale]),
             ));
@@ -2250,9 +2326,15 @@ fn draw_text_nodes(
             if lines.is_empty() {
                 continue;
             }
-            area.push(Element::classed_text(
-                Text::centered(Point::new(x, y), &lines, font, line_h, &fill),
-                "venn-text-node",
+            area.extend(fo_text_lines(
+                x,
+                y,
+                cell_w * 0.9,
+                cell_h * 0.9,
+                &lines,
+                font,
+                line_h,
+                &fill,
             ));
         }
         out.push(Element::group("venn-text-area", area));
@@ -2604,6 +2686,59 @@ mod tests {
         assert!(svg.contains("rgba(255, 107, 107, 0.1)"));
         assert!(svg.contains("#ffcc00"));
         assert!(svg.contains("\"red\""));
+    }
+
+    /// Every text of a scene.
+    fn texts(els: &[Element], out: &mut Vec<Text>) {
+        for e in els {
+            match e {
+                Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                    texts(children, out);
+                }
+                Element::Text { text, .. } => out.push(text.clone()),
+                _ => {}
+            }
+        }
+    }
+
+    /// mermaid 12.3.0 draws circles as venn.js's relative arcs, numbers in full
+    /// (Chromium's single-precision arc conversion then puts the bottom of this
+    /// circle 0.08px below 387.665, which only the same markup reproduces).
+    #[test]
+    fn circles_are_venn_js_arc_paths() {
+        let c = Circle {
+            x: 553.1183004943412,
+            y: 225.0,
+            radius: 162.66530054071148,
+        };
+        assert_eq!(
+            crate::output::svg::path_data(&circle_path(&c)),
+            "M 553.1183004943412 225 m -162.66530054071148 0 \
+             a 162.66530054071148 162.66530054071148 0 1 0 325.33060108142297 0 \
+             a 162.66530054071148 162.66530054071148 0 1 0 -325.33060108142297 0"
+        );
+        let b = crate::geom::path_bbox(&circle_path(&c)).unwrap();
+        assert!((b.x - 390.4529994).abs() < 1e-6 && (b.w - 325.3306011).abs() < 1e-6);
+    }
+
+    /// Text nodes sit where Chromium lays out their flex `foreignObject`
+    /// (mermaid 12.3.0: "Design" at x 217.266, its line box at y 232.984).
+    #[test]
+    fn text_nodes_snap_like_their_foreign_object() {
+        let r = crate::render::render(
+            "venn-beta\n  set A[\"Frontend\"]\n    text A1[\"React\"]\n    text A2[\"Design Systems\"]\n  set B[\"Backend\"]\n    text B1[\"API\"]\n  union A,B[\"Shared\"]\n    text AB1[\"OpenAPI\"]\n",
+            &MermaidConfig::default(),
+        )
+        .unwrap();
+        let mut all = Vec::new();
+        texts(&r.scene.elements, &mut all);
+        let design = all.iter().find(|t| t.lines == ["Design"]).unwrap();
+        assert_eq!(design.anchor, Anchor::Start);
+        assert!((design.x - 217.265625).abs() < 1e-9, "{}", design.x);
+        let top = design.y - crate::scene::first_baseline(20.0, 23.0);
+        assert!((top - 232.984375).abs() < 1e-9, "{top}");
+        let systems = all.iter().find(|t| t.lines == ["Systems"]).unwrap();
+        assert!((systems.x - 210.0625).abs() < 1e-9, "{}", systems.x);
     }
 
     #[test]

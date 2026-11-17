@@ -120,7 +120,7 @@ impl Ctx {
     }
 
     fn path(&mut self, cmds: &[PathCmd]) {
-        for c in cmds {
+        for c in crate::geom::flatten_arcs(cmds).iter() {
             let _ = match c {
                 PathCmd::MoveTo(p) => writeln!(self.out, "{} {} m", n(p.x), n(p.y)),
                 PathCmd::LineTo(p) => writeln!(self.out, "{} {} l", n(p.x), n(p.y)),
@@ -135,6 +135,8 @@ impl Ctx {
                     n(p.y)
                 ),
                 PathCmd::Close => writeln!(self.out, "h"),
+                // Flattened above.
+                PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => Ok(()),
             };
         }
     }
@@ -154,6 +156,8 @@ impl Ctx {
                 PathCmd::MoveTo(p) | PathCmd::LineTo(p) => finite(p),
                 PathCmd::CubicTo(a, b, p) => finite(a) && finite(b) && finite(p),
                 PathCmd::Close => true,
+                PathCmd::MoveBy(p) => finite(p),
+                PathCmd::ArcTo { r, to, .. } => r.is_finite() && finite(to),
             })
         {
             return;
