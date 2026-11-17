@@ -6,7 +6,7 @@
 
 use crate::color::{self, Rgba};
 use crate::geom::{PathCmd, Point, Rect};
-use crate::scene::{Anchor, Color, Element, Geometry, Paint, Scene, Text};
+use crate::scene::{Anchor, Color, Element, Geometry, Gradient, Paint, Scene, Text};
 use crate::text::line_width;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -87,9 +87,16 @@ const PX_TO_PT: f64 = 0.75;
 
 struct Ctx {
     out: String,
-    alphas: Vec<u32>,
+    /// Graphics states: alpha in thousandths, and whether the blend mode is
+    /// `Multiply`.
+    alphas: Vec<(u32, bool)>,
+    /// While drawing a text outline: its width in user space. Glyphs are then
+    /// stroked (render mode 1) instead of filled.
+    text_outline: Option<f64>,
     /// Glyphs drawn with each embedded TeX Gyre Heros face, with their characters.
     embedded: [BTreeMap<u16, char>; 4],
+    /// Stroke gradients, drawn as axial shading patterns `/P{index}`.
+    gradients: Vec<Gradient>,
 }
 
 fn n(v: f64) -> String {
@@ -97,11 +104,11 @@ fn n(v: f64) -> String {
 }
 
 impl Ctx {
-    fn gs_for(&mut self, alpha: f64) -> Option<String> {
-        if alpha >= 0.999 {
+    fn gs_for(&mut self, alpha: f64, multiply: bool) -> Option<String> {
+        if alpha >= 0.999 && !multiply {
             return None;
         }
-        let key = (alpha.clamp(0.0, 1.0) * 1000.0).round() as u32;
+        let key = ((alpha.clamp(0.0, 1.0) * 1000.0).round() as u32, multiply);
         let idx = match self.alphas.iter().position(|&a| a == key) {
             Some(i) => i,
             None => {
@@ -172,7 +179,7 @@ impl Ctx {
             .unwrap_or(1.0);
         let sa = stroke.map(|c| c.a * opacity).unwrap_or(1.0);
         // One ExtGState per distinct alpha; when fill and stroke differ use the smaller.
-        if let Some(g) = self.gs_for(fa.min(sa)) {
+        if let Some(g) = self.gs_for(fa.min(sa), paint.multiply) {
             self.out.push_str(&g);
         }
         if let Some(c) = fill {
@@ -180,15 +187,30 @@ impl Ctx {
             let _ = writeln!(self.out, "{} {} {} rg", n(r), n(g), n(b));
         }
         if let Some(c) = stroke {
-            let (r, g, b) = c.unit();
-            let _ = writeln!(
-                self.out,
-                "{} {} {} RG {} w",
-                n(r),
-                n(g),
-                n(b),
-                n(paint.stroke_width)
-            );
+            if let Some(grad) = &paint.stroke_gradient {
+                let k = match self.gradients.iter().position(|x| x == grad) {
+                    Some(k) => k,
+                    None => {
+                        self.gradients.push(grad.clone());
+                        self.gradients.len() - 1
+                    }
+                };
+                let _ = writeln!(
+                    self.out,
+                    "/Pattern CS /P{k} SCN {} w",
+                    n(paint.stroke_width)
+                );
+            } else {
+                let (r, g, b) = c.unit();
+                let _ = writeln!(
+                    self.out,
+                    "{} {} {} RG {} w",
+                    n(r),
+                    n(g),
+                    n(b),
+                    n(paint.stroke_width)
+                );
+            }
             if let Some(d) = &paint.dash {
                 let _ = writeln!(
                     self.out,
@@ -211,14 +233,34 @@ impl Ctx {
         let _ = writeln!(self.out, "{op}\nQ");
     }
 
-    fn text(&mut self, t: &Text) {
+    /// A text block; with `outline`, each glyph is first stroked `width` wide in
+    /// that colour with round joins, then filled over it (`paint-order: stroke`).
+    fn text(&mut self, t: &Text, outline: Option<(&crate::scene::Color, f64)>) {
         let Some(c) = resolve(&t.fill) else { return };
         let (r, g, b) = c.unit();
         self.out.push_str("q\n");
-        if let Some(gs) = self.gs_for(c.a) {
+        let outline = outline.and_then(|(oc, w)| resolve(oc).map(|oc| (oc, w)));
+        let alpha = outline.map_or(c.a, |(oc, _)| c.a.min(oc.a));
+        if let Some(gs) = self.gs_for(alpha, false) {
             self.out.push_str(&gs);
         }
         let _ = writeln!(self.out, "{} {} {} rg", n(r), n(g), n(b));
+        if let Some((oc, w)) = outline {
+            let (r, g, b) = oc.unit();
+            // Render mode 2 fills then strokes; mode 1 strokes alone. Stroking
+            // first and filling after (one text object each) keeps the stroke
+            // under the fill.
+            let _ = writeln!(self.out, "{} {} {} RG 1 j 1 J", n(r), n(g), n(b));
+            self.text_outline = Some(w);
+            self.text_lines(t);
+            self.text_outline = None;
+            self.out.push_str("0 Tr\n");
+        }
+        self.text_lines(t);
+        self.out.push_str("Q\n");
+    }
+
+    fn text_lines(&mut self, t: &Text) {
         for (i, line) in t.lines.iter().enumerate() {
             if line.is_empty() {
                 continue;
@@ -236,7 +278,6 @@ impl Ctx {
             }
             self.line(line, x, y, t.font_size, t.bold);
         }
-        self.out.push_str("Q\n");
     }
 
     /// A display line with Font Awesome icons: its text runs where the layout put
@@ -257,7 +298,13 @@ impl Ctx {
                     let (tx, ty, s) = crate::icons::placement(icon, x0 + x, y, t.font_size);
                     let _ = writeln!(self.out, "q {s:.7} 0 0 {s:.7} {} {} cm", n(tx), n(ty));
                     self.path(&d);
-                    self.out.push_str("f\nQ\n");
+                    // Outline pass: stroke the icon (the pen is not scaled with it).
+                    if let Some(w) = self.text_outline {
+                        let _ = writeln!(self.out, "{} w", n(w / s));
+                        self.out.push_str("S\nQ\n");
+                    } else {
+                        self.out.push_str("f\nQ\n");
+                    }
                 }
             }
         }
@@ -276,6 +323,10 @@ impl Ctx {
             n(x),
             n(y),
         );
+        // The pen width is in text space, which `Tm` scales by the font size.
+        if let Some(w) = self.text_outline {
+            let _ = write!(self.out, " 1 Tr {} w", n(w / font_size));
+        }
         for run in crate::text::styled_runs(line, bold) {
             let face = crate::fonts::face_index(run.bold, run.italic);
             let mut rest = run.text.as_str();
@@ -313,7 +364,10 @@ impl Ctx {
         match el {
             Element::Group { children, .. } => children.iter().for_each(|c| self.element(c)),
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
-            Element::Text { text, .. } => self.text(text),
+            Element::Text { text, .. } => self.text(text, None),
+            Element::OutlinedText {
+                text, color, width, ..
+            } => self.text(text, Some((color, *width))),
             Element::Rotated {
                 deg,
                 about,
@@ -541,7 +595,9 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
     let mut ctx = Ctx {
         out: String::new(),
         alphas: Vec::new(),
+        text_outline: None,
         embedded: Default::default(),
+        gradients: Vec::new(),
     };
 
     // Page background (Puppeteer prints the body background) unless transparent.
@@ -558,13 +614,14 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         );
     }
     let m = BODY_MARGIN_PX * PX_TO_PT;
+    let base = [a, 0.0, 0.0, -a, m - vb.x * a, page_h - m + vb.y * a];
     let _ = writeln!(
         ctx.out,
         "q {} 0 0 {} {} {} cm",
-        n(a),
-        n(-a),
-        n(m - vb.x * a),
-        n(page_h - m + vb.y * a)
+        n(base[0]),
+        n(base[3]),
+        n(base[4]),
+        n(base[5])
     );
     for el in &scene.elements {
         ctx.element(el);
@@ -592,8 +649,19 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
             font_objects.extend(objs);
         }
     }
+    // Shading patterns follow the embedded faces, one object each. A pattern's
+    // space is the page's default space, so its matrix is the diagram's `cm`.
+    let pattern_base = gs_base + ctx.alphas.len() + font_objects.len();
+    let patterns: String = (0..ctx.gradients.len())
+        .map(|i| format!(" /P{i} {} 0 R", pattern_base + i))
+        .collect();
+    let patterns = if patterns.is_empty() {
+        String::new()
+    } else {
+        format!(" /Pattern <<{patterns} >>")
+    };
     objects.push(format!(
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R{embedded} >> /ExtGState << {ext}>> >> >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R /F3 7 0 R /F4 8 0 R{embedded} >> /ExtGState << {ext}>>{patterns} >> >>",
         n(page_w),
         n(page_h)
     ).into_bytes());
@@ -618,9 +686,10 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
             .into_bytes(),
         );
     }
-    for &alpha in &ctx.alphas {
+    for &(alpha, multiply) in &ctx.alphas {
         let v = n(alpha as f64 / 1000.0);
-        objects.push(format!("<< /Type /ExtGState /ca {v} /CA {v} >>").into_bytes());
+        let bm = if multiply { " /BM /Multiply" } else { "" };
+        objects.push(format!("<< /Type /ExtGState /ca {v} /CA {v}{bm} >>").into_bytes());
     }
     let version = if font_objects.is_empty() {
         "1.4"
@@ -629,6 +698,23 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         "1.6"
     };
     objects.extend(font_objects);
+    for g in &ctx.gradients {
+        let rgb = |c: &Color| {
+            let (r, g, b) = resolve(c).map_or((0.0, 0.0, 0.0), |c| c.unit());
+            format!("{} {} {}", n(r), n(g), n(b))
+        };
+        objects.push(
+            format!(
+                "<< /PatternType 2 /Matrix [{}] /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [{} 0 {} 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [{}] /C1 [{}] /N 1 >> /Extend [true true] >> >>",
+                base.iter().map(|v| n(*v)).collect::<Vec<_>>().join(" "),
+                n(g.x1),
+                n(g.x2),
+                rgb(&g.from),
+                rgb(&g.to)
+            )
+            .into_bytes(),
+        );
+    }
 
     let mut pdf: Vec<u8> = format!("%PDF-{version}\n").into_bytes();
     pdf.extend_from_slice(b"%\xe2\xe3\xcf\xd3\n");
@@ -656,6 +742,109 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gradient_strokes_become_axial_shading_patterns() {
+        use crate::scene::{DiagramKind, Gradient};
+        let paint = Paint::stroke(&Color::new("#4e79a7"), 20.0).with_stroke_gradient(Gradient {
+            x1: 10.0,
+            x2: 590.0,
+            from: Color::new("#4e79a7"),
+            to: Color::new("#e15759"),
+        });
+        let scene = Scene {
+            kind: DiagramKind::Sankey,
+            view_box: Rect::new(0.0, 0.0, 600.0, 400.0),
+            elements: vec![Element::line(
+                Point::new(10.0, 50.0),
+                Point::new(590.0, 60.0),
+                paint,
+            )],
+            acc_title: None,
+            acc_descr: None,
+            font_family: "sans-serif".into(),
+            css: String::new(),
+        };
+        let opt = PdfOptions {
+            background: "white".into(),
+            width: 600.0,
+            height: 400.0,
+            paper: None,
+        };
+        let pdf = String::from_utf8_lossy(&to_pdf(&scene, &opt)).into_owned();
+        assert!(pdf.contains("/Pattern CS /P0 SCN 20 w"), "{pdf}");
+        assert!(pdf.contains("/Pattern << /P0 9 0 R >>"), "{pdf}");
+        assert!(pdf.contains("/ShadingType 2 /ColorSpace /DeviceRGB /Coords [10 0 590 0]"));
+        // Pattern space is the page's: the diagram's own `cm`.
+        assert!(pdf.contains("/Matrix [0.75 0 0 -0.75 6 306]"), "{pdf}");
+    }
+
+    /// What the scene's CSS does in a browser (`mix-blend-mode: multiply` on
+    /// sankey links, `paint-order: stroke` label halos) the PDF draws itself.
+    #[test]
+    fn multiply_blend_and_outlined_text() {
+        use crate::scene::{Anchor, DiagramKind, Text};
+        let link = Paint::stroke(&Color::new("#4e79a7"), 20.0)
+            .with_opacity(0.5)
+            .with_multiply();
+        let label = Text {
+            x: 10.0,
+            y: 20.0,
+            lines: vec!["Coal 75.57".into()],
+            line_height: 16.8,
+            font_size: 14.0,
+            bold: false,
+            anchor: Anchor::Start,
+            fill: Color::new("#333"),
+        };
+        let scene = Scene {
+            kind: DiagramKind::Sankey,
+            view_box: Rect::new(0.0, 0.0, 600.0, 400.0),
+            elements: vec![
+                Element::line(Point::new(10.0, 50.0), Point::new(590.0, 60.0), link),
+                Element::OutlinedText {
+                    text: label,
+                    class: Some("sankey-label-bg".into()),
+                    color: Color::new("#ffffff"),
+                    width: 4.0,
+                },
+            ],
+            acc_title: None,
+            acc_descr: None,
+            font_family: "sans-serif".into(),
+            css: String::new(),
+        };
+        let opt = PdfOptions {
+            background: "white".into(),
+            width: 600.0,
+            height: 400.0,
+            paper: None,
+        };
+        let pdf = String::from_utf8_lossy(&to_pdf(&scene, &opt)).into_owned();
+        assert!(pdf.contains("<< /Type /ExtGState /ca 0.5 /CA 0.5 /BM /Multiply >>"));
+        // Stroked first (4px in text space scaled by 1/14), round joins, then filled.
+        let stroke = pdf.find("1 1 1 RG 1 j 1 J").expect("outline colour");
+        let outline = pdf
+            .find("1 Tr 0.286 w /F1 1 Tf (Coal 75.57) Tj")
+            .expect("outline");
+        let reset = pdf.find("0 Tr\n").expect("fill mode restored");
+        let fill = pdf.rfind("/F1 1 Tf (Coal 75.57) Tj").expect("fill");
+        assert!(stroke < outline && outline < reset && reset < fill, "{pdf}");
+        // SVG output writes plain text; the halo there comes from the CSS.
+        let svg = crate::output::svg::to_svg(
+            &scene,
+            &crate::output::svg::SvgOptions {
+                id: "my-svg",
+                background: "white",
+                sizing: crate::output::svg::SvgSizing::Fixed {
+                    width: 600.0,
+                    height: 400.0,
+                },
+                theme_css: None,
+            },
+        );
+        assert!(svg.contains("<text class=\"sankey-label-bg\""), "{svg}");
+    }
 
     #[test]
     fn string_escaping() {

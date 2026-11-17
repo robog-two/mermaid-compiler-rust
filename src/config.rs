@@ -298,6 +298,9 @@ pub struct SequenceConfig {
     pub note_font_size: f64,
     pub actor_font_size: f64,
     pub wrap_padding: f64,
+    /// `labelBoxHeight`: a frame's title box, and the label room svgDraw adds
+    /// under a classic glyph participant.
+    pub label_box_height: f64,
 }
 
 impl Default for SequenceConfig {
@@ -320,6 +323,7 @@ impl Default for SequenceConfig {
             note_font_size: 16.0,
             actor_font_size: 16.0,
             wrap_padding: 10.0,
+            label_box_height: 20.0,
         }
     }
 }
@@ -333,6 +337,7 @@ impl SequenceConfig {
         set_f64(j, "height", &mut self.height);
         set_f64(j, "boxMargin", &mut self.box_margin);
         set_f64(j, "boxTextMargin", &mut self.box_text_margin);
+        set_f64(j, "labelBoxHeight", &mut self.label_box_height);
         set_f64(j, "noteMargin", &mut self.note_margin);
         set_f64(j, "messageMargin", &mut self.message_margin);
         set_f64(j, "messageFontSize", &mut self.message_font_size);

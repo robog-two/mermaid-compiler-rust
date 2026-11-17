@@ -4,6 +4,8 @@
 //! (the same metrics the PDF backend's built-in Helvetica uses), which gives sizes
 //! within a few percent of the browser's "trebuchet ms"/arial rendering.
 
+pub mod serif;
+
 use crate::geom::Point;
 use crate::scene::{Color, Text};
 
@@ -51,9 +53,14 @@ pub mod mark {
     pub const BOLD_OFF: char = '\u{E001}';
     pub const ITALIC_ON: char = '\u{E002}';
     pub const ITALIC_OFF: char = '\u{E003}';
+    /// Starts a new run (its own `<tspan>`) in the same style, as mermaid's
+    /// `createText` puts each word of an SVG label in a tspan of its own. Placed
+    /// in finished display lines only; it changes neither measurement nor
+    /// kerning.
+    pub const RUN: char = '\u{E004}';
 
     pub fn is_mark(c: char) -> bool {
-        matches!(c, BOLD_ON | BOLD_OFF | ITALIC_ON | ITALIC_OFF)
+        matches!(c, BOLD_ON | BOLD_OFF | ITALIC_ON | ITALIC_OFF | RUN)
     }
 }
 
@@ -95,6 +102,19 @@ pub fn plain(line: &str) -> String {
     line.chars().filter(|&c| !mark::is_mark(c)).collect()
 }
 
+/// A display line split into one run per word ([`mark::RUN`] before each space),
+/// as mermaid's `createText` draws SVG labels (see [`svg_word_runs_box`]).
+pub fn word_runs(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 8);
+    for (i, c) in line.chars().enumerate() {
+        if c == ' ' && i > 0 {
+            out.push(mark::RUN);
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Split a display line into runs of one style (`bold` is the text's base weight).
 /// Empty runs are dropped; a line without marks is one run.
 pub fn styled_runs(line: &str, bold: bool) -> Vec<StyledRun> {
@@ -103,6 +123,16 @@ pub fn styled_runs(line: &str, bold: bool) -> Vec<StyledRun> {
     let mut cur = String::new();
     let mut cur_style = (bold, false);
     for c in line.chars() {
+        if c == mark::RUN {
+            if !cur.is_empty() {
+                out.push(StyledRun {
+                    text: std::mem::take(&mut cur),
+                    bold: cur_style.0,
+                    italic: cur_style.1,
+                });
+            }
+            continue;
+        }
         if st.apply(c) {
             let style = (bold || st.bold > 0, st.italic > 0);
             if style != cur_style {
@@ -408,6 +438,7 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
     let mut st = Emphasis::default();
     let mut prev: Option<char> = None;
     text.chars()
+        .filter(|&c| c != mark::RUN)
         .map(|c| {
             if st.apply(c) {
                 // A change of style starts a new run, which is not kerned across.
@@ -625,7 +656,7 @@ const ARIAL_ITALIC_INK: [(i16, i16); 94] = [
     (122, 1134),
 ];
 
-/// [`ARIAL_INK`] for Liberation Sans Bold (advances: the bold [`char_width_em`]).
+/// [`ARIAL_INK`] for Arial Bold (Liberation Sans Bold's `glyf`).
 const ARIAL_BOLD_INK: [(i16, i16); 94] = [
     (193, 487),
     (135, 836),
@@ -734,6 +765,12 @@ pub fn svg_bbox_width(text: &str, font_size: f64) -> f64 {
     right - left
 }
 
+/// [`svg_bbox_width`] in regular or bold weight.
+pub fn svg_bbox_width_weight(text: &str, font_size: f64, bold: bool) -> f64 {
+    let (left, right) = svg_bbox_extent_styled(text, font_size, bold, false);
+    right - left
+}
+
 /// The left and right edges of an SVG `<text>`'s `getBBox()` relative to its
 /// start (see [`svg_bbox_width`]), upright or italic (`font-style: italic`,
 /// whose glyphs lean past their advance).
@@ -785,6 +822,52 @@ pub fn layout_unit_ceil(w: f64) -> f64 {
     ((w * 64.0) - 1e-6).ceil().max(0.0) / 64.0
 }
 
+/// The font size Chromium shapes text at. Blink's
+/// `FontDescription::EffectiveFontSize()` cuts the computed size (a `float`)
+/// to 1/100 px in single precision, `floorf(size * 100) / 100`, and Skia hands
+/// that to FreeType in 26.6 fixed point, `(int)(size * 64)`: 11.48px is laid
+/// out at 11.46875px, and 9.9px (`9.9f * 100` is 989.99994) at 9.875px. Fitted
+/// exactly to the advances Chromium measures for 9401 sizes from 6 to 60px.
+/// (Blink's font cache keys sizes by `(unsigned)(effective * 100)`, so two
+/// effective sizes a hundredth apart can share the first one's font; a page
+/// that uses only one of them is not affected.)
+pub fn shaping_size(font_size: f64) -> f64 {
+    let effective = (font_size as f32 * 100.0).floor() / 100.0;
+    f64::from((effective * 64.0) as i32) / 64.0
+}
+
+/// The box of one SVG text line drawn as mermaid's `createText` draws SVG labels,
+/// one `<tspan>` per word (each after the first keeps its leading space), with
+/// `text-anchor: start` at 0: `(x, width, advance)` of its `getBBox()` and its
+/// advance. Chromium kerns across the tspans (a pair's kerning is part of the
+/// first glyph's advance) but lays each tspan out as a fragment whose width is
+/// rounded up to 1/64 px, so the line is a little wider than one run; the box
+/// unites that advance with each glyph's ink, rounded out to whole pixels from
+/// the glyph's origin, as [`svg_bbox_width`] does. Characters outside ASCII
+/// count by their advance alone.
+pub fn svg_word_runs_box(line: &str, font_size: f64, bold: bool) -> (f64, f64, f64) {
+    let size = shaping_size(font_size);
+    let ink_table = if bold { &ARIAL_BOLD_INK } else { &ARIAL_INK };
+    let chars: Vec<char> = line.chars().filter(|&c| !mark::is_mark(c)).collect();
+    let (mut x, mut run) = (0.0f64, 0.0f64);
+    let (mut left, mut right) = (0.0f64, 0.0f64);
+    for (i, &c) in chars.iter().enumerate() {
+        if c == ' ' && i > 0 {
+            x += layout_unit_ceil(run);
+            run = 0.0;
+        }
+        if let 0x21..=0x7E = c as u32 {
+            let (lo, hi) = ink_table[(c as u32 - 0x21) as usize];
+            let ink = |u: i16| f64::from(u) / 2048.0 * size;
+            left = left.min(x + run + (ink(lo) + 0.005).floor());
+            right = right.max(x + run + (ink(hi) - 0.005).ceil());
+        }
+        let kern = chars.get(i + 1).map_or(0.0, |&n| kerning_em(c, n, bold));
+        run += (char_width_em(c, bold) + kern) * size;
+    }
+    x += layout_unit_ceil(run);
+    (left, right.max(x) - left, x)
+}
 /// An SVG `dominant-baseline` value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Baseline {
@@ -843,47 +926,32 @@ pub struct TextBlock {
 /// Line pitch of SVG text labels in em (`createFormattedText`'s `lineHeight`).
 pub const SVG_LINE_HEIGHT: f64 = 1.1;
 
-/// Whether a glyph reaches below the font's descent line, which grows the browser's
-/// `getBBox()` of an SVG text line (`g`, `p`, brackets, `_`, ...).
-fn has_deep_descender(c: char) -> bool {
-    matches!(
-        c,
-        'g' | 'j'
-            | 'p'
-            | 'q'
-            | 'y'
-            | '('
-            | ')'
-            | '['
-            | ']'
-            | '{'
-            | '}'
-            | '|'
-            | '_'
-            | '@'
-            | '$'
-            | 'ç'
-            | 'Ç'
-            | 'µ'
-            | 'þ'
-            | 'ÿ'
-            | 'ý'
-    )
+/// How far below the baseline a glyph's ink reaches, in em, for the glyphs that
+/// can reach past the font's rounded descent (0 for the rest). Measured in
+/// Chromium as the font sizes (6..40px) at which a lone glyph's `getBBox()`
+/// grows: `g`, `p`, brackets, ... from about 0.2075em, `|` and the cedillas
+/// further, `Q` and `_` less (only where the descent rounds down by more than
+/// 0.01em); `@` and `$` never.
+fn descender_depth(c: char) -> f64 {
+    match c {
+        '|' | 'ç' | 'Ç' => 0.22,
+        'g' | 'j' | 'p' | 'q' | 'y' | '(' | ')' | '[' | ']' | '{' | '}' | 'µ' | 'þ' | 'ÿ' | 'ý' => {
+            0.2075
+        }
+        'Q' | '_' => 0.195,
+        _ => 0.0,
+    }
 }
 
 /// Height of one SVG text line's bounding box, as Chromium's `getBBox()` reports it
 /// for mermaid's fonts (Arial metrics, ascent 0.905em and descent 0.212em, each
-/// rounded to whole pixels; a deep descender rounds the descent up instead):
-/// 16px at 14px, 17px (18px with a descender) at 16px.
+/// rounded to whole pixels; a glyph whose ink reaches further down extends it to
+/// that ink, rounded out): 16px at 14px, 17px (18px with a `g`) at 16px.
 pub fn svg_line_box(font_size: f64, line: &str) -> f64 {
     let ascent = (0.905 * font_size).round();
     let descent = (0.212 * font_size).round();
-    let descent = if line.chars().any(has_deep_descender) {
-        descent.max((0.212 * font_size - 1e-6).ceil())
-    } else {
-        descent
-    };
-    ascent + descent
+    let ink = line.chars().map(descender_depth).fold(0.0, f64::max);
+    ascent + descent.max((ink * font_size - 1e-9).ceil())
 }
 
 impl TextBlock {
@@ -1675,6 +1743,16 @@ mod tests {
         assert_eq!(svg_line_box(16.0, "Christmas"), 17.0);
         assert_eq!(svg_line_box(16.0, "Laptop"), 18.0);
         assert_eq!(svg_line_box(16.0, "(x)"), 18.0);
+        // Chromium (mermaid's fonts): `_` and `Q` reach below the rounded descent
+        // at 16px but not at 10px; `@` and `$` never; `g` at 10px does.
+        assert_eq!(svg_line_box(10.0, "RC_1"), 11.0);
+        assert_eq!(svg_line_box(16.0, "RC_1"), 18.0);
+        assert_eq!(svg_line_box(11.0, "Q"), svg_line_box(11.0, "g"));
+        assert_eq!(svg_line_box(16.0, "@$"), 17.0);
+        assert_eq!(svg_line_box(10.0, "g"), 12.0);
+        // `|` also at 19px, where `g` stays within.
+        assert_eq!(svg_line_box(19.0, "|"), svg_line_box(19.0, "x") + 1.0);
+        assert_eq!(svg_line_box(19.0, "g"), svg_line_box(19.0, "x"));
     }
 
     #[test]
@@ -1970,5 +2048,56 @@ mod tests {
         // ... and 8824/64 px from a whole unit (as Chromium sizes both boxes).
         let paras = ["theta internationalization eta alpha lambda".to_string()];
         assert_eq!(html_wrap_width(&paras, 120.0, 16.0, false), 137.875);
+    }
+
+    #[test]
+    fn word_runs_box_as_chromium_lays_out_create_text_tspans() {
+        // getBBox() of one tspan per word in headless Chromium (Liberation Sans):
+        // (x, width, advance) with text-anchor start.
+        let b = |s: &str, f: f64| svg_word_runs_box(s, f, false);
+        assert_eq!(b("Stores all of the core banking", 11.48).1, 148.609375);
+        assert_eq!(b("A customer of the bank, with", 11.48).1, 144.140625);
+        assert_eq!(b("A customer of the bank, with", 16.0).1, 201.03125);
+        assert_eq!(b("A customer of the bank, with", 10.5).2, 131.953125);
+        assert_eq!(b("[Software System]", 10.5).1, 85.283447265625);
+        assert_eq!(b("Banking System G Queue", 16.0).1, 185.1015625);
+        // One run: no per-tspan rounding, the kerned advance.
+        assert_eq!(b("[Person]", 11.48).1, 42.71875);
+        assert_eq!(shaping_size(11.48), 11.46875);
+        assert_eq!(shaping_size(14.0), 14.0);
+    }
+
+    #[test]
+    fn shaping_size_follows_blinks_effective_font_size() {
+        // 64× the size Chromium's advances scale with (getComputedTextLength of
+        // a long string against its length at 2048px), each in a fresh page.
+        for (size, fdot6) in [
+            (9.6, 614),
+            (9.9, 632),
+            (10.0, 640),
+            (11.48, 734),
+            (12.6, 806),
+            (14.4, 921),
+            (15.9, 1017),
+            (16.22, 1037),
+            (16.8, 1074),
+            (17.3, 1106),
+            (40.1, 2565),
+            (8.15625, 521),
+        ] {
+            assert_eq!(shaping_size(size) * 64.0, f64::from(fdot6), "{size}px");
+        }
+    }
+
+    #[test]
+    fn run_marks_split_tspans_but_not_measurement() {
+        let l = word_runs("A customer of");
+        assert_eq!(plain(&l), "A customer of");
+        assert_eq!(
+            line_width(&l, 16.0, false),
+            line_width("A customer of", 16.0, false)
+        );
+        let runs: Vec<String> = styled_runs(&l, false).into_iter().map(|r| r.text).collect();
+        assert_eq!(runs, ["A", " customer", " of"]);
     }
 }

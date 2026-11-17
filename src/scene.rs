@@ -37,6 +37,21 @@ pub struct Paint {
     pub fill_opacity: Option<f64>,
     /// A blurred drop shadow behind the shape (CSS `filter: drop-shadow()`).
     pub shadow: Option<Shadow>,
+    /// A horizontal linear gradient the stroke is painted with instead of `stroke`.
+    pub stroke_gradient: Option<Gradient>,
+    /// Composited with `mix-blend-mode: multiply`. SVG output gets this from the
+    /// scene's CSS; PDF output, which has no CSS, sets the blend mode itself.
+    pub multiply: bool,
+}
+
+/// A two-stop `<linearGradient gradientUnits="userSpaceOnUse">` along x: `from`
+/// at `x1` (and left of it), `to` at `x2` (and right of it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gradient {
+    pub x1: f64,
+    pub x2: f64,
+    pub from: Color,
+    pub to: Color,
 }
 
 /// A CSS `drop-shadow(dx dy blur color)`: the shape's silhouette offset and
@@ -60,6 +75,8 @@ impl Paint {
             opacity: None,
             fill_opacity: None,
             shadow: None,
+            stroke_gradient: None,
+            multiply: false,
         }
     }
     pub fn stroke(c: &Color, w: f64) -> Self {
@@ -71,6 +88,8 @@ impl Paint {
             opacity: None,
             fill_opacity: None,
             shadow: None,
+            stroke_gradient: None,
+            multiply: false,
         }
     }
     pub fn both(fill: &Color, stroke: &Color, w: f64) -> Self {
@@ -82,6 +101,8 @@ impl Paint {
             opacity: None,
             fill_opacity: None,
             shadow: None,
+            stroke_gradient: None,
+            multiply: false,
         }
     }
     pub fn dashed(mut self, d: Vec<f64>) -> Self {
@@ -92,12 +113,21 @@ impl Paint {
         self.opacity = Some(o);
         self
     }
+    pub fn with_multiply(mut self) -> Self {
+        self.multiply = true;
+        self
+    }
     pub fn with_fill_opacity(mut self, o: f64) -> Self {
         self.fill_opacity = Some(o);
         self
     }
     pub fn with_shadow(mut self, s: Option<Shadow>) -> Self {
         self.shadow = s;
+        self
+    }
+    /// Stroke with a horizontal gradient (`stroke` stays as the solid fallback).
+    pub fn with_stroke_gradient(mut self, g: Gradient) -> Self {
+        self.stroke_gradient = Some(g);
         self
     }
 }
@@ -236,6 +266,16 @@ pub enum Element {
         text: Text,
         class: Option<String>,
     },
+    /// Text drawn with an outline of `width` in `color` under its fill (CSS
+    /// `stroke` with `stroke-linejoin: round; paint-order: stroke`). SVG output
+    /// writes plain text and leaves the outline to the scene's CSS, as mermaid
+    /// does; PDF output, which has no CSS, strokes it itself.
+    OutlinedText {
+        text: Text,
+        class: Option<String>,
+        color: Color,
+        width: f64,
+    },
     /// Children drawn rotated by `deg` degrees (clockwise, SVG `rotate(deg cx cy)`)
     /// about `about` — e.g. vertical axis titles or labels running along a line.
     Rotated {
@@ -308,6 +348,21 @@ impl Element {
                 text.x += dx;
                 text.y += dy;
                 Element::Text { text, class }
+            }
+            Element::OutlinedText {
+                mut text,
+                class,
+                color,
+                width,
+            } => {
+                text.x += dx;
+                text.y += dy;
+                Element::OutlinedText {
+                    text,
+                    class,
+                    color,
+                    width,
+                }
             }
             Element::Rotated {
                 deg,

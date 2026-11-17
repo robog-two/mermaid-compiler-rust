@@ -60,46 +60,47 @@ impl Rgba {
         (h * 60.0, s * 100.0, l * 100.0)
     }
 
+    /// The colour of a khroma HSL result. khroma stringifies it as `hsl(h, s%, l%)` with
+    /// each channel clamped (`h % 360`, `s` and `l` to `0..=100`) and rounded to 10
+    /// decimals, and the browser turns that string into sRGB ([`Rgba::from_css_hsl`]).
     pub fn from_hsl(h: f64, s: f64, l: f64, a: f64) -> Rgba {
-        let h = h.rem_euclid(360.0) / 360.0;
-        let s = (s / 100.0).clamp(0.0, 1.0);
-        let l = (l / 100.0).clamp(0.0, 1.0);
-        let to = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-        if s == 0.0 {
-            return Rgba {
-                r: to(l),
-                g: to(l),
-                b: to(l),
-                a,
-            };
-        }
-        let q = if l < 0.5 {
-            l * (1.0 + s)
+        let round10 = |v: f64| js_round(v * 1e10) / 1e10;
+        Rgba::from_css_hsl(
+            round10(h % 360.0),
+            round10(s.clamp(0.0, 100.0)),
+            round10(l.clamp(0.0, 100.0)),
+            a,
+        )
+    }
+
+    /// Chromium's `hsl(h, s%, l%)`: the hue wraps into `0..360` and the percentages
+    /// clamp in doubles, then `gfx::HSLToSRGB` runs in `float` (CSS Color 4's
+    /// `f(n)` formula) and each channel serialises as `round((c + 1e-7f) * 255)`.
+    pub fn from_css_hsl(h: f64, s: f64, l: f64, a: f64) -> Rgba {
+        let h = if h.is_finite() {
+            (h % 360.0 + 360.0) % 360.0
         } else {
-            l + s - l * s
+            0.0
         };
-        let p = 2.0 * l - q;
-        let hue = |mut t: f64| {
-            if t < 0.0 {
-                t += 1.0;
+        let unit = |v: f64| ((v / 100.0 * 100.0) / 100.0).clamp(0.0, 1.0) as f32;
+        let (h, s, l) = (h as f32, unit(s), unit(l));
+        let f = |n: f32| -> f32 {
+            if s == 0.0 {
+                return l;
             }
-            if t > 1.0 {
-                t -= 1.0;
-            }
-            if t < 1.0 / 6.0 {
-                p + (q - p) * 6.0 * t
-            } else if t < 0.5 {
-                q
-            } else if t < 2.0 / 3.0 {
-                p + (q - p) * (2.0 / 3.0 - t) * 6.0
-            } else {
-                p
-            }
+            let k = ((n + h / 30.0) as f64 % 12.0) as f32;
+            let a = s * l.min(1.0 - l);
+            l - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+        };
+        let to = |c: f32| {
+            (((c + 1e-7) as f64 * 255.0) as f32 as f64)
+                .clamp(0.0, 255.0)
+                .round() as u8
         };
         Rgba {
-            r: to(hue(h + 1.0 / 3.0)),
-            g: to(hue(h)),
-            b: to(hue(h - 1.0 / 3.0)),
+            r: to(f(0.0)),
+            g: to(f(8.0)),
+            b: to(f(4.0)),
             a,
         }
     }
@@ -149,6 +150,12 @@ impl Rgba {
     }
 }
 
+/// JavaScript's `Math.round`: halves round up.
+fn js_round(v: f64) -> f64 {
+    let f = v.floor();
+    if v - f >= 0.5 { f + 1.0 } else { f }
+}
+
 /// Parse a CSS colour. Returns `None` for unsupported syntax (e.g. `var(--x)`).
 pub fn parse(input: &str) -> Option<Rgba> {
     let s = input
@@ -164,13 +171,16 @@ pub fn parse(input: &str) -> Option<Rgba> {
         if p.len() < 3 {
             return None;
         }
+        // Chromium's stylesheet parser: the channel clamps in doubles, is stored as a
+        // `float` and serialises rounded (so `127.4999999999` is 128).
         let ch = |v: &str| -> Option<u8> {
             let v = v.trim();
-            Some(if let Some(pct) = v.strip_suffix('%') {
-                (pct.parse::<f64>().ok()? * 2.55).round().clamp(0.0, 255.0) as u8
+            let c = if let Some(pct) = v.strip_suffix('%') {
+                pct.parse::<f64>().ok()? / 100.0 * 255.0
             } else {
-                v.parse::<f64>().ok()?.round().clamp(0.0, 255.0) as u8
-            })
+                v.parse::<f64>().ok()?
+            };
+            Some((c.clamp(0.0, 255.0) as f32).round() as u8)
         };
         let a = p.get(3).and_then(|v| parse_alpha(v)).unwrap_or(1.0);
         return Some(Rgba {
@@ -180,22 +190,52 @@ pub fn parse(input: &str) -> Option<Rgba> {
             a,
         });
     }
-    if let Some(args) = func_args(&s, "hsla").or_else(|| func_args(&s, "hsl")) {
-        let p = split_args(args);
-        if p.len() < 3 {
-            return None;
-        }
-        let num = |v: &str| {
-            v.trim()
-                .trim_end_matches('%')
-                .trim_end_matches("deg")
-                .parse::<f64>()
-                .ok()
-        };
-        let a = p.get(3).and_then(|v| parse_alpha(v)).unwrap_or(1.0);
-        return Some(Rgba::from_hsl(num(p[0])?, num(p[1])?, num(p[2])?, a));
+    if s.starts_with("hsl") {
+        let (h, sat, l, a) = hsl_args(&s)?;
+        return Some(Rgba::from_css_hsl(h, sat, l, a));
     }
     named(&s)
+}
+
+/// The channels of an `hsl()`/`hsla()` string, unconverted.
+fn hsl_args(s: &str) -> Option<(f64, f64, f64, f64)> {
+    let args = func_args(s, "hsla").or_else(|| func_args(s, "hsl"))?;
+    let p = split_args(args);
+    if p.len() < 3 {
+        return None;
+    }
+    let num = |v: &str| {
+        v.trim()
+            .trim_end_matches('%')
+            .trim_end_matches("deg")
+            .parse::<f64>()
+            .ok()
+    };
+    let a = p.get(3).and_then(|v| parse_alpha(v)).unwrap_or(1.0);
+    Some((num(p[0])?, num(p[1])?, num(p[2])?, a))
+}
+
+/// khroma's `adjust(color, { h, s, l })` on a CSS colour string, as the browser
+/// then paints the `hsl()` string khroma returns. khroma keeps an `hsl()` input's
+/// own channels (no trip through sRGB bytes), so `darken("hsl(80, 100%,
+/// 56.2745098039%)", 30)` is exactly `hsl(80, 100%, 26.2745098039%)`; any other
+/// colour is converted from its sRGB channels. `None` when `input` does not parse.
+pub fn adjust(input: &str, dh: f64, ds: f64, dl: f64) -> Option<Rgba> {
+    let lower = input.trim().to_ascii_lowercase();
+    let (h, s, l, a) = match hsl_args(&lower) {
+        Some((h, s, l, a)) => (h, s.clamp(0.0, 100.0), l.clamp(0.0, 100.0), a),
+        None => {
+            let c = parse(input)?;
+            let (h, s, l) = c.to_hsl();
+            (h, s, l, c.a)
+        }
+    };
+    Some(Rgba::from_hsl(
+        h + dh,
+        (s + ds).clamp(0.0, 100.0),
+        (l + dl).clamp(0.0, 100.0),
+        a,
+    ))
 }
 
 fn parse_alpha(v: &str) -> Option<f64> {
@@ -348,6 +388,33 @@ mod tests {
         assert_eq!(parse("transparent").unwrap().a, 0.0);
         assert_eq!(parse("Red").unwrap().to_hex(), "#ff0000");
         assert_eq!(parse("var(--x)"), None);
+    }
+
+    #[test]
+    fn hsl_strings_resolve_as_chromium_does() {
+        // getComputedStyle() in headless Chromium (14824 strings checked, in a
+        // stylesheet, a style attribute, a fill attribute and element.style).
+        let rgb = |s: &str| {
+            let c = parse(s).unwrap();
+            [c.r, c.g, c.b]
+        };
+        assert_eq!(rgb("hsl(0, 50%, 1.1764705882%)"), [5, 2, 2]);
+        assert_eq!(rgb("hsl(0, 50%, 20.0%)"), [77, 26, 26]);
+        assert_eq!(rgb("hsl(0, 50%, 27.0588235294%)"), [104, 35, 35]);
+        assert_eq!(rgb("hsl(270, 100%, 76.2745098039%)"), [195, 134, 255]);
+        assert_eq!(rgb("hsl(80, 100%, 26.2745098039%)"), [89, 134, 0]);
+        // A float channel rounds as the stylesheet's float does.
+        assert_eq!(rgb("rgb(127.4999999999, 10.49999999, 3.5)"), [128, 11, 4]);
+    }
+
+    #[test]
+    fn adjust_keeps_an_hsl_strings_channels() {
+        // venn: darken("hsl(80, 100%, 56.2745098039%)", 30) paints rgb(89, 134, 0);
+        // a trip through sRGB bytes would give 90.
+        let c = adjust("hsl(80, 100%, 56.2745098039%)", 0.0, 0.0, -30.0).unwrap();
+        assert_eq!([c.r, c.g, c.b], [89, 134, 0]);
+        let c = adjust("#ECECFF", 0.0, 0.0, -10.0).unwrap();
+        assert_eq!(c, Rgba::from_hsl(240.0, 100.0, 86.2745098039, 1.0));
     }
 
     #[test]

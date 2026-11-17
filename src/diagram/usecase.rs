@@ -4564,7 +4564,7 @@ mod tests {
                     Element::Group { children, .. } | Element::Rotated { children, .. } => {
                         dashes(children, out)
                     }
-                    Element::Text { .. } => {}
+                    Element::Text { .. } | Element::OutlinedText { .. } => {}
                 }
             }
         }

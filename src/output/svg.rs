@@ -1,7 +1,7 @@
 //! `Scene` → SVG text, shaped like mermaid's output (`<svg id="my-svg" ...>`).
 
 use crate::geom::PathCmd;
-use crate::scene::{Anchor, Element, Geometry, Paint, Scene, Shadow, Text};
+use crate::scene::{Anchor, Element, Geometry, Gradient, Paint, Scene, Shadow, Text};
 use std::fmt::Write as _;
 
 /// How the root `<svg>` element is sized.
@@ -78,11 +78,13 @@ pub fn path_data(cmds: &[PathCmd]) -> String {
     d
 }
 
-/// The drop-shadow filters of a document: its id, and the distinct shadows
-/// (`filter` ids `{id}-shadow-{index}`).
+/// The drop-shadow filters and stroke gradients of a document: its id, the
+/// distinct shadows (`filter` ids `{id}-shadow-{index}`) and gradients
+/// (`{id}-gradient-{index}`).
 struct Filters<'a> {
     id: &'a str,
     shadows: Vec<Shadow>,
+    gradients: Vec<Gradient>,
 }
 
 impl Filters<'_> {
@@ -98,10 +100,23 @@ impl Filters<'_> {
                     {
                         self.shadows.push(sh.clone());
                     }
+                    if let Some(g) = &paint.stroke_gradient
+                        && !self.gradients.contains(g)
+                    {
+                        self.gradients.push(g.clone());
+                    }
                 }
-                Element::Text { .. } => {}
+                Element::Text { .. } | Element::OutlinedText { .. } => {}
             }
         }
+    }
+
+    /// The `url(#...)` a gradient-stroked shape's `stroke` refers to.
+    fn stroke_url(&self, p: &Paint) -> Option<String> {
+        p.stroke_gradient
+            .as_ref()
+            .and_then(|g| self.gradients.iter().position(|x| x == g))
+            .map(|k| format!("url(#{}-gradient-{k})", self.id))
     }
 
     fn attr(&self, p: &Paint) -> String {
@@ -115,10 +130,21 @@ impl Filters<'_> {
     /// `<defs>` with a `feDropShadow` per shadow (the flood split into an
     /// opaque colour and its opacity, which every renderer reads).
     fn defs(&self) -> String {
-        if self.shadows.is_empty() {
+        if self.shadows.is_empty() && self.gradients.is_empty() {
             return String::new();
         }
         let mut out = String::from("<defs>");
+        for (k, g) in self.gradients.iter().enumerate() {
+            let _ = write!(
+                out,
+                "<linearGradient id=\"{}-gradient-{k}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" x2=\"{}\" y1=\"0\" y2=\"0\"><stop offset=\"0%\" stop-color=\"{}\"/><stop offset=\"100%\" stop-color=\"{}\"/></linearGradient>",
+                self.id,
+                num(g.x1),
+                num(g.x2),
+                esc(g.from.css()),
+                esc(g.to.css())
+            );
+        }
         for (k, sh) in self.shadows.iter().enumerate() {
             let (color, alpha) = match crate::color::parse(sh.color.css()) {
                 Some(c) => (format!("rgb({},{},{})", c.r, c.g, c.b), c.a),
@@ -140,12 +166,9 @@ impl Filters<'_> {
     }
 }
 
-fn paint_attrs(p: &Paint) -> String {
-    let mut s = format!(
-        " fill=\"{}\" stroke=\"{}\"",
-        esc(p.fill.css()),
-        esc(p.stroke.css())
-    );
+fn paint_attrs(p: &Paint, stroke_url: Option<String>) -> String {
+    let stroke = stroke_url.unwrap_or_else(|| esc(p.stroke.css()));
+    let mut s = format!(" fill=\"{}\" stroke=\"{stroke}\"", esc(p.fill.css()));
     if !p.stroke.is_none() {
         let _ = write!(s, " stroke-width=\"{}\"", num(p.stroke_width));
     }
@@ -273,8 +296,9 @@ fn write_line(out: &mut String, line: &str, bold: bool) {
         out.push_str(&esc(line));
         return;
     }
+    let word_runs = line.contains(crate::text::mark::RUN);
     for run in crate::text::styled_runs(line, bold) {
-        if run.bold == bold && !run.italic {
+        if run.bold == bold && !run.italic && !word_runs {
             out.push_str(&esc(&run.text));
             continue;
         }
@@ -312,7 +336,7 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
             out.push_str("</g>");
         }
         Element::Shape { geom, paint, class } => {
-            let attrs = paint_attrs(paint) + &fx.attr(paint);
+            let attrs = paint_attrs(paint, fx.stroke_url(paint)) + &fx.attr(paint);
             let cls = class_attr(class);
             match geom {
                 Geometry::Rect { rect, rx } => {
@@ -343,7 +367,9 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 }
             }
         }
-        Element::Text { text, class } => write_text(out, text, class),
+        Element::Text { text, class } | Element::OutlinedText { text, class, .. } => {
+            write_text(out, text, class)
+        }
         Element::Rotated {
             deg,
             about,
@@ -435,6 +461,7 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
     let mut fx = Filters {
         id: &id,
         shadows: Vec::new(),
+        gradients: Vec::new(),
     };
     fx.collect(&scene.elements);
     out.push_str(&fx.defs());
@@ -500,6 +527,7 @@ mod tests {
         let mut fx = Filters {
             id: "d",
             shadows: Vec::new(),
+            gradients: Vec::new(),
         };
         fx.collect(&els);
         for e in &els {

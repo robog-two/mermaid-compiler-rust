@@ -2194,7 +2194,7 @@ linkStyle 0 stroke:#00f");
                     }
                 }
             },
-            Element::Text { .. } | Element::Rotated { .. } => {}
+            Element::Text { .. } | Element::OutlinedText { .. } | Element::Rotated { .. } => {}
         }
     }
 
