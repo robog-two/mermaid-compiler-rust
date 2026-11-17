@@ -261,7 +261,7 @@ fn draw_node(
         1.1 * font,
         &tfill,
     );
-    t.y = ty + font + 0.27 * font;
+    t.y = ty + font + crate::text::baseline_shift(crate::text::Baseline::Middle, font);
     out.push(Element::classed_text(
         t,
         if event { "eventText" } else { "nodeText" },
@@ -270,9 +270,9 @@ fn draw_node(
 }
 
 /// The title: a bold `4ex` text at (`x`, 20). Chromium's `ex` is the font's
-/// x-height (0.528em) and its text box the rounded ascent and descent.
+/// x-height (1082/2048 em) and its text box the rounded ascent and descent.
 fn title_text(t: &str, x: f64, font: f64, pal: &Palette) -> (Element, Rect) {
-    let size = 4.0 * 0.528 * font;
+    let size = 4.0 * 1082.0 / 2048.0 * font;
     let line = crate::text::label_lines(t).join(" ");
     let w = line_width(&line, size, true);
     let (asc, desc) = ((0.905 * size).round(), (0.212 * size).round());

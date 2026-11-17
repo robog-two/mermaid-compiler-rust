@@ -1594,10 +1594,10 @@ pub fn layout(d: &C4Diagram, conf: &C4Conf, lconf: &LayoutConf) -> C4Layout {
 
 /// How far the alphabetic baseline sits below `y` for svgDraw's texts
 /// (`dominant-baseline: middle` with `alignment-baseline: mathematical`):
-/// Chromium puts it half the rounded font ascent down, measured 6, 7 and 7px
-/// at 12, 14 and 16px.
+/// Chromium puts it half the rounded font ascent down (the mathematical
+/// baseline), measured 5.5, 6.5 and 7px at 12, 14 and 16px.
 fn baseline_shift(font: f64) -> f64 {
-    js_round((0.905 * font).round() / 2.0)
+    crate::text::baseline_shift(crate::text::Baseline::Mathematical, font)
 }
 
 /// svgDraw's `byTspan`: one centred `<text>` per line around `y`
@@ -2545,7 +2545,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
     #[test]
     fn relationship_and_boundary_texts_follow_svg_draw() {
         // Two stacked systems: the label is centred half its width right of the
-        // chord midpoint, the technology 17px lower, baselines 6px below.
+        // chord midpoint, the technology 17px lower, baselines 5.5px below.
         let s = scene(
             "C4Context\nSystem(a, \"A\")\nSystem(c, \"C\")\nRel(a, c, \"HHHH\", \"HHHH\")\nUpdateLayoutConfig($c4ShapeInRow=\"1\")",
         );
@@ -2555,7 +2555,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
             .iter()
             .find(|t| t.lines.iter().map(|l| text::plain(l)).eq(["[HHHH]"]))
             .unwrap();
-        assert_eq!((label.y, techn.y), (295.0, 312.0));
+        assert_eq!((label.y, techn.y), (294.5, 311.5));
         // The technology is italic.
         assert_eq!(
             text::styled_runs(&techn.lines[0], false),
@@ -2571,7 +2571,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         let t = texts(&s);
         let label = t.iter().find(|t| t.lines == ["HHHH"]).unwrap();
         let kind = t.iter().find(|t| t.lines == ["[HHHH]"]).unwrap();
-        assert_eq!((label.y, kind.y), (138.0, 160.0));
+        assert_eq!((label.y, kind.y), (138.0, 159.5));
         assert!(label.bold && (label.x - 308.0).abs() < 1e-9);
     }
 

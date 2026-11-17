@@ -5,7 +5,7 @@ use crate::config::{Look, SequenceConfig};
 use crate::error::{Error, Result};
 use crate::geom::{self, PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Shadow, Text};
-use crate::text::{label_lines, svg_line_box};
+use crate::text::{Baseline, baseline_shift, label_lines, svg_line_box};
 use crate::theme::{ColorSlot, Palette, SlotColors, ThemeName};
 use std::collections::HashMap;
 
@@ -457,11 +457,10 @@ const ACTOR_TYPE_W: f64 = 36.0;
 /// The autonumber marker's circle radius, before the marker's `strokeWidth`
 /// scaling (the stylesheet's bare `line { stroke-width: 2px }` doubles it).
 const SEQ_NUM_R: f64 = 6.0;
-/// Alphabetic-baseline offsets (in em) of `dominant-baseline: middle` (half the
-/// x-height) and `central` (the em box centre), as Chromium places them; it
-/// then snaps the baseline to a whole pixel (see `line_text`).
-const BASELINE_MIDDLE: f64 = 0.27;
-const BASELINE_CENTRAL: f64 = 0.375;
+/// `dominant-baseline: middle` (half the x-height) and `central` (the
+/// centre of the rounded ascent and descent), as Chromium places them.
+const BASELINE_MIDDLE: Baseline = Baseline::Middle;
+const BASELINE_CENTRAL: Baseline = Baseline::Central;
 
 /// JavaScript's `Math.round` (halves round up, also below zero).
 fn js_round(x: f64) -> f64 {
@@ -483,12 +482,11 @@ fn text_dims(lines: &[String], font_size: f64) -> (f64, f64) {
 }
 
 /// One `<text>` line with `text-anchor: middle`, its attribute `y` turned into
-/// the alphabetic baseline by `shift` em, on the nearest whole pixel row (where
-/// Chromium draws it).
-fn line_text(x: f64, y: f64, shift: f64, line: &str, font_size: f64, fill: &Color) -> Text {
+/// the alphabetic baseline of `dominant-baseline: shift`.
+fn line_text(x: f64, y: f64, shift: Baseline, line: &str, font_size: f64, fill: &Color) -> Text {
     Text {
         x,
-        y: js_round(y + shift * font_size),
+        y: y + baseline_shift(shift, font_size),
         lines: vec![line.to_string()],
         line_height: font_size,
         font_size,
@@ -513,7 +511,7 @@ fn draw_text_lines(
     font_size: f64,
     fill: &Color,
     dy1em: bool,
-    shift: f64,
+    shift: Baseline,
 ) {
     let mut above = 0.0;
     for line in lines {
@@ -1747,7 +1745,7 @@ fn frame_elements(l: &LoopModel, pal: &Palette, cfg: &SequenceConfig) -> Element
         mf,
         &pal.loop_text,
         false,
-        0.0,
+        Baseline::Alphabetic,
     );
     for (y, title) in &l.sections {
         draw_text_lines(
@@ -1760,7 +1758,7 @@ fn frame_elements(l: &LoopModel, pal: &Palette, cfg: &SequenceConfig) -> Element
             mf,
             &pal.loop_text,
             false,
-            0.0,
+            Baseline::Alphabetic,
         );
     }
     Element::group("frame", els)
@@ -2217,8 +2215,8 @@ mod tests {
         assert!((circle.1 - 15.0 * k).abs() < 1e-9);
         assert!((circle.0.y - (glyph_bottom - 50.0 * k)).abs() < 1e-9);
         let label = texts(&s).into_iter().find(|t| t.lines == ["User"]).unwrap();
-        // Its `central` baseline 0.375em down, snapped to the pixel grid.
-        assert!((label.y - js_round(73.0 - 6.0 - 8.5 + 0.375 * 16.0)).abs() < 1e-9);
+        // Its `central` baseline 5.5px down at 16px.
+        assert!((label.y - (73.0 - 6.0 - 8.5 + 5.5)).abs() < 1e-9);
         // The lifeline starts at the datum (classic: 80px below the row top).
         assert_eq!(path_starts(&s, "actor-line")[0].0.y, 73.0);
         let classic = draw("sequenceDiagram\nactor U as User\nU->>U: x", Look::Classic);
