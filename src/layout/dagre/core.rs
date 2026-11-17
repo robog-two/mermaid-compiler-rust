@@ -1593,7 +1593,7 @@ fn resolve_conflicts(entries: &[BcEntry], cg: &Graph<(), ()>) -> Vec<SortEntry> 
 /// V8's `Array.prototype.sort` for a comparator returning a number: TimSort,
 /// which for fewer than 64 items is one run extended by binary insertion.
 /// Matters where the comparator is inconsistent (NaN barycentres).
-fn js_sort<T: Clone>(a: &mut [T], cmp: impl Fn(&T, &T) -> f64) {
+pub(crate) fn js_sort<T: Clone>(a: &mut [T], cmp: impl Fn(&T, &T) -> f64) {
     let n = a.len();
     if n < 2 {
         return;

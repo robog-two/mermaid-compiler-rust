@@ -37,6 +37,18 @@ pub struct Paint {
     pub fill_opacity: Option<f64>,
     /// A blurred drop shadow behind the shape (CSS `filter: drop-shadow()`).
     pub shadow: Option<Shadow>,
+    /// A horizontal linear gradient the stroke is painted with instead of `stroke`.
+    pub stroke_gradient: Option<Gradient>,
+}
+
+/// A two-stop `<linearGradient gradientUnits="userSpaceOnUse">` along x: `from`
+/// at `x1` (and left of it), `to` at `x2` (and right of it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gradient {
+    pub x1: f64,
+    pub x2: f64,
+    pub from: Color,
+    pub to: Color,
 }
 
 /// A CSS `drop-shadow(dx dy blur color)`: the shape's silhouette offset and
@@ -60,6 +72,7 @@ impl Paint {
             opacity: None,
             fill_opacity: None,
             shadow: None,
+            stroke_gradient: None,
         }
     }
     pub fn stroke(c: &Color, w: f64) -> Self {
@@ -71,6 +84,7 @@ impl Paint {
             opacity: None,
             fill_opacity: None,
             shadow: None,
+            stroke_gradient: None,
         }
     }
     pub fn both(fill: &Color, stroke: &Color, w: f64) -> Self {
@@ -82,6 +96,7 @@ impl Paint {
             opacity: None,
             fill_opacity: None,
             shadow: None,
+            stroke_gradient: None,
         }
     }
     pub fn dashed(mut self, d: Vec<f64>) -> Self {
@@ -98,6 +113,11 @@ impl Paint {
     }
     pub fn with_shadow(mut self, s: Option<Shadow>) -> Self {
         self.shadow = s;
+        self
+    }
+    /// Stroke with a horizontal gradient (`stroke` stays as the solid fallback).
+    pub fn with_stroke_gradient(mut self, g: Gradient) -> Self {
+        self.stroke_gradient = Some(g);
         self
     }
 }
