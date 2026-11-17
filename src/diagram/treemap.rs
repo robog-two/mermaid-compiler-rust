@@ -487,6 +487,13 @@ pub fn render(
         .unwrap_or(",")
         .to_string();
     let pad = cfg.section_f64("treemap", "diagramPadding", 8.0);
+    // The svg gets its `viewBox` and 100% width before anything is drawn, so in
+    // mmdc's 784px container a wider map lays its texts out shrunk.
+    let scale = if cfg.use_max_width("treemap") {
+        (784.0 / width).min(1.0)
+    } else {
+        1.0
+    };
     Ok(draw(
         &tm,
         &layout(&tm, width, height, inner),
@@ -495,10 +502,13 @@ pub fn render(
         &fmt,
         pad,
         pal,
+        scale,
     ))
 }
 
-/// Draw laid-out cells.
+/// Draw laid-out cells; `scale` is the screen pixels per unit the texts are
+/// laid out at (mmdc's page over a wider map).
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     tm: &Treemap,
     cells: &[Cell],
@@ -507,6 +517,7 @@ pub fn draw(
     fmt: &str,
     pad: f64,
     pal: &Palette,
+    scale: f64,
 ) -> Scene {
     let title_h = if tm.title.as_ref().is_some_and(|t| !t.is_empty()) {
         30.0
@@ -516,16 +527,21 @@ pub fn draw(
     let mut bounds = Bounds::default();
     let mut els = Vec::new();
     if let Some(t) = tm.title.as_ref().filter(|t| !t.is_empty()) {
-        // A 14px text at y = 15 with `dominant-baseline: middle`: its baseline
-        // 0.27em lower, its box the rounded ascent and descent.
+        // A 14px text at y = 15 with `dominant-baseline: middle`: its box (which
+        // the view box takes) is the rounded ascent and descent and its baseline
+        // half the x-height lower, all in screen pixels at the render-time
+        // `scale`, mapped back.
         let tw = line_width(t, 14.0, false);
-        let baseline = title_h / 2.0 + 0.27 * 14.0;
-        let top = baseline - 0.905 * 14.0;
+        let fs = 14.0 * scale;
+        // (the baseline lands on Chromium's 1/64px grid in screen space)
+        let baseline_px = title_h / 2.0 * scale + baseline_shift(Baseline::Middle, fs);
+        let baseline = (baseline_px * 64.0 + 1e-6).floor() / 64.0 / scale;
+        let top = baseline - (0.905 * fs).round() / scale;
         bounds.add_rect(Rect::new(
             width / 2.0 - tw / 2.0,
             top,
             tw,
-            crate::text::svg_line_box(14.0, t),
+            crate::text::svg_line_box(fs, t) / scale,
         ));
         let mut text = Text::centered(
             Point::new(width / 2.0, 0.0),
@@ -826,8 +842,9 @@ mod tests {
 
     #[test]
     fn title_box_follows_its_middle_baseline() {
-        // mermaid 12.3 (the gallery treemap): the title's text box starts at
-        // y = 6.2, so the viewBox top is 6.2 - 8 = -1.8.
+        // mermaid 12.3.0 (the gallery treemap, 1000 wide in mmdc's 784px page):
+        // the title's box, measured at 0.784 scale (13 screen px tall), starts at
+        // y 5.9316, so the viewBox top is -2.0684 and it is 430.0684 tall.
         let cfg = MermaidConfig::default();
         let s = render(
             "treemap-beta\ntitle Annual Budget\n\"A\": 10\n\"B\": 20",
@@ -836,6 +853,6 @@ mod tests {
             &cfg.palette(),
         )
         .unwrap();
-        assert!((s.view_box.y + 1.81).abs() < 0.1, "{:?}", s.view_box);
+        assert!((s.view_box.y + 2.0684).abs() < 0.01, "{:?}", s.view_box);
     }
 }
