@@ -13,7 +13,6 @@ use crate::error::{Error, Result};
 use crate::geom::{self, PathCmd, Point, Rect};
 use crate::json::Json;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
-use crate::text::line_width;
 use crate::theme::{Palette, ThemeName};
 
 // ---------------------------------------------------------------------------
@@ -508,7 +507,19 @@ pub struct Badge {
 }
 
 /// Item badges: centred on the domain's x, stacked below its label block.
-pub fn badges(d: &Cynefin, width: f64, height: f64, show_desc: bool, item_font: f64) -> Vec<Badge> {
+///
+/// `scale` is the screen pixels per unit the svg is drawn at while mermaid
+/// measures the labels: a badge is its text's getBBox() wide (plus padding),
+/// and Chromium lays that text out at the screen size, its glyphs' ink
+/// rounded out to whole screen pixels.
+pub fn badges(
+    d: &Cynefin,
+    width: f64,
+    height: f64,
+    show_desc: bool,
+    item_font: f64,
+    scale: f64,
+) -> Vec<Badge> {
     let mut out = Vec::new();
     for dom in Domain::ALL {
         let Some(block) = d.domain(dom).filter(|b| !b.items.is_empty()) else {
@@ -530,7 +541,8 @@ pub fn badges(d: &Cynefin, width: f64, height: f64, show_desc: bool, item_font: 
                 (false, false) => 15.0,
             };
         let badge = |label: String, k: usize, overflow: bool| {
-            let w = line_width(&label, item_font, false) + ITEM_PADDING_X * 2.0;
+            let w = crate::text::svg_bbox_width(&label, item_font * scale) / scale
+                + ITEM_PADDING_X * 2.0;
             Badge {
                 domain: dom,
                 rect: Rect::new(
@@ -913,7 +925,14 @@ pub fn draw(d: &Cynefin, cfg: &MermaidConfig, pal: &Palette) -> Scene {
 
     // 7. Item badges.
     let mut items = Vec::new();
-    for b in badges(d, width, height, show_desc, t.item_font_size) {
+    // The svg (width + 2 · padding wide, 100% of mmdc's 784px page) is sized
+    // before the badges are measured.
+    let scale = if cfg.use_max_width("cynefin") {
+        (784.0 / (width + 2.0 * padding)).min(1.0)
+    } else {
+        1.0
+    };
+    for b in badges(d, width, height, show_desc, t.item_font_size, scale) {
         let bg = t.bg(b.domain);
         let geom = crate::scene::Geometry::Rect {
             rect: b.rect,
@@ -1183,7 +1202,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let b = badges(&d, 800.0, 600.0, true, 12.0);
+        let b = badges(&d, 800.0, 600.0, true, 12.0, 1.0);
         let conf: Vec<&Badge> = b.iter().filter(|b| b.domain == Domain::Confusion).collect();
         assert_eq!(conf.len(), 4);
         assert!(conf[3].overflow);
@@ -1240,5 +1259,22 @@ mod tests {
         assert_eq!(t.complex_bg.css(), "#ff0000");
         assert_eq!(t.cliff_width, 6.0);
         assert_eq!(t.label_color.css(), "#131300");
+    }
+
+    #[test]
+    fn badges_measure_their_labels_at_the_page_scale() {
+        // mermaid 12.3.0 (880px wide in mmdc's 784px page): "Page on-call
+        // immediately" and "Apply known fix" badges are 154.758 and 104.084 wide,
+        // their 12px labels' getBBox() laid out at 10.69px (ink rounded out to
+        // screen pixels) plus 2 · 10. Unscaled, they measured 0.7 narrower.
+        let d = parse(
+            "cynefin-beta\n  clear\n    \"Apply known fix\"\n  chaotic\n    \"Page on-call immediately\"\n",
+            None,
+        )
+        .unwrap();
+        let b = badges(&d, 800.0, 600.0, true, 12.0, 784.0 / 880.0);
+        let w = |l: &str| b.iter().find(|b| b.label == l).unwrap().rect.w;
+        assert!((w("Page on-call immediately") - 154.758).abs() < 0.05);
+        assert!((w("Apply known fix") - 104.084).abs() < 0.05);
     }
 }
