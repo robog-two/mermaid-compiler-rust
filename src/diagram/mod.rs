@@ -1,6 +1,7 @@
 //! Diagram detection, shared preprocessing and per-diagram parsers/renderers.
 
 pub mod agentflow;
+pub mod archicons;
 pub mod architecture;
 pub mod architecture_fcose;
 pub mod block;

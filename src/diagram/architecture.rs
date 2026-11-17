@@ -15,7 +15,7 @@
 use super::architecture_fcose::{self, ArchConfig, Placement};
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
-use crate::geom::{self, Bounds, PathCmd, Point, Rect};
+use crate::geom::{self, Bounds, Point, Rect};
 use crate::json::Json;
 use crate::layout::force::fcose;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
@@ -579,136 +579,19 @@ fn arrow(end: Point, dir: Point, color: &Color, icon: f64, bounds: &mut Bounds) 
     )
 }
 
-/// White glyph for the built-in icon names, a generic cube otherwise.
+/// The icon drawn on a service's (or group's) blue square: mermaid's own SVG
+/// for a built-in name (`database`, `server`, `disk`, `internet`, `cloud`, also
+/// as `mermaid-architecture:<name>`), nothing for `blank`, and `unknownIcon`'s
+/// `?` for any other name (an icon pack mmdc was not given).
 fn icon_glyph(icon: Option<&str>, r: Rect) -> Vec<Element> {
-    let white = Color::new("#ffffff");
-    let s = r.w / 80.0;
-    let p = |x: f64, y: f64| Point::new(r.x + x * s, r.y + y * s);
-    let stroke = Paint::stroke(&white, 3.0 * s);
-    let fill = Paint::fill(&white);
-    let name = icon.map(|i| i.rsplit(':').next().unwrap_or(i).to_ascii_lowercase());
-    let pi = std::f64::consts::PI;
-    match name.as_deref() {
-        None | Some("blank") => vec![],
-        Some("database") => {
-            let (rx, ry) = (20.0 * s, 7.0 * s);
-            let mut body = vec![
-                PathCmd::MoveTo(p(20.0, 24.0)),
-                PathCmd::LineTo(p(20.0, 56.0)),
-            ];
-            body.extend(geom::elliptic_arc_cubics(p(40.0, 56.0), rx, ry, pi, 0.0));
-            body.push(PathCmd::LineTo(p(60.0, 24.0)));
-            let mut mid = vec![PathCmd::MoveTo(p(20.0, 40.0))];
-            mid.extend(geom::elliptic_arc_cubics(p(40.0, 40.0), rx, ry, pi, 0.0));
-            vec![
-                Element::path(geom::ellipse(p(40.0, 24.0), rx, ry), stroke.clone()),
-                Element::path(body, stroke.clone()),
-                Element::path(mid, stroke),
-            ]
-        }
-        Some("server") => {
-            let mut v = Vec::new();
-            for y in [16.0, 34.0, 52.0] {
-                v.push(Element::rect(
-                    Rect::new(r.x + 18.0 * s, r.y + y * s, 44.0 * s, 12.0 * s),
-                    2.0 * s,
-                    stroke.clone(),
-                ));
-                v.push(Element::shape(
-                    Geometry::Circle {
-                        c: p(54.0, y + 6.0),
-                        r: 2.2 * s,
-                    },
-                    fill.clone(),
-                ));
-            }
-            v
-        }
-        Some("disk") => vec![
-            Element::shape(
-                Geometry::Circle {
-                    c: p(40.0, 40.0),
-                    r: 22.0 * s,
-                },
-                stroke.clone(),
-            ),
-            Element::shape(
-                Geometry::Circle {
-                    c: p(40.0, 40.0),
-                    r: 5.0 * s,
-                },
-                fill,
-            ),
-            Element::line(p(46.0, 46.0), p(56.0, 56.0), stroke),
-        ],
-        Some("internet") => {
-            let half = |x: f64| -> f64 { (22.0f64 * 22.0 - x * x).max(0.0).sqrt() };
-            let w11 = half(11.0);
-            vec![
-                Element::shape(
-                    Geometry::Circle {
-                        c: p(40.0, 40.0),
-                        r: 22.0 * s,
-                    },
-                    stroke.clone(),
-                ),
-                Element::path(
-                    geom::ellipse(p(40.0, 40.0), 9.0 * s, 22.0 * s),
-                    stroke.clone(),
-                ),
-                Element::line(p(18.0, 40.0), p(62.0, 40.0), stroke.clone()),
-                Element::line(p(40.0 - w11, 29.0), p(40.0 + w11, 29.0), stroke.clone()),
-                Element::line(p(40.0 - w11, 51.0), p(40.0 + w11, 51.0), stroke),
-            ]
-        }
-        Some("cloud") => vec![
-            Element::shape(
-                Geometry::Circle {
-                    c: p(27.0, 46.0),
-                    r: 10.0 * s,
-                },
-                fill.clone(),
-            ),
-            Element::shape(
-                Geometry::Circle {
-                    c: p(41.0, 37.0),
-                    r: 14.0 * s,
-                },
-                fill.clone(),
-            ),
-            Element::shape(
-                Geometry::Circle {
-                    c: p(55.0, 46.0),
-                    r: 10.0 * s,
-                },
-                fill.clone(),
-            ),
-            Element::rect(
-                Rect::new(r.x + 27.0 * s, r.y + 40.0 * s, 28.0 * s, 16.0 * s),
-                0.0,
-                fill,
-            ),
-        ],
-        Some(_) => {
-            // Generic cube.
-            let top = [p(40.0, 18.0), p(60.0, 29.0), p(40.0, 40.0), p(20.0, 29.0)];
-            vec![
-                Element::path(
-                    geom::polygon(&[
-                        p(40.0, 18.0),
-                        p(60.0, 29.0),
-                        p(60.0, 51.0),
-                        p(40.0, 62.0),
-                        p(20.0, 51.0),
-                        p(20.0, 29.0),
-                    ]),
-                    stroke.clone(),
-                ),
-                Element::path(geom::polyline(&top[1..]), stroke.clone()),
-                Element::line(p(40.0, 40.0), p(40.0, 62.0), stroke),
-            ]
-        }
+    let Some(icon) = icon else {
+        return Vec::new();
+    };
+    let name = icon.strip_prefix("mermaid-architecture:").unwrap_or(icon);
+    if name == "blank" {
+        return Vec::new();
     }
+    super::archicons::builtin(name, r).unwrap_or_else(|| vec![super::archicons::unknown(r)])
 }
 
 /// Boxes from mermaid's fcose placement: a service's icon has its top left
@@ -869,7 +752,8 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 title,
             } => {
                 let mut v = vec![Element::classed_shape(
-                    Geometry::Rect { rect: ib, rx: 6.0 },
+                    // wrapIcon's `<rect width="80" height="80">`: square corners.
+                    Geometry::Rect { rect: ib, rx: 0.0 },
                     Paint::fill(&icon_bg),
                     "node-bkg",
                 )];
@@ -979,16 +863,23 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 let at = Point::new(mid.x, mid.y + b.height / 2.0);
                 let r = Rect::centered(at, b.width + 6.0, b.height);
                 bounds.add_rect(r);
+                // The text's tspans sit 1em, 2.1em, ... below the midpoint, on the
+                // group's `dominant-baseline: middle`.
                 label_els.push(Element::group(
                     "edgeLabel",
                     // Upstream's edge labels have no background box.
-                    vec![Element::text(Text::centered(
-                        at,
-                        &b.lines,
-                        font,
-                        b.line_height,
-                        &pal.text_color,
-                    ))],
+                    vec![Element::text(Text {
+                        x: mid.x,
+                        y: mid.y
+                            + font
+                            + crate::text::baseline_shift(crate::text::Baseline::Middle, font),
+                        lines: b.lines.clone(),
+                        line_height: font * crate::text::SVG_LINE_HEIGHT,
+                        font_size: font,
+                        bold: false,
+                        anchor: Anchor::Middle,
+                        fill: pal.text_color.clone(),
+                    })],
                 ));
             }
         }

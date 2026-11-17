@@ -1745,7 +1745,9 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
             paint = paint.dashed(vec![2.0]);
         }
         let dir = pb.minus(pa).norm();
-        let trim = |h: Head| if h == Head::Arrow { 8.0 } else { 0.0 };
+        // The line stops 4px short of an arrow end (markerOffsets), where the
+        // 8px `pointEnd` marker is centred.
+        let trim = |h: Head| if h == Head::Arrow { 4.0 } else { 0.0 };
         let sa = pa.plus(dir.scale(trim(e.start)));
         let sb = pb.minus(dir.scale(trim(e.end)));
         edges.push(Element::classed_shape(
@@ -1811,11 +1813,13 @@ fn head(h: Head, tip: Point, dir: Point, color: &Color) -> Vec<Element> {
     let n = Point::new(-dir.y, dir.x);
     match h {
         Head::None => Vec::new(),
+        // `pointEnd`: `M 0 0 L 10 5 L 0 10 z` in a 10 × 10 viewBox drawn 8 × 8
+        // (userSpaceOnUse), so its 1px stroke is 0.8.
         Head::Arrow => {
-            let base = tip.minus(dir.scale(10.0));
+            let base = tip.minus(dir.scale(8.0));
             vec![Element::path(
-                geom::polygon(&[tip, base.plus(n.scale(5.0)), base.minus(n.scale(5.0))]),
-                Paint::both(color, color, 1.0),
+                geom::polygon(&[tip, base.plus(n.scale(4.0)), base.minus(n.scale(4.0))]),
+                Paint::both(color, color, 0.8),
             )]
         }
         Head::Circle => vec![Element::shape(
