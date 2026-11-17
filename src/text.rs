@@ -178,7 +178,9 @@ pub fn char_width_em(c: char, bold: bool) -> f64 {
     }
     let units = match code {
         0x20..=0x7E => f64::from(table[(code - 0x20) as usize]) * 1000.0 / 2048.0,
-        0xA0..=0x24F => 556.0,
+        // A no-break space is as wide as a space.
+        0xA0 => f64::from(table[0]) * 1000.0 / 2048.0,
+        0xA1..=0x24F => 556.0,
         // CJK, Hangul, full-width forms and emoji are roughly square.
         0x1100..=0x11FF | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFF00..=0xFF60 => {
             1000.0

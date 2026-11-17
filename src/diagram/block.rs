@@ -1760,9 +1760,11 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         bounds.add_point(pa);
         bounds.add_point(pb);
         if let Some(l) = &e.label {
+            // The label sits on the edge's middle point, half-way between the
+            // blocks' centres, its `labelBkg` box exactly the label's.
             let tb = label_box(l, m.font);
-            let mid = pa.lerp(pb, 0.5);
-            let bg = Rect::centered(mid, tb.width + 6.0, tb.height + 2.0);
+            let mid = ca.lerp(cb, 0.5);
+            let bg = Rect::centered(mid, tb.width, tb.height);
             bounds.add_rect(bg);
             labels.push(Element::rect(
                 bg,
@@ -2254,5 +2256,46 @@ class c hot
         let f = fit_label(&tb, 49.64);
         assert!(f.clipped);
         assert_eq!((f.w, f.h), (49.625, 24.0));
+    }
+
+    #[test]
+    fn no_break_spaces_are_space_wide() {
+        // mermaid 12.3.0: a down block arrow labelled with three &nbsp; is
+        // 13.34 (three space widths) + 48 = 61.34 wide.
+        use crate::scene::{Element, Geometry};
+        fn walk(els: &[Element], out: &mut Vec<Element>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, out),
+                    other => out.push(other.clone()),
+                }
+            }
+        }
+        let r = crate::render::render(
+            "block\ncolumns 1\n  a[\"&nbsp;&nbsp;&nbsp;\"]\n  arrow<[\"&nbsp;&nbsp;&nbsp;\"]>(down)\n",
+            &MermaidConfig::default(),
+        )
+        .unwrap();
+        let mut els = Vec::new();
+        walk(&r.scene.elements, &mut els);
+        let widths: Vec<f64> = els
+            .iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Path(c),
+                    class: Some(k),
+                    ..
+                } if k == "label-container" => crate::geom::path_bbox(c).map(|b| b.w),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            widths.iter().any(|w| (w - 61.34375).abs() < 1e-3),
+            "{widths:?}"
+        );
+        assert_eq!(
+            crate::text::line_width("\u{a0}", 16.0, false),
+            crate::text::line_width(" ", 16.0, false)
+        );
     }
 }

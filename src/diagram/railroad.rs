@@ -909,7 +909,9 @@ impl Metrics {
     /// `getBBox()` of the label: Arial-metric advance widths, and the browser's
     /// (hinted) line box height measured for common sizes.
     fn measure(&self, text: &str) -> (f64, f64) {
-        if text.is_empty() {
+        // SVG text drops leading and trailing white space, so a blank label
+        // (`" "`) has an empty box.
+        if text.trim().is_empty() {
             return (0.0, 0.0);
         }
         let w = svg_bbox_width(text, self.font_size);
@@ -2300,5 +2302,31 @@ mod tests {
         }
         let empty = render("railroad-beta\n", None, &cfg, &pal).unwrap();
         assert_eq!((empty.view_box.w, empty.view_box.h), (200.0, 100.0));
+    }
+
+    #[test]
+    fn blank_terminal_is_the_padding_square() {
+        // mermaid 12.3.0: `"Hello" " " "World"` draws the blank terminal 20 × 20
+        // (SVG text drops the space, so its box is empty), centred on the line.
+        let r = crate::render::render(
+            "railroad-ebnf-beta\ngreeting = \"Hello\" \" \" \"World\" ;\n",
+            &MermaidConfig::default(),
+        )
+        .unwrap();
+        fn rects(els: &[Element], out: &mut Vec<Rect>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => rects(children, out),
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        ..
+                    } => out.push(*rect),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        rects(&r.scene.elements, &mut out);
+        assert!(out.iter().any(|r| r.w == 20.0 && r.h == 20.0), "{out:?}");
     }
 }
