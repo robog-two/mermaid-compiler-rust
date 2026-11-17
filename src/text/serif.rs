@@ -65,25 +65,6 @@ fn kerning(a: char, b: char) -> f64 {
         .map_or(0.0, |&(_, k)| f64::from(k))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn widths_and_heights_as_chromium_measures_them() {
-        // getBBox() in headless Chromium, "Times New Roman" (Liberation Serif).
-        assert_eq!(bbox_width("Hello John, how are you?", 16.0), 163.96875);
-        assert_eq!(bbox_width("Great!", 16.0), 40.859375);
-        assert_eq!(bbox_width("See you later!", 16.0), 88.859375);
-        assert_eq!(bbox_width("John", 16.0), 30.234375);
-        assert_eq!(bbox_width("Alice", 16.0), 34.65625);
-        assert_eq!(line_box(16.0, "Hello John, how are you?"), 18.0);
-        assert_eq!(line_box(16.0, "Great!"), 17.0);
-        assert_eq!(line_box(14.0, "Typography"), 16.0);
-        assert_eq!(line_box(14.0, "(paren)x"), 15.0);
-    }
-}
-
 /// Liberation Serif (the browser's default serif font, metric-compatible with Times New Roman)
 /// for ASCII 0x20..=0x7E, in 1/2048 em: advance width, ink `xMin`, `xMax` and `yMin`
 /// (`hmtx` and `glyf`).
@@ -293,3 +274,22 @@ const SERIF_KERNING: &[(&str, i16)] = &[
     ("y,", -133),
     ("y.", -133),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widths_and_heights_as_chromium_measures_them() {
+        // getBBox() in headless Chromium, "Times New Roman" (Liberation Serif).
+        assert_eq!(bbox_width("Hello John, how are you?", 16.0), 163.96875);
+        assert_eq!(bbox_width("Great!", 16.0), 40.859375);
+        assert_eq!(bbox_width("See you later!", 16.0), 88.859375);
+        assert_eq!(bbox_width("John", 16.0), 30.234375);
+        assert_eq!(bbox_width("Alice", 16.0), 34.65625);
+        assert_eq!(line_box(16.0, "Hello John, how are you?"), 18.0);
+        assert_eq!(line_box(16.0, "Great!"), 17.0);
+        assert_eq!(line_box(14.0, "Typography"), 16.0);
+        assert_eq!(line_box(14.0, "(paren)x"), 15.0);
+    }
+}
