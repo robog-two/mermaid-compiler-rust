@@ -1752,10 +1752,14 @@ fn draw_blocks(
                 let mut paint = Paint::both(
                     st.fill.as_ref().unwrap_or(&pal.main_bkg),
                     st.stroke.as_ref().unwrap_or(&pal.node_border),
-                    st.stroke_width.unwrap_or(1.0),
+                    // `.node rect, circle, polygon, path { stroke-width: strokeWidth }`.
+                    st.stroke_width.unwrap_or(pal.stroke_width.unwrap_or(1.0)),
                 );
                 paint.dash = st.dash.clone();
                 let (mut els, outline) = g.draw(c, &paint);
+                if m.neo {
+                    neo_node(&mut els, *shape, &st, pal);
+                }
                 let color: Color = st.color.clone().unwrap_or_else(|| pal.node_text.clone());
                 let center = c.plus(g.label_off);
                 let mut t = Text::centered(center, &g.lines, m.font, tb.line_height, &color);
@@ -1796,6 +1800,79 @@ fn draw_blocks(
     }
 }
 
+/// The shared stylesheet's `[data-look="neo"].node` rules on a block's shape
+/// (mermaid 12.3.0 draws blocks with the flowchart shapes): the theme's
+/// `dropShadow` on its outline (each ring of a double circle), and every outline
+/// in `nodeBorder` or, with `useGradient`, the `{id}-gradient`, unless a `style`
+/// stroke (inline) wins.
+fn neo_node(els: &mut Vec<Element>, shape: BlockShape, st: &StyleOverrides, pal: &Palette) {
+    fn outlines(els: &mut [Element], f: &mut dyn FnMut(&mut Element)) {
+        for el in els {
+            match el {
+                Element::Group { children, .. } | Element::Translated { children, .. } => {
+                    outlines(children, f)
+                }
+                Element::Shape { .. } => f(el),
+                _ => {}
+            }
+        }
+    }
+    /// The vector holding the first shape (inside any wrapping groups).
+    fn first_level(els: &mut Vec<Element>) -> &mut Vec<Element> {
+        if !matches!(
+            els.first(),
+            Some(Element::Group { .. } | Element::Translated { .. })
+        ) {
+            return els;
+        }
+        match &mut els[0] {
+            Element::Group { children, .. } | Element::Translated { children, .. } => {
+                first_level(children)
+            }
+            _ => unreachable!("checked above"),
+        }
+    }
+    if st.stroke.is_none() {
+        let gradient = pal
+            .node_gradient
+            .as_ref()
+            .map(|(from, to)| crate::scene::Gradient::across_bbox(from, to));
+        outlines(els, &mut |el| {
+            if let Element::Shape { paint, .. } = el
+                && !paint.stroke.is_none()
+            {
+                paint.stroke = pal.node_border.clone();
+                paint.stroke_gradient = gradient.clone();
+            }
+        });
+    }
+    let Some(sh) = pal.drop_shadow.as_ref() else {
+        return;
+    };
+    if shape == BlockShape::DoubleCircle {
+        let level = first_level(els);
+        let mut out = Vec::with_capacity(level.len() + 2);
+        for el in level.drain(..) {
+            if matches!(
+                &el,
+                Element::Shape {
+                    geom: Geometry::Circle { .. },
+                    ..
+                }
+            ) {
+                let mut one = vec![el];
+                super::graph::cast_shadow(&mut one, sh);
+                out.extend(one);
+            } else {
+                out.push(el);
+            }
+        }
+        *level = out;
+    } else {
+        super::graph::cast_shadow(first_level(els), sh);
+    }
+}
+
 /// Draw a laid-out block diagram.
 pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Scene {
     let mut bounds = Bounds::default();
@@ -1828,11 +1905,11 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         let mid = Point::new(ca.x + (cb.x - ca.x) / 2.0, ca.y + (cb.y - ca.y) / 2.0);
         let pa = a.clip(mid);
         let pb = b.clip(mid);
-        // `.edge-thickness-normal` is 1px in the block stylesheet, `-thick` 3.5px;
-        // `.edge-pattern-dotted` dashes 2.
+        // `.edge-thickness-normal` is the theme's `strokeWidth` (1px by default)
+        // in the shared stylesheet, `-thick` 3.5px; `.edge-pattern-dotted` dashes 2.
         let width = match e.line {
             Line::Thick => 3.5,
-            _ => 1.0,
+            _ => pal.stroke_width.unwrap_or(1.0),
         };
         let mut paint = Paint::stroke(&pal.line_color, width);
         if e.line == Line::Dotted {

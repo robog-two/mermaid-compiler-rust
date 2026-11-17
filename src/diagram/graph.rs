@@ -563,7 +563,7 @@ fn small_shadow(
 /// The neo look's drop shadow cast by `els[0]`: a blurred CSS `drop-shadow()`
 /// as that shape's own filter, a hard one (`stdDeviation="0"`) as an offset copy
 /// of its silhouette drawn before it.
-fn cast_shadow(els: &mut Vec<Element>, sh: &DropShadow) {
+pub(super) fn cast_shadow(els: &mut Vec<Element>, sh: &DropShadow) {
     match sh.blurred() {
         Some(blurred) => {
             if let Some(Element::Shape { paint, .. }) = els.first_mut()
