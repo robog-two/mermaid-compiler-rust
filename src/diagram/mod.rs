@@ -169,6 +169,13 @@ pub fn preprocess(src: &str) -> Result<Preprocessed> {
         if let Some(cfg) = yaml.get("config").filter(|c| c.as_object().is_some()) {
             config_layers.push(cfg.clone());
         }
+        // The front matter's `displayMode` (gantt's `db.setDisplayMode`).
+        if let Some(m) = yaml.get("displayMode").and_then(Json::to_scalar_string) {
+            config_layers.push(Json::Object(vec![(
+                "gantt".into(),
+                Json::Object(vec![("displayMode".into(), Json::String(m))]),
+            )]));
+        }
         for l in &mut lines[..fm_lines] {
             l.clear();
         }

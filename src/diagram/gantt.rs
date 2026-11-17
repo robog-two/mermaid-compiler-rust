@@ -1418,10 +1418,15 @@ fn assign_rows(g: &Gantt, compact: bool) -> (Vec<Option<usize>>, usize) {
     let mut next = 0;
     for sec in 0..g.sections.len() {
         let mut lanes: Vec<i64> = Vec::new(); // lane -> busy until
-        for (i, t) in g.tasks.iter().enumerate() {
-            if t.section != sec || t.vert {
-                continue;
-            }
+        // getMaxIntersections takes a section's tasks by start, then order.
+        let mut order: Vec<usize> = (0..g.tasks.len())
+            .filter(|&i| g.tasks[i].section == sec && !g.tasks[i].vert)
+            .collect();
+        if compact {
+            order.sort_by_key(|&i| (g.tasks[i].start, i));
+        }
+        for i in order {
+            let t = &g.tasks[i];
             let lane = if compact {
                 match lanes.iter().position(|&until| until <= t.start) {
                     Some(l) => l,
@@ -1434,7 +1439,7 @@ fn assign_rows(g: &Gantt, compact: bool) -> (Vec<Option<usize>>, usize) {
                 lanes.push(i64::MIN);
                 lanes.len() - 1
             };
-            lanes[lane] = t.end.max(t.start + 1);
+            lanes[lane] = t.end;
             rows[i] = Some(next + lane);
         }
         next += lanes.len();
@@ -1454,6 +1459,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let font = cfg.section_f64("gantt", "fontSize", 11.0);
     let sec_font = cfg.section_f64("gantt", "sectionFontSize", 11.0);
     let title_margin = cfg.section_f64("gantt", "titleTopMargin", 25.0);
+    let n_styles = (cfg.section_f64("gantt", "numberSectionStyles", 4.0) as usize).max(1);
     // The svg's parent width: mmdc's 800px page less the body's 8px margins.
     let total_w = cfg.section_f64("gantt", "useWidth", 784.0);
     let compact = cfg
@@ -1461,7 +1467,9 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .and_then(|j| j.as_str())
         .is_some_and(|m| m == "compact");
     let top_axis = g.top_axis || cfg.section_bool("gantt", "topAxis", false);
-    let axis_font = font;
+    // d3's axis labels: `font-size` 10, `y` 3 and `dy` 1em below the bottom
+    // axis, 3 above the top one.
+    let axis_font = 10.0;
 
     let gap = bar_h + bar_gap;
     let (rows, n_rows) = assign_rows(g, compact);
@@ -1470,20 +1478,16 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .iter()
         .map(|s| crate::text::label_lines(s))
         .collect();
-    let widest_sec = sec_labels
-        .iter()
-        .flatten()
-        .map(|l| line_width(l, sec_font, false))
-        .fold(0.0, f64::max);
-    let left_pad = left_pad_cfg.max(widest_sec + 20.0);
-    let inner = (total_w - 2.0 * left_pad_cfg).max(200.0);
-    let w = left_pad + inner + right_pad;
+    // `rangeRound([0, w - leftPadding - rightPadding])` on the parent's
+    // width; section titles wider than the padding overflow it.
+    let left_pad = left_pad_cfg;
+    let inner = (total_w - left_pad - right_pad).max(0.0);
+    let w = total_w;
 
-    let oy = if top_axis { 20.0 } else { 0.0 };
-    let h = n_rows as f64 * gap + 2.0 * top_pad + oy;
-    let grid_top = oy + top_pad + grid_pad - 50.0;
+    let h = n_rows as f64 * gap + 2.0 * top_pad;
+    let grid_top = top_pad + grid_pad - 50.0;
     let axis_y = h - 50.0;
-    let row_y = |r: usize| oy + r as f64 * gap + top_pad;
+    let row_y = |r: usize| r as f64 * gap + top_pad;
 
     // `scaleTime().domain([min startTime, max endTime]).rangeRound(...)`: the
     // domain ends at the latest (excludes-extended) end, not the drawn one.
@@ -1516,35 +1520,45 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         }
     }
     for (r, &sec) in row_section.iter().enumerate() {
-        let (fill, op) = &c.sections[sec % 4];
+        let k = sec % n_styles;
+        let (fill, op) = &c.sections[k % 4];
         bands.push(Element::classed_shape(
             Geometry::Rect {
                 rect: Rect::new(0.0, row_y(r) - 2.0, w - right_pad / 2.0, gap),
                 rx: 0.0,
             },
             Paint::fill(fill).with_opacity(*op),
-            format!("section section{}", sec % 4),
+            format!("section section{k}"),
         ));
     }
 
-    // Excluded days (skipped for very long ranges, as mermaid does).
+    // Excluded days (skipped for very long ranges, as mermaid does): runs of
+    // consecutive excluded days from the first start to the last end, each
+    // one rect from the start of its first day to the end (23:59:59.999) of
+    // its last, `gridLineStartPadding` down to `topPadding` above the bottom.
     if !g.excludes.is_empty() && t1 - t0 <= 5 * 365 * DAY_MS {
-        let mut day = t0.div_euclid(DAY_MS);
-        while day * DAY_MS < t1 {
-            let t = day * DAY_MS;
-            if is_excluded(g, t) {
-                let x0 = x_of(t.max(t0));
-                let x1 = x_of((t + DAY_MS).min(t1));
-                excl.push(Element::classed_shape(
-                    Geometry::Rect {
-                        rect: Rect::new(x0, grid_top, x1 - x0, axis_y - grid_top),
-                        rx: 0.0,
-                    },
-                    Paint::fill(&c.exclude),
-                    "exclude-range",
-                ));
+        let mut ranges: Vec<(i64, i64)> = Vec::new();
+        let mut run: Option<(i64, i64)> = None;
+        let mut d = t0;
+        while d <= t1 {
+            if is_excluded(g, d) {
+                run = Some(run.map_or((d, d), |(a, _)| (a, d)));
+            } else if let Some(r) = run.take() {
+                ranges.push(r);
             }
-            day += 1;
+            d += DAY_MS;
+        }
+        for (a, b) in ranges {
+            let x0 = x_of(a.div_euclid(DAY_MS) * DAY_MS);
+            let x1 = x_of(b.div_euclid(DAY_MS) * DAY_MS + DAY_MS - 1);
+            excl.push(Element::classed_shape(
+                Geometry::Rect {
+                    rect: Rect::new(x0, grid_pad, x1 - x0, h - top_pad - grid_pad),
+                    rx: 0.0,
+                },
+                Paint::fill(&c.exclude),
+                "exclude-range",
+            ));
         }
     }
 
@@ -1567,7 +1581,8 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         tick_list = ticks(t0, t1, s2, u2, g.week_start);
     }
     for &t in &tick_list {
-        let x = x_of(t);
+        // d3-axis offsets each tick by half a pixel (devicePixelRatio 1).
+        let x = x_of(t) + 0.5;
         grid.push(Element::classed_shape(
             Geometry::Path(vec![
                 geom::PathCmd::MoveTo(Point::new(x, grid_top)),
@@ -1578,6 +1593,17 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             Paint::stroke(&Color::new("#000000"), 1.0).with_opacity(0.8),
             "tick",
         ));
+        if top_axis {
+            // The top axis' ticks reach as far down from `topPadding`.
+            grid.push(Element::classed_shape(
+                Geometry::Path(vec![
+                    geom::PathCmd::MoveTo(Point::new(x, top_pad)),
+                    geom::PathCmd::LineTo(Point::new(x, h - grid_pad)),
+                ]),
+                Paint::stroke(&Color::new("#000000"), 1.0).with_opacity(0.8),
+                "tick",
+            ));
+        }
         let label = format_time(t, &axis_format);
         let lw = line_width(&label, axis_font, false);
         let mut put = |y: f64| {
@@ -1598,12 +1624,13 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         };
         put(axis_y + 3.0 + axis_font);
         if top_axis {
-            put(grid_top - 6.0);
+            put(top_pad - 3.0);
         }
     }
 
     // Tasks.
-    let text_y = |r: usize| row_y(r) + bar_h / 2.0 + font * 0.35;
+    // `y = order * gap + barHeight / 2 + (fontSize / 2 - 2) + topPadding`.
+    let text_y = |r: usize| row_y(r) + bar_h / 2.0 + font / 2.0 - 2.0;
     for (t, r) in g.tasks.iter().zip(&rows) {
         let Some(r) = *r else { continue };
         let y = row_y(r);
@@ -1624,21 +1651,27 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let paint = Paint::both(&fill, &stroke, 2.0);
         let label = normalize_label(&t.label);
         let tw = line_width(&label, font, false);
-        let (bx0, bx1) = if t.milestone {
+        if t.milestone {
             let mid = (x_of(t.start) + x_of(t.render_end.max(t.start))) / 2.0;
             let hs = bar_h / 2.0;
             let cy = y + bar_h / 2.0;
-            bars.push(Element::classed_shape(
-                Geometry::Path(geom::polygon(&[
-                    Point::new(mid, cy - hs),
-                    Point::new(mid + hs, cy),
-                    Point::new(mid, cy + hs),
-                    Point::new(mid - hs, cy),
-                ])),
-                paint,
-                "milestone",
-            ));
-            (mid - hs, mid + hs)
+            // A `barHeight` square task rect (rx 3) under `.milestone`'s
+            // `rotate(45deg) scale(0.8)` about its centre.
+            let k = 0.8;
+            let mut paint = paint;
+            paint.stroke_width *= k;
+            bars.push(Element::Rotated {
+                deg: 45.0,
+                about: Point::new(mid, cy),
+                children: vec![Element::classed_shape(
+                    Geometry::Rect {
+                        rect: Rect::new(mid - hs * k, cy - hs * k, 2.0 * hs * k, 2.0 * hs * k),
+                        rx: 3.0 * k,
+                    },
+                    paint,
+                    "milestone",
+                )],
+            });
         } else {
             let x0 = x_of(t.start);
             let x1 = x_of(t.render_end.max(t.start));
@@ -1650,32 +1683,49 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 paint,
                 "task",
             ));
-            (x0, x1)
+        }
+        // drawRects' text: `x` from the drawn extent (`renderEndTime`), the
+        // inside/outside class from `endTime`; both against the getBBox width.
+        let ts = |t: i64| x_of(t) - left_pad;
+        let (mut sx, mut ex) = (ts(t.start), ts(t.render_end.max(t.start)));
+        if t.milestone {
+            sx += 0.5 * (ts(t.end) - ts(t.start)) - 0.5 * bar_h;
+            ex = sx + bar_h;
+        }
+        let x = if tw > ex - sx {
+            if ex + tw + 1.5 * left_pad_cfg > w {
+                sx + left_pad - 5.0
+            } else {
+                ex + left_pad + 5.0
+            }
+        } else {
+            (ex - sx) / 2.0 + sx + left_pad
         };
-        let inside = !t.milestone && tw + 6.0 <= bx1 - bx0;
-        // `taskText{n}` = `taskTextColor`; `activeText` / `doneText` / `activeCritText` /
-        // `doneCritText` = `taskTextDarkColor` (!important), except that done labels outside
-        // the bar take `taskTextOutsideColor`; other outside labels `taskTextOutsideColor`.
-        let dark_label = t.active || t.done;
-        let outside_fill = if t.active {
+        let csx = ts(t.start);
+        let cex = if t.milestone { csx + bar_h } else { ts(t.end) };
+        let (inside, anchor) = if tw > cex - csx {
+            if cex + tw + 1.5 * left_pad_cfg > w {
+                (false, Anchor::End)
+            } else {
+                (false, Anchor::Start)
+            }
+        } else {
+            (true, Anchor::Middle)
+        };
+        // `taskText{n}`: taskTextColor; `taskTextOutside{n}`:
+        // taskTextOutsideColor. `activeText` / `doneText` (and their crit
+        // forms) are taskTextDarkColor !important, except that done labels
+        // outside the bar keep the outside colour.
+        let fill_text = if inside {
+            if t.active || t.done {
+                c.task_text_dark.clone()
+            } else {
+                c.task_text.clone()
+            }
+        } else if t.active && !t.done {
             c.task_text_dark.clone()
         } else {
             c.task_text_outside.clone()
-        };
-        let (x, anchor, fill_text) = if inside {
-            (
-                (bx0 + bx1) / 2.0,
-                Anchor::Middle,
-                if dark_label {
-                    c.task_text_dark.clone()
-                } else {
-                    c.task_text.clone()
-                },
-            )
-        } else if bx1 + 5.0 + tw <= w || bx0 - 5.0 - tw < left_pad {
-            (bx1 + 5.0, Anchor::Start, outside_fill)
-        } else {
-            (bx0 - 5.0, Anchor::End, outside_fill)
         };
         let lx = match anchor {
             Anchor::Start => x,
@@ -1717,15 +1767,21 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         if lines.iter().all(String::is_empty) {
             continue;
         }
-        let cy = (row_y(*lo) - 2.0 + row_y(*hi) - 2.0 + gap) / 2.0;
-        let t = Text::centered(
-            Point::new(10.0, cy),
-            lines,
-            sec_font,
-            sec_font * 1.3,
-            &c.title,
-        )
-        .anchored(Anchor::Start, 10.0);
+        // vertLabels: `y` mid-way down the section's rows, `dy` up half the
+        // extra lines, tspans 1em apart on their central baselines.
+        let cy = (row_y(*lo) + row_y(*hi) + gap) / 2.0;
+        let n = lines.len() as f64;
+        let t = Text {
+            x: 10.0,
+            y: cy - (n - 1.0) / 2.0 * sec_font
+                + crate::text::baseline_shift(crate::text::Baseline::Central, sec_font),
+            lines: lines.clone(),
+            line_height: sec_font,
+            font_size: sec_font,
+            bold: false,
+            anchor: Anchor::Start,
+            fill: c.title.clone(),
+        };
         labels.push(Element::classed_text(t, "sectionTitle"));
     }
 
@@ -1793,7 +1849,8 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     ];
     Scene {
         kind: DiagramKind::Gantt,
-        view_box: bounds.rect().pad(8.0),
+        // `viewBox="0 0 w h"`.
+        view_box: Rect::new(0.0, 0.0, w, h),
         elements: els,
         acc_title: None,
         acc_descr: None,
@@ -1973,7 +2030,10 @@ mod tests {
         let src = "gantt\ndateFormat YYYY-MM-DD\nexcludes weekends\nsection S\nA :a, 2024-01-01, 2024-01-03\nB :b, 2024-01-04, 2d\nM :vert, v, 2024-01-02, 0d";
         let cfg = MermaidConfig::default();
         let s = render(src, None, &cfg, &cfg.palette()).unwrap();
-        assert_eq!(s.view_box.w, 784.0 + 16.0);
+        assert_eq!(
+            (s.view_box.x, s.view_box.y, s.view_box.w),
+            (0.0, 0.0, 784.0)
+        );
         let mut vert = None;
         let mut label = None;
         fn walk<'a>(els: &'a [Element], v: &mut Option<Rect>, l: &mut Option<&'a Text>) {
@@ -2064,5 +2124,25 @@ mod tests {
         let (rows, n) = assign_rows(&g, true);
         assert_eq!(n, 2);
         assert_eq!(rows, vec![Some(0), Some(0), Some(1)]);
+    }
+
+    #[test]
+    fn compact_mode_packs_tasks_by_start_time() {
+        // getMaxIntersections sorts by start: the milestone at 1918 follows
+        // the task ending 1915 on the first lane, as does the one from 1920.
+        let pre = crate::diagram::preprocess(
+            "---\ndisplayMode: compact\n---\ngantt\ndateFormat YYYY\nsection S\na : 1910, 1915\nb : 1920, 1925\nm : milestone, 1918, 1s",
+        )
+        .unwrap();
+        let mut cfg = MermaidConfig::default();
+        for l in &pre.config_layers {
+            cfg = cfg.with_directive(l).unwrap();
+        }
+        let g = parse(&pre.body, None).unwrap();
+        let compact =
+            cfg.section("gantt", "displayMode").and_then(|j| j.as_str()) == Some("compact");
+        assert!(compact);
+        assert_eq!(assign_rows(&g, true), (vec![Some(0), Some(0), Some(0)], 1));
+        assert_eq!(assign_rows(&g, false).1, 3);
     }
 }
