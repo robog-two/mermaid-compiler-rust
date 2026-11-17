@@ -3558,7 +3558,9 @@ fn model_order(g: &GraphDiagram, nodes: &[Node], empty_of: &[Option<usize>]) -> 
             .map(|ci| (w.rank[ci] as f64, Ok(ci)))
             .collect();
         subgraphs.extend(w.nodes.iter().enumerate().filter_map(|(i, n)| {
-            let k = n.group_seq.filter(|_| n.cluster == scope && !w.placeholder[i])?;
+            let k = n
+                .group_seq
+                .filter(|_| n.cluster == scope && !w.placeholder[i])?;
             Some((k as f64 - 0.5, Err(i)))
         }));
         subgraphs.sort_by(|a, b| a.0.total_cmp(&b.0));

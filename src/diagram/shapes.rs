@@ -1984,6 +1984,22 @@ mod tests {
         }
     }
 
+    /// subroutine.ts: one polygon (`insertPolygonShape`), the inner frame
+    /// FRAME_WIDTH in from each side traced first, then the outer box.
+    #[test]
+    fn subroutine_is_one_polygon() {
+        let m = ShapeMetrics::classic(Shape::Subroutine, 15.0);
+        let o = outline(Shape::Subroutine, Point::default(), 100.0, 50.0, &m).unwrap();
+        assert_eq!(o.parts.len(), 1);
+        let Geometry::Path(cmds) = &o.parts[0].geom else {
+            panic!()
+        };
+        assert_eq!(cmds.len(), 11);
+        assert_eq!(cmds[0], PathCmd::MoveTo(Point::new(-42.0, 25.0)));
+        assert_eq!(cmds[5], PathCmd::LineTo(Point::new(-50.0, 25.0)));
+        assert_eq!(cmds[7], PathCmd::LineTo(Point::new(50.0, -25.0)));
+    }
+
     #[test]
     fn every_sized_shape_has_an_outline() {
         let m = ShapeMetrics::classic(Shape::Rect, 15.0);

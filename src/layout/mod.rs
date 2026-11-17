@@ -5559,6 +5559,17 @@ mod tests {
         assert!(close(offs(2, 37.0, 10.0), &[15.667, 21.333]));
     }
 
+    /// `portAlignment.default: CENTER` (mermaid's usecase `spreadPorts`), as
+    /// mermaid 12.3.0 places them on a 58px ellipse side: one port spacing
+    /// apart about the middle, crammed from the inset when that does not fit.
+    #[test]
+    fn elk_centred_port_offsets() {
+        let off = |n, len| elk_port_offsets(n, len, 10.0, 20.0, true).collect::<Vec<_>>();
+        assert_eq!(off(1, 58.0), [29.0]);
+        assert_eq!(off(2, 58.0), [19.0, 39.0]);
+        assert_eq!(off(3, 58.0), [10.0, 29.0, 48.0]);
+    }
+
     #[test]
     fn elk_port_offsets_are_elks_doubles() {
         // Four ports on a 45px side in a container: ELK adds its step to the

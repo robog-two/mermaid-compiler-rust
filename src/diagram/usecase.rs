@@ -4326,7 +4326,11 @@ mod tests {
             d.relationships[0].label.as_ref().unwrap().text,
             "opens **form**"
         );
-        assert_eq!(label_lines(&d.actors[0].label), ["User", "role"]);
+        // Markdown emphasis stays, as marks.
+        let lines = label_lines(&d.actors[0].label);
+        let plain: Vec<String> = lines.iter().map(|l| crate::text::plain(l)).collect();
+        assert_eq!(plain, ["User", "role"]);
+        assert!(crate::text::has_marks(&lines[0]));
         assert_eq!(
             label_lines(&Label::text("Open #40;safe#41;")),
             ["Open (safe)"]
@@ -4799,5 +4803,204 @@ mod tests {
         texts(&r.scene.elements, &mut t);
         let c = t.iter().find(|t| t.lines == ["Checkout"]).unwrap();
         assert_eq!(c.fill.css(), "#131300");
+    }
+
+    /// The end points of every command of a group's first path.
+    fn path_points(els: &[Element]) -> Vec<Point> {
+        let Some(Element::Shape {
+            geom: Geometry::Path(cmds),
+            ..
+        }) = els.first()
+        else {
+            panic!("no path");
+        };
+        cmds.iter()
+            .filter_map(|c| match *c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(p),
+                PathCmd::Close => None,
+            })
+            .collect()
+    }
+
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() < 2e-3
+    }
+
+    fn all_texts(els: &[Element], out: &mut Vec<Text>) {
+        for e in els {
+            match e {
+                Element::Text { text, .. } => out.push(text.clone()),
+                Element::Group { children, .. } => all_texts(children, out),
+                _ => {}
+            }
+        }
+    }
+
+    const MULTI_EDGES: &str = "usecase-beta
+actor User
+actor Support
+Start
+Finish
+User --> Start
+Start <-- Support
+Start -- Finish
+User --o Start
+Start o-- Support
+User --x Finish
+Finish x-- Support";
+
+    /// mermaid 12.3.0 (ELK): an ellipse use case's ports stand one port spacing
+    /// apart about its middle (`spreadPorts`, `portAlignment.default: CENTER`),
+    /// crammed to 19 apart for three on a 58px side; `straightenEdgeTerminals`
+    /// then pulls the long edge's channel onto its target's port.
+    #[test]
+    fn ellipse_ports_are_centred_and_terminal_jogs_straightened() {
+        let s = scene(MULTI_EDGES);
+        let edge =
+            |id: &str| path_points(find_group(&s.elements, &format!("usecase-{id}")).unwrap());
+        // User --> Start and User --o Start reach Start's west side at 56.5 / 76.5.
+        let e0 = edge("edge-0");
+        let last = e0[e0.len() - 1];
+        assert!(near(last.x, 128.907) && near(last.y, 56.5), "{last:?}");
+        let e3 = edge("edge-3");
+        assert!(near(e3[e3.len() - 1].y, 76.5), "{e3:?}");
+        // Start <-- Support leaves Start at 47.5 and runs at Support's port,
+        // 47.25, from x = 308 on (ELK left it at 44.375 between two jogs).
+        let e1 = edge("edge-1");
+        assert!(near(e1[0].x, 272.438) && near(e1[0].y, 47.5), "{e1:?}");
+        let end = e1[e1.len() - 1];
+        assert!(near(end.x, 528.0) && near(end.y, 47.25), "{e1:?}");
+        assert!(
+            e1.iter().filter(|p| p.x > 308.5).all(|p| near(p.y, 47.25)),
+            "{e1:?}"
+        );
+        // Start o-- Support keeps Start's port, 66.5, as far as x = 505.
+        let e4 = edge("edge-4");
+        assert!(
+            e4.iter().filter(|p| p.x < 505.0).all(|p| near(p.y, 66.5)),
+            "{e4:?}"
+        );
+        // Start's third east port: 85.5.
+        assert!(near(edge("edge-2")[0].y, 85.5));
+        // As wide as mermaid's drawing: no extra layer.
+        assert!(near(s.view_box.w, 632.0), "{:?}", s.view_box);
+    }
+
+    #[test]
+    fn business_use_case_radii_reach_twice_the_half_padding() {
+        // mermaid 12.3.0: a 160x78 ellipse (label 120x38, plus 2 x halfPadding 10).
+        let s = scene(
+            "usecase-beta\nQuote(\"Prepare quote\")@{ business: true } <<Core>>\nactor A\nA --> Quote",
+        );
+        let r = extent(find_group(&s.elements, "usecase-Quote").unwrap());
+        assert!(near(r.w, 160.0) && near(r.h, 78.0), "{r:?}");
+    }
+
+    #[test]
+    fn notes_are_rough_rectangles() {
+        // note.ts: an open fill path of the four corners, then every side
+        // stroked twice; classic keeps rough's 1.3 noteBorder stroke.
+        let note = |src: &str, look: Look| {
+            let mut cfg = MermaidConfig::default().scoped("usecase");
+            cfg.look = look;
+            let s = render(src, None, &cfg, &cfg.palette()).unwrap();
+            find_group(&s.elements, "usecase-note-0")
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        paint,
+                        class,
+                    } if class.as_deref() != Some("drop-shadow") => {
+                        Some((cmds.clone(), paint.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let neo = note("usecase-beta\nA\nnote for A \"hello note\"", Look::Neo);
+        assert_eq!(neo.len(), 2);
+        assert_eq!(neo[0].0.len(), 4);
+        assert!(!neo[0].0.contains(&PathCmd::Close));
+        assert_eq!(neo[1].0.len(), 16);
+        assert!(neo[1].1.fill.is_none());
+        assert_eq!(neo[0].1.stroke_width, 2.0);
+        let classic = note("usecase-beta\nA\nnote for A \"hello note\"", Look::Classic);
+        assert!(classic[0].1.stroke.is_none());
+        assert_eq!(classic[1].1.stroke_width, 1.3);
+    }
+
+    #[test]
+    fn json_cells_cast_their_own_shadows_value_first() {
+        let s = scene("usecase-beta\njson Data@{ \"status\": \"pending\" }");
+        let g = find_group(&s.elements, "usecase-Data").unwrap();
+        let shapes: Vec<(Option<&str>, Rect)> = g
+            .iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Rect { rect, .. },
+                    class,
+                    ..
+                } => Some((class.as_deref(), *rect)),
+                _ => None,
+            })
+            .collect();
+        // The border, the title cell, the value cell and the key cell.
+        let shadows = shapes.iter().filter(|s| s.0 == Some("drop-shadow")).count();
+        assert_eq!(shadows, 4);
+        let cells: Vec<Rect> = shapes
+            .iter()
+            .filter(|s| s.0 == Some("usecase-json-cell"))
+            .map(|s| s.1)
+            .collect();
+        assert_eq!(cells.len(), 3);
+        assert!(cells[1].x > cells[2].x, "value cell before key cell");
+    }
+
+    #[test]
+    fn markdown_labels_keep_their_emphasis() {
+        let s = scene(
+            "usecase-beta\nactor R\nF(\"`**Formatted** label`\")\nR -- \"`opens **form**`\" --> F",
+        );
+        let mut t = Vec::new();
+        all_texts(&s.elements, &mut t);
+        let has_bold = |plain: &str| {
+            t.iter().any(|t| {
+                t.lines.iter().any(|l| {
+                    crate::text::plain(l) == plain
+                        && crate::text::styled_runs(l, false).iter().any(|r| r.bold)
+                })
+            })
+        };
+        assert!(has_bold("Formatted label"));
+        assert!(has_bold("opens form"));
+        // `.labelBkg` (2px padding a side) and its `p` under the text: mermaid
+        // 12.3.0 sizes `opens **form**` 52.265625 wide (its runs each in layout units).
+        let mut rects = Vec::new();
+        fn label_rects(els: &[Element], inside: bool, out: &mut Vec<Rect>) {
+            for e in els {
+                match e {
+                    Element::Group {
+                        class, children, ..
+                    } => label_rects(
+                        children,
+                        inside || class.as_deref() == Some("edgeLabel"),
+                        out,
+                    ),
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        ..
+                    } if inside => out.push(*rect),
+                    _ => {}
+                }
+            }
+        }
+        label_rects(&s.elements, false, &mut rects);
+        assert_eq!(rects.len(), 2, "{rects:?}");
+        assert!(
+            near(rects[0].w, 56.265625) && near(rects[1].w, 52.265625),
+            "{rects:?}"
+        );
     }
 }
