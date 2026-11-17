@@ -541,8 +541,10 @@ pub fn badges(
                 (false, false) => 15.0,
             };
         let badge = |label: String, k: usize, overflow: bool| {
-            let w = crate::text::svg_bbox_width(&label, item_font * scale) / scale
-                + ITEM_PADDING_X * 2.0;
+            // Chromium lays the text out at the screen size cut to 26.6 fixed
+            // point (`shaping_size`), so the measure shrinks with it.
+            let size = crate::text::shaping_size(item_font * scale);
+            let w = crate::text::svg_bbox_width(&label, size) / scale + ITEM_PADDING_X * 2.0;
             Badge {
                 domain: dom,
                 rect: Rect::new(
@@ -928,7 +930,7 @@ pub fn draw(d: &Cynefin, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     // The svg (width + 2 · padding wide, 100% of mmdc's 784px page) is sized
     // before the badges are measured.
     let scale = if cfg.use_max_width("cynefin") {
-        (784.0 / (width + 2.0 * padding)).min(1.0)
+        crate::text::mmdc_page_scale(width + 2.0 * padding, height + 2.0 * padding)
     } else {
         1.0
     };
@@ -1265,18 +1267,21 @@ mod tests {
 
     #[test]
     fn badges_measure_their_labels_at_the_page_scale() {
-        // mermaid 12.3.0 (880px wide in mmdc's 784px page): "Page on-call
-        // immediately" and "Apply known fix" badges are 154.758 and 104.084 wide,
-        // their 12px labels' getBBox() laid out at 10.69px (ink rounded out to
-        // screen pixels) plus 2 · 10. Unscaled, they measured 0.7 narrower.
+        // mermaid 12.3.0 (880 × 680 in mmdc's 784px page): "Page on-call
+        // immediately" and "Apply known fix" badges are 154.7576 and 104.0839
+        // wide, their 12px labels' getBBox() laid out at 10.6875px (12px at
+        // the screen scale, cut to 26.6 fixed point; ink rounded out to screen
+        // pixels) plus 2 · 10. Unscaled, they measured 0.7 narrower; at 10.69px,
+        // 0.04 wider.
         let d = parse(
             "cynefin-beta\n  clear\n    \"Apply known fix\"\n  chaotic\n    \"Page on-call immediately\"\n",
             None,
         )
         .unwrap();
-        let b = badges(&d, 800.0, 600.0, true, 12.0, 784.0 / 880.0);
+        let scale = crate::text::mmdc_page_scale(880.0, 680.0);
+        let b = badges(&d, 800.0, 600.0, true, 12.0, scale);
         let w = |l: &str| b.iter().find(|b| b.label == l).unwrap().rect.w;
-        assert!((w("Page on-call immediately") - 154.758).abs() < 0.05);
-        assert!((w("Apply known fix") - 104.084).abs() < 0.05);
+        assert!((w("Page on-call immediately") - 154.757_62).abs() < 1e-3);
+        assert!((w("Apply known fix") - 104.083_86).abs() < 1e-3);
     }
 }
