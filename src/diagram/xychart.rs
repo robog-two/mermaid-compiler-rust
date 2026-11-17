@@ -5,34 +5,19 @@
 //! canvas, value axis from d3 ticks, legend right of the plot).
 //!
 //! Also hosts small chart helpers shared by the other chart modules
-//! (quadrant, radar, sankey): number formatting,
-//! quote-aware list splitting and a Taffy-based legend layout.
+//! (quadrant, radar, sankey): quote-aware list splitting and a Taffy-based legend layout.
 
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Point, Rect};
 use crate::json::Json;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
-use crate::text::{Baseline, baseline_shift, line_width, normalize_label};
+use crate::text::{Baseline, baseline_shift, normalize_label};
 use crate::theme::{Palette, ThemeName};
 
 // ---------------------------------------------------------------------------
 // Shared chart helpers
 // ---------------------------------------------------------------------------
-
-/// Format a number like JavaScript's `String(n)` for typical chart values
-/// (no exponent, no trailing zeros, no floating noise).
-pub(crate) fn fmt_num(v: f64) -> String {
-    if !v.is_finite() {
-        return "0".into();
-    }
-    if (v - v.round()).abs() < 1e-9 && v.abs() < 1e15 {
-        return format!("{}", v.round() as i64);
-    }
-    let s = format!("{v:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" { "0".into() } else { s.into() }
-}
 
 /// Split on commas outside double quotes and brackets/braces.
 pub(crate) fn split_top_level(s: &str) -> Vec<String> {
@@ -138,23 +123,6 @@ pub(crate) fn text_at(
         anchor,
         fill: fill.clone(),
     }
-}
-
-/// Bounding box of a [`Text`] (approximate, from measured widths).
-pub(crate) fn text_bounds(t: &Text) -> Rect {
-    let w = t
-        .lines
-        .iter()
-        .map(|l| line_width(l, t.font_size, t.bold))
-        .fold(0.0, f64::max);
-    let h = t.line_height * t.lines.len().max(1) as f64;
-    let x = match t.anchor {
-        Anchor::Start => t.x,
-        Anchor::Middle => t.x - w / 2.0,
-        Anchor::End => t.x - w,
-    };
-    let top = t.y - t.font_size * 0.85;
-    Rect::new(x, top, w, h - (t.line_height - t.font_size))
 }
 
 // ---------------------------------------------------------------------------

@@ -1,14 +1,13 @@
 //! `sankey-beta` diagrams: CSV `source,target,value` rows laid out with a port
 //! of the d3-sankey algorithm (longest-path columns, value-proportional node
-//! heights, iterative relaxation + collision resolution), drawn as filled
-//! cubic ribbons.
+//! heights, iterative relaxation + collision resolution), drawn as mermaid
+//! draws them: stroked `sankeyLinkHorizontal` curves with a gradient each.
 
-use crate::color::{self, Rgba};
 use crate::config::MermaidConfig;
-use crate::diagram::xychart::{fmt_num, keyword, text_at, text_bounds};
+use crate::diagram::xychart::keyword;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, PathCmd, Point, Rect};
-use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene};
+use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Text};
 use crate::theme::Palette;
 
 // ---------------------------------------------------------------------------
@@ -169,7 +168,7 @@ pub fn parse(body: &str) -> Result<Sankey> {
 }
 
 // ---------------------------------------------------------------------------
-// Layout (d3-sankey port)
+// Layout (d3-sankey 0.12.3 port, as mermaid bundles it)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,44 +219,52 @@ pub struct SankeyLayout {
     pub links: Vec<LinkBand>,
 }
 
+use crate::layout::dagre::js_sort;
+
+/// JavaScript's `a - b || tie`: the difference, or the tie-break when it is 0 or
+/// NaN (a node not placed yet has an `undefined` breadth).
+fn or_tie(d: f64, tie: f64) -> f64 {
+    if d == 0.0 || d.is_nan() { tie } else { d }
+}
+
 struct Engine {
     nodes: Vec<NodeBox>,
     links: Vec<LinkBand>,
     py: f64,
+    y0: f64,
+    y1: f64,
 }
 
 impl Engine {
-    fn sort_links(&mut self, n: usize) {
-        let mut sl = self.nodes[n].source_links.clone();
-        sl.sort_by(|&a, &b| {
-            let (ta, tb) = (self.links[a].target, self.links[b].target);
-            self.nodes[ta]
-                .y0
-                .total_cmp(&self.nodes[tb].y0)
-                .then(a.cmp(&b))
-        });
-        let mut tl = self.nodes[n].target_links.clone();
-        tl.sort_by(|&a, &b| {
-            let (sa, sb) = (self.links[a].source, self.links[b].source);
-            self.nodes[sa]
-                .y0
-                .total_cmp(&self.nodes[sb].y0)
-                .then(a.cmp(&b))
+    /// `sourceLinks.sort(ascendingTargetBreadth)`.
+    fn sort_source_links(&mut self, n: usize) {
+        let mut sl = std::mem::take(&mut self.nodes[n].source_links);
+        let (nodes, links) = (&self.nodes, &self.links);
+        js_sort(&mut sl, |&a, &b| {
+            let d = nodes[links[a].target].y0 - nodes[links[b].target].y0;
+            or_tie(d, a as f64 - b as f64)
         });
         self.nodes[n].source_links = sl;
+    }
+
+    /// `targetLinks.sort(ascendingSourceBreadth)`.
+    fn sort_target_links(&mut self, n: usize) {
+        let mut tl = std::mem::take(&mut self.nodes[n].target_links);
+        let (nodes, links) = (&self.nodes, &self.links);
+        js_sort(&mut tl, |&a, &b| {
+            let d = nodes[links[a].source].y0 - nodes[links[b].source].y0;
+            or_tie(d, a as f64 - b as f64)
+        });
         self.nodes[n].target_links = tl;
     }
 
+    /// `reorderNodeLinks`: re-sort the link lists at the far ends of `n`'s links.
     fn reorder_node_links(&mut self, n: usize) {
-        let tl = self.nodes[n].target_links.clone();
-        for l in tl {
-            let s = self.links[l].source;
-            self.sort_links(s);
+        for l in self.nodes[n].target_links.clone() {
+            self.sort_source_links(self.links[l].source);
         }
-        let sl = self.nodes[n].source_links.clone();
-        for l in sl {
-            let t = self.links[l].target;
-            self.sort_links(t);
+        for l in self.nodes[n].source_links.clone() {
+            self.sort_target_links(self.links[l].target);
         }
     }
 
@@ -302,17 +309,17 @@ impl Engine {
         self.nodes[n].y1 += dy;
     }
 
-    fn resolve_collisions(&mut self, col: &[usize], alpha: f64, y0: f64, y1: f64) {
-        if col.is_empty() {
-            return;
-        }
+    /// `column.sort(ascendingBreadth)` then `resolveCollisions(column, beta)`.
+    fn settle_column(&mut self, col: &mut [usize], beta: f64) {
+        let nodes = &self.nodes;
+        js_sort(col, |&a, &b| nodes[a].y0 - nodes[b].y0);
         let i = col.len() >> 1;
         let subject = col[i];
         let (sy0, sy1) = (self.nodes[subject].y0, self.nodes[subject].y1);
-        self.bottom_to_top(col, sy0 - self.py, i as isize - 1, alpha);
-        self.top_to_bottom(col, sy1 + self.py, i + 1, alpha);
-        self.bottom_to_top(col, y1, col.len() as isize - 1, alpha);
-        self.top_to_bottom(col, y0, 0, alpha);
+        self.bottom_to_top(col, sy0 - self.py, i as isize - 1, beta);
+        self.top_to_bottom(col, sy1 + self.py, i + 1, beta);
+        self.bottom_to_top(col, self.y1, col.len() as isize - 1, beta);
+        self.top_to_bottom(col, self.y0, 0, beta);
     }
 
     fn top_to_bottom(&mut self, col: &[usize], mut y: f64, from: usize, alpha: f64) {
@@ -338,15 +345,66 @@ impl Engine {
         }
     }
 
-    fn sort_column(&self, col: &mut [usize]) {
-        col.sort_by(|&a, &b| self.nodes[a].y0.total_cmp(&self.nodes[b].y0));
+    fn relax_left_to_right(&mut self, columns: &mut [Vec<usize>], alpha: f64, beta: f64) {
+        for column in columns.iter_mut().skip(1) {
+            for &tgt in column.iter() {
+                let (mut y, mut w) = (0.0, 0.0);
+                for &l in &self.nodes[tgt].target_links {
+                    let s = self.links[l].source;
+                    let v = self.links[l].value
+                        * (self.nodes[tgt].layer as f64 - self.nodes[s].layer as f64);
+                    y += self.target_top(s, tgt) * v;
+                    w += v;
+                }
+                // `if (!(w > 0)) continue;`
+                if w.is_nan() || w <= 0.0 {
+                    continue;
+                }
+                let dy = (y / w - self.nodes[tgt].y0) * alpha;
+                self.shift(tgt, dy);
+                self.reorder_node_links(tgt);
+            }
+            self.settle_column(column, beta);
+        }
+    }
+
+    fn relax_right_to_left(&mut self, columns: &mut [Vec<usize>], alpha: f64, beta: f64) {
+        let n = columns.len();
+        for column in columns.iter_mut().take(n.saturating_sub(1)).rev() {
+            for &src in column.iter() {
+                let (mut y, mut w) = (0.0, 0.0);
+                for &l in &self.nodes[src].source_links {
+                    let t = self.links[l].target;
+                    let v = self.links[l].value
+                        * (self.nodes[t].layer as f64 - self.nodes[src].layer as f64);
+                    y += self.source_top(src, t) * v;
+                    w += v;
+                }
+                // `if (!(w > 0)) continue;`
+                if w.is_nan() || w <= 0.0 {
+                    continue;
+                }
+                let dy = (y / w - self.nodes[src].y0) * alpha;
+                self.shift(src, dy);
+                self.reorder_node_links(src);
+            }
+            self.settle_column(column, beta);
+        }
     }
 }
 
-/// Compute node rectangles and link bands.
+/// Compute node rectangles and link bands (d3-sankey's `sankey(graph)`).
 pub fn layout(g: &Sankey, opt: &LayoutOptions) -> Result<SankeyLayout> {
     let n = g.nodes.len();
-    let mut nodes: Vec<NodeBox> = vec![NodeBox::default(); n];
+    let mut nodes: Vec<NodeBox> = vec![
+        NodeBox {
+            // `undefined` until `initializeNodeBreadths` places the node.
+            y0: f64::NAN,
+            y1: f64::NAN,
+            ..NodeBox::default()
+        };
+        n
+    ];
     let links: Vec<LinkBand> = g
         .links
         .iter()
@@ -366,13 +424,13 @@ pub fn layout(g: &Sankey, opt: &LayoutOptions) -> Result<SankeyLayout> {
         nodes[l.source].source_links.push(i);
         nodes[l.target].target_links.push(i);
     }
-    // Node values.
+    // computeNodeValues
     for nd in &mut nodes {
         let out: f64 = nd.source_links.iter().map(|&l| links[l].value).sum();
         let inn: f64 = nd.target_links.iter().map(|&l| links[l].value).sum();
         nd.value = out.max(inn);
     }
-    // Depths (longest path from sources) and heights (to sinks).
+    // computeNodeDepths / computeNodeHeights
     let cycle_err = |frontier: &[usize], nodes: &[NodeBox], forward: bool| {
         let line = frontier
             .iter()
@@ -423,158 +481,107 @@ pub fn layout(g: &Sankey, opt: &LayoutOptions) -> Result<SankeyLayout> {
             current = (0..n).filter(|&i| next[i]).collect();
         }
     }
-    // Layers.
-    let layers = nodes.iter().map(|nd| nd.depth).max().map_or(0, |d| d + 1);
+    // computeNodeLayers
     let ext = opt.extent;
-    let kx = if layers > 1 {
-        (ext.w - opt.node_width) / (layers - 1) as f64
-    } else {
-        0.0
-    };
+    let (x0, x1, y0, y1) = (ext.x, ext.right(), ext.y, ext.bottom());
+    let layers = nodes.iter().map(|nd| nd.depth).max().map_or(0, |d| d + 1);
+    let kx = (x1 - x0 - opt.node_width) / (layers as f64 - 1.0);
     let mut columns: Vec<Vec<usize>> = vec![Vec::new(); layers.max(1)];
     for i in 0..n {
         let nd = &nodes[i];
-        let raw = match opt.align {
-            Align::Left => nd.depth,
-            Align::Right => (layers - 1).saturating_sub(nd.height),
+        let raw: i64 = match opt.align {
+            Align::Left => nd.depth as i64,
+            Align::Right => layers as i64 - 1 - nd.height as i64,
             Align::Justify => {
                 if nd.source_links.is_empty() {
-                    layers - 1
+                    layers as i64 - 1
                 } else {
-                    nd.depth
+                    nd.depth as i64
                 }
             }
             Align::Center => {
                 if !nd.target_links.is_empty() {
-                    nd.depth
+                    nd.depth as i64
                 } else if !nd.source_links.is_empty() {
                     nd.source_links
                         .iter()
-                        .map(|&l| nodes[links[l].target].depth)
+                        .map(|&l| nodes[links[l].target].depth as i64)
                         .min()
-                        .unwrap_or(1)
-                        .saturating_sub(1)
+                        .unwrap_or(0)
+                        - 1
                 } else {
                     0
                 }
             }
         };
-        let layer = raw.min(layers.saturating_sub(1));
+        let layer = raw.min(layers as i64 - 1).max(0) as usize;
         nodes[i].layer = layer;
-        nodes[i].x0 = ext.x + layer as f64 * kx;
+        nodes[i].x0 = x0 + layer as f64 * kx;
         nodes[i].x1 = nodes[i].x0 + opt.node_width;
         columns[layer].push(i);
     }
     columns.retain(|c| !c.is_empty());
 
-    // Initial breadths.
+    // computeNodeBreadths
     let max_len = columns.iter().map(Vec::len).max().unwrap_or(1);
-    let py = if max_len > 1 {
-        opt.node_padding.min(ext.h / (max_len - 1) as f64)
-    } else {
-        opt.node_padding
-    };
+    let py = opt.node_padding.min((y1 - y0) / (max_len as f64 - 1.0));
     let ky = columns
         .iter()
         .map(|c| {
             let sum: f64 = c.iter().map(|&i| nodes[i].value).sum();
-            if sum > 0.0 {
-                (ext.h - (c.len() as f64 - 1.0) * py) / sum
-            } else {
-                f64::INFINITY
-            }
+            (y1 - y0 - (c.len() as f64 - 1.0) * py) / sum
         })
+        .filter(|v| !v.is_nan())
         .fold(f64::INFINITY, f64::min);
-    let ky = if ky.is_finite() { ky.max(0.0) } else { 0.0 };
-    let mut eng = Engine { nodes, links, py };
-    for l in &mut eng.links {
-        l.width = l.value * ky;
-    }
+    let mut eng = Engine {
+        nodes,
+        links,
+        py,
+        y0,
+        y1,
+    };
+    // initializeNodeBreadths
     for c in &columns {
-        let mut y = ext.y;
+        let mut y = y0;
         for &i in c {
             eng.nodes[i].y0 = y;
             eng.nodes[i].y1 = y + eng.nodes[i].value * ky;
             y = eng.nodes[i].y1 + py;
+            for l in eng.nodes[i].source_links.clone() {
+                eng.links[l].width = eng.links[l].value * ky;
+            }
         }
-        let spare = (ext.bottom() - y + py) / (c.len() as f64 + 1.0);
+        let spare = (y1 - y + py) / (c.len() as f64 + 1.0);
         for (k, &i) in c.iter().enumerate() {
             eng.shift(i, spare * (k as f64 + 1.0));
         }
+        // reorderLinks: nodes of later columns have no breadth yet.
+        for &i in c {
+            eng.sort_source_links(i);
+            eng.sort_target_links(i);
+        }
     }
-    for i in 0..n {
-        eng.sort_links(i);
-    }
-
-    // Relaxation.
     let iters = opt.iterations;
     for it in 0..iters {
-        let alpha = 0.99f64.powi(it as i32);
+        let alpha = 0.99f64.powf(it as f64);
         let beta = (1.0 - alpha).max((it as f64 + 1.0) / iters as f64);
-        // Right to left.
-        for ci in (0..columns.len().saturating_sub(1)).rev() {
-            let col = columns[ci].clone();
-            for &src in &col {
-                let (mut y, mut w) = (0.0, 0.0);
-                for &l in &eng.nodes[src].source_links.clone() {
-                    let t = eng.links[l].target;
-                    let v = eng.links[l].value
-                        * (eng.nodes[t].layer as f64 - eng.nodes[src].layer as f64);
-                    y += eng.source_top(src, t) * v;
-                    w += v;
-                }
-                if w > 0.0 {
-                    let dy = (y / w - eng.nodes[src].y0) * alpha;
-                    eng.shift(src, dy);
-                }
-                eng.reorder_node_links(src);
-            }
-            let mut col = columns[ci].clone();
-            eng.sort_column(&mut col);
-            eng.resolve_collisions(&col, beta, ext.y, ext.bottom());
-            columns[ci] = col;
-        }
-        // Left to right.
-        for column in columns.iter_mut().skip(1) {
-            let col = column.clone();
-            for &tgt in &col {
-                let (mut y, mut w) = (0.0, 0.0);
-                for &l in &eng.nodes[tgt].target_links.clone() {
-                    let s = eng.links[l].source;
-                    let v = eng.links[l].value
-                        * (eng.nodes[tgt].layer as f64 - eng.nodes[s].layer as f64);
-                    y += eng.target_top(s, tgt) * v;
-                    w += v;
-                }
-                if w > 0.0 {
-                    let dy = (y / w - eng.nodes[tgt].y0) * alpha;
-                    eng.shift(tgt, dy);
-                }
-                eng.reorder_node_links(tgt);
-            }
-            let mut col = column.clone();
-            eng.sort_column(&mut col);
-            eng.resolve_collisions(&col, beta, ext.y, ext.bottom());
-            *column = col;
-        }
+        eng.relax_right_to_left(&mut columns, alpha, beta);
+        eng.relax_left_to_right(&mut columns, alpha, beta);
     }
 
-    // Link breadths.
+    // computeLinkBreadths
     for i in 0..n {
-        eng.sort_links(i);
-    }
-    for i in 0..n {
-        let mut y0 = eng.nodes[i].y0;
+        let mut ys = eng.nodes[i].y0;
         for l in eng.nodes[i].source_links.clone() {
             let w = eng.links[l].width;
-            eng.links[l].y0 = y0 + w / 2.0;
-            y0 += w;
+            eng.links[l].y0 = ys + w / 2.0;
+            ys += w;
         }
-        let mut y1 = eng.nodes[i].y0;
+        let mut yt = eng.nodes[i].y0;
         for l in eng.nodes[i].target_links.clone() {
             let w = eng.links[l].width;
-            eng.links[l].y1 = y1 + w / 2.0;
-            y1 += w;
+            eng.links[l].y1 = yt + w / 2.0;
+            yt += w;
         }
     }
     Ok(SankeyLayout {
@@ -584,7 +591,7 @@ pub fn layout(g: &Sankey, opt: &LayoutOptions) -> Result<SankeyLayout> {
 }
 
 // ---------------------------------------------------------------------------
-// Drawing
+// Drawing (mermaid's `sankeyRenderer.ts`)
 // ---------------------------------------------------------------------------
 
 /// d3's `schemeTableau10`, which mermaid uses for sankey nodes.
@@ -593,100 +600,42 @@ const TABLEAU10: [&str; 10] = [
     "#9c755f", "#bab0ab",
 ];
 
-#[derive(Debug, Clone, PartialEq)]
-enum LinkColor {
-    Source,
-    Target,
-    Gradient,
-    Fixed(String),
-}
+/// Font size of the `node-labels` group.
+const LABEL_FONT: f64 = 14.0;
 
-type Cubic = [Point; 4];
-
-fn cubic_at(c: &Cubic, t: f64) -> Point {
-    let u = 1.0 - t;
-    c[0].scale(u * u * u)
-        .plus(c[1].scale(3.0 * u * u * t))
-        .plus(c[2].scale(3.0 * u * t * t))
-        .plus(c[3].scale(t * t * t))
-}
-
-/// The part of cubic `c` between parameters `t0 < t1` (de Casteljau).
-fn sub_cubic(c: &Cubic, t0: f64, t1: f64) -> Cubic {
-    let split_left = |c: &Cubic, t: f64| -> Cubic {
-        let p01 = c[0].lerp(c[1], t);
-        let p12 = c[1].lerp(c[2], t);
-        let p23 = c[2].lerp(c[3], t);
-        let a = p01.lerp(p12, t);
-        let b = p12.lerp(p23, t);
-        [c[0], p01, a, a.lerp(b, t)]
+/// `getBBox()` of a one-line SVG label at `x` (anchored) with baseline `y`, as
+/// mermaid measures it while drawing: the run (its advance in layout units)
+/// placed by the anchor, extended to the last glyph's ink (`8.86` ends 0.2px
+/// past its advance).
+fn label_box(t: &Text) -> Rect {
+    let line = t.lines.first().map(String::as_str).unwrap_or("");
+    let adv = crate::text::layout_unit_ceil(crate::text::line_width(line, t.font_size, false));
+    let x = match t.anchor {
+        Anchor::Start => t.x,
+        Anchor::Middle => t.x - adv / 2.0,
+        Anchor::End => t.x - adv,
     };
-    let split_right = |c: &Cubic, t: f64| -> Cubic {
-        let p01 = c[0].lerp(c[1], t);
-        let p12 = c[1].lerp(c[2], t);
-        let p23 = c[2].lerp(c[3], t);
-        let a = p01.lerp(p12, t);
-        let b = p12.lerp(p23, t);
-        [a.lerp(b, t), b, p23, c[3]]
-    };
-    let left = split_left(c, t1);
-    if t1 <= 0.0 {
-        return [c[0]; 4];
-    }
-    split_right(&left, t0 / t1)
+    let ascent = (0.905 * t.font_size).round();
+    Rect::new(
+        x,
+        t.y - ascent,
+        crate::text::svg_bbox_width(line, t.font_size),
+        crate::text::svg_line_box(t.font_size, line),
+    )
 }
 
-/// Filled ribbon between two horizontal-tangent cubics, restricted to `[t0, t1]`.
-pub fn ribbon(x0: f64, y0: f64, x1: f64, y1: f64, w: f64, t0: f64, t1: f64) -> Vec<PathCmd> {
-    let xm = (x0 + x1) / 2.0;
-    let edge = |dy: f64| -> Cubic {
-        [
-            Point::new(x0, y0 + dy),
-            Point::new(xm, y0 + dy),
-            Point::new(xm, y1 + dy),
-            Point::new(x1, y1 + dy),
-        ]
-    };
-    let top = sub_cubic(&edge(-w / 2.0), t0, t1);
-    let bot = sub_cubic(&edge(w / 2.0), t0, t1);
-    vec![
-        PathCmd::MoveTo(top[0]),
-        PathCmd::CubicTo(top[1], top[2], top[3]),
-        PathCmd::LineTo(bot[3]),
-        PathCmd::CubicTo(bot[2], bot[1], bot[0]),
-        PathCmd::Close,
-    ]
-}
-
-fn mix(a: &Color, b: &Color, t: f64) -> Color {
-    match (color::parse(a.css()), color::parse(b.css())) {
-        (Some(x), Some(y)) => {
-            let m = |p: u8, q: u8| (p as f64 + (q as f64 - p as f64) * t).round() as u8;
-            Color::new(
-                Rgba {
-                    r: m(x.r, y.r),
-                    g: m(x.g, y.g),
-                    b: m(x.b, y.b),
-                    a: 1.0,
-                }
-                .to_hex(),
-            )
-        }
-        _ => a.clone(),
-    }
-}
-
-/// Render a `sankey-beta` diagram body (already preprocessed).
+/// Render a `sankey-beta` diagram body (already preprocessed). mermaid draws no
+/// title for sankey diagrams.
 pub fn render(
     body: &str,
-    title: Option<String>,
+    _title: Option<String>,
     cfg: &MermaidConfig,
     pal: &Palette,
 ) -> Result<Scene> {
     let g = parse(body)?;
     let s = "sankey";
-    let width = cfg.section_f64(s, "width", 600.0).max(50.0);
-    let height = cfg.section_f64(s, "height", 400.0).max(50.0);
+    let width = cfg.section_f64(s, "width", 600.0);
+    let height = cfg.section_f64(s, "height", 400.0);
     let show_values = cfg.section_bool(s, "showValues", true);
     let str_opt = |k: &str| {
         cfg.section(s, k)
@@ -701,155 +650,169 @@ pub fn render(
         Some("center") => Align::Center,
         _ => Align::Justify,
     };
-    let link_color = match str_opt("linkColor").as_deref() {
-        Some("source") => LinkColor::Source,
-        Some("target") => LinkColor::Target,
-        None | Some("gradient") => LinkColor::Gradient,
-        Some(other) => LinkColor::Fixed(other.to_string()),
-    };
+    let outlined = str_opt("labelStyle").as_deref() == Some("outlined");
+    let link_color = str_opt("linkColor").unwrap_or_else(|| "gradient".to_string());
     let node_width = cfg.section_f64(s, "nodeWidth", 10.0);
-    let node_padding = cfg.section_f64(
-        s,
-        "nodePadding",
-        10.0 + if show_values { 15.0 } else { 0.0 },
-    );
-
-    let mut top = 0.0;
-    let mut els = Vec::new();
-    let mut bounds = Bounds::default();
-    if let Some(t) = title.as_ref().filter(|t| !t.is_empty()) {
-        let txt = text_at(
-            width / 2.0,
-            pal.font_size * 1.2,
-            std::slice::from_ref(t),
-            pal.font_size * 1.2,
-            Anchor::Middle,
-            &pal.title_color,
-        );
-        bounds.add_rect(text_bounds(&txt));
-        els.push(Element::classed_text(txt, "sankey-title"));
-        top = pal.font_size * 2.4;
-    }
-    bounds.add_rect(Rect::new(0.0, 0.0, width, height + top));
+    let node_padding =
+        cfg.section_f64(s, "nodePadding", 12.0) + if show_values { 15.0 } else { 0.0 };
     let opt = LayoutOptions {
-        extent: Rect::new(0.0, top, width, height),
+        extent: Rect::new(0.0, 0.0, width, height),
         node_width,
         node_padding,
         align,
         iterations: 6,
     };
     let lay = layout(&g, &opt)?;
-    let node_color = |i: usize| Color::new(TABLEAU10[i % TABLEAU10.len()]);
 
-    // Links (drawn first, under the nodes).
-    let mut link_els = Vec::new();
-    for l in &lay.links {
-        if l.width <= 0.0 {
-            continue;
-        }
-        let (sn, tn) = (&lay.nodes[l.source], &lay.nodes[l.target]);
-        let (x0, x1) = (sn.x1, tn.x0);
-        let (sc, tc) = (node_color(l.source), node_color(l.target));
-        let full = |c: &Color| {
-            Element::classed_shape(
-                crate::scene::Geometry::Path(ribbon(x0, l.y0, x1, l.y1, l.width, 0.0, 1.0)),
-                Paint::fill(c).with_opacity(0.5),
-                "link",
-            )
-        };
-        match &link_color {
-            LinkColor::Source => link_els.push(full(&sc)),
-            LinkColor::Target => link_els.push(full(&tc)),
-            LinkColor::Fixed(c) => link_els.push(full(&Color::new(c.clone()))),
-            LinkColor::Gradient => {
-                // Approximate the SVG gradient with colour-interpolated slices. Slices
-                // are opaque, toned 50% toward white (`stroke-opacity: 0.5` over mmdc's
-                // default white page; the theme `background` is not painted), so their
-                // slight overlaps leave no seams.
-                const SLICES: usize = 16;
-                let mut parts = Vec::new();
-                for k in 0..SLICES {
-                    let (t0, t1) = (k as f64 / SLICES as f64, (k + 1) as f64 / SLICES as f64);
-                    // Slight overlap hides anti-aliasing seams.
-                    let t1o = (t1 + 0.004).min(1.0);
-                    let x_mid = cubic_at(
-                        &[
-                            Point::new(x0, 0.0),
-                            Point::new((x0 + x1) / 2.0, 0.0),
-                            Point::new((x0 + x1) / 2.0, 0.0),
-                            Point::new(x1, 0.0),
-                        ],
-                        (t0 + t1) / 2.0,
-                    )
-                    .x;
-                    let f = if (x1 - x0).abs() < 1e-9 {
-                        0.5
-                    } else {
-                        (x_mid - x0) / (x1 - x0)
-                    };
-                    parts.push(Element::shape(
-                        crate::scene::Geometry::Path(ribbon(x0, l.y0, x1, l.y1, l.width, t0, t1o)),
-                        Paint::fill(&mix(&mix(&sc, &tc, f), &Color::new("#ffffff"), 0.5)),
-                    ));
+    // `nodeColors[id] ?? ordinal(schemeTableau10)(id)`: the scale hands out colours
+    // in the order it first sees ids (the nodes, in order; overridden ones never ask).
+    let overrides = cfg.section(s, "nodeColors");
+    let mut scheme = 0usize;
+    let colors: Vec<Color> = g
+        .nodes
+        .iter()
+        .map(|id| {
+            match overrides
+                .and_then(|o| o.get(id))
+                .and_then(|c| c.to_scalar_string())
+            {
+                Some(c) => Color::new(c),
+                None => {
+                    scheme += 1;
+                    Color::new(TABLEAU10[(scheme - 1) % TABLEAU10.len()])
                 }
-                link_els.push(Element::group("link", parts));
             }
-        }
-    }
-    els.push(Element::group("links", link_els));
+        })
+        .collect();
 
-    // Nodes and labels.
+    let mut bounds = Bounds::default();
+    // Nodes.
     let mut node_els = Vec::new();
-    let mut label_els = Vec::new();
-    let font = 14.0;
     for (i, nd) in lay.nodes.iter().enumerate() {
-        let r = Rect::new(nd.x0, nd.y0, nd.x1 - nd.x0, (nd.y1 - nd.y0).max(0.5));
+        let r = Rect::new(nd.x0, nd.y0, nd.x1 - nd.x0, nd.y1 - nd.y0);
+        bounds.add_rect(r);
         node_els.push(Element::classed_shape(
-            crate::scene::Geometry::Rect { rect: r, rx: 0.0 },
-            Paint::fill(&node_color(i)),
+            Geometry::Rect { rect: r, rx: 0.0 },
+            Paint::fill(&colors[i]),
             "node",
         ));
-        let value = format!(
-            "{prefix}{}{suffix}",
-            fmt_num((nd.value * 100.0).round() / 100.0)
-        );
-        // `getText` joins name and value with a newline, which SVG text renders
-        // as a space: one line, its baseline on the node's middle (`dy="0em"`;
-        // without values `0.35em` lower).
-        let line = if show_values {
-            format!("{} {value}", g.nodes[i])
-        } else {
-            g.nodes[i].clone()
-        };
-        let (x, anchor) = if nd.x0 < width / 2.0 {
-            (nd.x1 + 6.0, Anchor::Start)
-        } else {
-            (nd.x0 - 6.0, Anchor::End)
-        };
-        let dy = if show_values { 0.0 } else { 0.35 * font };
-        let t = text_at(
-            x,
-            (nd.y0 + nd.y1) / 2.0 + dy,
-            &[line],
-            font,
-            anchor,
-            &pal.text_color,
-        );
-        // `labelStyle: legacy` (the default): bare text in the root's `textColor`.
-        bounds.add_rect(text_bounds(&t));
-        label_els.push(Element::classed_text(t, "node-label"));
     }
-    els.push(Element::group("nodes", node_els));
-    els.push(Element::group("node-labels", label_els));
 
+    // Labels: `${id}\n${prefix}${round2(value)}${suffix}`, one SVG line (white
+    // space collapses), on the node's middle (`dy="0em"`; without values 0.35em
+    // lower).
+    let central_layer = {
+        let (mut max_value, mut layer) = (0.0, 0usize);
+        for nd in &lay.nodes {
+            if nd.value > max_value {
+                max_value = nd.value;
+                layer = nd.layer;
+            }
+        }
+        layer
+    };
+    let mut label_els = Vec::new();
+    let classes: &[&str] = if outlined {
+        &["sankey-label-bg", "sankey-label-fg"]
+    } else {
+        &["node-label"]
+    };
+    for class in classes {
+        for (i, nd) in lay.nodes.iter().enumerate() {
+            let raw = if show_values {
+                let v = (nd.value * 100.0 + 0.5).floor() / 100.0;
+                format!("{}\n{prefix}{v}{suffix}", g.nodes[i])
+            } else {
+                g.nodes[i].clone()
+            };
+            let line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+            let start = if outlined {
+                nd.layer >= central_layer
+            } else {
+                nd.x0 < width / 2.0
+            };
+            let (x, anchor) = if start {
+                (nd.x1 + 6.0, Anchor::Start)
+            } else {
+                (nd.x0 - 6.0, Anchor::End)
+            };
+            let dy = if show_values { 0.0 } else { 0.35 * LABEL_FONT };
+            let t = Text {
+                x,
+                y: (nd.y1 + nd.y0) / 2.0 + dy,
+                lines: vec![line],
+                line_height: LABEL_FONT * 1.2,
+                font_size: LABEL_FONT,
+                bold: false,
+                anchor,
+                fill: pal.text_color.clone(),
+            };
+            bounds.add_rect(label_box(&t));
+            label_els.push(Element::classed_text(t, *class));
+        }
+    }
+
+    // Links: `sankeyLinkHorizontal()` stroked `max(1, width)` wide at
+    // `stroke-opacity: 0.5`, each with its own source-to-target gradient.
+    let mut link_els = Vec::new();
+    for l in &lay.links {
+        let (x0, x1) = (lay.nodes[l.source].x1, lay.nodes[l.target].x0);
+        let xm = (x0 + x1) / 2.0;
+        let d = vec![
+            PathCmd::MoveTo(Point::new(x0, l.y0)),
+            PathCmd::CubicTo(
+                Point::new(xm, l.y0),
+                Point::new(xm, l.y1),
+                Point::new(x1, l.y1),
+            ),
+        ];
+        bounds.add_rect(Rect::new(
+            x0.min(x1),
+            l.y0.min(l.y1),
+            (x1 - x0).abs(),
+            (l.y1 - l.y0).abs(),
+        ));
+        let (sc, tc) = (&colors[l.source], &colors[l.target]);
+        let w = l.width.max(1.0);
+        let paint = match link_color.as_str() {
+            "gradient" => Paint::stroke(sc, w).with_stroke_gradient(Gradient {
+                x1: x0,
+                x2: x1,
+                from: sc.clone(),
+                to: tc.clone(),
+            }),
+            "source" => Paint::stroke(sc, w),
+            "target" => Paint::stroke(tc, w),
+            other => Paint::stroke(&Color::new(other), w),
+        };
+        link_els.push(Element::classed_shape(
+            Geometry::Path(d),
+            paint.with_opacity(0.5),
+            "link",
+        ));
+    }
+
+    let mut css =
+        String::from("rect.node{shape-rendering:crispEdges;}.link{mix-blend-mode:multiply;}");
+    if outlined {
+        css.push_str(&format!(
+            ".sankey-label-bg{{stroke:{};stroke-width:4px;stroke-linejoin:round;paint-order:stroke;}}",
+            pal.main_bkg.css()
+        ));
+    }
+    let els = vec![
+        Element::group("nodes", node_els),
+        Element::group("node-labels", label_els),
+        Element::group("links", link_els),
+    ];
     Ok(Scene {
         kind: DiagramKind::Sankey,
-        view_box: bounds.rect().pad(4.0),
-        elements: vec![Element::group("main", els)],
+        view_box: bounds.rect(),
+        elements: els,
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
-        css: String::new(),
+        css,
     })
 }
 
@@ -971,18 +934,111 @@ mod tests {
         }
     }
 
+    const EXAMPLE: &str = "sankey-beta\nAgricultural 'waste',Bio-conversion,124.729\nBio-conversion,Liquid,0.597\nBio-conversion,Losses,26.862\nBio-conversion,Solid,280.322\nBio-conversion,Gas,81.144\nBiofuel imports,Liquid,35\nBiomass imports,Solid,35\nCoal imports,Coal,11.606\nCoal reserves,Coal,63.965\nCoal,Solid,75.571\nGas,Heating and cooling - commercial,22.567\nGas,\"Heating and cooling, homes\",46.477\nGas,Industry,30.1\nLiquid,Industry,10.6\nLiquid,Transport,25.6\nSolid,Industry,280.0\nSolid,Thermal generation,111.893\nThermal generation,Electricity grid,82.0\nThermal generation,Losses,30.0\nElectricity grid,Industry,40.0\nElectricity grid,\"Heating and cooling, homes\",42.0\n\"Wind \"\"offshore\"\"\",Electricity grid,35.0\n";
+
+    /// Node positions mermaid 12.3.0 draws for its docs example (800×460,
+    /// values shown: padding 12 + 15): `initializeNodeBreadths` sorts a column's
+    /// source links while later columns have no breadth yet, relaxation re-sorts
+    /// only the far ends' lists, and the link breadths are not sorted again.
     #[test]
-    fn sub_cubic_matches_curve() {
-        let c: Cubic = [
-            Point::new(0.0, 0.0),
-            Point::new(5.0, 0.0),
-            Point::new(5.0, 10.0),
-            Point::new(10.0, 10.0),
+    fn layout_matches_mermaid_example() {
+        let g = parse(EXAMPLE).unwrap();
+        let l = layout(
+            &g,
+            &LayoutOptions {
+                extent: Rect::new(0.0, 0.0, 800.0, 460.0),
+                node_width: 10.0,
+                node_padding: 27.0,
+                align: Align::Justify,
+                iterations: 6,
+            },
+        )
+        .unwrap();
+        let want = [
+            (0.0, 0.0),
+            (158.0, 0.0),
+            (316.0, 377.1007611750894),
+            (790.0, 256.09604010061236),
+            (316.0, 0.0),
+            (316.0, 275.90805224050257),
+            (0.0, 378.8304175720801),
+            (0.0, 161.27637176759225),
+            (0.0, 259.7363740050274),
+            (158.0, 282.1699232142087),
+            (0.0, 294.1078423759942),
+            (790.0, 402.40707246042086),
+            (790.0, 319.21153506097005),
+            (790.0, 0.0),
+            (790.0, 443.74034203888084),
+            (474.0, 191.45859362317756),
+            (632.0, 167.17724187977333),
+            (0.0, 210.5063728863098),
         ];
-        let s = sub_cubic(&c, 0.25, 0.75);
-        let (a, b) = (cubic_at(&c, 0.25), cubic_at(&c, 0.75));
-        assert!(s[0].dist(a) < 1e-9 && s[3].dist(b) < 1e-9);
-        assert!(cubic_at(&s, 0.5).dist(cubic_at(&c, 0.5)) < 1e-9);
+        assert_eq!(l.nodes.len(), want.len());
+        for (i, (n, (x, y))) in l.nodes.iter().zip(want).enumerate() {
+            assert!(
+                (n.x0 - x).abs() < 1e-9 && (n.y0 - y).abs() < 1e-9,
+                "node {i}: ({}, {}) want ({x}, {y})",
+                n.x0,
+                n.y0
+            );
+        }
+    }
+
+    /// mermaid 12.3.0, `showValues: false` (padding 12) with three sinks.
+    #[test]
+    fn single_source_fan_out_matches_mermaid() {
+        let g = parse("sankey\nElectricity grid,Heating and cooling - homes,113.726\nElectricity grid,Industry,342.165\nElectricity grid,Losses,56.691\n").unwrap();
+        let l = layout(&g, &opts()).unwrap();
+        let ys: Vec<(f64, f64)> = l.nodes.iter().map(|n| (n.y0, n.y1 - n.y0)).collect();
+        let want = [
+            (9.673843260105073, 376.00000000000006),
+            (0.0, 83.42270309921143),
+            (95.42270309921143, 250.99211443242257),
+            (358.414817531634, 41.58518246836604),
+        ];
+        for (got, want) in ys.iter().zip(want) {
+            assert!((got.0 - want.0).abs() < 1e-9 && (got.1 - want.1).abs() < 1e-9);
+        }
+        // Link centres where mermaid strokes them.
+        assert!((l.links[0].y0 - 51.3851948097108).abs() < 1e-9);
+        assert!((l.links[2].y1 - 379.20740876581704).abs() < 1e-9);
+    }
+
+    #[test]
+    fn links_are_gradient_strokes_and_overridden_nodes_skip_the_scheme() {
+        let cfg = MermaidConfig::default()
+            .with_directive(
+                &crate::json::parse(r##"{"sankey":{"nodeColors":{"a":"#123456"}}}"##).unwrap(),
+            )
+            .unwrap();
+        let s = render("sankey\na,b,1\nb,c,1\n", None, &cfg, &cfg.palette()).unwrap();
+        let mut fills = Vec::new();
+        let mut strokes = Vec::new();
+        fn walk(els: &[Element], f: &mut Vec<String>, st: &mut Vec<Paint>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, f, st),
+                    Element::Shape { paint, class, .. } if class.as_deref() == Some("node") => {
+                        f.push(paint.fill.css().to_string())
+                    }
+                    Element::Shape { paint, class, .. } if class.as_deref() == Some("link") => {
+                        st.push(paint.clone())
+                    }
+                    _ => {}
+                }
+            }
+        }
+        walk(&s.elements, &mut fills, &mut strokes);
+        // `b` gets the scheme's first colour: `a` never asked the scale.
+        assert_eq!(fills, ["#123456", "#4e79a7", "#f28e2c"]);
+        let g = strokes[0].stroke_gradient.as_ref().unwrap();
+        assert_eq!((g.from.css(), g.to.css()), ("#123456", "#4e79a7"));
+        assert_eq!((g.x1, g.x2), (10.0, 295.0));
+        assert!(strokes[0].fill.is_none());
+        // No padding around the drawing: the viewBox is the content's bounding box.
+        assert_eq!(s.view_box.x, 0.0);
+        assert_eq!(s.view_box.w, 600.0);
     }
 
     #[test]

@@ -13,18 +13,20 @@
 //! `<seq>-<7 hex digits of FNV-1a(seq, branch, message)>` instead: same shape,
 //! stable across runs.
 //!
-//! Commit labels follow `gitGraphRenderer.ts`: with `rotateCommitLabel` (the
-//! default) they and their backgrounds are turned -45°, and every lane gets
-//! 40px extra room; TB/BT tags are always turned +45°. With
-//! `rotateCommitLabel: false` the LR commit step grows when labels/tags are
-//! wider than mermaid's 50px spacing so horizontal labels never overlap
-//! (mermaid lets them overlap).
+//! Layout and drawing port `gitGraphRenderer.ts`: commits 50px apart (or one
+//! step past their furthest parent with `parallelCommits`, BT included), both
+//! `drawCommits` passes (the arrows use the first pass's positions), the
+//! commit map's handling of a repeated id, `findLane` for rerouted arrows, and
+//! the viewBox as the drawing's `getBBox()` (text measured as mermaid measures
+//! it while drawing) plus `diagramPadding`. With `rotateCommitLabel` (the
+//! default) commit labels and their backgrounds are turned -45° and every lane
+//! gets 40px extra room; TB/BT tags are always turned +45°.
 
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::{TextBlock, line_width, svg_bbox_width, svg_line_box};
+use crate::text::{line_width, svg_bbox_width, svg_line_box};
 use crate::theme::Palette;
 
 /// Graph orientation.
@@ -492,23 +494,17 @@ impl Default for GitConfig {
     }
 }
 
+/// `.commit-label` / `.tag-label` font size (`commitLabelFontSize`, `tagLabelFontSize`).
 const LABEL_FONT: f64 = 10.0;
 const TAG_FONT: f64 = 10.0;
 /// Branch labels are SVG text in the root font (no stylesheet rule sizes them).
 const BRANCH_FONT: f64 = 16.0;
-
-/// Abstract layout: `along` = commit axis, `across` = lane axis.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Layout {
-    /// Lane coordinate per branch index.
-    pub lane: Vec<f64>,
-    /// Display index (colour) per branch index.
-    pub lane_index: Vec<usize>,
-    /// `along` coordinate per commit.
-    pub pos: Vec<f64>,
-    /// Extent of the commit axis.
-    pub max_pos: f64,
-}
+/// `gitGraphRenderer.ts` constants.
+const LAYOUT_OFFSET: f64 = 10.0;
+const COMMIT_STEP: f64 = 40.0;
+const DEFAULT_POS: f64 = 30.0;
+const PX: f64 = 4.0;
+const PY: f64 = 2.0;
 
 fn shown_label(c: &Commit, gc: &GitConfig) -> bool {
     gc.show_commit_label
@@ -516,8 +512,280 @@ fn shown_label(c: &Commit, gc: &GitConfig) -> bool {
         && (c.kind != CommitType::Merge || c.custom_id)
 }
 
-/// Compute lanes and commit positions.
-pub fn layout(g: &GitGraph, gc: &GitConfig) -> Layout {
+/// mermaid's commit `Map`, keyed by id: a commit that reuses an id replaces the
+/// earlier one's entry (which keeps its place in the key order), and parents
+/// name ids, so they resolve to whichever commit holds the id last.
+struct Commits<'a> {
+    g: &'a GitGraph,
+    /// The commit stored under each key, keys in insertion order.
+    keys: Vec<usize>,
+    /// Commit index → the commit its id resolves to.
+    resolve: Vec<usize>,
+}
+
+impl<'a> Commits<'a> {
+    fn new(g: &'a GitGraph) -> Self {
+        let mut keys: Vec<usize> = Vec::new();
+        let mut slot: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, c) in g.commits.iter().enumerate() {
+            match slot.get(c.id.as_str()) {
+                Some(&k) => keys[k] = i,
+                None => {
+                    slot.insert(&c.id, keys.len());
+                    keys.push(i);
+                }
+            }
+        }
+        let resolve = g
+            .commits
+            .iter()
+            .map(|c| keys[slot[c.id.as_str()]])
+            .collect();
+        Commits { g, keys, resolve }
+    }
+
+    fn parents(&self, c: usize) -> Vec<usize> {
+        self.g.commits[c]
+            .parents
+            .iter()
+            .map(|&p| self.resolve[p])
+            .collect()
+    }
+}
+
+/// `drawText(name).getBBox()` of a branch label as mermaid measures it while
+/// drawing: rows (split at `\n` / `<br>`) as `<tspan dy="1em" x="0">`, each
+/// as wide as its ink. Returns (width, height, top below the text's origin).
+fn branch_label_box(name: &str) -> (f64, f64, f64, Vec<String>) {
+    let rows: Vec<String> = split_rows(name);
+    let ascent = (0.905 * BRANCH_FONT).round();
+    let (mut w, mut top, mut bottom) = (0.0f64, f64::INFINITY, f64::NEG_INFINITY);
+    for (i, r) in rows.iter().enumerate() {
+        let baseline = BRANCH_FONT * (i + 1) as f64;
+        w = w.max(svg_bbox_width(r, BRANCH_FONT));
+        top = top.min(baseline - ascent);
+        bottom = bottom.max(baseline - ascent + svg_line_box(BRANCH_FONT, r));
+    }
+    if rows.is_empty() {
+        return (0.0, 0.0, 0.0, rows);
+    }
+    (w, bottom - top, top, rows)
+}
+
+/// `txt.split(/\\n|\n|<br\s*\/?>/gi)`, each row trimmed.
+fn split_rows(s: &str) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut cur = String::new();
+    let mut rest = s;
+    while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix("\\n").or_else(|| rest.strip_prefix('\n')) {
+            rows.push(std::mem::take(&mut cur));
+            rest = r;
+            continue;
+        }
+        let lower = rest.get(..3).map(str::to_ascii_lowercase);
+        if lower.as_deref() == Some("<br") {
+            let after = rest[3..].trim_start();
+            let after = after.strip_prefix('/').unwrap_or(after);
+            if let Some(r) = after.strip_prefix('>') {
+                rows.push(std::mem::take(&mut cur));
+                rest = r;
+                continue;
+            }
+        }
+        let c = rest.chars().next().unwrap_or(' ');
+        cur.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    rows.push(cur);
+    rows.into_iter().map(|r| r.trim().to_string()).collect()
+}
+
+/// Where a commit is drawn (`getCommitPosition`), and the walk's `pos` there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placed {
+    pub commit: usize,
+    pub x: f64,
+    pub y: f64,
+    pub pos_with_offset: f64,
+    pub pos: f64,
+}
+
+/// Lanes and commit positions, as `gitGraphRenderer.ts` computes them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Layout {
+    /// `branchPos.pos` per branch index.
+    pub lane: Vec<f64>,
+    /// Display index (colour) per branch index.
+    pub lane_index: Vec<usize>,
+    /// Commits in drawing order with their positions (second `drawCommits` pass).
+    pub placed: Vec<Placed>,
+    /// `commitPos` after the first pass, which the arrows are drawn from.
+    pub arrow_at: Vec<Option<Point>>,
+    /// `maxPos` when the branches are drawn.
+    pub max_pos: f64,
+}
+
+/// The walk of `drawCommits` (positions only), updating `commitPos` and `maxPos`.
+struct Walker<'a> {
+    cm: &'a Commits<'a>,
+    o: Orientation,
+    parallel: bool,
+    lane: &'a [f64],
+    /// `REDUX_BRANCH_LABEL_PADDING_Y / 2 + 1` under redux geometry, else -2.
+    spine_dy: f64,
+    at: Vec<Option<Point>>,
+    max_pos: f64,
+}
+
+impl Walker<'_> {
+    fn vertical(&self) -> bool {
+        self.o != Orientation::LR
+    }
+
+    /// `findClosestParent`: the parent furthest along (BT: the lowest `y`).
+    fn closest_parent(&self, parents: &[usize]) -> Option<usize> {
+        let bt = self.o == Orientation::BT;
+        let mut target = if bt { f64::INFINITY } else { 0.0 };
+        let mut closest = None;
+        for &p in parents {
+            let Some(at) = self.at[p] else { continue };
+            let v = if self.vertical() { at.y } else { at.x };
+            if (bt && v <= target) || (!bt && v >= target) {
+                closest = Some(p);
+                target = v;
+            }
+        }
+        closest
+    }
+
+    /// `calculatePosition`.
+    fn calculate_position(&self, k: usize) -> f64 {
+        let parents = self.cm.parents(k);
+        let zero = Point::new(0.0, 0.0);
+        let current = || self.at[k].unwrap_or(zero);
+        if !parents.is_empty() {
+            if let Some(cp) = self.closest_parent(&parents) {
+                let pp = self.at[cp].unwrap_or(zero);
+                return match self.o {
+                    Orientation::TB => pp.y + COMMIT_STEP,
+                    Orientation::BT => current().y - COMMIT_STEP,
+                    Orientation::LR => pp.x + COMMIT_STEP,
+                };
+            }
+            return 0.0;
+        }
+        match self.o {
+            Orientation::TB => DEFAULT_POS,
+            Orientation::BT => current().y - COMMIT_STEP,
+            Orientation::LR => 0.0,
+        }
+    }
+
+    /// `setParallelBTPos`.
+    fn parallel_bt(&mut self, sorted: &[usize], default_pos: f64) {
+        let g = self.cm.g;
+        let lane = |k: usize| self.lane[g.commits[k].branch];
+        let (mut cur, mut max_position) = (default_pos, default_pos);
+        let mut roots = Vec::new();
+        for &k in sorted {
+            let parents = self.cm.parents(k);
+            if !parents.is_empty() {
+                let cp = self.closest_parent(&parents);
+                let y = cp.and_then(|p| self.at[p]).map_or(0.0, |p| p.y);
+                cur = y + COMMIT_STEP;
+                max_position = cur.max(max_position);
+            } else {
+                roots.push(k);
+            }
+            self.at[k] = Some(Point::new(lane(k), cur + LAYOUT_OFFSET));
+        }
+        cur = max_position;
+        for &k in &roots {
+            self.at[k] = Some(Point::new(lane(k), cur + default_pos));
+        }
+        for &k in sorted {
+            let parents = self.cm.parents(k);
+            if parents.is_empty() {
+                continue;
+            }
+            // `findClosestParentBT`: the parent highest up.
+            let mut best = f64::INFINITY;
+            let mut closest = None;
+            for &p in &parents {
+                if let Some(at) = self.at[p]
+                    && at.y <= best
+                {
+                    closest = Some(p);
+                    best = at.y;
+                }
+            }
+            cur = closest.and_then(|p| self.at[p]).map_or(0.0, |p| p.y) - COMMIT_STEP;
+            if cur <= max_position {
+                max_position = cur;
+            }
+            self.at[k] = Some(Point::new(lane(k), cur - LAYOUT_OFFSET));
+        }
+    }
+
+    /// One `drawCommits` pass.
+    fn walk(&mut self) -> Vec<Placed> {
+        let g = self.cm.g;
+        let bt = self.o == Orientation::BT;
+        let vertical = self.vertical();
+        let mut pos = if vertical { DEFAULT_POS } else { 0.0 };
+        let mut sorted = self.cm.keys.clone();
+        sorted.sort_by_key(|&k| g.commits[k].seq);
+        if bt {
+            if self.parallel {
+                self.parallel_bt(&sorted, pos);
+            }
+            sorted.reverse();
+        }
+        let mut placed = Vec::with_capacity(sorted.len());
+        for &k in &sorted {
+            if self.parallel {
+                pos = self.calculate_position(k);
+            }
+            let wo = if bt && self.parallel {
+                pos
+            } else {
+                pos + LAYOUT_OFFSET
+            };
+            let branch = self.lane[g.commits[k].branch];
+            let (x, y) = if vertical {
+                (branch, wo)
+            } else {
+                (wo, branch + self.spine_dy)
+            };
+            self.at[k] = Some(if vertical {
+                Point::new(x, wo)
+            } else {
+                Point::new(wo, y)
+            });
+            placed.push(Placed {
+                commit: k,
+                x,
+                y,
+                pos_with_offset: wo,
+                pos,
+            });
+            pos = if bt && self.parallel {
+                pos + COMMIT_STEP
+            } else {
+                pos + COMMIT_STEP + LAYOUT_OFFSET
+            };
+            if pos > self.max_pos {
+                self.max_pos = pos;
+            }
+        }
+        placed
+    }
+}
+
+/// Compute lanes and commit positions (`setBranchPosition`, `drawCommits`).
+/// `redux`: the redux themes' geometry (spines 7px below the branch position).
+pub fn layout(g: &GitGraph, gc: &GitConfig, redux: bool) -> Layout {
     let vertical = g.orientation != Orientation::LR;
     let order = g.lane_order();
     let mut lane = vec![0.0; g.branches.len()];
@@ -526,117 +794,33 @@ pub fn layout(g: &GitGraph, gc: &GitConfig) -> Layout {
     for (idx, &b) in order.iter().enumerate() {
         lane[b] = p;
         lane_index[b] = idx;
-        // mermaid's `setBranchPosition`.
-        p += 50.0 + if gc.rotate_commit_label { 40.0 } else { 0.0 };
-        if vertical {
-            // (Half the label's `getBBox` width: the ink's.)
-            p += svg_bbox_width(&g.branches[b].name, BRANCH_FONT) / 2.0;
-        }
-    }
-    // Commit step: mermaid uses 50; with horizontal LR labels widen it so
-    // labels/tags never collide.
-    let step = if vertical || gc.rotate_commit_label {
-        50.0
-    } else {
-        let widest = g
-            .commits
-            .iter()
-            .map(|c| {
-                let lw = if shown_label(c, gc) {
-                    line_width(&c.id, LABEL_FONT, false) + 8.0
-                } else {
-                    0.0
-                };
-                let tw = c
-                    .tags
-                    .iter()
-                    .map(|t| line_width(t, TAG_FONT, false) + 16.0)
-                    .fold(0.0, f64::max);
-                lw.max(tw)
-            })
-            .fold(0.0, f64::max);
-        widest.max(50.0)
-    };
-    let start = if vertical { 30.0 } else { 0.0 };
-    let mut pos = vec![0.0; g.commits.len()];
-    let mut max_pos: f64 = start;
-    for (i, c) in g.commits.iter().enumerate() {
-        let slot = if gc.parallel_commits {
-            c.parents
-                .iter()
-                .map(|&pi| pos[pi] + step)
-                .fold(start + 10.0, f64::max)
+        let half = if vertical {
+            branch_label_box(&g.branches[b].name).0 / 2.0
         } else {
-            start + 10.0 + step * i as f64
+            0.0
         };
-        pos[i] = slot;
-        max_pos = max_pos.max(slot + step - 10.0);
+        p += 50.0 + if gc.rotate_commit_label { 40.0 } else { 0.0 } + half;
     }
-    if g.orientation == Orientation::BT {
-        for p in &mut pos {
-            // mermaid walks the commits newest-first from `defaultPos`, so
-            // the newest sits at start + 10 and the branch labels at max_pos.
-            *p = max_pos - *p;
-        }
-    }
+    let cm = Commits::new(g);
+    let mut w = Walker {
+        cm: &cm,
+        o: g.orientation,
+        parallel: gc.parallel_commits,
+        lane: &lane,
+        spine_dy: if redux { 12.0 / 2.0 + 1.0 } else { -2.0 },
+        at: vec![None; g.commits.len()],
+        max_pos: 0.0,
+    };
+    // `drawCommits(.., false)` before the branches and arrows, then again to draw.
+    w.walk();
+    let (arrow_at, max_pos) = (w.at.clone(), w.max_pos);
+    let placed = w.walk();
     Layout {
         lane,
         lane_index,
-        pos,
+        placed,
+        arrow_at,
         max_pos,
-    }
-}
-
-/// mermaid's `LAYOUT_OFFSET`: a commit sits this far past its slot start.
-const LAYOUT_OFFSET: f64 = 10.0;
-
-/// Commit label background, text (anchor start; fill set by the caller) and
-/// optional rotation `(about, deg)` for a commit at `p`, after mermaid's
-/// `drawCommitLabel` (PX = 4, PY = 2).
-fn commit_label_geometry(
-    o: Orientation,
-    p: Point,
-    id: &str,
-    rotate: bool,
-) -> (Rect, Text, Option<(Point, f64)>) {
-    // `drawCommitLabel` sizes the box by the text's `getBBox()`: the ink's
-    // width, 11px tall at 10px (12 with a deep descender).
-    let w = svg_bbox_width(id, LABEL_FONT);
-    let h = svg_line_box(LABEL_FONT, id);
-    let text = |x: f64, y: f64| Text {
-        x,
-        y,
-        lines: vec![id.to_string()],
-        line_height: h,
-        font_size: LABEL_FONT,
-        bold: false,
-        anchor: Anchor::Start,
-        fill: Color::new("#000"),
-    };
-    if o == Orientation::LR {
-        // The whole label group is `translate(r_x, r_y) rotate(-45, pos, y)`
-        // with pos = along - LAYOUT_OFFSET; translate-then-rotate equals
-        // rotating the shifted label about the shifted centre.
-        let (dx, dy) = if rotate {
-            (-7.5 - (w + 10.0) / 25.0 * 9.5, 10.0 + w / 25.0 * 8.5)
-        } else {
-            (0.0, 0.0)
-        };
-        let rect = Rect::new(p.x - w / 2.0 - 2.0 + dx, p.y + 13.5 + dy, w + 4.0, h + 4.0);
-        let t = text(p.x - w / 2.0 + dx, p.y + 25.0 + dy);
-        let rot = rotate.then(|| (Point::new(p.x - LAYOUT_OFFSET + dx, p.y + dy), -45.0));
-        (rect, t, rot)
-    } else {
-        let rect = Rect::new(p.x - (w + 16.0 + 5.0), p.y - 12.0, w + 4.0, h + 4.0);
-        let t = text(p.x - (w + 16.0), p.y + h - 12.0);
-        (rect, t, rotate.then_some((p, -45.0)))
-    }
-}
-
-fn to_xy(o: Orientation, along: f64, across: f64) -> Point {
-    match o {
-        Orientation::LR => Point::new(along, across),
-        _ => Point::new(across, along),
     }
 }
 
@@ -804,30 +988,35 @@ impl<'a> GitStyle<'a> {
         }
     }
 
+    /// Left-to-right spines (and their commits) sit off the branch position:
+    /// 2px up, or under redux geometry half the 12px label padding plus one down.
+    fn spine_dy(&self) -> f64 {
+        if self.redux { 12.0 / 2.0 + 1.0 } else { -2.0 }
+    }
+
     /// `NEO_COLOR_GEN_THEMES`.
     fn neo_gen(&self) -> bool {
         self.family != Family::Classic
     }
 }
 
-/// Orthogonal polyline with rounded corners of radius `r` (quarter circles).
+/// An orthogonal polyline whose inner corners are quarter circles of radius `r`
+/// (mermaid's `L .. A r r ..` arrows): each arc starts `r` before its corner and
+/// ends `r` after it.
 fn rounded(points: &[Point], r: f64) -> Vec<PathCmd> {
     let mut cmds = vec![PathCmd::MoveTo(points[0])];
     for i in 1..points.len() {
         let p = points[i];
-        if i + 1 < points.len() {
-            let prev = points[i - 1];
-            let next = points[i + 1];
-            let din = p.minus(prev);
-            let dout = next.minus(p);
-            let rr = r.min(din.len() / 2.0).min(dout.len() / 2.0);
-            let a = p.minus(din.norm().scale(rr));
-            let b = p.plus(dout.norm().scale(rr));
+        if i + 1 < points.len() && r > 0.0 {
+            let din = p.minus(points[i - 1]).norm();
+            let dout = points[i + 1].minus(p).norm();
+            let a = p.minus(din.scale(r));
+            let b = p.plus(dout.scale(r));
             let k = 0.552_284_75;
             cmds.push(PathCmd::LineTo(a));
             cmds.push(PathCmd::CubicTo(
-                a.plus(din.norm().scale(rr * k)),
-                b.minus(dout.norm().scale(rr * k)),
+                a.plus(din.scale(r * k)),
+                b.minus(dout.scale(r * k)),
                 b,
             ));
         } else {
@@ -837,19 +1026,16 @@ fn rounded(points: &[Point], r: f64) -> Vec<PathCmd> {
     cmds
 }
 
-/// Left-to-right spines (and their commits) sit off the branch position:
-/// 2px up, or under the redux themes half their 12px label padding plus one
-/// down (`drawBranches`' `spineY`, `getCommitPosition`).
-fn shift_lanes(lay: &mut Layout, pal: &Palette) {
-    use crate::theme::ThemeName as T;
-    let redux = matches!(
-        pal.theme,
-        T::Redux | T::ReduxDark | T::ReduxColor | T::ReduxDarkColor
-    );
-    let dy = if redux { 12.0 / 2.0 + 1.0 } else { -2.0 };
-    for l in &mut lay.lane {
-        *l += dy;
-    }
+/// The `getBBox()` of one-line SVG text (start-anchored at `x`, baseline `y`),
+/// as measured while mermaid draws: the run's ink, the font's rounded ascent
+/// above the baseline.
+fn text_box(x: f64, y: f64, s: &str, font: f64) -> Rect {
+    Rect::new(
+        x,
+        y - (0.905 * font).round(),
+        svg_bbox_width(s, font),
+        svg_line_box(font, s),
+    )
 }
 
 /// Render a gitGraph.
@@ -869,31 +1055,49 @@ pub fn render(
     };
     let g = parse(body, title, &opts)?;
     let gc = GitConfig::from_config(cfg);
-    let mut lay = layout(&g, &gc);
-    if g.orientation == Orientation::LR {
-        shift_lanes(&mut lay, pal);
-    }
+    let lay = layout(&g, &gc, GitStyle::new(pal).redux);
     Ok(draw(&g, &lay, &gc, pal))
 }
 
-/// Draw a laid-out git graph.
+/// mermaid's `findLane`: a free coordinate between two lanes for rerouted
+/// arrows (taken lanes are kept 10px apart; after five halvings the candidate
+/// is used anyway).
+fn find_lane(lanes: &mut Vec<f64>, y1: f64, y2: f64, depth: usize) -> f64 {
+    let candidate = y1 + (y1 - y2).abs() / 2.0;
+    if depth > 5 {
+        return candidate;
+    }
+    if lanes.iter().all(|l| (l - candidate).abs() >= 10.0) {
+        lanes.push(candidate);
+        return candidate;
+    }
+    let diff = (y1 - y2).abs();
+    find_lane(lanes, y1, y2 - diff / 5.0, depth + 1)
+}
+
+/// Draw a laid-out git graph (`gitGraphRenderer.ts` `draw`).
 pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene {
     let o = g.orientation;
     let vertical = o != Orientation::LR;
+    let cm = Commits::new(g);
     let mut bounds = Bounds::default();
-    let pt = |c: usize| to_xy(o, lay.pos[c], lay.lane[g.commits[c].branch]);
     let st = GitStyle::new(pal);
     let ck = |b: usize| st.commit_index(lay.lane_index[b]);
-    let start: f64 = if vertical { 30.0 } else { 0.0 };
-    let (lo, hi) = (start.min(lay.max_pos), lay.max_pos.max(start));
+    let max_pos = lay.max_pos;
+    let mut lanes: Vec<f64> = Vec::new();
 
-    // Branch lines and labels.
+    // drawBranches.
     let mut branch_els = Vec::new();
     if gc.show_branches {
-        for (b, br) in g.branches.iter().enumerate() {
-            let across = lay.lane[b];
-            let a = to_xy(o, lo, across);
-            let z = to_xy(o, hi, across);
+        for &b in &g.lane_order() {
+            let pos = lay.lane[b];
+            let k = st.branch_index(lay.lane_index[b]);
+            let spine = if vertical { pos } else { pos + st.spine_dy() };
+            let (a, z) = match o {
+                Orientation::LR => (Point::new(0.0, spine), Point::new(max_pos, spine)),
+                Orientation::TB => (Point::new(pos, DEFAULT_POS), Point::new(pos, max_pos)),
+                Orientation::BT => (Point::new(pos, max_pos), Point::new(pos, DEFAULT_POS)),
+            };
             bounds.add_point(a);
             bounds.add_point(z);
             branch_els.push(Element::classed_shape(
@@ -903,35 +1107,52 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 } else {
                     vec![2.0]
                 }),
-                format!("branch branch{}", st.branch_index(lay.lane_index[b])),
+                format!("branch branch{k}"),
             ));
-            // The label's SVG text box (`getBBox`) plus 18 x 4.
-            // The redux themes pad the label box by 16 x 12, shifting it off
-            // the axis start in TB / BT.
-            let tb = TextBlock::svg(vec![br.name.clone()], BRANCH_FONT, false);
+            lanes.push(spine);
+            let (bw, bh, btop, rows) = branch_label_box(&g.branches[b].name);
             let (pad_x, pad_y) = if st.redux { (16.0, 12.0) } else { (0.0, 0.0) };
-            // (Its width is the ink's, as `getBBox` measures it.)
-            let tw = if st.redux {
-                tb.width
-            } else {
-                svg_bbox_width(&br.name, BRANCH_FONT)
-            };
-            let (w, h) = (tw + 18.0 + pad_x, tb.height + 4.0 + pad_y);
-            // mermaid's `drawBranches`: LR labels move 30px further left when
-            // commit labels are rotated (they lean towards the branch label).
-            let rot_shift = if gc.rotate_commit_label { 30.0 } else { 0.0 };
-            let (dx, dy) = if st.redux {
-                (-pad_x / 2.0 - 3.0, pad_y + 10.0)
-            } else {
-                (0.0, 0.0)
-            };
-            let rect = match o {
-                Orientation::LR => Rect::new(-tw - 4.0 - rot_shift - 19.0, across - h / 2.0, w, h),
-                Orientation::TB => Rect::new(across - tw / 2.0 - 10.0 + dx, -dy, w, h),
-                Orientation::BT => Rect::new(across - tw / 2.0 - 10.0 + dx, hi + dy, w, h),
+            let rot = if gc.rotate_commit_label { 30.0 } else { 0.0 };
+            let (w, h) = (bw + 18.0 + pad_x, bh + 4.0 + pad_y);
+            // The box (with its transform) and the label group's translation.
+            let (rect, label_at) = match o {
+                Orientation::LR => (
+                    Rect::new(
+                        -bw - 4.0 - rot - 19.0,
+                        -bh / 2.0 + 10.0 + spine - 12.0 - pad_y / 2.0,
+                        w,
+                        h,
+                    ),
+                    Point::new(-bw - 14.0 - rot + pad_x / 2.0, spine - bh / 2.0 - 2.0),
+                ),
+                Orientation::TB if st.redux => (
+                    Rect::new(
+                        pos - bw / 2.0 - 10.0 - pad_x / 2.0 - 3.0,
+                        -pad_y - 10.0,
+                        w,
+                        h,
+                    ),
+                    Point::new(pos - bw / 2.0 - 5.0, -pad_y * 2.0 + 7.0),
+                ),
+                Orientation::TB => (
+                    Rect::new(pos - bw / 2.0 - 10.0, 0.0, w, h),
+                    Point::new(pos - bw / 2.0 - 5.0, 0.0),
+                ),
+                Orientation::BT if st.redux => (
+                    Rect::new(
+                        pos - bw / 2.0 - 10.0 - pad_x / 2.0 - 3.0,
+                        max_pos + pad_y + 10.0,
+                        w,
+                        h,
+                    ),
+                    Point::new(pos - bw / 2.0 - 5.0, max_pos + pad_y * 2.0 + 4.0),
+                ),
+                Orientation::BT => (
+                    Rect::new(pos - bw / 2.0 - 10.0, max_pos, w, h),
+                    Point::new(pos - bw / 2.0 - 5.0, max_pos),
+                ),
             };
             bounds.add_rect(rect);
-            let k = st.branch_index(lay.lane_index[b]);
             let (fill, stroke) = st.label_box(k);
             let paint = match &stroke {
                 Some((c, w)) => Paint::both(&fill, c, *w),
@@ -945,13 +1166,20 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 paint,
                 format!("branchLabelBkg label{k}"),
             ));
-            let text = Text::centered(
-                rect.center(),
-                &tb.lines,
-                BRANCH_FONT,
-                tb.line_height,
-                &st.branch_label(k),
-            );
+            // `<tspan dy="1em" x="0">` rows from the label group's origin.
+            if !rows.is_empty() {
+                bounds.add_rect(Rect::new(label_at.x, label_at.y + btop, bw, bh));
+            }
+            let text = Text {
+                x: label_at.x,
+                y: label_at.y + BRANCH_FONT,
+                lines: rows,
+                line_height: BRANCH_FONT,
+                font_size: BRANCH_FONT,
+                bold: false,
+                anchor: Anchor::Start,
+                fill: st.branch_label(k),
+            };
             branch_els.push(Element::classed_text(
                 if st.redux { text.bold() } else { text },
                 format!("branch-label{k}"),
@@ -959,84 +1187,112 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
         }
     }
 
-    // Arrows (parent → child).
+    // drawArrows: every stored commit (in key order) from each of its parents,
+    // at the positions of the first `drawCommits` pass.
     let mut arrow_els = Vec::new();
-    let mut lanes_used: Vec<f64> = lay.lane.clone();
-    for (ci, c) in g.commits.iter().enumerate() {
-        for (pi_n, &pi) in c.parents.iter().enumerate() {
+    for &ci in &cm.keys {
+        let c = &g.commits[ci];
+        for pi in cm.parents(ci) {
             let a = &g.commits[pi];
-            let (pa, pb) = (lay.pos[pi], lay.pos[ci]);
-            let (la, lb) = (lay.lane[a.branch], lay.lane[c.branch]);
-            let merge_side = c.kind == CommitType::Merge && pi_n != 0;
-            let mut color_branch = if merge_side { a.branch } else { c.branch };
-            let pts: Vec<(f64, f64)>;
-            let radius;
-            if (la - lb).abs() < 1e-9 {
-                pts = vec![(pa, la), (pb, lb)];
-                radius = 0.0;
-            } else {
-                // Reroute when a commit on the curving branch sits between the two.
-                let curve_branch = if lb > la { c.branch } else { a.branch };
-                let blocked = g
-                    .commits
-                    .iter()
-                    .any(|x| x.seq > a.seq && x.seq < c.seq && x.branch == curve_branch);
-                if blocked {
-                    let mid = find_lane(&mut lanes_used, la.min(lb), la.max(lb));
-                    if lb < la {
-                        color_branch = a.branch;
-                    }
-                    pts = vec![(pa, la), (pa, mid), (pb, mid), (pb, lb)];
-                    radius = 10.0;
-                } else if merge_side {
-                    pts = vec![(pa, la), (pb, la), (pb, lb)];
-                    radius = 20.0;
+            let (Some(p1), Some(p2)) = (lay.arrow_at[pi], lay.arrow_at[ci]) else {
+                continue;
+            };
+            let first_parent = cm.parents(ci).first().copied();
+            let merge_side = c.kind == CommitType::Merge && Some(pi) != first_parent;
+            let mut color = if merge_side { a.branch } else { c.branch };
+            // shouldRerouteArrow: a commit of the branch that would get the curve
+            // lies between the two.
+            let b_furthest = if vertical { p1.x < p2.x } else { p1.y < p2.y };
+            let curve_branch = if b_furthest { c.branch } else { a.branch };
+            let reroute = cm.keys.iter().any(|&x| {
+                let xc = &g.commits[x];
+                xc.seq > a.seq && xc.seq < c.seq && xc.branch == curve_branch
+            });
+            let (pts, r): (Vec<Point>, f64) = if reroute {
+                let line_y = if p1.y < p2.y {
+                    find_lane(&mut lanes, p1.y, p2.y, 0)
                 } else {
-                    pts = vec![(pa, la), (pa, lb), (pb, lb)];
-                    radius = 20.0;
+                    find_lane(&mut lanes, p2.y, p1.y, 0)
+                };
+                let line_x = if p1.x < p2.x {
+                    find_lane(&mut lanes, p1.x, p2.x, 0)
+                } else {
+                    find_lane(&mut lanes, p2.x, p1.x, 0)
+                };
+                let pts = if vertical {
+                    if p1.x >= p2.x {
+                        color = a.branch;
+                    }
+                    vec![p1, Point::new(line_x, p1.y), Point::new(line_x, p2.y), p2]
+                } else {
+                    if p1.y >= p2.y {
+                        color = a.branch;
+                    }
+                    vec![p1, Point::new(p1.x, line_y), Point::new(p2.x, line_y), p2]
+                };
+                (pts, 10.0)
+            } else {
+                let same = if vertical { p1.x == p2.x } else { p1.y == p2.y };
+                if same {
+                    (vec![p1, p2], 0.0)
+                } else {
+                    // Merges turn at the merge commit's row, the rest at the parent's.
+                    let turn = match (vertical, merge_side) {
+                        (true, true) | (false, false) => Point::new(p1.x, p2.y),
+                        (true, false) | (false, true) => Point::new(p2.x, p1.y),
+                    };
+                    (vec![p1, turn, p2], 20.0)
                 }
+            };
+            for p in &pts {
+                bounds.add_point(*p);
             }
-            let xy: Vec<Point> = pts.iter().map(|&(al, ac)| to_xy(o, al, ac)).collect();
+            let k = ck(color);
             arrow_els.push(Element::classed_shape(
-                Geometry::Path(rounded(&xy, radius)),
-                Paint::stroke(&st.lane(ck(color_branch)), st.arrow_width()),
-                format!("arrow arrow{}", ck(color_branch)),
+                Geometry::Path(rounded(&pts, r)),
+                Paint::stroke(&st.lane(k), st.arrow_width()),
+                format!("arrow arrow{k}"),
             ));
         }
     }
 
-    // Commit bullets, labels and tags.
+    // drawCommits: bullets, labels and tags.
     let mut bullet_els = Vec::new();
     let (tag_bkg, tag_border) = if st.neo_gen() {
         (pal.main_bkg.clone(), pal.node_border.clone())
     } else {
-        (pal.label_box_bkg.clone(), pal.label_box_border.clone())
+        (pal.tag_label_bkg.clone(), pal.tag_label_border.clone())
     };
     let mut label_els = Vec::new();
     // `.commit-merge` / `-reverse` / `-highlight-inner`: `mainBkg` under the neo colour
     // generator, `primaryColor` (the same colour in the classic themes) otherwise.
     let primary = pal.main_bkg.clone();
     // Bullet, merge-hole and cherry-pick dot radii, reverse-cross half size, highlight
-    // outer / inner sizes (`useReduxGeometry`).
-    let (bullet_r, hole_r, dot_r, cross, (hi_out, hi_in)) = if st.redux {
-        (7.0, 5.0, 2.5, 4.0, (14.0, 8.0))
+    // outer / inner sizes and offsets (`useReduxGeometry`).
+    let (bullet_r, hole_r, dot_r, cross, (hi_out, hi_in), (off_out, off_in)) = if st.redux {
+        (7.0, 5.0, 2.5, 4.0, (14.0, 8.0), (3.0, 2.0))
     } else {
-        (10.0, 6.0, 2.75, 5.0, (20.0, 12.0))
+        (10.0, 6.0, 2.75, 5.0, (20.0, 12.0), (0.0, 0.0))
     };
-    for (ci, c) in g.commits.iter().enumerate() {
-        let p = pt(ci);
+    for pl in &lay.placed {
+        let ci = pl.commit;
+        let c = &g.commits[ci];
+        let p = Point::new(pl.x, pl.y);
         let k = ck(c.branch);
         let (col, col_fill) = (st.lane(k), st.commit_fill(k));
-        bounds.add_rect(Rect::centered(p, 24.0, 24.0));
         let cls = format!("commit {} commit{k}", c.id);
         let symbol = c.custom_type.unwrap_or(c.kind);
         match symbol {
             CommitType::Highlight => {
                 // `.commit-highlight{k}`.
                 let (hf, hs) = st.highlight(k);
+                let outer = Rect::new(p.x - 10.0 + off_out, p.y - 10.0 + off_out, hi_out, hi_out);
+                let inner = Rect::new(p.x - 6.0 + off_in, p.y - 6.0 + off_in, hi_in, hi_in);
+                bounds.add_rect(outer);
+                bounds.add_rect(inner);
                 bullet_els.push(Element::classed_shape(
                     Geometry::Rect {
-                        rect: Rect::centered(p, hi_out, hi_out),
+                        rect: outer,
                         rx: 0.0,
                     },
                     Paint::both(&hf, &hs, 1.0),
@@ -1044,7 +1300,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 ));
                 bullet_els.push(Element::classed_shape(
                     Geometry::Rect {
-                        rect: Rect::centered(p, hi_in, hi_in),
+                        rect: inner,
                         rx: 0.0,
                     },
                     Paint::both(&primary, &primary, 1.0),
@@ -1054,6 +1310,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             CommitType::CherryPick => {
                 // Classed `commit commit-cherry-pick` only (no `commit{k}`): no stroke,
                 // and an inherited fill.
+                bounds.add_rect(Rect::centered(p, 2.0 * bullet_r, 2.0 * bullet_r));
                 bullet_els.push(Element::classed_shape(
                     Geometry::Circle { c: p, r: bullet_r },
                     Paint::fill(&st.inherited_fill()),
@@ -1068,6 +1325,8 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                         },
                         Paint::fill(&mark),
                     ));
+                }
+                for dx in [3.0, -3.0] {
                     bullet_els.push(Element::line(
                         Point::new(p.x + dx, p.y + 1.0),
                         Point::new(p.x, p.y - 5.0),
@@ -1076,13 +1335,9 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 }
             }
             _ => {
-                let r = if c.kind == CommitType::Merge {
-                    bullet_r - 1.0
-                } else {
-                    bullet_r
-                };
+                bounds.add_rect(Rect::centered(p, 2.0 * bullet_r, 2.0 * bullet_r));
                 bullet_els.push(Element::classed_shape(
-                    Geometry::Circle { c: p, r },
+                    Geometry::Circle { c: p, r: bullet_r },
                     Paint::both(&col_fill, &col, 1.0),
                     cls.clone(),
                 ));
@@ -1090,10 +1345,14 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                     bullet_els.push(Element::classed_shape(
                         Geometry::Circle { c: p, r: hole_r },
                         Paint::both(&primary, &primary, 1.0),
-                        format!("{cls} commit-merge"),
+                        format!("commit commit-merge {} commit{k}", c.id),
                     ));
                 }
                 if symbol == CommitType::Reverse {
+                    // (Filled too: the open cross encloses nothing.)
+                    let mut paint =
+                        Paint::stroke(&primary, if st.neo_gen() { st.stroke_width() } else { 3.0 });
+                    paint.fill = primary.clone();
                     bullet_els.push(Element::classed_shape(
                         Geometry::Path(vec![
                             PathCmd::MoveTo(Point::new(p.x - cross, p.y - cross)),
@@ -1101,164 +1360,23 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                             PathCmd::MoveTo(Point::new(p.x - cross, p.y + cross)),
                             PathCmd::LineTo(Point::new(p.x + cross, p.y - cross)),
                         ]),
-                        Paint::stroke(&primary, if st.neo_gen() { st.stroke_width() } else { 3.0 }),
-                        format!("{cls} commit-reverse"),
+                        paint,
+                        format!("commit commit-reverse {} commit{k}", c.id),
                     ));
                 }
             }
         }
         if shown_label(c, gc) {
-            let (rect, text, rotation) = commit_label_geometry(o, p, &c.id, gc.rotate_commit_label);
-            // Neo colour generator: transparent box, `nodeBorder` text (weight 600
-            // under redux geometry).
-            let bkg = Element::classed_shape(
-                Geometry::Rect { rect, rx: 0.0 },
-                Paint::fill(&primary).with_opacity(if st.neo_gen() { 0.0 } else { 0.5 }),
-                "commit-label-bkg",
-            );
-            let txt = Element::classed_text(
-                Text {
-                    fill: if st.neo_gen() {
-                        pal.node_border.clone()
-                    } else {
-                        pal.text_color.clone()
-                    },
-                    bold: st.redux,
-                    ..text
-                },
-                "commit-label",
-            );
-            match rotation {
-                Some((about, deg)) => {
-                    bounds.add_rotated_rect(rect, about, deg);
-                    label_els.push(Element::Rotated {
-                        deg,
-                        about,
-                        children: vec![bkg, txt],
-                    });
-                }
-                None => {
-                    bounds.add_rect(rect);
-                    label_els.push(bkg);
-                    label_els.push(txt);
-                }
-            }
+            label_els.extend(commit_label(c, pl, o, gc, &st, pal, &mut bounds));
         }
-        // Tags: newest first, stacked away from the commit.
-        // `drawCommitTags` sizes every tag of a commit by the widest and tallest
-        // `getBBox()` among them (10px: 11 tall, 12 with a deep descender).
-        let tag_w = c
-            .tags
-            .iter()
-            .map(|t| svg_bbox_width(t, TAG_FONT))
-            .fold(0.0, f64::max);
-        let h2 = c
-            .tags
-            .iter()
-            .map(|t| svg_line_box(TAG_FONT, t))
-            .fold(0.0, f64::max)
-            / 2.0;
-        for (k, t) in c.tags.iter().rev().enumerate() {
-            if vertical {
-                // mermaid's `drawCommitTags` (TB/BT): the tag is laid out to the
-                // right of the commit, then turned +45° about (x, pos) where
-                // pos = along - LAYOUT_OFFSET, after a (12,12) / (14,14) shift.
-                let pos = p.y - LAYOUT_OFFSET;
-                let y = pos + k as f64 * 20.0;
-                let poly: Vec<Point> = [
-                    (p.x, y + 2.0),
-                    (p.x, y - 2.0),
-                    (p.x + LAYOUT_OFFSET, y - h2 - 2.0),
-                    (p.x + LAYOUT_OFFSET + tag_w + 4.0, y - h2 - 2.0),
-                    (p.x + LAYOUT_OFFSET + tag_w + 4.0, y + h2 + 2.0),
-                    (p.x + LAYOUT_OFFSET, y + h2 + 2.0),
-                ]
-                .iter()
-                .map(|&(x, y)| Point::new(x + 12.0, y + 12.0))
-                .collect();
-                let about = Point::new(p.x + 12.0, pos + 12.0);
-                for q in &poly {
-                    bounds.add_point(q.rotated(about, 45.0));
-                }
-                label_els.push(Element::Rotated {
-                    deg: 45.0,
-                    about,
-                    children: vec![
-                        Element::classed_shape(
-                            Geometry::Path(geom::polygon(&poly)),
-                            Paint::both(&tag_bkg, &tag_border, 1.0),
-                            "tag-label-bkg",
-                        ),
-                        Element::classed_shape(
-                            Geometry::Circle {
-                                c: Point::new(p.x + 2.0 + 12.0, y + 12.0),
-                                r: 1.5,
-                            },
-                            Paint::fill(&pal.text_color),
-                            "tag-hole",
-                        ),
-                    ],
-                });
-                label_els.push(Element::Rotated {
-                    deg: 45.0,
-                    about: Point::new(p.x + 14.0, pos + 14.0),
-                    children: vec![Element::classed_text(
-                        Text {
-                            x: p.x + 5.0 + 14.0,
-                            y: y + 3.0 + 14.0,
-                            lines: vec![t.clone()],
-                            line_height: TAG_FONT * 1.2,
-                            font_size: TAG_FONT,
-                            bold: false,
-                            anchor: Anchor::Start,
-                            fill: pal.label_text.clone(),
-                        },
-                        "tag-label",
-                    )],
-                });
-                continue;
-            }
-            let (poly, hole, center) = {
-                let ly = p.y - 19.2 - k as f64 * 20.0;
-                let left = p.x - tag_w / 2.0 - 4.0;
-                let poly = vec![
-                    Point::new(left - 8.0, ly + 2.0),
-                    Point::new(left - 8.0, ly - 2.0),
-                    Point::new(left, ly - h2 - 2.0),
-                    Point::new(p.x + tag_w / 2.0 + 4.0, ly - h2 - 2.0),
-                    Point::new(p.x + tag_w / 2.0 + 4.0, ly + h2 + 2.0),
-                    Point::new(left, ly + h2 + 2.0),
-                ];
-                (poly, Point::new(left - 4.0, ly), Point::new(p.x, ly))
-            };
-            for q in &poly {
-                bounds.add_point(*q);
-            }
-            label_els.push(Element::classed_shape(
-                Geometry::Path(geom::polygon(&poly)),
-                Paint::both(&tag_bkg, &tag_border, 1.0),
-                "tag-label-bkg",
-            ));
-            label_els.push(Element::classed_shape(
-                Geometry::Circle { c: hole, r: 1.5 },
-                Paint::fill(&pal.text_color),
-                "tag-hole",
-            ));
-            // Its own bbox centred on the commit, baseline at y - 16.
-            label_els.push(Element::classed_text(
-                Text {
-                    x: center.x - svg_bbox_width(t, TAG_FONT) / 2.0,
-                    y: center.y + 3.2,
-                    lines: vec![t.clone()],
-                    line_height: TAG_FONT * 1.2,
-                    font_size: TAG_FONT,
-                    bold: false,
-                    anchor: Anchor::Start,
-                    fill: pal.label_text.clone(),
-                },
-                "tag-label",
-            ));
-        }
+        label_els.extend(commit_tags(
+            c,
+            pl,
+            o,
+            pal,
+            (&tag_bkg, &tag_border),
+            &mut bounds,
+        ));
     }
 
     let mut els = vec![
@@ -1268,19 +1386,12 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
         Element::group("commit-labels", label_els),
     ];
     if let Some(t) = g.title.as_ref().filter(|t| !t.is_empty()) {
-        // utils `insertTitle`: centred on the drawing, its baseline at
-        // y = -titleTopMargin (not above the drawing's top).
+        // utils `insertTitle`: centred on the drawing's bounding box, its
+        // baseline at y = -titleTopMargin.
         let r = bounds.rect();
-        let (x, y) = (r.center().x, -gc.title_top_margin);
-        // (Its box: the font's rounded ascent above the baseline, as
-        // `getBBox` measures text.)
-        let w = line_width(t, 18.0, false);
-        bounds.add_rect(Rect::new(
-            x - w / 2.0,
-            y - (0.905f64 * 18.0).round(),
-            w,
-            svg_line_box(18.0, t),
-        ));
+        let (x, y) = (r.x + r.w / 2.0, -gc.title_top_margin);
+        let adv = crate::text::layout_unit_ceil(line_width(t, 18.0, false));
+        bounds.add_rect(text_box(x - adv / 2.0, y, t, 18.0));
         els.push(Element::classed_text(
             Text {
                 x,
@@ -1295,10 +1406,9 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             "gitTitleText",
         ));
     }
-    let _ = Anchor::Middle;
     Scene {
         kind: DiagramKind::GitGraph,
-        view_box: bounds.rect().pad(gc.diagram_padding.max(8.0)),
+        view_box: bounds.rect().pad(gc.diagram_padding),
         elements: els,
         acc_title: None,
         acc_descr: None,
@@ -1307,18 +1417,231 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
     }
 }
 
-/// mermaid's `findLane`: a free coordinate between two lanes for rerouted arrows.
-fn find_lane(lanes: &mut Vec<f64>, a: f64, b: f64) -> f64 {
-    let mut hi = b;
-    for _ in 0..6 {
-        let cand = a + (hi - a).abs() / 2.0;
-        if lanes.iter().all(|l| (l - cand).abs() >= 10.0) {
-            lanes.push(cand);
-            return cand;
-        }
-        hi -= (hi - a).abs() / 5.0;
+/// `drawCommitLabel`: the id on a half-transparent box below the commit (TB/BT:
+/// left of it), sized by the text's `getBBox()`, and with `rotateCommitLabel`
+/// turned -45°.
+fn commit_label(
+    c: &Commit,
+    pl: &Placed,
+    o: Orientation,
+    gc: &GitConfig,
+    st: &GitStyle,
+    pal: &Palette,
+    bounds: &mut Bounds,
+) -> Vec<Element> {
+    let id = c.id.as_str();
+    let (w, h) = (svg_bbox_width(id, LABEL_FONT), svg_line_box(LABEL_FONT, id));
+    let ascent = (0.905 * LABEL_FONT).round();
+    let (rect, tx, ty) = if o == Orientation::LR {
+        (
+            Rect::new(
+                pl.pos_with_offset - w / 2.0 - PY,
+                pl.y + 13.5,
+                w + 2.0 * PY,
+                h + 2.0 * PY,
+            ),
+            pl.pos_with_offset - w / 2.0,
+            pl.y + 25.0,
+        )
+    } else {
+        (
+            Rect::new(
+                pl.x - (w + 4.0 * PX + 5.0),
+                pl.y - 12.0,
+                w + 2.0 * PY,
+                h + 2.0 * PY,
+            ),
+            pl.x - (w + 4.0 * PX),
+            pl.y + h - 12.0,
+        )
+    };
+    // Neo colour generator: transparent box, `nodeBorder` text (weight 600
+    // under redux geometry).
+    let bkg = Element::classed_shape(
+        Geometry::Rect { rect, rx: 0.0 },
+        if st.neo_gen() {
+            Paint::fill(&Color::none())
+        } else {
+            Paint::fill(&pal.commit_label_bkg).with_opacity(0.5)
+        },
+        "commit-label-bkg",
+    );
+    let txt = Element::classed_text(
+        Text {
+            x: tx,
+            y: ty,
+            lines: vec![id.to_string()],
+            line_height: h,
+            font_size: LABEL_FONT,
+            bold: st.redux,
+            anchor: Anchor::Start,
+            fill: if st.neo_gen() {
+                pal.node_border.clone()
+            } else {
+                pal.commit_label_color.clone()
+            },
+        },
+        "commit-label",
+    );
+    let text_rect = Rect::new(tx, ty - ascent, w, h);
+    if !gc.rotate_commit_label {
+        bounds.add_rect(rect);
+        bounds.add_rect(text_rect);
+        return vec![bkg, txt];
     }
-    a + (b - a) / 2.0
+    if o == Orientation::LR {
+        // The group: `translate(r_x, r_y) rotate(-45, pos, y)` (its box is the
+        // union of the box and the text, turned).
+        let r_x = -7.5 - (w + 10.0) / 25.0 * 9.5;
+        let r_y = 10.0 + w / 25.0 * 8.5;
+        let about = Point::new(pl.pos + r_x, pl.y + r_y);
+        let mut union = Bounds::default();
+        union.add_rect(rect);
+        union.add_rect(text_rect);
+        let shift = |e: Element| e.translated(r_x, r_y);
+        let u = union.rect();
+        bounds.add_rotated_rect(Rect::new(u.x + r_x, u.y + r_y, u.w, u.h), about, -45.0);
+        vec![Element::Rotated {
+            deg: -45.0,
+            about,
+            children: vec![shift(bkg), shift(txt)],
+        }]
+    } else {
+        // Text and box each `rotate(-45, x, y)`.
+        let about = Point::new(pl.x, pl.y);
+        bounds.add_rotated_rect(rect, about, -45.0);
+        bounds.add_rotated_rect(text_rect, about, -45.0);
+        vec![Element::Rotated {
+            deg: -45.0,
+            about,
+            children: vec![bkg, txt],
+        }]
+    }
+}
+
+/// `drawCommitTags`: newest tag first, stacked away from the commit, every tag
+/// of a commit as wide and tall as the largest `getBBox()` among them.
+fn commit_tags(
+    c: &Commit,
+    pl: &Placed,
+    o: Orientation,
+    pal: &Palette,
+    (tag_bkg, tag_border): (&Color, &Color),
+    bounds: &mut Bounds,
+) -> Vec<Element> {
+    let mut out = Vec::new();
+    if c.tags.is_empty() {
+        return out;
+    }
+    let ascent = (0.905 * TAG_FONT).round();
+    let tag_w = c
+        .tags
+        .iter()
+        .map(|t| svg_bbox_width(t, TAG_FONT))
+        .fold(0.0, f64::max);
+    let h2 = c
+        .tags
+        .iter()
+        .map(|t| svg_line_box(TAG_FONT, t))
+        .fold(0.0, f64::max)
+        / 2.0;
+    let pos = pl.pos;
+    let text = |x: f64, y: f64, t: &str| Text {
+        x,
+        y,
+        lines: vec![t.to_string()],
+        line_height: TAG_FONT * 1.2,
+        font_size: TAG_FONT,
+        bold: false,
+        anchor: Anchor::Start,
+        fill: pal.tag_label_color.clone(),
+    };
+    for (k, t) in c.tags.iter().rev().enumerate() {
+        let y_off = k as f64 * 20.0;
+        let tw = svg_bbox_width(t, TAG_FONT);
+        if o != Orientation::LR {
+            // TB/BT: laid out to the right of the commit, then turned +45° about
+            // (x, pos) after a (12,12) / (14,14) shift.
+            let y = pos + y_off;
+            let poly: Vec<Point> = [
+                (pl.x, y + 2.0),
+                (pl.x, y - 2.0),
+                (pl.x + LAYOUT_OFFSET, y - h2 - 2.0),
+                (pl.x + LAYOUT_OFFSET + tag_w + 4.0, y - h2 - 2.0),
+                (pl.x + LAYOUT_OFFSET + tag_w + 4.0, y + h2 + 2.0),
+                (pl.x + LAYOUT_OFFSET, y + h2 + 2.0),
+            ]
+            .iter()
+            .map(|&(x, y)| Point::new(x + 12.0, y + 12.0))
+            .collect();
+            let about = Point::new(pl.x + 12.0, pos + 12.0);
+            let mut local = Bounds::default();
+            for q in &poly {
+                local.add_point(*q);
+            }
+            bounds.add_rotated_rect(local.rect(), about, 45.0);
+            let hole = Point::new(pl.x + PX / 2.0 + 12.0, y + 12.0);
+            bounds.add_rotated_rect(Rect::centered(hole, 3.0, 3.0), about, 45.0);
+            out.push(Element::Rotated {
+                deg: 45.0,
+                about,
+                children: vec![
+                    Element::classed_shape(
+                        Geometry::Path(geom::polygon(&poly)),
+                        Paint::both(tag_bkg, tag_border, 1.0),
+                        "tag-label-bkg",
+                    ),
+                    Element::classed_shape(
+                        Geometry::Circle { c: hole, r: 1.5 },
+                        Paint::fill(&pal.text_color),
+                        "tag-hole",
+                    ),
+                ],
+            });
+            let (tx, ty) = (pl.x + 5.0 + 14.0, y + 3.0 + 14.0);
+            let about = Point::new(pl.x + 14.0, pos + 14.0);
+            bounds.add_rotated_rect(
+                Rect::new(tx, ty - ascent, tw, svg_line_box(TAG_FONT, t)),
+                about,
+                45.0,
+            );
+            out.push(Element::Rotated {
+                deg: 45.0,
+                about,
+                children: vec![Element::classed_text(text(tx, ty, t), "tag-label")],
+            });
+            continue;
+        }
+        let ly = pl.y - 19.2 - y_off;
+        let wo = pl.pos_with_offset;
+        let poly = vec![
+            Point::new(pos - tag_w / 2.0 - PX / 2.0, ly + PY),
+            Point::new(pos - tag_w / 2.0 - PX / 2.0, ly - PY),
+            Point::new(wo - tag_w / 2.0 - PX, ly - h2 - PY),
+            Point::new(wo + tag_w / 2.0 + PX, ly - h2 - PY),
+            Point::new(wo + tag_w / 2.0 + PX, ly + h2 + PY),
+            Point::new(wo - tag_w / 2.0 - PX, ly + h2 + PY),
+        ];
+        for q in &poly {
+            bounds.add_point(*q);
+        }
+        let hole = Point::new(pos - tag_w / 2.0 + PX / 2.0, ly);
+        bounds.add_rect(Rect::centered(hole, 3.0, 3.0));
+        out.push(Element::classed_shape(
+            Geometry::Path(geom::polygon(&poly)),
+            Paint::both(tag_bkg, tag_border, 1.0),
+            "tag-label-bkg",
+        ));
+        out.push(Element::classed_shape(
+            Geometry::Circle { c: hole, r: 1.5 },
+            Paint::fill(&pal.text_color),
+            "tag-hole",
+        ));
+        let (tx, ty) = (wo - tw / 2.0, pl.y - 16.0 - y_off);
+        bounds.add_rect(text_box(tx, ty, t, TAG_FONT));
+        out.push(Element::classed_text(text(tx, ty, t), "tag-label"));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1407,8 +1730,9 @@ mod tests {
     fn layout_separates_commits_and_lanes() {
         let g = parse(SRC, None, &ParseOptions::default()).unwrap();
         let gc = GitConfig::default();
-        let l = layout(&g, &gc);
-        for w in l.pos.windows(2) {
+        let l = layout(&g, &gc, false);
+        let xs: Vec<f64> = l.placed.iter().map(|p| p.x).collect();
+        for w in xs.windows(2) {
             assert!(w[1] > w[0]);
         }
         assert!(l.lane[1] > l.lane[0] && l.lane[2] > l.lane[1]);
@@ -1416,9 +1740,10 @@ mod tests {
             parallel_commits: true,
             ..GitConfig::default()
         };
-        let lp = layout(&g, &gp);
+        let lp = layout(&g, &gp, false);
         // In parallel mode a commit is one step after its latest parent.
-        assert!(lp.pos[3] > lp.pos[2]);
+        let x = |i: usize| lp.placed.iter().find(|p| p.commit == i).unwrap().x;
+        assert_eq!(x(3), x(2) + 50.0);
         let s = draw(
             &g,
             &l,
@@ -1447,7 +1772,7 @@ mod tests {
 
     fn scene_for(src: &str, gc: &GitConfig) -> Scene {
         let g = parse(src, None, &ParseOptions::default()).unwrap();
-        let l = layout(&g, gc);
+        let l = layout(&g, gc, false);
         draw(
             &g,
             &l,
@@ -1501,6 +1826,172 @@ mod tests {
         assert!(near(cherry.h, 16.0), "{cherry:?}");
     }
 
+    /// The statements of the comparison cases below: tags, a highlight, a
+    /// reverse, a merge with a tag, a cherry-pick, three lanes.
+    const FLOW: &str = "  commit id: \"c1\" tag: \"v1\"\n  commit id: \"c2\"\n  branch develop\n  checkout develop\n  commit id: \"d1\" tag: \"alpha\" tag: \"beta\"\n  commit id: \"d2\" type: HIGHLIGHT\n  checkout main\n  commit id: \"c3\" type: REVERSE\n  branch feature\n  commit id: \"f1\"\n  checkout develop\n  commit id: \"d3\"\n  checkout main\n  merge develop id: \"m1\" tag: \"v2\"\n  checkout feature\n  commit id: \"f2\"\n  checkout main\n  cherry-pick id: \"f1\"\n  commit id: \"c4\"\n";
+
+    fn view_box(src: &str) -> Rect {
+        crate::render::render(src, &MermaidConfig::default())
+            .unwrap()
+            .scene
+            .view_box
+    }
+
+    fn assert_box(got: Rect, want: [f64; 4]) {
+        let g = [got.x, got.y, got.w, got.h];
+        assert!(
+            g.iter().zip(want).all(|(a, b)| (a - b).abs() < 2e-3),
+            "{g:?} != {want:?}"
+        );
+    }
+
+    /// viewBoxes mermaid 12.3.0 gives these graphs (`getBBox()` of everything drawn,
+    /// padded by `diagramPadding`): every orientation, parallel commits (the BT
+    /// walk of `setParallelBTPos` included) and a title centred on the drawing.
+    #[test]
+    fn view_boxes_match_mermaid() {
+        let with = |head: &str, cfg: &str| {
+            let fm = if cfg.is_empty() {
+                String::new()
+            } else {
+                format!("---\nconfig:\n{cfg}---\n")
+            };
+            format!("{fm}{head}\n{FLOW}")
+        };
+        let par = "  gitGraph:\n    parallelCommits: true\n";
+        assert_box(
+            view_box(&with("gitGraph TB:", "")),
+            [-41.4674186706543, -8.0, 307.8424072265625, 596.0],
+        );
+        assert_box(
+            view_box(&with("gitGraph BT:", "")),
+            [-41.4674186706543, 22.0, 307.8424072265625, 588.0],
+        );
+        assert_box(
+            view_box(&with("gitGraph", par)),
+            [
+                -117.1484375,
+                -37.20000076293945,
+                525.1484375,
+                253.78392028808594,
+            ],
+        );
+        assert_box(
+            view_box(&with("gitGraph BT:", par)),
+            [-41.4674186706543, -98.0, 307.8424072265625, 438.0],
+        );
+        let titled = "---\ntitle: Example Git diagram\n---\ngitGraph\n   commit id: \"0-a3c0f7e\"\n   commit id: \"1-2b4c1d8\"\n   branch develop\n   checkout develop\n   commit id: \"2-0fd5e9a\"\n   commit id: \"3-9c7e2b1\"\n   checkout main\n   merge develop\n   commit id: \"5-77ab3c0\"\n   commit id: \"6-c1d2e3f\"\n";
+        let b = view_box(titled);
+        // (The reference's ids are random, and its right and bottom edges are
+        // their labels': its left edge is the `develop` label, its top the
+        // title's text box above `y = -titleTopMargin`.)
+        assert!(
+            (b.x - -117.1484375).abs() < 2e-3 && (b.y - -49.0).abs() < 2e-3,
+            "{b:?}"
+        );
+    }
+
+    /// A commit id used twice: mermaid's commit map keeps one entry (the later
+    /// commit, in the earlier one's place), so the earlier commit is not drawn
+    /// and its children hang off the later one. mermaid 12.3.0's viewBox for
+    /// its "MetroLine" example, which repeats `Boston`.
+    #[test]
+    fn a_repeated_commit_id_replaces_the_earlier_commit() {
+        let src = "---\nconfig:\n  theme: 'base'\n  gitGraph:\n    mainBranchName: 'MetroLine1'\n---\ngitGraph\n  commit id:\"NewYork\"\n  commit id:\"Dallas\"\n  branch MetroLine2\n  commit id:\"LosAngeles\"\n  commit id:\"Chicago\"\n  commit id:\"Houston\"\n  branch MetroLine3\n  commit id:\"Phoenix\"\n  commit type: HIGHLIGHT id:\"Denver\"\n  commit id:\"Boston\"\n  checkout MetroLine1\n  commit id:\"Atlanta\"\n  merge MetroLine3\n  commit id:\"Miami\"\n  commit id:\"Washington\"\n  merge MetroLine2 tag:\"MY JUNCTION\"\n  commit id:\"Boston\"\n  commit id:\"Detroit\"\n  commit type:REVERSE id:\"SanFrancisco\"\n";
+        assert_box(
+            view_box(src),
+            [
+                -141.1484375,
+                -36.70000076293945,
+                899.1484375,
+                272.2611389160156,
+            ],
+        );
+        let g = parse(
+            src.splitn(3, "---\n").nth(2).unwrap(),
+            None,
+            &ParseOptions {
+                main_branch_name: "MetroLine1".into(),
+                main_branch_order: 0.0,
+            },
+        )
+        .unwrap();
+        let l = layout(&g, &GitConfig::default(), false);
+        assert_eq!(l.placed.len(), g.commits.len() - 1);
+    }
+
+    /// Merge bullets keep the full radius under their hole; tags are as tall as
+    /// their text box (`RC_1`: 11px at 10px, `_` does not reach below the
+    /// descent there), and the label colours are `commitLabelColor` on
+    /// `commitLabelBackground`, tags `tagLabelColor` / `tagLabelBorder`.
+    #[test]
+    fn bullets_tags_and_label_colours_follow_mermaid() {
+        let s = scene_for(
+            "gitGraph\n  commit id: \"a\" tag: \"RC_1\"\n  branch b\n  commit id: \"x\"\n  checkout main\n  merge b\n",
+            &GitConfig::default(),
+        );
+        let mut circles = Vec::new();
+        let mut shapes = Vec::new();
+        let mut texts = Vec::new();
+        fn walk(
+            els: &[Element],
+            c: &mut Vec<(String, f64)>,
+            sh: &mut Vec<(String, Paint, Rect)>,
+            t: &mut Vec<(String, Color)>,
+        ) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                        walk(children, c, sh, t)
+                    }
+                    Element::Shape {
+                        geom: Geometry::Circle { r, .. },
+                        class: Some(k),
+                        ..
+                    } => c.push((k.clone(), *r)),
+                    Element::Shape {
+                        geom,
+                        paint,
+                        class: Some(k),
+                    } => {
+                        let r = match geom {
+                            Geometry::Rect { rect, .. } => *rect,
+                            Geometry::Path(cmds) => geom::path_bbox(cmds).unwrap_or_default(),
+                            Geometry::Circle { .. } => Rect::default(),
+                        };
+                        sh.push((k.clone(), paint.clone(), r));
+                    }
+                    Element::Text {
+                        text,
+                        class: Some(k),
+                    } => t.push((k.clone(), text.fill.clone())),
+                    _ => {}
+                }
+            }
+        }
+        walk(&s.elements, &mut circles, &mut shapes, &mut texts);
+        let merge: Vec<f64> = circles
+            .iter()
+            .filter(|(k, _)| k.contains("3-") || k.contains("2-"))
+            .map(|(_, r)| *r)
+            .collect();
+        assert_eq!(merge, vec![10.0, 6.0], "{circles:?}");
+        let (_, tag_paint, tag_box) = shapes.iter().find(|(k, ..)| k == "tag-label-bkg").unwrap();
+        assert_eq!(tag_box.h, 15.0);
+        assert_eq!(tag_paint.stroke.css(), "hsl(240, 60%, 86.2745098039%)");
+        assert_eq!(tag_paint.fill.css().to_ascii_lowercase(), "#ececff");
+        let (_, bkg, _) = shapes
+            .iter()
+            .find(|(k, ..)| k == "commit-label-bkg")
+            .unwrap();
+        assert_eq!(bkg.fill.css().to_ascii_lowercase(), "#ffffde");
+        assert_eq!(bkg.opacity, Some(0.5));
+        let label = texts.iter().find(|(k, _)| k == "commit-label").unwrap();
+        assert_eq!(label.1.css().to_ascii_lowercase(), "#000021");
+        let tag = texts.iter().find(|(k, _)| k == "tag-label").unwrap();
+        assert_eq!(tag.1.css().to_ascii_lowercase(), "#131300");
+    }
+
     #[test]
     fn commit_labels_rotate_by_default() {
         let src = "gitGraph\n  commit id: \"abc\"\n  commit id: \"defgh\"";
@@ -1514,7 +2005,8 @@ mod tests {
         let w = svg_bbox_width("abc", LABEL_FONT);
         let (dx, dy) = (-7.5 - (w + 10.0) / 25.0 * 9.5, 10.0 + w / 25.0 * 8.5);
         assert!((rot[0].1.x - (0.0 + dx)).abs() < 1e-9, "{rot:?}");
-        assert!((rot[0].1.y - dy).abs() < 1e-9);
+        // (The spine, and so the commit, sits 2px above the branch position.)
+        assert!((rot[0].1.y - (-2.0 + dy)).abs() < 1e-9);
         // Lanes get mermaid's 40px of extra room.
         let g = parse(
             "gitGraph\ncommit\nbranch b\ncommit",
@@ -1522,7 +2014,10 @@ mod tests {
             &ParseOptions::default(),
         )
         .unwrap();
-        assert_eq!(layout(&g, &GitConfig::default()).lane, vec![0.0, 90.0]);
+        assert_eq!(
+            layout(&g, &GitConfig::default(), false).lane,
+            vec![0.0, 90.0]
+        );
     }
 
     #[test]
@@ -1539,7 +2034,7 @@ mod tests {
             &ParseOptions::default(),
         )
         .unwrap();
-        assert_eq!(layout(&g, &gc).lane, vec![0.0, 50.0]);
+        assert_eq!(layout(&g, &gc, false).lane, vec![0.0, 50.0]);
     }
 
     #[test]
@@ -1559,7 +2054,12 @@ mod tests {
             &ParseOptions::default(),
         )
         .unwrap();
-        assert_eq!(layout(&g, &GitConfig::default()).pos, vec![90.0, 40.0]);
+        let ys: Vec<(usize, f64)> = layout(&g, &GitConfig::default(), false)
+            .placed
+            .iter()
+            .map(|p| (p.commit, p.y))
+            .collect();
+        assert_eq!(ys, vec![(1, 40.0), (0, 90.0)]);
     }
 
     #[test]
@@ -1596,7 +2096,7 @@ mod tests {
         let gc = GitConfig::default();
         let s = draw(
             &g,
-            &layout(&g, &gc),
+            &layout(&g, &gc, false),
             &gc,
             &crate::theme::palette(crate::theme::ThemeName::Default, &[]),
         );

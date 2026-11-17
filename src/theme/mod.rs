@@ -155,6 +155,15 @@ pub struct Palette {
     pub composite_title_background: Option<Color>,
     pub composite_background: Option<Color>,
     pub alt_background: Option<Color>,
+    /// Git graph commit labels: `commitLabelColor` (`secondaryTextColor`) on
+    /// `commitLabelBackground` (`secondaryColor`).
+    pub commit_label_color: Color,
+    pub commit_label_bkg: Color,
+    /// Git graph tags: `tagLabelColor` (`primaryTextColor`) on `tagLabelBackground`
+    /// (`primaryColor`), outlined `tagLabelBorder` (`tagBorder || primaryBorderColor`).
+    pub tag_label_color: Color,
+    pub tag_label_bkg: Color,
+    pub tag_label_border: Color,
 }
 
 /// A palette slot (`colorIndex` upstream): the n-th participant of a diagram that takes
@@ -297,6 +306,11 @@ fn default_palette() -> Palette {
         composite_title_background: None,
         composite_background: None,
         alt_background: None,
+        commit_label_color: c("#000021"),
+        commit_label_bkg: c("#ffffde"),
+        tag_label_color: c("#131300"),
+        tag_label_bkg: c("#ECECFF"),
+        tag_label_border: c("hsl(240, 60%, 86.2745098039%)"),
     }
 }
 
@@ -433,8 +447,15 @@ fn base_palette(vars: &[(String, String)]) -> Palette {
     // theme-helpers.js `mkBorder(c, darkMode)`.
     let mk_border = |c: Rgba| c.adjust_hsl(0.0, -40.0, if dark_mode { 10.0 } else { -10.0 });
     let border = get("primaryBorderColor").unwrap_or(mk_border(primary));
-    let text = get("primaryTextColor").unwrap_or(if primary.is_dark() {
-        Rgba::WHITE
+    // theme-base.js: `primaryTextColor ||= darkMode ? '#eee' : '#333'` (however dark
+    // `primaryColor` is).
+    let text = get("primaryTextColor").unwrap_or(if dark_mode {
+        Rgba {
+            r: 0xee,
+            g: 0xee,
+            b: 0xee,
+            a: 1.0,
+        }
     } else {
         Rgba {
             r: 0x33,
@@ -535,6 +556,12 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
             p.pie_colors = pie;
         }
     }
+    let git = classic::git_label_colors(theme, vars);
+    p.commit_label_color = git.commit_text;
+    p.commit_label_bkg = git.commit_bkg;
+    p.tag_label_color = git.tag_text;
+    p.tag_label_bkg = git.tag_bkg;
+    p.tag_label_border = git.tag_border;
     for (k, v) in vars {
         apply_variable(&mut p, k, v);
     }
@@ -758,7 +785,239 @@ mod tests {
             &[("primaryColor".into(), "#003366".into())],
         );
         assert_eq!(p.main_bkg.css(), "#003366");
-        assert_eq!(p.node_text.css(), "#ffffff");
+        // mermaid 12.3.0 `theme-base.js`: `primaryTextColor ||= darkMode ? '#eee' : '#333'`,
+        // whatever the primary colour.
+        assert_eq!(p.node_text.css(), "#333333");
+        let p = palette(
+            ThemeName::Base,
+            &[
+                ("primaryColor".into(), "#003366".into()),
+                ("darkMode".into(), "true".into()),
+            ],
+        );
+        assert_eq!(p.node_text.css(), "#eeeeee");
+    }
+
+    /// `commitLabelColor`, `commitLabelBackground`, `tagLabelColor`,
+    /// `tagLabelBackground` and `tagLabelBorder` of mermaid 12.3.0's resolved
+    /// `themeVariables` (as the browser reads them: `rgb()` / `hsl()` with
+    /// fractional channels round to 8 bits).
+    #[test]
+    fn git_label_colours_match_upstream() {
+        let rgb = |c: &Color| {
+            let k = color::parse(c.css()).unwrap();
+            format!("{:02x}{:02x}{:02x}", k.r, k.g, k.b)
+        };
+        let vars = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        type Case<'a> = (ThemeName, &'a [(&'a str, &'a str)], [&'a str; 5]);
+        let cases: &[Case] = &[
+            (
+                ThemeName::Default,
+                &[],
+                [
+                    "#000021",
+                    "#ffffde",
+                    "#131300",
+                    "#ECECFF",
+                    "hsl(240, 60%, 86.2745098039%)",
+                ],
+            ),
+            (
+                ThemeName::Base,
+                &[],
+                [
+                    "rgb(11, 34, 0)",
+                    "hsl(-79.4117647059, 100%, 93.3333333333%)",
+                    "#333",
+                    "#fff4dd",
+                    "hsl(40.5882352941, 60%, 83.3333333333%)",
+                ],
+            ),
+            (
+                ThemeName::Dark,
+                &[],
+                [
+                    "rgb(184, 182, 182)",
+                    "hsl(180, 1.5873015873%, 28.3529411765%)",
+                    "#e0dfdf",
+                    "#1f2020",
+                    "#cccccc",
+                ],
+            ),
+            (
+                ThemeName::Forest,
+                &[],
+                [
+                    "#32004d",
+                    "#cdffb2",
+                    "#321b67",
+                    "#cde498",
+                    "hsl(78.1578947368, 18.4615384615%, 64.5098039216%)",
+                ],
+            ),
+            (
+                ThemeName::Neutral,
+                &[],
+                [
+                    "rgb(3, 3, 3)",
+                    "hsl(0, 0%, 98.9215686275%)",
+                    "#111111",
+                    "#eee",
+                    "hsl(0, 0%, 83.3333333333%)",
+                ],
+            ),
+            (
+                ThemeName::Neo,
+                &[],
+                [
+                    "#333333",
+                    "hsl(-120, 0%, 80%)",
+                    "#333",
+                    "#cccccc",
+                    "hsl(0, 0%, 70%)",
+                ],
+            ),
+            (
+                ThemeName::NeoDark,
+                &[],
+                [
+                    "rgb(184, 182, 182)",
+                    "hsl(180, 1.5873015873%, 28.3529411765%)",
+                    "#e0dfdf",
+                    "#1f2020",
+                    "#cccccc",
+                ],
+            ),
+            (
+                ThemeName::Redux,
+                &[],
+                [
+                    "#333333",
+                    "hsl(-120, 0%, 80%)",
+                    "#28253D",
+                    "#cccccc",
+                    "hsl(247.5, 0%, 9.2156862745%)",
+                ],
+            ),
+            (
+                ThemeName::ReduxDarkColor,
+                &[],
+                [
+                    "rgb(184, 182, 182)",
+                    "hsl(180, 1.5873015873%, 28.3529411765%)",
+                    "#e0dfdf",
+                    "#1f2020",
+                    "#cccccc",
+                ],
+            ),
+            // Overrides: `default` derived everything but the border in its
+            // constructor; the others re-derive what they compute in `updateColors`.
+            (
+                ThemeName::Default,
+                &[
+                    ("primaryColor", "#ff0000"),
+                    ("secondaryColor", "#00ff00"),
+                    ("primaryBorderColor", "#ff0000"),
+                ],
+                ["#000021", "#ffffde", "#131300", "#ECECFF", "#ff0000"],
+            ),
+            (
+                ThemeName::Base,
+                &[("primaryColor", "#ff0000")],
+                [
+                    "#ffff00",
+                    "hsl(-120, 100%, 50%)",
+                    "#333",
+                    "#ff0000",
+                    "hsl(0, 60%, 40%)",
+                ],
+            ),
+            (
+                ThemeName::Base,
+                &[("darkMode", "true"), ("primaryColor", "#202040")],
+                [
+                    "rgb(223, 191, 223)",
+                    "hsl(120, 33.3333333333%, 18.8235294118%)",
+                    "#eee",
+                    "#202040",
+                    "hsl(240, 0%, 28.8235294118%)",
+                ],
+            ),
+            (
+                ThemeName::Dark,
+                &[("secondaryColor", "#00ff00")],
+                [
+                    "rgb(184, 182, 182)",
+                    "#00ff00",
+                    "#e0dfdf",
+                    "#1f2020",
+                    "#cccccc",
+                ],
+            ),
+            (
+                ThemeName::Forest,
+                &[("secondaryColor", "#00ff00"), ("primaryColor", "#0000ff")],
+                [
+                    "#32004d",
+                    "#00ff00",
+                    "#321b67",
+                    "#0000ff",
+                    "hsl(78.1578947368, 18.4615384615%, 64.5098039216%)",
+                ],
+            ),
+            (
+                ThemeName::Neo,
+                &[("primaryColor", "#ff0000")],
+                [
+                    "#ffff00",
+                    "hsl(-120, 100%, 50%)",
+                    "#333",
+                    "#ff0000",
+                    "hsl(0, 0%, 70%)",
+                ],
+            ),
+            (
+                ThemeName::Base,
+                &[
+                    ("tagLabelBorder", "#123456"),
+                    ("commitLabelColor", "#abcdef"),
+                ],
+                [
+                    "#abcdef",
+                    "hsl(-79.4117647059, 100%, 93.3333333333%)",
+                    "#333",
+                    "#fff4dd",
+                    "#123456",
+                ],
+            ),
+            (
+                ThemeName::Default,
+                &[("tagBorder", "#00ff00")],
+                ["#000021", "#ffffde", "#131300", "#ECECFF", "#00ff00"],
+            ),
+        ];
+        for (theme, v, want) in cases {
+            let p = palette(*theme, &vars(v));
+            let got = [
+                &p.commit_label_color,
+                &p.commit_label_bkg,
+                &p.tag_label_color,
+                &p.tag_label_bkg,
+                &p.tag_label_border,
+            ];
+            for (g, w) in got.iter().zip(want) {
+                assert_eq!(
+                    rgb(g),
+                    rgb(&Color::new(*w)),
+                    "{theme:?} {v:?}: {} vs {w}",
+                    g.css()
+                );
+            }
+        }
     }
 
     /// Values checked against mermaid 12.3.0's resolved `themeVariables`.
