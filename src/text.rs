@@ -4,6 +4,7 @@
 //! (the same metrics the PDF backend's built-in Helvetica uses), which gives sizes
 //! within a few percent of the browser's "trebuchet ms"/arial rendering.
 
+pub mod inter;
 pub mod serif;
 
 use crate::geom::Point;
