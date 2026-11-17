@@ -271,6 +271,9 @@ pub struct Placed {
     pub w: f64,
     pub h: f64,
     pub lines: Vec<String>,
+    /// How far left of centre each line is drawn (`break-spaces` keeps the
+    /// space a line broke at).
+    pub shifts: Vec<f64>,
     /// Colour section (`None` for the root).
     pub section: Option<usize>,
     /// What `getBBox()` reports for the drawn node, relative to its centre (a
@@ -290,20 +293,39 @@ impl Placed {
 /// markdown (`labelType: 'markdown'`), laid out in a `div` of `max-width: width`
 /// that is given the whole width once a line had to wrap. Returns the lines and
 /// the label's width.
+#[cfg(test)]
 fn wrap(text: &str, font: f64, width: f64) -> (Vec<String>, f64) {
+    let (lines, _, tw) = wrap_shifted(text, font, width);
+    (lines, tw)
+}
+
+/// [`wrap`], plus how far left of the label's centre each line sits (a line
+/// that broke at a space keeps it, see [`crate::text::break_space_shift`]).
+fn wrap_shifted(text: &str, font: f64, width: f64) -> (Vec<String>, Vec<f64>, f64) {
     let raw = crate::text::markdown_lines(&crate::icons::replace_references(text));
     let natural = raw
         .iter()
         .map(|l| line_width(l, font, false))
         .fold(0.0, f64::max);
-    let lines = crate::text::wrap_lines(&raw, width, font, false, BreakRule::Browser);
+    let (lines, shifts): (Vec<String>, Vec<f64>) =
+        crate::text::wrap_lines_flagged(&raw, width, font, false, BreakRule::Browser)
+            .into_iter()
+            .map(|(l, at_space)| {
+                let shift = if at_space {
+                    crate::text::break_space_shift(&l, font, false)
+                } else {
+                    0.0
+                };
+                (l, shift)
+            })
+            .unzip();
     let tw = if natural > width {
         crate::text::html_wrap_width(&raw, width, font, false)
     } else {
         // An HTML label's box: layout units (1/64 px).
         TextBlock::new(lines.clone(), font, false).html().width
     };
-    (lines, tw)
+    (lines, shifts, tw)
 }
 
 /// Label widths: `mindmap.maxNodeWidth` and `flowchart.wrappingWidth`.
@@ -322,7 +344,7 @@ fn measure(n: &Node, font: f64, padding: f64, widths: Widths) -> Placed {
         NodeShape::Square | NodeShape::Rounded | NodeShape::Hexagon => widths.wrapping,
         _ => widths.max_node,
     };
-    let (lines, tw) = wrap(&n.label, font, width);
+    let (lines, shifts, tw) = wrap_shifted(&n.label, font, width);
     let tb = TextBlock::new(lines.clone(), font, false);
     let th = tb.height.max(font * 1.5);
     let mut outline = None;
@@ -361,6 +383,7 @@ fn measure(n: &Node, font: f64, padding: f64, widths: Widths) -> Placed {
         w,
         h,
         lines,
+        shifts,
         section: None,
         bbox,
         outline,
@@ -380,14 +403,7 @@ pub fn layout(mm: &Mindmap, font: f64, padding: f64, widths: Widths) -> Vec<Plac
     if placed.is_empty() {
         return placed;
     }
-    // Sections: index of the root child each node descends from.
-    for (s, &c) in mm.nodes[0].children.iter().enumerate() {
-        let mut stack = vec![c];
-        while let Some(k) = stack.pop() {
-            placed[k].section = Some(s);
-            stack.extend(mm.nodes[k].children.iter().copied());
-        }
-    }
+    assign_sections(mm, &mut placed, false);
     let f32_round = |v: f64| f64::from(v as f32);
     let sizes: Vec<(f64, f64)> = placed
         .iter()
@@ -425,6 +441,49 @@ fn edge_points(a: Point, b: Point) -> [Point; 3] {
     [s, Point::new((s.x + e.x) / 2.0, (s.y + e.y) / 2.0), e]
 }
 
+/// mindmapDb.assignSections: each node's colour section is the index of the root
+/// child it descends from, or with `colorBy: depth` its distance from the root
+/// less one; either modulo `MAX_SECTIONS - 1` (11).
+pub fn assign_sections(mm: &Mindmap, placed: &mut [Placed], by_depth: bool) {
+    let Some(root) = mm.nodes.first() else {
+        return;
+    };
+    for (s, &c) in root.children.iter().enumerate() {
+        let mut stack = vec![(c, 1usize)];
+        while let Some((k, depth)) = stack.pop() {
+            placed[k].section = Some(if by_depth { depth - 1 } else { s } % 11);
+            stack.extend(mm.nodes[k].children.iter().map(|&ch| (ch, depth + 1)));
+        }
+    }
+}
+
+/// Whether default-shape nodes show their 3px underline: mindmap's styles give
+/// `.section-N line` `stroke-width: 0` when the theme's `useGradient` is on, which
+/// it is in every theme but `default` (and `base` given a `nodeBorder`) unless
+/// themeVariables say otherwise. The redux themes draw no underline at all.
+fn underlines(cfg: &MermaidConfig, pal: &Palette) -> bool {
+    use crate::theme::ThemeName as T;
+    let var = |k: &str| {
+        cfg.theme_variables
+            .iter()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.trim())
+    };
+    let gradient = match pal.theme {
+        T::Default | T::Null => false,
+        T::Base => var("nodeBorder").is_none(),
+        T::Redux | T::ReduxDark | T::ReduxColor | T::ReduxDarkColor => return false,
+        _ => true,
+    };
+    let gradient = match var("useGradient") {
+        Some("true") => true,
+        Some("false") => false,
+        _ => gradient,
+    };
+    !gradient
+}
+
 /// Render a mindmap.
 pub fn render(
     body: &str,
@@ -438,8 +497,15 @@ pub fn render(
         max_node: cfg.section_f64("mindmap", "maxNodeWidth", 200.0),
         wrapping: cfg.section_f64("flowchart", "wrappingWidth", 120.0),
     };
-    let placed = layout(&mm, pal.font_size, padding, widths);
-    Ok(draw(&mm, &placed, pal, padding))
+    let mut placed = layout(&mm, pal.font_size, padding, widths);
+    if cfg
+        .section("mindmap", "colorBy")
+        .and_then(|j| j.as_str())
+        .is_some_and(|v| v == "depth")
+    {
+        assign_sections(&mm, &mut placed, true);
+    }
+    Ok(draw(&mm, &placed, pal, padding, underlines(cfg, pal)))
 }
 
 /// `(fill, text, underline)` of a node: section `s` is `.section-s` (`cScale(s+1)`,
@@ -464,7 +530,15 @@ fn section_colors(pal: &Palette, section: Option<usize>) -> (Color, Color, Color
 }
 
 /// Draw a laid-out mindmap.
-pub fn draw(mm: &Mindmap, placed: &[Placed], pal: &Palette, padding: f64) -> Scene {
+///
+/// `underline` draws the line under default-shape nodes (see `underlines`).
+pub fn draw(
+    mm: &Mindmap,
+    placed: &[Placed],
+    pal: &Palette,
+    padding: f64,
+    underline: bool,
+) -> Scene {
     let font = pal.font_size;
     let mut bounds = Bounds::default();
     let mut edges = Vec::new();
@@ -498,15 +572,23 @@ pub fn draw(mm: &Mindmap, placed: &[Placed], pal: &Palette, padding: f64) -> Sce
                 Geometry::Path(cmds.clone()).translated(p.center.x, p.center.y),
                 Paint::fill(&fill),
             )],
-            None => shape_elements(nd.shape, r, &fill, &line),
+            None => shape_elements(nd.shape, r, &fill, underline.then_some(&line)),
         };
-        els.push(Element::text(Text::centered(
-            r.center(),
-            &p.lines,
-            font,
-            font * 1.5,
-            &text_color,
-        )));
+        let block = Text::centered(r.center(), &p.lines, font, font * 1.5, &text_color);
+        if p.shifts.iter().all(|&s| s == 0.0) {
+            els.push(Element::text(block));
+        } else {
+            // A line that broke at a space keeps it (`break-spaces`): one text
+            // per line, each centred with its own offset.
+            for (i, (line, shift)) in p.lines.iter().zip(&p.shifts).enumerate() {
+                els.push(Element::text(Text {
+                    x: block.x - shift,
+                    y: block.y + i as f64 * block.line_height,
+                    lines: vec![line.clone()],
+                    ..block.clone()
+                }));
+            }
+        }
         let section_class = match p.section {
             None => "section-root".to_string(),
             Some(s) => format!("section-{s}"),
@@ -551,7 +633,7 @@ fn edge_width(depth: usize) -> f64 {
     if i < 12 && w > 0.0 { w } else { 3.0 }
 }
 
-fn shape_elements(shape: NodeShape, r: Rect, fill: &Color, line: &Color) -> Vec<Element> {
+fn shape_elements(shape: NodeShape, r: Rect, fill: &Color, line: Option<&Color>) -> Vec<Element> {
     let c = r.center();
     let paint = Paint::fill(fill);
     match shape {
@@ -578,14 +660,19 @@ fn shape_elements(shape: NodeShape, r: Rect, fill: &Color, line: &Color) -> Vec<
             ));
             cmds.push(PathCmd::LineTo(Point::new(x1, y1)));
             cmds.push(PathCmd::Close);
-            vec![
-                Element::classed_shape(Geometry::Path(cmds), paint, "node-bkg node-no-border"),
-                Element::line(
+            let mut els = vec![Element::classed_shape(
+                Geometry::Path(cmds),
+                paint,
+                "node-bkg node-no-border",
+            )];
+            if let Some(line) = line {
+                els.push(Element::line(
                     Point::new(x0, y1),
                     Point::new(x1, y1),
                     Paint::stroke(line, 3.0),
-                ),
-            ]
+                ));
+            }
+            els
         }
         // Bang and cloud nodes are drawn from their outline.
         NodeShape::Square | NodeShape::Bang | NodeShape::Cloud => {
@@ -884,5 +971,75 @@ line\"(";
         let mm = parse("mindmap\n  root:::x\n    a:::urgent", None).unwrap();
         assert_eq!(mm.nodes[0].label, "root:::x");
         assert_eq!(mm.nodes[1].label, "a:::urgent");
+    }
+
+    #[test]
+    fn a_line_broken_at_a_space_keeps_it() {
+        // mermaid 12.3.0: "I am a rounded square" wraps after "rounded " in a
+        // `break-spaces` div, so the centred first line ends with the space and its
+        // glyphs start 2.234px left of the centred text (x 28.953 vs 31.188).
+        let (lines, shifts, _) = wrap_shifted("I am a rounded square", 16.0, 120.0);
+        assert_eq!(lines, ["I am a rounded", "square"]);
+        assert!((shifts[0] - 2.2227).abs() < 1e-3, "{shifts:?}");
+        assert_eq!(shifts[1], 0.0);
+        // A break after a hyphen keeps no space.
+        let (lines, shifts, _) = wrap_shifted(
+            "rho W Long-term kappa leaf alpha lambda Long-term i",
+            16.0,
+            200.0,
+        );
+        assert_eq!(lines[1], "leaf alpha lambda Long-");
+        assert!(shifts[0] > 2.0 && shifts[1] == 0.0 && shifts[2] == 0.0);
+    }
+
+    #[test]
+    fn color_by_depth_and_gradient_underlines() {
+        let src = "---\nconfig:\n  theme: base\n  mindmap:\n    colorBy: depth\n---\nmindmap\n  root((mindmap))\n    a[A]\n      b\n    c[C]\n      d\n";
+        let mm = parse(
+            "mindmap\n  root((mindmap))\n    a[A]\n      b\n    c[C]\n      d\n",
+            None,
+        )
+        .unwrap();
+        let mut p = layout(
+            &mm,
+            16.0,
+            10.0,
+            Widths {
+                max_node: 200.0,
+                wrapping: 120.0,
+            },
+        );
+        let sections = |p: &[Placed]| p.iter().map(|p| p.section).collect::<Vec<_>>();
+        assert_eq!(sections(&p), [None, Some(0), Some(0), Some(1), Some(1)]);
+        assert_using_depth(&mm, &mut p);
+        // mermaid 12.3.0 under `theme: base` (useGradient): `.section-N line`
+        // has stroke-width 0, so default nodes show no underline.
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        fn lines(els: &[Element]) -> usize {
+            els.iter()
+                .map(|e| match e {
+                    Element::Group { children, .. } => lines(children),
+                    Element::Shape {
+                        geom: Geometry::Path(c),
+                        class: None,
+                        ..
+                    } if c.len() == 2 => 1,
+                    _ => 0,
+                })
+                .sum()
+        }
+        assert_eq!(lines(&r.scene.elements), 0);
+        let r = crate::render::render(
+            &src.replace("theme: base", "theme: default"),
+            &MermaidConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(lines(&r.scene.elements), 2);
+    }
+
+    fn assert_using_depth(mm: &Mindmap, p: &mut [Placed]) {
+        assign_sections(mm, p, true);
+        let s: Vec<_> = p.iter().map(|p| p.section).collect();
+        assert_eq!(s, [None, Some(0), Some(1), Some(0), Some(1)]);
     }
 }

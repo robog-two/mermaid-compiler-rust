@@ -780,6 +780,22 @@ pub fn wrap_lines(
     bold: bool,
     rule: BreakRule,
 ) -> Vec<String> {
+    wrap_lines_flagged(lines, max_width, font_size, bold, rule)
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect()
+}
+
+/// [`wrap_lines`], each line paired with whether it broke at a space. Under
+/// `break-spaces` that space stays at the line's end and keeps its width, so a
+/// centred line sits half a space left of centre (see [`break_space_shift`]).
+pub fn wrap_lines_flagged(
+    lines: &[String],
+    max_width: f64,
+    font_size: f64,
+    bold: bool,
+    rule: BreakRule,
+) -> Vec<(String, bool)> {
     let paras: Vec<String> = lines
         .iter()
         .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -792,12 +808,16 @@ pub fn wrap_lines(
                 .map(|p| line_width(p, font_size, bold))
                 .fold(0.0, f64::max);
             if natural <= max_width {
-                return balance_marks(paras);
+                return balance_marks(paras)
+                    .into_iter()
+                    .map(|l| (l, false))
+                    .collect();
             }
             html_wrap_width(&paras, max_width, font_size, bold)
         }
     };
     let mut out = Vec::new();
+    let mut at_space = Vec::new();
     for para in &paras {
         let mut cur = String::new();
         for seg in segments(para, rule) {
@@ -807,14 +827,22 @@ pub fn wrap_lines(
                 BreakRule::Browser => line_width(&cand, font_size, bold),
             };
             if !plain(&cur).trim().is_empty() && used > width {
+                at_space.push(cur.ends_with(' '));
                 out.push(std::mem::replace(&mut cur, seg).trim_end().to_string());
             } else {
                 cur = cand;
             }
         }
+        at_space.push(false);
         out.push(cur.trim_end().to_string());
     }
-    balance_marks(out)
+    balance_marks(out).into_iter().zip(at_space).collect()
+}
+
+/// How far left of centre a centred `break-spaces` line that broke at a space
+/// sits: half the width its kept trailing space adds.
+pub fn break_space_shift(line: &str, font_size: f64, bold: bool) -> f64 {
+    (line_width(&format!("{line} "), font_size, bold) - line_width(line, font_size, bold)) / 2.0
 }
 
 /// The width an HTML label wrapped at `max_width` takes ([`BreakRule::Browser`]):
