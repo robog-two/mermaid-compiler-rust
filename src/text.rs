@@ -587,6 +587,13 @@ pub fn baseline_shift(b: Baseline, font_size: f64) -> f64 {
     }
 }
 
+/// An HTML line box's `line-height: normal` in mermaid's font (Liberation
+/// Sans): its ascent, descent and line gap (67/2048em), each rounded to
+/// whole pixels (18px at 16px).
+pub fn normal_line_height(font_size: f64) -> f64 {
+    (0.905 * font_size).round() + (0.212 * font_size).round() + (67.0 / 2048.0 * font_size).round()
+}
+
 /// Multi-line text with its measured extent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextBlock {

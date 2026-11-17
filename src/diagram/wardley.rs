@@ -1280,19 +1280,19 @@ pub fn colors(cfg: &MermaidConfig, pal: &Palette) -> WardleyColors {
 
 // ---------------------------------------------------------------- drawing
 
-/// Text at an SVG `y` with the given `dominant-baseline` shift (fraction of size).
+/// Text at an SVG `y` with the given `dominant-baseline`.
 fn text(
     x: f64,
     y: f64,
     s: &str,
     font: f64,
-    baseline_shift: f64,
+    baseline: crate::text::Baseline,
     anchor: Anchor,
     fill: &Color,
 ) -> Text {
     Text {
         x,
-        y: y + font * baseline_shift,
+        y: y + serif_baseline_shift(baseline, font),
         lines: vec![s.to_string()],
         line_height: font * 1.2,
         font_size: font,
@@ -1301,10 +1301,25 @@ fn text(
         fill: fill.clone(),
     }
 }
-/// `dominant-baseline: middle` (half the x-height of a serif font).
-const MIDDLE: f64 = 0.25;
+/// `dominant-baseline: middle`.
+const MIDDLE: crate::text::Baseline = crate::text::Baseline::Middle;
+
+/// [`crate::text::baseline_shift`] for the page's default serif font, which
+/// wardley's unstyled text falls back to (Liberation Serif: ascent 0.891em,
+/// descent 0.216em, x-height 940/2048em).
+fn serif_baseline_shift(b: crate::text::Baseline, font: f64) -> f64 {
+    use crate::text::Baseline;
+    let ascent = (0.891 * font).round();
+    let descent = (0.216 * font).round();
+    match b {
+        Baseline::Middle => (font * 940.0 / 4096.0 * 64.0 - 0.5).ceil() / 64.0,
+        Baseline::Central => (ascent - descent) / 2.0,
+        Baseline::Alphabetic => 0.0,
+        other => crate::text::baseline_shift(other, font),
+    }
+}
 /// `dominant-baseline: central`.
-const CENTRAL: f64 = 0.34;
+const CENTRAL: crate::text::Baseline = crate::text::Baseline::Central;
 
 fn line(a: Point, b: Point, stroke: &Color, w: f64) -> Element {
     Element::line(a, b, Paint::stroke(stroke, w))
@@ -1389,7 +1404,7 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
         height - pad / 4.0,
         "Evolution",
         wc.axis_font_size,
-        0.0,
+        crate::text::Baseline::Alphabetic,
         Anchor::Middle,
         &col.axis_text,
     )
@@ -1400,7 +1415,7 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
         yc.y,
         "Visibility",
         wc.axis_font_size,
-        0.0,
+        crate::text::Baseline::Alphabetic,
         Anchor::Middle,
         &col.axis_text,
     )
@@ -1473,7 +1488,7 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
                 height - pad / 1.5,
                 stage,
                 wc.axis_font_size - 2.0,
-                0.0,
+                crate::text::Baseline::Alphabetic,
                 Anchor::Middle,
                 &col.axis_text,
             ),
@@ -1773,7 +1788,7 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
                 p.y + n.label_offset_y.unwrap_or(-wc.node_label_offset - extra),
                 &n.label,
                 wc.label_font_size,
-                0.0,
+                crate::text::Baseline::Alphabetic,
                 Anchor::Start,
                 &col.component_label,
             )
@@ -1865,7 +1880,7 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
                         py(n.y),
                         &n.text,
                         11.0,
-                        0.0,
+                        crate::text::Baseline::Alphabetic,
                         Anchor::Start,
                         &col.axis_text,
                     )
@@ -1905,7 +1920,7 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
                     y + ah / 2.0 + 15.0,
                     &m.text,
                     10.0,
-                    0.0,
+                    crate::text::Baseline::Alphabetic,
                     Anchor::Middle,
                     &col.axis_text,
                 )

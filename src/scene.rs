@@ -157,12 +157,14 @@ pub struct Text {
 }
 
 /// The first line's baseline below the top of a block of `line_height`
-/// lines. An HTML label's line (`line-height: 1.5`) puts its glyph box,
-/// the font's ascent and descent rounded to whole pixels, half the leading
-/// below the line's top, rounded down to a pixel (measured in Chromium for
-/// 8-32px). Other line heights keep the 0.35em approximation.
+/// lines. An HTML label's line (`line-height: 1.5`, or `normal`) puts its
+/// glyph box, the font's ascent and descent rounded to whole pixels, half
+/// the leading below the line's top, rounded down to a pixel (measured in
+/// Chromium for 8-32px). Other line heights keep the 0.35em approximation.
 pub fn first_baseline(font_size: f64, line_height: f64) -> f64 {
-    if (line_height - 1.5 * font_size).abs() < 1e-9 {
+    let html = (line_height - 1.5 * font_size).abs() < 1e-9
+        || (line_height - crate::text::normal_line_height(font_size)).abs() < 1e-9;
+    if html {
         let ascent = (0.905 * font_size).round();
         let descent = (0.212 * font_size).round();
         ((line_height - ascent - descent) / 2.0 + 1e-9).floor() + ascent

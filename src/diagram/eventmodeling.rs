@@ -43,11 +43,13 @@ const CODE_FONT: f64 = 16.0;
 /// Advance of the monospace `<code>` font, in em.
 const CODE_ADVANCE: f64 = 0.6;
 /// `line-height: normal` of the HTML label's name and code lines, and their
-/// baselines below each line box's top (measured in Chromium).
-const NAME_LINE_HEIGHT: f64 = 18.5;
-const NAME_BASELINE: f64 = 15.2;
+/// baselines below each line box's top (measured in Chromium): Liberation
+/// Sans' 14 + 3px glyph box (plus a 1px line gap, the half-leading rounded
+/// down to nothing) and DejaVu Sans Mono's 15 + 4px one.
+const NAME_LINE_HEIGHT: f64 = 18.0;
+const NAME_BASELINE: f64 = 14.0;
 const CODE_LINE_HEIGHT: f64 = 19.0;
-const CODE_BASELINE: f64 = 15.2;
+const CODE_BASELINE: f64 = 15.0;
 
 /// The five entity types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

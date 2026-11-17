@@ -14,7 +14,7 @@ use crate::diagram::graph::StyleOverrides;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, Point, Rect};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
-use crate::text::{decode_entities, line_width};
+use crate::text::{Baseline, baseline_shift, decode_entities, line_width};
 use crate::theme::Palette;
 
 const SECTION_HEADER: f64 = 25.0;
@@ -534,7 +534,7 @@ pub fn draw(
             21.0,
             &pal.title_color,
         );
-        text.y = baseline;
+        text.y = title_h / 2.0 + baseline_shift(Baseline::Middle, 14.0);
         els.push(Element::classed_text(text, "treemapTitle"));
     }
     let class_style = |c: &Option<String>| {
@@ -610,7 +610,7 @@ pub fn draw(
             let cy = r.y + SECTION_HEADER / 2.0;
             if !name.is_empty() {
                 g.push(Element::classed_text(
-                    Text::centered(Point::new(0.0, cy), &[name], 12.0, 18.0, &label_color)
+                    Text::middle(Point::new(0.0, cy), &name, 12.0, &label_color)
                         .bold()
                         .anchored(Anchor::Start, r.x + 6.0),
                     "treemapSectionLabel",
@@ -618,7 +618,7 @@ pub fn draw(
             }
             if !value.is_empty() && r.w > value_w + 20.0 {
                 g.push(Element::classed_text(
-                    Text::centered(Point::new(0.0, cy), &[value], 10.0, 15.0, &label_color)
+                    Text::middle(Point::new(0.0, cy), &value, 10.0, &label_color)
                         .anchored(Anchor::End, r.right() - 10.0),
                     "treemapSectionValue",
                 ));
@@ -694,34 +694,21 @@ fn leaf_labels(cell: &Cell, r: Rect, show_values: bool, fmt: &str, color: &Color
     let mut out = Vec::new();
     let c = r.center();
     let vs = value_size(font);
-    let show_value =
-        !value.is_empty() && line_width(&value, vs, false) <= avail_w && combined(font) <= avail_h;
-    let label_cy = if show_value {
-        c.y - (vs + 2.0) / 2.0
-    } else {
-        c.y
-    };
+    // The label sits on the cell's centre (`dominant-baseline: middle`), the
+    // value hangs from `fontSize / 2 + 2` below it, shown only if it ends
+    // 4px above the cell's bottom.
+    let value_top = c.y + font / 2.0 + 2.0;
+    let show_value = !value.is_empty()
+        && line_width(&value, vs, false) <= avail_w
+        && value_top + vs <= r.bottom() - 4.0;
     out.push(Element::classed_text(
-        Text::centered(
-            Point::new(c.x, label_cy),
-            std::slice::from_ref(&cell.name),
-            font,
-            font,
-            color,
-        ),
+        Text::middle(c, &cell.name, font, color),
         "treemapLabel",
     ));
     if show_value {
-        out.push(Element::classed_text(
-            Text::centered(
-                Point::new(c.x, label_cy + font / 2.0 + 2.0 + vs / 2.0),
-                &[value],
-                vs,
-                vs,
-                color,
-            ),
-            "treemapValue",
-        ));
+        let mut t = Text::middle(Point::new(c.x, value_top), &value, vs, color);
+        t.y = value_top + baseline_shift(Baseline::Hanging, vs);
+        out.push(Element::classed_text(t, "treemapValue"));
     }
     out
 }

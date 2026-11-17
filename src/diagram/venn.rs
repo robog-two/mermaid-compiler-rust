@@ -2018,13 +2018,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let mut els = Vec::new();
     if let Some(t) = title {
         els.push(Element::classed_text(
-            Text::centered(
-                Point::new(width / 2.0, 32.0 * scale),
-                std::slice::from_ref(t),
-                32.0,
-                32.0,
-                &title_color,
-            ),
+            Text::middle(Point::new(width / 2.0, 32.0 * scale), t, 32.0, &title_color),
             "venn-title",
         ));
     }

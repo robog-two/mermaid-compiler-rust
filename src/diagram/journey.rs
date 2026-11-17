@@ -221,7 +221,8 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     // Section and task labels are `byFo` HTML labels in the root font, centred in
     // their box; the legend is root-font SVG text.
     let font = pal.font_size;
-    let lh = font * 1.15;
+    // The labels are HTML (`display: table-cell`) at `line-height: normal`.
+    let lh = crate::text::normal_line_height(font);
     let actors = j.actors();
 
     let actor_color = |name: &str| {
@@ -255,9 +256,10 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             if w > legend_w && w > left_margin - w {
                 legend_w = w;
             }
+            // The `<text x="40">`'s tspan sets `x="50"`.
             fore.push(Element::classed_text(
                 Text {
-                    x: 40.0,
+                    x: 50.0,
                     y: y + 7.0 + k as f64 * 20.0,
                     lines: vec![l.clone()],
                     line_height: 20.0,
@@ -378,7 +380,8 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             .and_then(|j| j.as_str())
             .filter(|s| !s.trim().is_empty())
             .map_or_else(|| pal.text_color.clone(), Color::new);
-        let size = 4.0 * 0.52 * font;
+        // `4ex`: four x-heights (1082/2048em).
+        let size = 4.0 * 1082.0 / 2048.0 * font;
         fore.push(Element::classed_text(
             Text {
                 x: left,
