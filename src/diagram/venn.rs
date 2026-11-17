@@ -2636,4 +2636,12 @@ mod tests {
         cfg.theme_variables.push(("venn2".into(), "#123456".into()));
         assert_eq!(theme_colors(&cfg, &pal), vec![Color::new("#123456")]);
     }
+
+    #[test]
+    fn set_label_colour_darkens_the_hsl_set_colour() {
+        // mermaid 12.3.0 (default theme): the third set's colour is
+        // hsl(80, 100%, 56.27%), its label rgb(89, 134, 0).
+        let c = shift_lightness(&Color::new("hsl(80, 100%, 56.2745098039%)"), -30.0);
+        assert_eq!(c.css(), "#598600");
+    }
 }
