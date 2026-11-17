@@ -25,8 +25,6 @@ use crate::theme::{Palette, ThemeName};
 const DEFAULT_STAGES: [&str; 4] = ["Genesis", "Custom Built", "Product", "Commodity"];
 /// Browser default (serif) font, which upstream's output ends up using.
 const FONT_FAMILY: &str = "\"Times New Roman\", Times, serif";
-/// Times advance widths relative to the Helvetica metrics of `text::line_width`.
-const SERIF_WIDTH: f64 = 0.87;
 
 // ---------------------------------------------------------------- model
 
@@ -1838,9 +1836,12 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
                     .iter()
                     .map(|a| format!("{}. {}", a.number, a.text))
                     .collect();
+                // getComputedTextLength() runs while the texts still inherit the
+                // container's "trebuchet ms", verdana, arial (Arial) family, before
+                // they end up in the serif face they are drawn in.
                 let max_w = lines
                     .iter()
-                    .map(|l| line_width(l, fs, false) * SERIF_WIDTH)
+                    .map(|l| line_width(l, fs, false))
                     .fold(0.0, f64::max);
                 let max_h = fs * 1.15;
                 let bw = max_w + bpad * 2.0 + 105.0;
@@ -2282,6 +2283,22 @@ annotation 1,[0.5, 0.5] \"First\"",
         let (r, _, _) = rects(&els).into_iter().find(|r| close(r.1, 4.0)).unwrap();
         assert!(r.right() <= 900.0 - 48.0 + 1e-9);
         assert!(r.bottom() <= 600.0 - 48.0 + 1e-9);
+    }
+
+    #[test]
+    fn annotations_box_is_measured_in_the_containers_font() {
+        // mermaid 12.3.0 (the gallery map): the box is 219.6425 wide, the widest
+        // line's getComputedTextLength() in Arial (the texts are drawn in Times
+        // later) plus 2·10 padding and 105. Chromium measures it 0.13px narrower
+        // at the svg's render-time scale; the plain Arial advance is 94.773.
+        let (_, els) = scene_elements(
+            "wardley-beta
+annotations [0.10, 0.20]
+annotation 1,[0.78, 0.82] \"User touchpoints\"
+annotation 2,[0.70, 0.60] \"Integration layer\"",
+        );
+        let (r, _, _) = rects(&els).into_iter().find(|r| close(r.1, 4.0)).unwrap();
+        assert!((r.w - 219.6425).abs() < 0.15, "{r:?}");
     }
 
     #[test]

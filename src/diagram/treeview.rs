@@ -782,7 +782,11 @@ pub fn layout(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
             if let Some(d) = &r.description {
                 st.total_w = st
                     .total_w
-                    .max(dx + line_width(d, cfg.font_size, false) + cfg.padding_x);
+                    // the italic text's `getBBox()`, whose last glyph's ink leans
+                    // past its advance
+                    .max(
+                        dx + crate::text::svg_bbox_extent(d, cfg.font_size, true).1 + cfg.padding_x,
+                    );
             }
         }
     }
@@ -1248,5 +1252,32 @@ mod tests {
         let s = render("treeView-beta\n  a\n", None, &cfg, &cfg.palette()).unwrap();
         assert_eq!(s.kind, DiagramKind::TreeView);
         assert_eq!(s.view_box.x, -1.5);
+    }
+
+    /// Every text and shape of a full render, groups flattened.
+    fn flat(src: &str) -> (crate::scene::Scene, Vec<crate::scene::Element>) {
+        fn walk(els: &[crate::scene::Element], out: &mut Vec<crate::scene::Element>) {
+            for e in els {
+                match e {
+                    crate::scene::Element::Group { children, .. }
+                    | crate::scene::Element::Rotated { children, .. } => walk(children, out),
+                    other => out.push(other.clone()),
+                }
+            }
+        }
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        let mut out = Vec::new();
+        walk(&r.scene.elements, &mut out);
+        (r.scene, out)
+    }
+
+    #[test]
+    fn italic_descriptions_widen_the_view_box_by_their_ink() {
+        // mermaid 12.3.0: viewBox "-0.5 0 284.8125 138.03125", from the italic
+        // description's getBBox(), whose last glyph leans past its advance.
+        let (s, _) = flat(
+            "treeView-beta\n    src/\n        index.js ## app entry point\n        config.ts ## runtime configuration\n    package.json ## project manifest\n",
+        );
+        assert!((s.view_box.w - 284.8125).abs() < 0.01, "{:?}", s.view_box);
     }
 }

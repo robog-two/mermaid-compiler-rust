@@ -912,20 +912,36 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
             0.0
         };
         let top = r.y + r.h / 2.0 - (name_h + data_h) / 2.0;
-        children.push(Element::text(Text {
-            x: r.x + r.w / 2.0,
-            y: top + NAME_BASELINE,
-            lines: b.name_lines.clone(),
+        // The foreignObject's content box starts and is as wide as its x and width
+        // in layout units (1/64 px, rounded down); each name line is centred in it
+        // with the free space halved and rounded down again.
+        let lu = |v: f64| (v * 64.0 + 1e-6).floor() / 64.0;
+        let (fo_x, fo_w) = (lu(r.x + BOX_PADDING), lu(r.w - 2.0 * BOX_PADDING));
+        let name_x = |line: &str| {
+            let w = line_width(line, TEXT_FONT, true);
+            fo_x + lu((fo_w - crate::text::layout_unit_ceil(w)) / 2.0) + w / 2.0
+        };
+        let name = |i: usize, lines: Vec<String>| Text {
+            x: name_x(&lines[0]),
+            y: top + NAME_BASELINE + i as f64 * NAME_LINE_HEIGHT,
+            lines,
             line_height: NAME_LINE_HEIGHT,
             font_size: TEXT_FONT,
             bold: true,
             anchor: Anchor::Middle,
             fill: c.box_text.clone(),
-        }));
+        };
+        if b.name_lines.len() == 1 {
+            children.push(Element::text(name(0, b.name_lines.clone())));
+        } else {
+            for (i, l) in b.name_lines.iter().enumerate() {
+                children.push(Element::text(name(i, vec![l.clone()])));
+            }
+        }
         if !data_lines.is_empty() {
             children.push(Element::classed_text(
                 Text {
-                    x: r.x + BOX_PADDING,
+                    x: fo_x,
                     y: top + name_h + NAME_LINE_HEIGHT + CODE_BASELINE,
                     lines: data_lines,
                     line_height: CODE_LINE_HEIGHT,
@@ -1137,5 +1153,44 @@ mod tests {
         let m = parse("eventmodeling\ntf 01 cmd Add\nentity Cart\nnote 01 {\n  hello\n}\ngwt 01 given\n evt Cart\nthen\n evt Cart\ntf 02 evt Added").unwrap();
         assert_eq!(m.frames.len(), 2);
         assert_eq!(m.entities, ["Cart"]);
+    }
+
+    /// Every text and shape of a full render, groups flattened.
+    fn flat(src: &str) -> (crate::scene::Scene, Vec<crate::scene::Element>) {
+        fn walk(els: &[crate::scene::Element], out: &mut Vec<crate::scene::Element>) {
+            for e in els {
+                match e {
+                    crate::scene::Element::Group { children, .. }
+                    | crate::scene::Element::Rotated { children, .. } => walk(children, out),
+                    other => out.push(other.clone()),
+                }
+            }
+        }
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        let mut out = Vec::new();
+        walk(&r.scene.elements, &mut out);
+        (r.scene, out)
+    }
+
+    #[test]
+    fn box_names_centre_in_layout_units() {
+        // mermaid 12.3.0: the second AddItem box's foreignObject is at x 1017.667,
+        // 391.333 wide; Chromium lays it out in 1/64 px, so the bold name's glyphs
+        // start at 1181.3125, not the exact centre's 1181.333.
+        let (_, els) = flat(
+            "eventmodeling\n\ntf 01 ui CartUI\ntf 02 cmd AddItem [[AddItem01]]\ntf 03 evt ItemAdded [[ItemAdded]]\ntf 04 cmd AddItem [[AddItem02]]\ntf 05 evt ItemAdded [[ItemAdded]]\n\ndata AddItem01 {\n  description: 'john'\n  image: 'avatar_john'\n  price: 20.4\n}\n\ndata AddItem02 {\n  description: 'jack'\n  image: 'avatar_jack'\n  price: 12.5\n}\n\ndata ItemAdded {\n  description: string\n  image: string\n  price: number\n}\n",
+        );
+        let xs: Vec<f64> = els
+            .iter()
+            .filter_map(|e| match e {
+                Element::Text { text, .. } if text.lines == ["AddItem"] => {
+                    Some(text.x - line_width("AddItem", TEXT_FONT, true) / 2.0)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xs.len(), 2);
+        assert!((xs[1] - 1181.3125).abs() < 0.005, "{xs:?}");
+        assert_eq!((xs[1] * 64.0).fract(), 0.0);
     }
 }

@@ -325,25 +325,27 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             ));
             let fy = cy - adj + bh / 2.0 + lh / 2.0;
             if let Some(t) = &item.ticket {
-                g.push(Element::classed_text(
-                    Text::centered(
-                        Point::new(0.0, fy),
-                        std::slice::from_ref(t),
-                        font,
-                        lh,
-                        &card_text,
-                    )
-                    .anchored(Anchor::Start, lx),
-                    "kanban-ticket",
-                ));
+                let text = Text::centered(
+                    Point::new(0.0, fy),
+                    std::slice::from_ref(t),
+                    font,
+                    lh,
+                    &card_text,
+                )
+                .anchored(Anchor::Start, lx);
+                let baseline = text.y;
+                g.push(Element::classed_text(text, "kanban-ticket"));
                 if linked_tickets {
-                    // An HTML label underlined inside the `.kanban-ticket-link` anchor.
+                    // An HTML label underlined inside the `.kanban-ticket-link` anchor:
+                    // Chromium paints the 1px underline on the pixel row just below
+                    // the one under the baseline (measured at 16px), in the anchor's
+                    // `color`, the page's black: the label's `#333` is only its fill.
                     let w = line_width(t, font, false);
-                    let base = fy + 0.35 * font + 2.0;
+                    let base = baseline + 1.5;
                     g.push(Element::line(
                         Point::new(lx, base),
                         Point::new(lx + w, base),
-                        Paint::stroke(&card_text, 1.0),
+                        Paint::stroke(&Color::new("#000000"), 1.0),
                     ));
                 }
             }
@@ -353,14 +355,8 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 let ax = padding + r.right() - tw - 2.0 * padding;
                 bounds.add_rect(Rect::new(ax, fy - lh / 2.0, tw, lh));
                 g.push(Element::classed_text(
-                    Text::centered(
-                        Point::new(0.0, fy),
-                        &[a],
-                        font,
-                        lh,
-                        &shade(&card_text, !pal.dark, 15.0),
-                    )
-                    .anchored(Anchor::Start, ax),
+                    Text::centered(Point::new(0.0, fy), &[a], font, lh, &card_text)
+                        .anchored(Anchor::Start, ax),
                     "kanban-assigned",
                 ));
             }
@@ -516,5 +512,60 @@ mod tests {
         let src = src.splitn(3, "---").nth(2).unwrap();
         let g = draw(&parse(src, None).unwrap(), &cfg, &pal).view_box;
         assert_eq!((g.x, g.y, g.w, g.h), (90.0, -310.0, 1245.0, 293.0));
+    }
+
+    /// Every text and shape of a full render, groups flattened.
+    fn flat(src: &str) -> (crate::scene::Scene, Vec<crate::scene::Element>) {
+        fn walk(els: &[crate::scene::Element], out: &mut Vec<crate::scene::Element>) {
+            for e in els {
+                match e {
+                    crate::scene::Element::Group { children, .. }
+                    | crate::scene::Element::Rotated { children, .. } => walk(children, out),
+                    other => out.push(other.clone()),
+                }
+            }
+        }
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        let mut out = Vec::new();
+        walk(&r.scene.elements, &mut out);
+        (r.scene, out)
+    }
+
+    #[test]
+    fn assignee_and_ticket_link_paint() {
+        // mermaid 12.3.0: the assignee is a plain `.label` (#333); a linked
+        // ticket's underline is the anchor's black text-decoration, on the pixel
+        // row from baseline + 1 (a 1px line centred 1.5 below the baseline).
+        let src = "---\nconfig:\n  kanban:\n    ticketBaseUrl: 'https://x/#TICKET#'\n---\nkanban\n  c[Col]\n    a[Task]@{ ticket: MC-1, assigned: 'knsv' }\n";
+        let (_, els) = flat(src);
+        let text = |cls: &str| {
+            els.iter()
+                .find_map(|e| match e {
+                    Element::Text {
+                        text,
+                        class: Some(c),
+                    } if c == cls => Some(text.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(text("kanban-assigned").fill.css(), "#333");
+        let ticket = text("kanban-ticket");
+        let underline = els
+            .iter()
+            .find_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Path(c),
+                    paint,
+                    class: None,
+                } if paint.stroke_width == 1.0 && c.len() == 2 => Some((c.clone(), paint.clone())),
+                _ => None,
+            })
+            .unwrap();
+        let crate::geom::PathCmd::MoveTo(a) = underline.0[0] else {
+            panic!()
+        };
+        assert_eq!(a.y, ticket.y + 1.5);
+        assert_eq!(underline.1.stroke.css(), "#000000");
     }
 }

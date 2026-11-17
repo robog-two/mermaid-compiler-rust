@@ -524,6 +524,105 @@ const ARIAL_INK: [(i16, i16); 94] = [
     (92, 1104),
 ];
 
+/// [`ARIAL_INK`] for Liberation Sans Italic, whose advance widths are the
+/// regular face's.
+const ARIAL_ITALIC_INK: [(i16, i16); 94] = [
+    (77, 549),
+    (187, 803),
+    (39, 1159),
+    (-12, 1170),
+    (146, 1733),
+    (33, 1256),
+    (202, 449),
+    (96, 855),
+    (-199, 560),
+    (120, 852),
+    (130, 1125),
+    (37, 331),
+    (105, 636),
+    (80, 318),
+    (-116, 745),
+    (89, 1122),
+    (53, 966),
+    (-12, 1109),
+    (48, 1121),
+    (13, 1062),
+    (46, 1144),
+    (115, 1139),
+    (212, 1202),
+    (54, 1127),
+    (70, 1097),
+    (81, 487),
+    (38, 500),
+    (131, 1126),
+    (130, 1125),
+    (131, 1126),
+    (159, 1133),
+    (194, 1935),
+    (-101, 1256),
+    (63, 1296),
+    (113, 1490),
+    (63, 1413),
+    (63, 1385),
+    (63, 1347),
+    (101, 1505),
+    (63, 1481),
+    (81, 546),
+    (-5, 1040),
+    (63, 1441),
+    (63, 996),
+    (63, 1706),
+    (63, 1480),
+    (111, 1536),
+    (63, 1353),
+    (101, 1526),
+    (63, 1416),
+    (58, 1344),
+    (184, 1372),
+    (153, 1489),
+    (177, 1525),
+    (177, 2094),
+    (-39, 1430),
+    (213, 1489),
+    (-40, 1308),
+    (-39, 738),
+    (146, 472),
+    (-169, 608),
+    (40, 981),
+    (-160, 1018),
+    (130, 503),
+    (46, 1069),
+    (29, 1076),
+    (67, 1001),
+    (69, 1193),
+    (69, 1063),
+    (69, 746),
+    (4, 1121),
+    (34, 1045),
+    (33, 501),
+    (-229, 502),
+    (34, 1110),
+    (33, 501),
+    (34, 1611),
+    (34, 1046),
+    (67, 1074),
+    (-51, 1073),
+    (69, 1125),
+    (34, 751),
+    (5, 982),
+    (93, 640),
+    (86, 1098),
+    (112, 1122),
+    (102, 1589),
+    (-82, 1084),
+    (-116, 1127),
+    (-12, 996),
+    (21, 833),
+    (213, 379),
+    (-159, 653),
+    (122, 1134),
+];
+
 /// Width of an SVG `<text>`'s `getBBox()` in Chromium (regular weight): the run's
 /// advance (kerned, rounded up to 1/64 px) united with each glyph's ink box,
 /// which Skia rounds out to whole pixels from the glyph's origin. So a label
@@ -531,6 +630,19 @@ const ARIAL_INK: [(i16, i16); 94] = [
 /// 8.898 advance). White space collapses as SVG's does, and none takes room at
 /// either end. Characters outside ASCII count by their advance alone.
 pub fn svg_bbox_width(text: &str, font_size: f64) -> f64 {
+    let (left, right) = svg_bbox_extent(text, font_size, false);
+    right - left
+}
+
+/// The left and right edges of an SVG `<text>`'s `getBBox()` relative to its
+/// start (see [`svg_bbox_width`]), upright or italic (`font-style: italic`,
+/// whose glyphs lean past their advance).
+pub fn svg_bbox_extent(text: &str, font_size: f64, italic: bool) -> (f64, f64) {
+    let table = if italic {
+        &ARIAL_ITALIC_INK
+    } else {
+        &ARIAL_INK
+    };
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut x = 0.0f64;
     let (mut left, mut right) = (0.0f64, 0.0f64);
@@ -540,7 +652,7 @@ pub fn svg_bbox_width(text: &str, font_size: f64) -> f64 {
             x += kerning_em(p, c, false) * font_size;
         }
         if let 0x21..=0x7E = c as u32 {
-            let (lo, hi) = ARIAL_INK[(c as u32 - 0x21) as usize];
+            let (lo, hi) = table[(c as u32 - 0x21) as usize];
             let ink = |u: i16| f64::from(u) / 2048.0 * font_size;
             left = left.min(x + (ink(lo) + 0.005).floor());
             right = right.max(x + (ink(hi) - 0.005).ceil());
@@ -548,7 +660,7 @@ pub fn svg_bbox_width(text: &str, font_size: f64) -> f64 {
         x += char_width_em(c, false) * font_size;
         prev = Some(c);
     }
-    right.max(layout_unit_ceil(x)) - left
+    (left, right.max(layout_unit_ceil(x)))
 }
 
 /// `w` rounded up to Chromium's layout unit (1/64 px), as an HTML box's
