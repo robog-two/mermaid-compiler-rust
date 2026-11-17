@@ -995,6 +995,7 @@ pub fn draw(d: &Cynefin, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                         line_height: sub_font,
                         font_size: sub_font,
                         bold: false,
+                        weight: None,
                         anchor: Anchor::Middle,
                         fill: t.text_color.clone(),
                     },

@@ -1419,6 +1419,10 @@ mod tests {
                     add(Point::new(rect.right(), rect.bottom()));
                 }
                 Geometry::Circle { c, .. } => add(*c),
+                Geometry::Line { a, b } => {
+                    add(*a);
+                    add(*b);
+                }
                 Geometry::Path(cmds) => {
                     for c in cmds {
                         match c {

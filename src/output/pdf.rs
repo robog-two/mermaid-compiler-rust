@@ -227,6 +227,7 @@ impl Ctx {
             Geometry::Rect { rect, rx } => self.path(&rounded_rect(rect, *rx)),
             Geometry::Circle { c, r } => self.path(&crate::geom::ellipse(*c, *r, *r)),
             Geometry::Path(cmds) => self.path(cmds),
+            Geometry::Line { a, b } => self.path(&Geometry::line_path(*a, *b)),
         }
         let op = match (fill.is_some(), stroke.is_some()) {
             (true, true) => "B",
@@ -798,6 +799,7 @@ mod tests {
             line_height: 16.8,
             font_size: 14.0,
             bold: false,
+            weight: None,
             anchor: Anchor::Start,
             fill: Color::new("#333"),
         };

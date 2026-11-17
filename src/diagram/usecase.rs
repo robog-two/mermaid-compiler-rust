@@ -4428,6 +4428,10 @@ mod tests {
             match geom {
                 Geometry::Rect { rect, .. } => b.add_rect(*rect),
                 Geometry::Circle { c, r } => b.add_rect(Rect::centered(*c, 2.0 * r, 2.0 * r)),
+                Geometry::Line { a, b: e } => {
+                    b.add_point(*a);
+                    b.add_point(*e);
+                }
                 Geometry::Path(cmds) => {
                     for c in cmds {
                         if let PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) =

@@ -299,6 +299,7 @@ fn title_text(t: &str, x: f64, font: f64, pal: &Palette) -> (Element, Rect) {
             line_height: size,
             font_size: size,
             bold: true,
+            weight: None,
             anchor: crate::scene::Anchor::Start,
             fill: pal.text_color.clone(),
         },

@@ -744,6 +744,7 @@ pub fn render(
                 line_height: LABEL_FONT * 1.2,
                 font_size: LABEL_FONT,
                 bold: false,
+                weight: None,
                 anchor,
                 fill: pal.text_color.clone(),
             };

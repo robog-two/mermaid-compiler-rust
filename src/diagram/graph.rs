@@ -4300,6 +4300,7 @@ fn node_elements(
                 line_height: g.font_size,
                 font_size: g.font_size,
                 bold: g.bold,
+                weight: None,
                 anchor: Anchor::Start,
                 fill: pal.node_border.clone(),
             };
@@ -4442,6 +4443,8 @@ fn node_elements(
                             &text_color,
                         );
                         t.bold = block.bold;
+                        // An HTML label: a markdown `<strong>` in it is bolder.
+                        t.weight = block.bold.then_some(700);
                         els.push(Element::classed_text(t, class));
                     }
                     y += block.height;
@@ -4474,6 +4477,7 @@ fn node_elements(
                     .anchored(Anchor::Start, x0 + REQ_PADDING / 2.0);
                     let t = Text {
                         bold: rm.body.bold,
+                        weight: rm.body.bold.then_some(700),
                         ..t
                     };
                     els.push(Element::classed_text(t, "label"));

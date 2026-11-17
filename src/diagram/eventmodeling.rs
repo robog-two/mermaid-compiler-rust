@@ -878,6 +878,7 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
                     line_height: font * 1.5,
                     font_size: font,
                     bold: true,
+                    weight: None,
                     anchor: Anchor::Start,
                     fill: pal.text_color.clone(),
                 }),
@@ -928,6 +929,7 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
             line_height: NAME_LINE_HEIGHT,
             font_size: TEXT_FONT,
             bold: true,
+            weight: None,
             anchor: Anchor::Middle,
             fill: c.box_text.clone(),
         };
@@ -947,6 +949,7 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
                     line_height: CODE_LINE_HEIGHT,
                     font_size: CODE_FONT,
                     bold: false,
+                    weight: None,
                     anchor: Anchor::Start,
                     fill: c.box_text.clone(),
                 },

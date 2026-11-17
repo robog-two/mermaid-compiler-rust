@@ -2184,6 +2184,10 @@ linkStyle 0 stroke:#00f");
                     add(crate::geom::Point::new(rect.right(), rect.bottom()));
                 }
                 Geometry::Circle { c, .. } => add(*c),
+                Geometry::Line { a, b } => {
+                    add(*a);
+                    add(*b);
+                }
                 Geometry::Path(cmds) => {
                     for c in cmds {
                         match c {

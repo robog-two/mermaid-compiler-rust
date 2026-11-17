@@ -756,6 +756,25 @@ mod tests {
         assert_eq!(vb.w, 211.859375);
     }
 
+    /// mermaid 12.3.0 draws the name as `<strong>` inside the bold label div:
+    /// its computed weight is `bolder` than 700, 900.
+    #[test]
+    fn markdown_bold_name_is_bolder_than_the_bold_label() {
+        let src = "requirementDiagram\n\nrequirement \"__test_req__\" {\n    id: 1\n}\n";
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        let opt = crate::output::svg::SvgOptions {
+            id: "my-svg",
+            background: "white",
+            sizing: crate::output::svg::SvgSizing::MaxWidth,
+            theme_css: None,
+        };
+        let svg = crate::output::svg::to_svg(&r.scene, &opt);
+        assert!(
+            svg.contains("font-weight=\"700\"><tspan font-weight=\"900\">test_req</tspan>"),
+            "{svg}"
+        );
+    }
+
     #[test]
     fn bold_class_reaches_every_label() {
         // mermaid 12.3.0: viewBox width 386.46875 with `classDef important

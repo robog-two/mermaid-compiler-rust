@@ -741,7 +741,7 @@ mod tests {
                         add(Point::new(c.x - r, c.y - r));
                         add(Point::new(c.x + r, c.y + r));
                     }
-                    Geometry::Rect { .. } => {}
+                    Geometry::Rect { .. } | Geometry::Line { .. } => {}
                 }
             }
         }

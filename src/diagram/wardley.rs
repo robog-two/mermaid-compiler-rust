@@ -1295,6 +1295,7 @@ fn text(
         line_height: font * 1.2,
         font_size: font,
         bold: false,
+        weight: None,
         anchor,
         fill: fill.clone(),
     }

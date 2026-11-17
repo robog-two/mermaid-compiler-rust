@@ -2093,6 +2093,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 line_height: label_font * 1.1,
                 font_size: label_font,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Middle,
                 fill: text_fill,
             }));

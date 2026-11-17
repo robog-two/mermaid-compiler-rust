@@ -1744,6 +1744,7 @@ pub fn draw(g: &Grammar, m: &Metrics, st: &Style) -> Scene {
                 line_height: m.font_size * 1.5,
                 font_size: m.font_size,
                 bold: true,
+                weight: None,
                 anchor: Anchor::Start,
                 fill: st.rule_name.clone(),
             },

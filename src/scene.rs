@@ -135,16 +135,35 @@ impl Paint {
 /// Geometry of a shape.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Geometry {
-    Rect { rect: Rect, rx: f64 },
-    Circle { c: Point, r: f64 },
+    Rect {
+        rect: Rect,
+        rx: f64,
+    },
+    Circle {
+        c: Point,
+        r: f64,
+    },
     Path(Vec<PathCmd>),
+    /// A straight `<line>` (mermaid's gantt today marker), for SVG output: a
+    /// browser keeps a line's coordinates as given (a path's too, but a line
+    /// far outside the canvas is measured from clamped ones). Every other
+    /// consumer treats it as the two-point path [`Geometry::line_path`].
+    Line {
+        a: Point,
+        b: Point,
+    },
 }
 
 impl Geometry {
+    /// A [`Geometry::Line`]'s two-point path.
+    pub fn line_path(a: Point, b: Point) -> Vec<PathCmd> {
+        vec![PathCmd::MoveTo(a), PathCmd::LineTo(b)]
+    }
     /// The same geometry moved by `(dx, dy)`.
     pub fn translated(&self, dx: f64, dy: f64) -> Geometry {
         let mv = |p: &Point| Point::new(p.x + dx, p.y + dy);
         match self {
+            Geometry::Line { a, b } => Geometry::Line { a: mv(a), b: mv(b) },
             Geometry::Rect { rect, rx } => Geometry::Rect {
                 rect: Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h),
                 rx: *rx,
@@ -196,6 +215,11 @@ pub struct Text {
     pub line_height: f64,
     pub font_size: f64,
     pub bold: bool,
+    /// The CSS `font-weight` mermaid's markup computes for this text when that
+    /// is not plain normal (400) or bold (700): ishikawa's head label (600), or
+    /// a bold HTML label (700), whose `<strong>` runs are then `bolder` (900).
+    /// SVG output writes it; layout keeps measuring with `bold`.
+    pub weight: Option<u16>,
     pub anchor: Anchor,
     pub fill: Color,
 }
@@ -234,6 +258,7 @@ impl Text {
             line_height,
             font_size,
             bold: false,
+            weight: None,
             anchor: Anchor::Middle,
             fill: fill.clone(),
         }
@@ -248,6 +273,7 @@ impl Text {
             line_height: font_size * 1.5,
             font_size,
             bold: false,
+            weight: None,
             anchor: Anchor::Middle,
             fill: fill.clone(),
         }

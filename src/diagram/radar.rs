@@ -487,6 +487,7 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             line_height: fs,
             font_size: fs,
             bold: false,
+            weight: None,
             anchor: Anchor::Middle,
             fill: text_c.clone(),
         };

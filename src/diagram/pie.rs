@@ -257,6 +257,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
                 line_height: pal.pie_section_text_size,
                 font_size: pal.pie_section_text_size,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Middle,
                 fill: pal.pie_section_text.clone(),
             },
@@ -286,6 +287,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
                 line_height: title_size,
                 font_size: title_size,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Middle,
                 fill: pal.pie_title_text.clone(),
             },
@@ -308,6 +310,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
             line_height: legend_size,
             font_size: legend_size,
             bold: false,
+            weight: None,
             anchor: Anchor::Start,
             fill: pal.pie_legend_text.clone(),
         };
