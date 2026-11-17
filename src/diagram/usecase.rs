@@ -3468,7 +3468,7 @@ fn draw_node(
                     let (a, b) = (corners[i], corners[(i + 1) % 4]);
                     let at = |t: f64| Point::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
                     let side = PathCmd::CubicTo(at(1.0 / 3.0), at(2.0 / 3.0), b);
-                    [PathCmd::MoveTo(a), side.clone(), PathCmd::MoveTo(a), side]
+                    [PathCmd::MoveTo(a), side, PathCmd::MoveTo(a), side]
                 })
                 .collect();
             let mut outline = paint;

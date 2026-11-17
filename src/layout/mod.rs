@@ -2283,7 +2283,7 @@ fn elk_port_offsets(
             },
             0.0,
         )
-    } else if center {
+    } else if center && n > 1 {
         // `CENTER`: the ports need `(n - 1) * port_port`; centred in the room,
         // or crammed into it from its start.
         let height = (n - 1) as f64 * port_port;
