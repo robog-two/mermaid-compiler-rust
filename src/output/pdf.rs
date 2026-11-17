@@ -385,6 +385,11 @@ impl Ctx {
             Element::OutlinedText {
                 text, color, width, ..
             } => self.text(text, Some((color, *width))),
+            Element::Translated { dx, dy, children } => {
+                let _ = writeln!(self.out, "q\n1 0 0 1 {} {} cm", n(*dx), n(*dy));
+                children.iter().for_each(|c| self.element(c));
+                self.out.push_str("Q\n");
+            }
             Element::Rotated {
                 deg,
                 about,

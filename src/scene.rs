@@ -332,6 +332,15 @@ pub enum Element {
         rect: Rect,
         children: Vec<Element>,
     },
+    /// Children given in a local frame whose origin is `(dx, dy)` (SVG
+    /// `translate(dx, dy)`): mermaid draws some shapes about their own origin
+    /// and moves them with a transform, and the browser measures and paints
+    /// such a shape in single precision in that frame, not where it lands.
+    Translated {
+        dx: f64,
+        dy: f64,
+        children: Vec<Element>,
+    },
 }
 
 impl Element {
@@ -425,6 +434,15 @@ impl Element {
                 deg,
                 about: Point::new(about.x + dx, about.y + dy),
                 children: all(children),
+            },
+            Element::Translated {
+                dx: x,
+                dy: y,
+                children,
+            } => Element::Translated {
+                dx: x + dx,
+                dy: y + dy,
+                children,
             },
         }
     }
@@ -582,9 +600,9 @@ impl Scene {
         fn count(e: &[Element]) -> usize {
             e.iter()
                 .map(|el| match el {
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        1 + count(children)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Rotated { children, .. }
+                    | Element::Translated { children, .. } => 1 + count(children),
                     _ => 1,
                 })
                 .sum()

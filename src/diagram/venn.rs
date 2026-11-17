@@ -2133,7 +2133,9 @@ fn translate_element(e: Element, dy: f64) -> Element {
         return e;
     }
     match e {
-        e @ (Element::OutlinedText { .. } | Element::Clipped { .. }) => e.translated(0.0, dy),
+        e @ (Element::OutlinedText { .. }
+        | Element::Clipped { .. }
+        | Element::Translated { .. }) => e.translated(0.0, dy),
         Element::Group {
             id,
             class,

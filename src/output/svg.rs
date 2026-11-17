@@ -128,6 +128,7 @@ impl Filters<'_> {
             match el {
                 Element::Group { children, .. }
                 | Element::Rotated { children, .. }
+                | Element::Translated { children, .. }
                 | Element::Clipped { children, .. } => {
                     self.collect(children);
                 }
@@ -470,6 +471,24 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 num(*deg),
                 num(about.x),
                 num(about.y)
+            );
+            for c in children {
+                write_element(out, c, fx);
+            }
+            out.push_str("</g>");
+        }
+        Element::Translated { dx, dy, children } => {
+            if children.is_empty() {
+                return;
+            }
+            // In full, as mermaid writes it: the browser reads the offset
+            // and the local coordinates in single precision each.
+            use crate::diagram::xychart::js_num;
+            let _ = write!(
+                out,
+                "<g transform=\"translate({}, {})\">",
+                js_num(*dx),
+                js_num(*dy)
             );
             for c in children {
                 write_element(out, c, fx);

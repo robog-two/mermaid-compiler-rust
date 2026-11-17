@@ -1039,7 +1039,9 @@ pub fn draw(d: &Cynefin, cfg: &MermaidConfig, pal: &Palette) -> Scene {
 
 fn translate(e: Element, dx: f64, dy: f64) -> Element {
     match e {
-        e @ (Element::OutlinedText { .. } | Element::Clipped { .. }) => e.translated(dx, dy),
+        e @ (Element::OutlinedText { .. }
+        | Element::Clipped { .. }
+        | Element::Translated { .. }) => e.translated(dx, dy),
         Element::Group {
             id,
             class,

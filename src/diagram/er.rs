@@ -1436,7 +1436,10 @@ mod tests {
                     }
                 }
             },
-            Element::Text { .. } | Element::OutlinedText { .. } | Element::Rotated { .. } => {}
+            Element::Text { .. }
+            | Element::OutlinedText { .. }
+            | Element::Rotated { .. }
+            | Element::Translated { .. } => {}
         }
     }
 
