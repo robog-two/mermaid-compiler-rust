@@ -3406,13 +3406,15 @@ fn draw_node(
             ry,
         } => {
             let paint = painted(&n.style, slot, &role.bkg, &role.border, 2.0);
-            // The marker is a `.node path` (see the actor's glyph).
+            // The marker is a `.node path` under neo (see the actor's glyph); the
+            // classic stylesheet gives `.usecase-business-marker` a stroke but no
+            // width, so it keeps SVG's initial 1px.
             let line = Paint::stroke(
                 &paint.stroke,
                 n.style.stroke_width.unwrap_or(if o.neo() {
                     pal.stroke_width.unwrap_or(1.0)
                 } else {
-                    2.0
+                    1.0
                 }),
             );
             els.push(Element::classed_shape(

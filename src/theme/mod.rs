@@ -156,6 +156,19 @@ pub struct Palette {
     pub node_shadow: bool,
     /// `stateBorder`: the inner disc of a state end (`stateBorder ?? nodeBorder`).
     pub state_border: Option<Color>,
+    /// A flowchart's node and edge label text (`.label text, span { color:
+    /// nodeTextColor || textColor }`): only the base, neo and redux themes set
+    /// `nodeTextColor` (to `primaryTextColor`).
+    pub flow_text: Color,
+    /// `stateLabelColor` (`stateLabelColor || stateBkg || primaryTextColor`):
+    /// a state's and a composite's label (`.cluster-label, .nodeLabel`).
+    pub state_label: Color,
+    /// A `stateBkg` override: a state's fill (`.node rect { fill: stateBkg ||
+    /// mainBkg }`).
+    pub state_bkg: Option<Color>,
+    /// `transitionColor`: a state transition's line and barb (`lineColor`, but
+    /// theme-neutral.js `#000`).
+    pub transition: Color,
     /// `quadrant1Fill`: the theme's `primaryColor` (the neo / redux light themes use
     /// their gantt-block `#ECECFE`); quadrants 2..4 add 5 per RGB channel each.
     pub quadrant_fill: Color,
@@ -441,6 +454,10 @@ fn default_palette() -> Palette {
         node_gradient: None,
         node_shadow: false,
         state_border: None,
+        flow_text: c("#333"),
+        state_label: c("#131300"),
+        state_bkg: None,
+        transition: c("#333333"),
         quadrant_fill: c("#ECECFF"),
         // invert(#ECECFF); mkBorder(#ECECFF) = adjust(s: -40, l: -10).
         primary_text: c("#131300"),
@@ -783,6 +800,42 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
     p.tag_label_border = git.tag_border;
     for (k, v) in vars {
         apply_variable(&mut p, k, v);
+    }
+    // Each theme's `updateColors`, after the overrides.
+    let sets_node_text = matches!(
+        theme,
+        ThemeName::Base
+            | ThemeName::Neo
+            | ThemeName::NeoDark
+            | ThemeName::Redux
+            | ThemeName::ReduxDark
+            | ThemeName::ReduxColor
+            | ThemeName::ReduxDarkColor
+    );
+    p.flow_text = match var("nodeTextColor") {
+        Some(v) => c(v),
+        None if sets_node_text => p.primary_text.clone(),
+        None => p.text_color.clone(),
+    };
+    // (Under the default theme mermaid 12.3.0 keeps its own `#131300`
+    // whatever `stateBkg` or `primaryTextColor` say: measured, every other
+    // theme follows them.)
+    let state_bkg = var("stateBkg").filter(|_| theme != ThemeName::Default);
+    p.state_label = match var("stateLabelColor").or(state_bkg) {
+        Some(v) => c(v),
+        None if theme == ThemeName::Default => c("#131300"),
+        None => p.primary_text.clone(),
+    };
+    p.state_bkg = var("stateBkg").map(c);
+    p.transition = match (var("transitionColor"), theme) {
+        (Some(v), _) => c(v),
+        (None, ThemeName::Neutral) => c("#000"),
+        (None, _) => p.line_color.clone(),
+    };
+    // theme-base.js: `compositeBackground ||= background || tertiaryColor`, its
+    // background `#f4f4f4` (the others' composites take the canvas's).
+    if theme == ThemeName::Base && p.composite_background.is_none() {
+        p.composite_background = Some(c(var("background").unwrap_or("#f4f4f4")));
     }
     if p.er_row_odd.is_some() {
         let (odd, even) = er_rows(theme, &p, vars);
