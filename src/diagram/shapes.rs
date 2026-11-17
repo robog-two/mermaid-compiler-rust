@@ -708,9 +708,18 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
                 p(x0 + h / 4.0, c.y),
             ],
         ),
-        Shape::Diamond | Shape::Choice => {
-            poly_outline(c, vec![p(c.x, y0), p(x1, c.y), p(c.x, y1), p(x0, c.y)])
+        Shape::Diamond => {
+            // question.ts translates the drawn polygon by `-s/2 + 0.5`: the
+            // outline sits half a pixel right of the node, while edges are
+            // still clipped at the unshifted bounds.
+            let pts = vec![p(c.x, y0), p(x1, c.y), p(c.x, y1), p(x0, c.y)];
+            Outline {
+                parts: vec![body_poly(&shifted(&pts, 0.5, 0.0))],
+                boundary: Boundary::Polygon(c, pts),
+                glyphs: Vec::new(),
+            }
         }
+        Shape::Choice => poly_outline(c, vec![p(c.x, y0), p(x1, c.y), p(c.x, y1), p(x0, c.y)]),
         Shape::Hexagon => {
             let k = h / m.hexagon_factor;
             poly_outline(
@@ -1995,5 +2004,22 @@ mod tests {
             .clip(Point::new(481.2268829345703, 384.46181462605796));
         assert!((hit.x - 483.1072056532992).abs() < 1e-5, "{hit:?}");
         assert!((hit.y - 384.19125185279137).abs() < 1e-5, "{hit:?}");
+    }
+
+    /// question.ts draws the diamond translated by `-s/2 + 0.5` (mermaid
+    /// 12.3.0, a 171px diamond at x 573.5: its top vertex at 574), while
+    /// edges still clip at the unshifted node bounds.
+    #[test]
+    fn diamond_drawn_half_a_pixel_right() {
+        let m = ShapeMetrics::classic(Shape::Diamond, 15.0);
+        let c = Point::new(573.5, 809.5);
+        let o = outline(Shape::Diamond, c, 171.0, 171.0, &m).unwrap();
+        let Geometry::Path(d) = &o.parts[0].geom else {
+            panic!("diamond body is a path")
+        };
+        assert_eq!(d[0], geom::PathCmd::MoveTo(Point::new(574.0, 724.0)));
+        assert_eq!(d[1], geom::PathCmd::LineTo(Point::new(659.5, 809.5)));
+        let hit = o.boundary.clip(Point::new(0.0, 809.5));
+        assert_eq!(hit.x, 573.5 - 85.5);
     }
 }
