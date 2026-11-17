@@ -733,6 +733,7 @@ mod tests {
                                 PathCmd::MoveTo(p) | PathCmd::LineTo(p) => add(*p),
                                 PathCmd::CubicTo(_, _, p) => add(*p),
                                 PathCmd::Close => {}
+                                PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => {}
                             }
                         }
                     }
@@ -740,7 +741,7 @@ mod tests {
                         add(Point::new(c.x - r, c.y - r));
                         add(Point::new(c.x + r, c.y + r));
                     }
-                    Geometry::Rect { .. } => {}
+                    Geometry::Rect { .. } | Geometry::Line { .. } => {}
                 }
             }
         }

@@ -2664,7 +2664,7 @@ fn calc_label_position(points: &[Point]) -> Point {
 /// An end is `Some` when its arrow type is one of `markerOffsets`' keys: such
 /// an end on a zero-length segment gets mermaid's NaN angle, and d3 then
 /// writes `NaN` coordinates the browser does not draw.
-fn line_with_offset(data: &[Point], start: Option<f64>, end: Option<f64>) -> Vec<Point> {
+pub(crate) fn line_with_offset(data: &[Point], start: Option<f64>, end: Option<f64>) -> Vec<Point> {
     let last = data.len() - 1;
     let (first, final_) = (data[0], data[last]);
     let (start_key, end_key) = (start.is_some(), end.is_some());
@@ -2783,7 +2783,7 @@ fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> 
         }
     };
     let mut d = String::new();
-    for c in cmds {
+    for c in geom::flatten_arcs(cmds).iter() {
         match *c {
             geom::PathCmd::MoveTo(a) => {
                 let a = local(a);
@@ -2806,6 +2806,8 @@ fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> 
                 )
             }
             geom::PathCmd::Close => d += "Z",
+            // Flattened above.
+            geom::PathCmd::MoveBy(_) | geom::PathCmd::ArcTo { .. } => {}
         }
     }
     d.contains(&js_round(p.x)) || d.contains(&js_round(p.y))
@@ -4506,6 +4508,7 @@ fn node_elements(
                 line_height: g.font_size,
                 font_size: g.font_size,
                 bold: g.bold,
+                weight: None,
                 anchor: Anchor::Start,
                 fill: pal.node_border.clone(),
             };
@@ -4665,6 +4668,8 @@ fn node_elements(
                             &text_color,
                         );
                         t.bold = block.bold;
+                        // An HTML label: a markdown `<strong>` in it is bolder.
+                        t.weight = block.bold.then_some(700);
                         els.push(Element::classed_text(t, class));
                     }
                     y += block.height;
@@ -4697,6 +4702,7 @@ fn node_elements(
                     .anchored(Anchor::Start, x0 + REQ_PADDING / 2.0);
                     let t = Text {
                         bold: rm.body.bold,
+                        weight: rm.body.bold.then_some(700),
                         ..t
                     };
                     els.push(Element::classed_text(t, "label"));
@@ -5734,6 +5740,7 @@ mod tests {
             .filter_map(|c| match c {
                 PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(*p),
                 PathCmd::Close => None,
+                PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => None,
             })
             .collect()
     }

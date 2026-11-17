@@ -51,9 +51,15 @@ pub fn esc(s: &str) -> String {
 
 /// Path data string for path commands.
 pub fn path_data(cmds: &[PathCmd]) -> String {
+    use crate::diagram::xychart::js_num;
+    // A path with SVG arcs is venn.js's: every number in full.
+    let arcs = cmds.iter().any(|c| matches!(c, PathCmd::ArcTo { .. }));
     let mut d = String::new();
     for c in cmds {
         match c {
+            PathCmd::MoveTo(p) if arcs => {
+                let _ = write!(d, "M {} {} ", js_num(p.x), js_num(p.y));
+            }
             PathCmd::MoveTo(p) => {
                 let _ = write!(d, "M{},{}", num(p.x), num(p.y));
             }
@@ -73,7 +79,36 @@ pub fn path_data(cmds: &[PathCmd]) -> String {
                 );
             }
             PathCmd::Close => d.push('Z'),
+            // venn.js's spelling (`circlePath`, `intersectionAreaPath`), its
+            // numbers as JavaScript prints them, so the browser parses the same
+            // floats it parses from mermaid's markup.
+            PathCmd::MoveBy(p) => {
+                let _ = write!(d, "m {} {} ", js_num(p.x), js_num(p.y));
+            }
+            PathCmd::ArcTo {
+                rx,
+                ry,
+                large,
+                sweep,
+                to,
+                rel,
+            } => {
+                let _ = write!(
+                    d,
+                    "{} {} {} 0 {} {} {} {} ",
+                    if *rel { 'a' } else { 'A' },
+                    js_num(*rx),
+                    js_num(*ry),
+                    u8::from(*large),
+                    u8::from(*sweep),
+                    js_num(to.x),
+                    js_num(to.y)
+                );
+            }
         }
+    }
+    if arcs {
+        d.truncate(d.trim_end().len());
     }
     d
 }
@@ -94,7 +129,10 @@ impl Filters<'_> {
     fn collect(&mut self, els: &[Element]) {
         for el in els {
             match el {
-                Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                Element::Group { children, .. }
+                | Element::Rotated { children, .. }
+                | Element::Translated { children, .. }
+                | Element::Clipped { children, .. } => {
                     self.collect(children);
                 }
                 Element::Shape { paint, .. } => {
@@ -236,10 +274,10 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>) {
         num(t.y),
         num(t.font_size),
         esc(t.fill.css()),
-        if t.bold { " font-weight=\"bold\"" } else { "" }
+        weight_attr(t)
     );
     if t.lines.len() == 1 {
-        write_line(out, &t.lines[0], t.bold);
+        write_line(out, &t.lines[0], t);
     } else {
         for (i, line) in t.lines.iter().enumerate() {
             let _ = write!(
@@ -248,7 +286,7 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>) {
                 num(t.x),
                 num(t.y + i as f64 * t.line_height),
             );
-            write_line(out, line, t.bold);
+            write_line(out, line, t);
             out.push_str("</tspan>");
         }
     }
@@ -261,7 +299,7 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>) {
 fn write_text_with_icons(out: &mut String, t: &Text, class: &Option<String>) {
     use crate::icons::Piece;
     let _ = write!(out, "<g{}>", class_attr(class));
-    let weight = if t.bold { " font-weight=\"bold\"" } else { "" };
+    let weight = weight_attr(t);
     for (i, line) in t.lines.iter().enumerate() {
         let y = t.y + i as f64 * t.line_height;
         let w = crate::text::line_width(line, t.font_size, t.bold);
@@ -284,7 +322,7 @@ fn write_text_with_icons(out: &mut String, t: &Text, class: &Option<String>) {
                         num(t.font_size),
                         esc(t.fill.css()),
                     );
-                    write_line(out, &text, t.bold);
+                    write_line(out, &text, t);
                     out.push_str("</text>");
                 }
                 Piece::Icon { x, icon } => {
@@ -315,21 +353,48 @@ fn fmt_scale(s: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
+/// A text's `font-weight` attribute: its own CSS weight, else bold or none.
+fn weight_attr(t: &Text) -> String {
+    match t.weight {
+        Some(w) => format!(" font-weight=\"{w}\""),
+        None if t.bold => " font-weight=\"bold\"".into(),
+        None => String::new(),
+    }
+}
+
+/// CSS `bolder`: the weight of a `<strong>` inside text of weight `w`.
+fn bolder(w: u16) -> u16 {
+    match w {
+        0..350 => 400,
+        350..550 => 700,
+        _ => 900,
+    }
+}
+
 /// One display line: plain text, or one `<tspan>` per run of markdown emphasis.
-fn write_line(out: &mut String, line: &str, bold: bool) {
+/// A run marked bold inside bold text with its own CSS weight ([`Text::weight`],
+/// an HTML label's) is that weight made `bolder`, as `<strong>` is.
+fn write_line(out: &mut String, line: &str, t: &Text) {
     if !crate::text::has_marks(line) {
         out.push_str(&esc(line));
         return;
     }
+    let bold = t.bold;
     let word_runs = line.contains(crate::text::mark::RUN);
-    for run in crate::text::styled_runs(line, bold) {
-        if run.bold == bold && !run.italic && !word_runs {
+    // Only text with its own CSS weight tells a marked run inside bold text
+    // apart; other text takes its runs merged with its weight.
+    let base = bold && t.weight.is_none();
+    for run in crate::text::styled_runs(line, base) {
+        let strong = (run.bold && bold).then_some(t.weight).flatten();
+        if (run.bold || bold) == bold && !run.italic && !word_runs && strong.is_none() {
             out.push_str(&esc(&run.text));
             continue;
         }
         out.push_str("<tspan");
         // Runs are never lighter than the text's own weight.
-        if run.bold != bold {
+        if let Some(w) = strong {
+            let _ = write!(out, " font-weight=\"{}\"", bolder(w));
+        } else if run.bold && !bold {
             out.push_str(" font-weight=\"bold\"");
         }
         if run.italic {
@@ -390,10 +455,32 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 Geometry::Path(cmds) => {
                     let _ = write!(out, "<path{cls} d=\"{}\"{attrs}/>", path_data(cmds));
                 }
+                Geometry::Line { a, b } => {
+                    let _ = write!(
+                        out,
+                        "<line{cls} x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"{attrs}/>",
+                        num(a.x),
+                        num(a.y),
+                        num(b.x),
+                        num(b.y)
+                    );
+                }
             }
         }
         Element::Text { text, class } | Element::OutlinedText { text, class, .. } => {
             write_text(out, text, class)
+        }
+        Element::Clipped { rect, children } => {
+            // A nested viewport over the same user coordinates clips its content.
+            let (x, y, w, h) = (num(rect.x), num(rect.y), num(rect.w), num(rect.h));
+            let _ = write!(
+                out,
+                "<svg x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" viewBox=\"{x} {y} {w} {h}\">"
+            );
+            for c in children {
+                write_element(out, c, fx);
+            }
+            out.push_str("</svg>");
         }
         Element::Rotated {
             deg,
@@ -409,6 +496,24 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 num(*deg),
                 num(about.x),
                 num(about.y)
+            );
+            for c in children {
+                write_element(out, c, fx);
+            }
+            out.push_str("</g>");
+        }
+        Element::Translated { dx, dy, children } => {
+            if children.is_empty() {
+                return;
+            }
+            // In full, as mermaid writes it: the browser reads the offset
+            // and the local coordinates in single precision each.
+            use crate::diagram::xychart::js_num;
+            let _ = write!(
+                out,
+                "<g transform=\"translate({}, {})\">",
+                js_num(*dx),
+                js_num(*dy)
             );
             for c in children {
                 write_element(out, c, fx);
@@ -519,10 +624,16 @@ mod tests {
     #[test]
     fn emphasis_marks_become_styled_tspans() {
         let mut out = String::new();
+        let plain = Text::middle(
+            crate::geom::Point::default(),
+            "",
+            16.0,
+            &crate::scene::Color::new("#000"),
+        );
         write_line(
             &mut out,
             &crate::text::label_lines("`a **b** *c<d*`")[0],
-            false,
+            &plain,
         );
         assert_eq!(
             out,
@@ -530,8 +641,17 @@ mod tests {
         );
         // Text that is bold already needs no bold tspans.
         let mut out = String::new();
-        write_line(&mut out, &crate::text::label_lines("<b>x</b>y")[0], true);
+        let bold = plain.clone().bold();
+        write_line(&mut out, &crate::text::label_lines("<b>x</b>y")[0], &bold);
         assert_eq!(out, "xy");
+        // Unless it is an HTML label's: `<strong>` in bold is `bolder`.
+        let html = Text {
+            weight: Some(700),
+            ..bold
+        };
+        let mut out = String::new();
+        write_line(&mut out, &crate::text::label_lines("<b>x</b>y")[0], &html);
+        assert_eq!(out, "<tspan font-weight=\"900\">x</tspan>y");
     }
 
     #[test]

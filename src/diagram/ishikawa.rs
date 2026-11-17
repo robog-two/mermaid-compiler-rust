@@ -620,6 +620,8 @@ fn text_el(l: &Label, fill: &Color, class: &str) -> Element {
             line_height: l.line_height,
             font_size: l.font_size,
             bold: l.bold,
+            // The only bold label is the head's: `.ishikawa-head-label` is 600.
+            weight: l.bold.then_some(600),
             anchor: l.anchor,
             fill: fill.clone(),
         },
@@ -875,6 +877,38 @@ mod tests {
             let ang = ((a.y - b.y).abs() / (a.x - b.x).abs()).atan().to_degrees();
             assert!((ang - 82.0).abs() < 1e-6);
         }
+    }
+
+    /// mermaid 12.3.0's `.ishikawa-head-label { font-weight: 600 }`: the head
+    /// label's computed weight is 600, not bold's 700.
+    #[test]
+    fn head_label_weight_is_600() {
+        let cfg = MermaidConfig::default();
+        let s = render(
+            "ishikawa\n  Blurry Photo\n    Cause\n",
+            None,
+            &cfg,
+            &cfg.palette(),
+        )
+        .unwrap();
+        fn walk(els: &[Element], out: &mut Vec<(Option<String>, Option<u16>)>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                        walk(children, out)
+                    }
+                    Element::Text { text, class } => out.push((class.clone(), text.weight)),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&s.elements, &mut out);
+        assert!(
+            out.contains(&(Some("ishikawa-head-label".into()), Some(600))),
+            "{out:?}"
+        );
+        assert!(out.iter().filter(|o| o.1.is_some()).count() == 1, "{out:?}");
     }
 
     #[test]

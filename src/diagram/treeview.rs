@@ -942,6 +942,7 @@ fn icon_elements(icon: &IconRef, x: f64, y: f64, color: &Color) -> Vec<Element> 
                         line_height: 67.75 * k,
                         font_size: 67.75 * k,
                         bold: false,
+                        weight: None,
                         anchor: Anchor::Start,
                         fill: Color::new("#fff"),
                     }),
@@ -961,6 +962,7 @@ pub fn draw(lay: &Layout, cfg: &LayoutConfig, colors: &Colors, pal: &Palette) ->
         line_height: fs * 1.5,
         font_size: fs,
         bold: false,
+        weight: None,
         anchor: Anchor::Start,
         fill: fill.clone(),
     };

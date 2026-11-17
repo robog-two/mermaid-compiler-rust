@@ -32,6 +32,7 @@ pub fn unknown(r: Rect) -> Element {
         line_height: 67.75 * s,
         font_size: 67.75 * s,
         bold: false,
+        weight: None,
         anchor: Anchor::Start,
         fill: Color::new("#ffffff"),
     })

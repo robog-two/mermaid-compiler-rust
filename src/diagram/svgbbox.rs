@@ -754,6 +754,39 @@ pub fn cylinder_box(w: f64, h: f64, rx: f64, ry: f64) -> (f64, f64) {
 /// (sequence's database glyph draws it at the participant's own coordinates,
 /// and the single-precision arcs land differently there).
 pub fn cylinder_box_at(start: (f64, f64), w: f64, h: f64, rx: f64, ry: f64) -> (f64, f64) {
+    let (lo, hi) = cylinder_bounds(start, w, h, rx, ry);
+    (f64::from(span(lo.0, hi.0)), f64::from(span(lo.1, hi.1)))
+}
+
+/// `getBBox()` of a node group holding [`cylinder_box`]'s path under
+/// cylinder.ts's `translate(-w / 2, -(h / 2 + ry))` and a label box
+/// `(x, y, width, height)` in the group's frame, as `(x, y, width, height)`:
+/// what `calculateBlockSize` takes for a block's size.
+pub fn cylinder_node_box(w: f64, h: f64, rx: f64, ry: f64, label: [f64; 4]) -> [f64; 4] {
+    let (lo, hi) = cylinder_bounds((0.0, ry), w, h, rx, ry);
+    let (pw, ph) = (span(lo.0, hi.0), span(lo.1, hi.1));
+    let (x, y) = (lo.0 + js_f32(-w / 2.0), lo.1 + js_f32(-(h / 2.0 + ry)));
+    let (lx, ly) = (js_f32(label[0]), js_f32(label[1]));
+    let (lw, lh) = (js_f32(label[2]), js_f32(label[3]));
+    let (l, t) = (x.min(lx), y.min(ly));
+    let (r, b) = ((x + pw).max(lx + lw), (y + ph).max(ly + lh));
+    [
+        f64::from(l),
+        f64::from(t),
+        f64::from(span(l, r)),
+        f64::from(span(t, b)),
+    ]
+}
+
+/// `SkPath::computeTightBounds()` of `createCylinderPathD`'s path from
+/// `start`: its corners.
+fn cylinder_bounds(
+    start: (f64, f64),
+    w: f64,
+    h: f64,
+    rx: f64,
+    ry: f64,
+) -> ((f32, f32), (f32, f32)) {
     let arc = |dx: f64| {
         Segment::Arc(RelArc {
             rx,
@@ -773,7 +806,7 @@ pub fn cylinder_box_at(start: (f64, f64), w: f64, h: f64, rx: f64, ry: f64) -> (
         Segment::Line(0.0, -h),
     ];
     let (lo, hi, _) = segment_bounds((js_f32(start.0), js_f32(start.1)), &segs);
-    (f64::from(span(lo.0, hi.0)), f64::from(span(lo.1, hi.1)))
+    (lo, hi)
 }
 
 #[cfg(test)]
@@ -950,5 +983,25 @@ mod tests {
             28.215_816_497_802_734_f64 as f32,
         );
         assert_eq!(f64::from(span(lo, hi)), 87.954_521_179_199_22);
+    }
+
+    #[test]
+    fn cylinder_node_box_is_measured_in_the_shapes_frame() {
+        // A block `y[("DB")]` before layout (cylinder.ts, padding 8): mermaid
+        // sizes its row by this box, and centres the rows at ±27.30204200744629
+        // (half of 46.60408401489258 + 8), not at the exact 46.6074484.
+        let (w, lw) = (30.234375, 22.234375);
+        let ry = (w / 2.0) / (2.5 + w / 50.0);
+        let h = 24.0 + 8.0 + ry;
+        let label = [-lw / 2.0, -12.0 + 8.0 / 1.5, lw, 24.0];
+        assert_eq!(
+            cylinder_node_box(w, h, w / 2.0, ry, label),
+            [
+                -15.117_187_5,
+                -23.302_043_914_794_922,
+                30.234_375,
+                46.604_084_014_892_58
+            ]
+        );
     }
 }

@@ -1624,6 +1624,7 @@ fn tspan_lines(lines: &[String], x: f64, y: f64, font: f64, bold: bool, fill: &C
         line_height: font,
         font_size: font,
         bold,
+        weight: None,
         anchor: Anchor::Middle,
         fill: fill.clone(),
     })
@@ -1874,6 +1875,7 @@ fn draw_shape(s: &Shape, card: &CardLayout, r: Rect, conf: &C4Conf) -> Element {
             line_height: 1.1 * sec.font,
             font_size: sec.font,
             bold: sec.bold,
+            weight: None,
             anchor: Anchor::Middle,
             fill: font.clone(),
         };
@@ -2067,6 +2069,7 @@ pub fn draw(
                 line_height: 16.0,
                 font_size: 16.0,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Start,
                 fill: marker.clone(),
             },
@@ -2498,9 +2501,10 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
                     Element::Text { text, .. } | Element::OutlinedText { text, .. } => {
                         out.push(text.clone())
                     }
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        walk(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Rotated { children, .. }
+                    | Element::Translated { children, .. }
+                    | Element::Clipped { children, .. } => walk(children, out),
                     Element::Shape { .. } => {}
                 }
             }

@@ -32,7 +32,7 @@ pub struct Subpath {
 pub fn flatten(cmds: &[PathCmd]) -> Vec<Subpath> {
     let mut out: Vec<Subpath> = Vec::new();
     let mut cur = Point::default();
-    for c in cmds {
+    for c in crate::geom::flatten_arcs(cmds).iter() {
         match *c {
             PathCmd::MoveTo(p) => {
                 out.push(Subpath {
@@ -77,6 +77,8 @@ pub fn flatten(cmds: &[PathCmd]) -> Vec<Subpath> {
                 }
                 cur = p;
             }
+            // `flatten_arcs` leaves neither.
+            PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => {}
             PathCmd::Close => {
                 if let Some(s) = out.last_mut() {
                     s.closed = true;

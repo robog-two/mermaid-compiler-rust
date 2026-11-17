@@ -120,6 +120,7 @@ pub(crate) fn text_at(
         line_height: size * 1.2,
         font_size: size,
         bold: false,
+        weight: None,
         anchor,
         fill: fill.clone(),
     }

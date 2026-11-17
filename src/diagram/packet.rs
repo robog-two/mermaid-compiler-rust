@@ -313,6 +313,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                     line_height: BYTE_FONT,
                     font_size: BYTE_FONT,
                     bold: false,
+                    weight: None,
                     anchor: if single {
                         Anchor::Middle
                     } else {
@@ -329,6 +330,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                         line_height: BYTE_FONT,
                         font_size: BYTE_FONT,
                         bold: false,
+                        weight: None,
                         anchor: Anchor::End,
                         fill: ink.clone(),
                     };

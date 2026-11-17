@@ -4659,6 +4659,10 @@ mod tests {
             match geom {
                 Geometry::Rect { rect, .. } => b.add_rect(*rect),
                 Geometry::Circle { c, r } => b.add_rect(Rect::centered(*c, 2.0 * r, 2.0 * r)),
+                Geometry::Line { a, b: e } => {
+                    b.add_point(*a);
+                    b.add_point(*e);
+                }
                 Geometry::Path(cmds) => {
                     for c in cmds {
                         if let PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) =
@@ -4792,9 +4796,10 @@ mod tests {
             for e in els {
                 match e {
                     Element::Shape { paint, .. } => out.extend(paint.dash.clone()),
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        dashes(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Rotated { children, .. }
+                    | Element::Translated { children, .. }
+                    | Element::Clipped { children, .. } => dashes(children, out),
                     Element::Text { .. } | Element::OutlinedText { .. } => {}
                 }
             }
@@ -4874,7 +4879,7 @@ mod tests {
         cmds.iter()
             .filter_map(|c| match *c {
                 PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::CubicTo(_, _, p) => Some(p),
-                PathCmd::Close => None,
+                PathCmd::Close | PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => None,
             })
             .collect()
     }

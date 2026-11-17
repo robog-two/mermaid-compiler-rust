@@ -1675,6 +1675,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                     line_height: axis_font * 1.2,
                     font_size: axis_font,
                     bold: false,
+                    weight: None,
                     anchor: Anchor::Middle,
                     fill: c.text.clone(),
                 },
@@ -1800,6 +1801,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                 line_height: font * 1.2,
                 font_size: font,
                 bold: false,
+                weight: None,
                 anchor,
                 fill: fill_text,
             },
@@ -1838,6 +1840,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
             line_height: sec_font,
             font_size: sec_font,
             bold: false,
+            weight: None,
             anchor: Anchor::Start,
             fill: c.title.clone(),
         };
@@ -1872,6 +1875,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                 line_height: VERT_FONT * 1.2,
                 font_size: VERT_FONT,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Middle,
                 fill: c.vert.clone(),
             },
@@ -1887,11 +1891,15 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
         let marker = g.today_marker.as_deref().unwrap_or("");
         if marker != "off" {
             let x = if g.tasks.is_empty() { 0.0 } else { x_of(now) };
+            // A `<line>`, as mermaid draws it: far outside the chart (a
+            // `dateFormat X` chart's seconds against today's milliseconds),
+            // Chromium measures a line from coordinates clamped to ~2^25, a path
+            // from the ones given.
             overlay.push(Element::classed_shape(
-                Geometry::Path(vec![
-                    geom::PathCmd::MoveTo(Point::new(x, title_margin)),
-                    geom::PathCmd::LineTo(Point::new(x, h - title_margin)),
-                ]),
+                Geometry::Line {
+                    a: Point::new(x, title_margin),
+                    b: Point::new(x, h - title_margin),
+                },
                 today_paint(&c.today, marker),
                 "today",
             ));
@@ -1910,6 +1918,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                 line_height: 22.0,
                 font_size: 18.0,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Middle,
                 fill: c.title.clone(),
             },
@@ -2277,14 +2286,10 @@ mod tests {
                 match e {
                     Element::Group { children, .. } => walk(children, out),
                     Element::Shape {
-                        geom: Geometry::Path(cmds),
+                        geom: Geometry::Line { a, b },
                         paint,
                         class: Some(c),
                     } if c == "today" => {
-                        let [geom::PathCmd::MoveTo(a), geom::PathCmd::LineTo(b)] = cmds.as_slice()
-                        else {
-                            panic!("{cmds:?}")
-                        };
                         assert_eq!(a.x, b.x);
                         out.push((a.x, a.y, b.y, paint.clone()));
                     }
@@ -2300,6 +2305,39 @@ mod tests {
     /// 2024-01-24T15:30:00Z, the `new Date()` the references below were rendered at.
     const NOW: i64 = 1_706_110_200_000;
     const PLAN: &str = "gantt\n    dateFormat YYYY-MM-DD\n    section A\n    One   :a1, 2024-01-10, 10d\n    Two   :after a1, 12d\n    section B\n    Three :2024-01-15, 15d\n";
+
+    /// A `dateFormat X` chart (seconds) puts today 15 billion px to the right;
+    /// mermaid 12.3.0 writes `<line x1="15234843269" x2="15234843269" y1="25"
+    /// y2="195" class="today">`, and so must we: Chromium's `getBBox` of that
+    /// line starts at 33554428, of the same path at 15234843269.
+    #[test]
+    fn far_today_line_is_an_svg_line() {
+        let src = "gantt\n    title Git Issues - days since last update\n    dateFormat X\n    axisFormat %s\n    section Issue19062\n    71   : 0, 71\n    section Issue19401\n    36   : 0, 36\n    section Issue193\n    34   : 0, 34\n    section Issue7441\n    9    : 0, 9\n    section Issue1300\n    5    : 0, 5\n";
+        let lines = today_lines(src, Some(NOW));
+        assert_eq!(
+            lines.iter().map(|l| (l.0, l.1, l.2)).collect::<Vec<_>>(),
+            [(15_234_843_269.0, 25.0, 195.0)]
+        );
+        let r = crate::render::render_with_env(
+            src,
+            &MermaidConfig::default(),
+            &crate::render::RenderEnv { now_ms: Some(NOW) },
+        )
+        .unwrap();
+        let opt = crate::output::svg::SvgOptions {
+            id: "my-svg",
+            background: "white",
+            sizing: crate::output::svg::SvgSizing::MaxWidth,
+            theme_css: None,
+        };
+        let svg = crate::output::svg::to_svg(&r.scene, &opt);
+        assert!(
+            svg.contains(
+                "<line class=\"today\" x1=\"15234843269\" y1=\"25\" x2=\"15234843269\" y2=\"195\""
+            ),
+            "{svg}"
+        );
+    }
 
     #[test]
     fn today_line_follows_the_supplied_clock() {

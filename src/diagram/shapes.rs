@@ -1041,9 +1041,10 @@ fn geometry_points(g: &Geometry, out: &mut Vec<Point>) {
             out.push(Point::new(c.x - r, c.y - r));
             out.push(Point::new(c.x + r, c.y + r));
         }
+        Geometry::Line { a, b } => out.extend([*a, *b]),
         Geometry::Path(cmds) => {
             let mut cur = Point::default();
-            for cmd in cmds {
+            for cmd in crate::geom::flatten_arcs(cmds).iter() {
                 match *cmd {
                     PathCmd::MoveTo(q) | PathCmd::LineTo(q) => {
                         out.push(q);
@@ -1062,7 +1063,8 @@ fn geometry_points(g: &Geometry, out: &mut Vec<Point>) {
                         }
                         cur = e;
                     }
-                    PathCmd::Close => {}
+                    // Flattened above.
+                    PathCmd::Close | PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => {}
                 }
             }
         }

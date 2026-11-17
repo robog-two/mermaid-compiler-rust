@@ -222,6 +222,22 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
                     PathCmd::LineTo(p) => PathCmd::LineTo(sc(p)),
                     PathCmd::CubicTo(a, b, p) => PathCmd::CubicTo(sc(a), sc(b), sc(p)),
                     PathCmd::Close => PathCmd::Close,
+                    PathCmd::MoveBy(d) => PathCmd::MoveBy(d.scale(k)),
+                    &PathCmd::ArcTo {
+                        rx,
+                        ry,
+                        large,
+                        sweep,
+                        to,
+                        rel,
+                    } => PathCmd::ArcTo {
+                        rx: rx * k,
+                        ry: ry * k,
+                        large,
+                        sweep,
+                        to: if rel { to.scale(k) } else { sc(&to) },
+                        rel,
+                    },
                 })
                 .collect();
             paint.stroke_width *= k;
@@ -243,6 +259,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
                 line_height: pal.pie_section_text_size,
                 font_size: pal.pie_section_text_size,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Middle,
                 fill: pal.pie_section_text.clone(),
             },
@@ -272,6 +289,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
                 line_height: title_size,
                 font_size: title_size,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Middle,
                 fill: pal.pie_title_text.clone(),
             },
@@ -294,6 +312,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
             line_height: legend_size,
             font_size: legend_size,
             bold: false,
+            weight: None,
             anchor: Anchor::Start,
             fill: pal.pie_legend_text.clone(),
         };

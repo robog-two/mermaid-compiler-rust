@@ -2163,24 +2163,34 @@ linkStyle 0 stroke:#00f");
             *r = Rect::new(x0, y0, x1 - x0, y1 - y0);
         };
         match el {
-            Element::Group { children, .. } => children.iter().for_each(|c| bbox(c, out)),
+            Element::Group { children, .. } | Element::Clipped { children, .. } => {
+                children.iter().for_each(|c| bbox(c, out))
+            }
             Element::Shape { geom, .. } => match geom {
                 Geometry::Rect { rect, .. } => {
                     add(crate::geom::Point::new(rect.x, rect.y));
                     add(crate::geom::Point::new(rect.right(), rect.bottom()));
                 }
                 Geometry::Circle { c, .. } => add(*c),
+                Geometry::Line { a, b } => {
+                    add(*a);
+                    add(*b);
+                }
                 Geometry::Path(cmds) => {
                     for c in cmds {
                         match c {
                             PathCmd::MoveTo(p) | PathCmd::LineTo(p) => add(*p),
                             PathCmd::CubicTo(_, _, p) => add(*p),
                             PathCmd::Close => {}
+                            PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => {}
                         }
                     }
                 }
             },
-            Element::Text { .. } | Element::OutlinedText { .. } | Element::Rotated { .. } => {}
+            Element::Text { .. }
+            | Element::OutlinedText { .. }
+            | Element::Rotated { .. }
+            | Element::Translated { .. } => {}
         }
     }
 

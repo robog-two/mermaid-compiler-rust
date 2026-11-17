@@ -1177,6 +1177,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 line_height: BRANCH_FONT,
                 font_size: BRANCH_FONT,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Start,
                 fill: st.branch_label(k),
             };
@@ -1400,6 +1401,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 line_height: 22.0,
                 font_size: 18.0,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Middle,
                 fill: pal.text_color.clone(),
             },
@@ -1474,6 +1476,7 @@ fn commit_label(
             line_height: h,
             font_size: LABEL_FONT,
             bold: st.redux,
+            weight: None,
             anchor: Anchor::Start,
             fill: if st.neo_gen() {
                 pal.node_border.clone()
@@ -1553,6 +1556,7 @@ fn commit_tags(
         line_height: TAG_FONT * 1.2,
         font_size: TAG_FONT,
         bold: false,
+        weight: None,
         anchor: Anchor::Start,
         fill: pal.tag_label_color.clone(),
     };
@@ -1957,6 +1961,9 @@ mod tests {
                         let r = match geom {
                             Geometry::Rect { rect, .. } => *rect,
                             Geometry::Path(cmds) => geom::path_bbox(cmds).unwrap_or_default(),
+                            Geometry::Line { a, b } => {
+                                geom::path_bbox(&Geometry::line_path(*a, *b)).unwrap_or_default()
+                            }
                             Geometry::Circle { .. } => Rect::default(),
                         };
                         sh.push((k.clone(), paint.clone(), r));

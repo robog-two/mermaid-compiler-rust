@@ -559,6 +559,120 @@ fn group_border_color(pal: &Palette) -> Color {
 /// svgDraw.ts: arrowSize = iconSize / 6, base as wide as it is long, tip 2px
 /// past the edge end (`ArchitectureDirectionArrowShift`).
 /// The arrow's corners also widen the drawing's box (`getBBox`).
+/// drawEdges' label: `createText` wrapped at a width from the edge's extent,
+/// its tspans 1em, 2.1em, ... below the midpoint. An edge between two
+/// horizontal sides keeps it level, between two vertical sides turns it
+/// -90° about the midpoint, and an elbow (one of each) tilts it 45° and
+/// moves it by its screen boxes before and after the turn
+/// (`getBoundingClientRect`, at scale 1), with `dominant-baseline: auto`.
+fn edge_label(
+    label: &str,
+    pts: &[Point],
+    from: Side,
+    to: Side,
+    font: f64,
+    fill: &Color,
+    bounds: &mut Bounds,
+) -> Vec<Element> {
+    let horizontal = |s: Side| matches!(s, Side::L | Side::R);
+    let (start, mid, end) = (pts[0], pts[1], pts[pts.len() - 1]);
+    let width = match (horizontal(from), horizontal(to)) {
+        (true, true) => (start.x - end.x).abs(),
+        (false, false) => (start.y - end.y).abs() / 1.5,
+        _ => (start.x - end.x).abs() / 2.0,
+    };
+    let lines = crate::text::svg_wrap_lines(&crate::text::label_lines(label), width, font, false);
+    let b = TextBlock::svg(lines, font, false);
+    if b.is_empty() {
+        return Vec::new();
+    }
+    let middle = crate::text::baseline_shift(crate::text::Baseline::Middle, font);
+    let ascent = (0.905 * font).round();
+    // The text box (as getBBox / getBoundingClientRect see it) about the
+    // group's origin: from the first line's ascent to the block's height.
+    // The text box about the anchor (lines centred on it).
+    let ink = b
+        .lines
+        .iter()
+        .map(|l| {
+            let half = crate::text::line_width(l, font, false) / 2.0;
+            let (lo, hi) = crate::text::svg_bbox_extent(l, font, false);
+            (lo - half, hi - half)
+        })
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |a, (lo, hi)| {
+            (a.0.min(lo), a.1.max(hi))
+        });
+    let text = |x: f64, y: f64| Text {
+        x,
+        y,
+        lines: b.lines.clone(),
+        line_height: font * crate::text::SVG_LINE_HEIGHT,
+        font_size: font,
+        bold: false,
+        weight: None,
+        anchor: Anchor::Middle,
+        fill: fill.clone(),
+    };
+    // Corners of the text box placed with its origin at `o`, turned by `deg`
+    // about `about`.
+    let mut add = |o: Point, baseline: f64, deg: f64, about: Point| {
+        let (x0, x1) = (o.x + ink.0, o.x + ink.1);
+        let top = o.y + baseline - ascent;
+        let (sin, cos) = deg.to_radians().sin_cos();
+        for (x, y) in [
+            (x0, top),
+            (x1, top),
+            (x0, top + b.height),
+            (x1, top + b.height),
+        ] {
+            let (dx, dy) = (x - about.x, y - about.y);
+            bounds.add_point(Point::new(
+                about.x + dx * cos - dy * sin,
+                about.y + dx * sin + dy * cos,
+            ));
+        }
+    };
+    match (horizontal(from), horizontal(to)) {
+        (true, true) => {
+            add(mid, font + middle, 0.0, mid);
+            vec![Element::text(text(mid.x, mid.y + font + middle))]
+        }
+        (false, false) => {
+            add(mid, font + middle, -90.0, mid);
+            vec![Element::Rotated {
+                deg: -90.0,
+                about: mid,
+                children: vec![Element::text(text(mid.x, mid.y + font + middle))],
+            }]
+        }
+        _ => {
+            // getArchitectureDirectionXYFactors
+            let (fx, fy) = match (from, to) {
+                (Side::L, Side::T) | (Side::T, Side::L) => (1.0, 1.0),
+                (Side::B, Side::L) | (Side::L, Side::B) => (1.0, -1.0),
+                (Side::B, Side::R) | (Side::R, Side::B) => (-1.0, -1.0),
+                _ => (-1.0, 1.0),
+            };
+            let (w0, h0) = (ink.1 - ink.0, b.height);
+            // The box turned 45°: (w + h)·cos 45° each way.
+            let turned = (w0 + h0) * std::f64::consts::FRAC_1_SQRT_2;
+            let deg = -fx * fy * 45.0;
+            let o = Point::new(
+                mid.x + fx * turned / 2.0,
+                mid.y - h0 / 2.0 + fy * turned / 2.0,
+            );
+            let about = Point::new(o.x, o.y + h0 / 2.0);
+            // `dominant-baseline: auto`: the first baseline 1em down.
+            add(o, font, deg, about);
+            vec![Element::Rotated {
+                deg,
+                about,
+                children: vec![Element::text(text(o.x, o.y + font))],
+            }]
+        }
+    }
+}
+
 fn arrow(end: Point, dir: Point, color: &Color, icon: f64, bounds: &mut Bounds) -> Element {
     let size = icon / 6.0;
     let perp = Point::new(-dir.y, dir.x);
@@ -632,11 +746,11 @@ fn layout_from_placement(d: &Architecture, p: &Placement, font: f64, icon: f64) 
 fn layout(d: &Architecture, font: f64, c: &ArchConfig) -> (Placement, Layout) {
     // cytoscape measures a label (a service's raw title or an edge's label,
     // one line) on a canvas in its default font, `Helvetica Neue, Helvetica,
-    // sans-serif` (Arial's metrics where Helvetica Neue is missing), rounded
-    // up; service titles at `architecture.fontSize`, edge labels at
-    // cytoscape's 16px.
+    // sans-serif` (Inter, as mermaid-cli's environment serves Helvetica
+    // Neue), rounded up; service titles at `architecture.fontSize`, edge
+    // labels at cytoscape's 16px.
     let measure = |t: &str, edge: bool| {
-        crate::text::line_width(t, if edge { 16.0 } else { c.font_size }, false).ceil()
+        crate::text::inter::canvas_width(t, if edge { 16.0 } else { c.font_size }).ceil()
     };
     let placement = architecture_fcose::place(d, &measure, c);
     let lay = layout_from_placement(d, &placement, font, c.icon_size);
@@ -712,7 +826,12 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             // svgDraw.ts: the title moves down `fontSize / 2 - 3` past an icon.
             baseline += ac.font_size / 2.0 - 3.0;
         }
-        if let Some(t) = g.title.as_ref().map(|t| TextBlock::label(t, font)) {
+        // createText wraps the title at the group's width.
+        let wrapped = |t: &str, w: f64| {
+            let lines = crate::text::svg_wrap_lines(&crate::text::label_lines(t), w, font, false);
+            TextBlock::new(lines, font, false)
+        };
+        if let Some(t) = g.title.as_ref().map(|t| wrapped(t, r.w)) {
             if !t.is_empty() {
                 children.push(Element::classed_text(
                     Text {
@@ -722,6 +841,7 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                         line_height: font * crate::text::SVG_LINE_HEIGHT,
                         font_size: font,
                         bold: false,
+                        weight: None,
                         anchor: Anchor::Start,
                         fill: pal.text_color.clone(),
                     },
@@ -769,7 +889,17 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 } else {
                     v.extend(icon_glyph(icon.as_deref(), ib));
                 }
-                if let Some(b) = title.as_ref().map(|t| TextBlock::label(t, font)) {
+                // createText wraps the title at 1.5 icon widths.
+                let wrap = 1.5 * ac.icon_size;
+                if let Some(b) = title.as_ref().map(|t| {
+                    let lines = crate::text::svg_wrap_lines(
+                        &crate::text::label_lines(t),
+                        wrap,
+                        font,
+                        false,
+                    );
+                    TextBlock::new(lines, font, false)
+                }) {
                     if !b.is_empty() {
                         // `createText` under the icon's bottom centre: tspans
                         // 1.1em apart from 1em down, on the group's inherited
@@ -779,11 +909,31 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                             + font
                             + crate::text::baseline_shift(crate::text::Baseline::Middle, font);
                         let last = b.lines.last().map_or("", String::as_str);
-                        let top = first - (0.905 * font).round();
-                        let bottom = first
-                            + lh * (b.lines.len() as f64 - 1.0)
-                            + crate::text::svg_line_box(font, last)
-                            - (0.905 * font).round();
+                        let ascent = (0.905 * font).round();
+                        // The viewBox is measured before it is set (at scale 1):
+                        // Chromium boxes the text from its single-precision row
+                        // positions (row `i` at `y = (1.1i - 0.1)em`, `dy =
+                        // 1.1em`) and the unrounded `middle` shift (half the
+                        // x-height), rounded out to the 1/64px layout unit
+                        // (17.015625 tall at 16px, where the drawn text's box is
+                        // 17); a descender's ink reaches whole pixels below the
+                        // baseline as drawn (the shift rounded).
+                        let row = |i: usize, shift: f64| {
+                            let em = |k: f64| k as f32 * font as f32;
+                            f64::from(em(i as f64 * 1.1 - 0.1) + em(1.1)) + shift
+                        };
+                        let raw = font * 1082.0 / 4096.0;
+                        let drawn = first - ib.bottom() - font;
+                        let lu = |v: f64, up: bool| {
+                            let u = v * 64.0;
+                            (if up { u.ceil() } else { u.floor() }) / 64.0
+                        };
+                        let n = b.lines.len() - 1;
+                        let descent = (0.212 * font).round();
+                        let below = crate::text::svg_line_box(font, last) - ascent;
+                        let top = ib.bottom() + lu(row(0, raw) - ascent, false);
+                        let bottom = ib.bottom()
+                            + lu(row(n, raw) + descent, true).max(row(n, drawn) + below);
                         bounds.add_rect(Rect::new(
                             ib.center().x - b.width / 2.0,
                             top,
@@ -798,6 +948,7 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                                 line_height: lh,
                                 font_size: font,
                                 bold: false,
+                                weight: None,
                                 anchor: Anchor::Middle,
                                 fill: pal.text_color.clone(),
                             },
@@ -855,33 +1006,20 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             class: Some("architecture-edge".into()),
             children,
         });
-        if let Some(b) = e.label.as_ref().map(|l| TextBlock::label(l, font)) {
-            if !b.is_empty() {
-                // `createText` at the midpoint with `dy: 1em`: the label hangs just
-                // below the edge rather than covering it.
-                let mid = pts[1];
-                let at = Point::new(mid.x, mid.y + b.height / 2.0);
-                let r = Rect::centered(at, b.width + 6.0, b.height);
-                bounds.add_rect(r);
-                // The text's tspans sit 1em, 2.1em, ... below the midpoint, on the
-                // group's `dominant-baseline: middle`.
-                label_els.push(Element::group(
-                    "edgeLabel",
-                    // Upstream's edge labels have no background box.
-                    vec![Element::text(Text {
-                        x: mid.x,
-                        y: mid.y
-                            + font
-                            + crate::text::baseline_shift(crate::text::Baseline::Middle, font),
-                        lines: b.lines.clone(),
-                        line_height: font * crate::text::SVG_LINE_HEIGHT,
-                        font_size: font,
-                        bold: false,
-                        anchor: Anchor::Middle,
-                        fill: pal.text_color.clone(),
-                    })],
-                ));
-            }
+        if let Some(label) = e.label.as_deref().filter(|l| !l.trim().is_empty()) {
+            label_els.push(Element::group(
+                "edgeLabel",
+                // Upstream's edge labels have no background box.
+                edge_label(
+                    label,
+                    &pts,
+                    e.lhs.side,
+                    e.rhs.side,
+                    font,
+                    &pal.text_color,
+                    &mut bounds,
+                ),
+            ));
         }
     }
 
@@ -1165,6 +1303,78 @@ mod tests {
         );
     }
 
+    /// mermaid 12.3.0's viewBox, absolute offset included: cytoscape centres the
+    /// layout on its labels measured in Inter (the canvas's Helvetica Neue), and
+    /// the viewBox takes "Processor"'s box at scale 1 (17.015625 tall, rounded out
+    /// to layout units), not the 17 the scaled drawing shows.
+    #[test]
+    fn view_box_matches_mermaids_absolutely() {
+        let src = "architecture-beta\n    service src1(server)[Source 1]\n    service src2(server)[Source 2]\n    service src3(server)[Source 3]\n    service proc(server)[Processor]\n    src1:B --> T:proc\n    src2:B --> T:proc\n    src3:B --> T:proc\n    align row src1 src2 src3\n";
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        let v = r.scene.view_box;
+        let want = [-166.108_894, -103.600_822, 414.717_804, 369.936_035];
+        for (got, want) in [v.x, v.y, v.w, v.h].into_iter().zip(want) {
+            assert!((got - want).abs() < 2e-3, "{v:?}");
+        }
+    }
+
+    /// createText wraps a group's title at the group's width and a service's at
+    /// 1.5 icon widths (mermaid 12.3.0: "Backend Services" in two lines).
+    #[test]
+    fn titles_wrap_like_create_text() {
+        let src = "---\nconfig:\n  architecture:\n    padding: 20\n---\narchitecture-beta\n    group api(cloud)[API]\n    group back(server)[Backend Services] in api\n\n    service db(database)[Database] in back\n    service disk1(disk)[Storage] in back\n    service server(server)[Server] in api\n    service gw(internet)[Gateway]\n    junction j1\n\n    db:L -- R:server\n    disk1:T -- B:db\n    server:T -- B:j1\n    j1:R --> L:gw\n    gw:B -- T:disk1\n";
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        fn walk(els: &[Element], out: &mut Vec<Vec<String>>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Text { text, .. } => out.push(text.lines.clone()),
+                    _ => {}
+                }
+            }
+        }
+        let mut lines = Vec::new();
+        walk(&r.scene.elements, &mut lines);
+        assert!(
+            lines.contains(&vec!["Backend".to_string(), "Services".to_string()]),
+            "{lines:?}"
+        );
+    }
+
+    /// drawEdges turns a label on a vertical edge -90° about the midpoint and
+    /// wraps it at its width (mermaid 12.3.0: "calls" at translate(-187.184,
+    /// -72.661) rotate(-90); "replicates data" in two lines), and tilts an
+    /// elbow's 45°.
+    #[test]
+    fn edge_labels_turn_and_wrap_like_draw_edges() {
+        let src = "architecture-beta\n    group g2(cloud)[Group 2]\n    service s0(server)[DB]\n    service s1(internet)[Service number 1]\n    service s2(cloud)[Svc 2]\n    service s3(server)[DB]\n    service s4(disk)[Service number 4]\n    service s5(cloud)[DB]\n    service s6(server)[x6] in g2\n    s0:T -[calls]- B:s3\n    s6{group}:T -[calls]- B:s4\n    s5:B -[replicates data]- L:s2\n    s6:T --> B:s0\n    s5:R -[calls]- B:s1\n    s0:R --> L:s4\n    s5:T --> B:s4\n";
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        fn walk(els: &[Element], deg: f64, out: &mut Vec<(f64, Vec<String>)>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, deg, out),
+                    Element::Rotated { deg, children, .. } => walk(children, *deg, out),
+                    Element::Text { text, .. } => out.push((deg, text.lines.clone())),
+                    _ => {}
+                }
+            }
+        }
+        let mut texts = Vec::new();
+        walk(&r.scene.elements, 0.0, &mut texts);
+        let calls = |d: f64| {
+            texts
+                .iter()
+                .filter(|t| t.0 == d && t.1 == ["calls"])
+                .count()
+        };
+        assert_eq!(calls(-90.0), 2, "{texts:?}");
+        assert_eq!(calls(-45.0) + calls(45.0), 1, "{texts:?}");
+        assert!(
+            texts.iter().any(|t| t.1 == ["replicates", "data"]),
+            "{texts:?}"
+        );
+    }
+
     fn err_line(src: &str) -> usize {
         match parse(src, None) {
             Err(Error::Parse { line, .. }) => line,
@@ -1229,10 +1439,10 @@ mod tests {
     service s2(cloud)[x2] in g0
     service s3(database)[Service number 3]",
             &[
-                ("s0", 217.6332061971034, 247.1332061971034),
-                ("s1", 71.9097292826084, 101.4097292826084),
-                ("s2", -73.81965954576471, -44.31965954576471),
-                ("s3", -281.1332061971034, -251.6332061971034),
+                ("s0", 215.3832061971034, 247.1332061971034),
+                ("s1", 69.6597292826084, 101.4097292826084),
+                ("s2", -76.06965954576471, -44.31965954576471),
+                ("s3", -283.3832061971034, -251.6332061971034),
             ],
         );
         // Only same-side edges (no spatial constraints); their endpoints and
@@ -1255,22 +1465,21 @@ mod tests {
     s7:T --> T:s4
     s7:R -- R:s6",
             &[
-                ("s0", 304.25679168541643, 339.44540146717634),
-                ("s1", 63.49903969744793, 49.6859856540257),
-                ("s2", -32.715413215805015, -29.00875126043576),
-                ("s3", -134.57498621106015, -92.21032128678121),
-                ("s4", -287.75679168541643, 4.379338781689853),
-                ("s5", -18.63878199853069, -154.89711742028635),
-                ("s6", -148.23105132567682, 18.259596564597047),
-                ("s7", -226.55892931675157, -187.62004156755515),
-                ("j0", -193.8681672764819, -303.44540146717634),
+                ("s0", 319.31681913528405, 295.99704392807337),
+                ("s1", 83.03645205703171, 63.55882156462545),
+                ("s2", 8.899067305369137, -17.219013064145784),
+                ("s3", -76.1052684035935, -86.58799880124188),
+                ("s4", -82.38634223695406, -180.5985121527668),
+                ("s5", -162.19937875824058, -35.96895990063015),
+                ("s6", 21.275730629731136, -165.66812751389176),
+                ("s7", -218.01050802472713, -234.99110642402042),
             ],
         );
     }
 
     /// With `fontSize: 24` the services' titles, not their icons, set the
     /// width of the group around them: mermaid 12.3.0's positions and group
-    /// rects (Chromium, `Helvetica` resolving to Arial's metrics).
+    /// rects (Chromium, the canvas's `Helvetica Neue` resolving to Inter).
     #[test]
     fn font_size_widens_groups_by_their_titles_like_cytoscape() {
         let d = parse(
@@ -1300,14 +1509,14 @@ mod tests {
         let at = |id: &str| p.node_pos[d.nodes.iter().position(|n| n.id == id).unwrap()];
         let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
         let (db, server) = (at("db"), at("server"));
-        assert!(close(db.x, 88.70813219223501) && close(db.y, 24.550458108513606));
-        assert!(close(server.x, -114.70813219223498));
+        assert!(close(db.x, 89.95813219223501) && close(db.y, 24.550458108513606));
+        assert!(close(server.x, -113.45813219223498));
         // The drawn rect is cytoscape's box shifted by half an icon.
         let back = p.group_bbox[1];
-        assert!(close(back.x + 40.0, 33.70813219223501), "{back:?}");
-        assert!(close(back.w, 190.0) && close(back.h, 390.89304507517085));
+        assert!(close(back.x + 40.0, 32.45813219223501), "{back:?}");
+        assert!(close(back.w, 195.0) && close(back.h, 390.89304507517085));
         let api = p.group_bbox[0];
-        assert!(close(api.x + 40.0, -157.20813219223498) && close(api.w, 422.41626438446997));
+        assert!(close(api.x + 40.0, -155.95813219223498) && close(api.w, 424.91626438446997));
     }
 
     #[test]
@@ -1332,13 +1541,13 @@ mod tests {
     s0:R --> L:s4
     s5:T --> B:s4",
             &[
-                ("s0", -227.68404835199726, -11.856657718654716),
-                ("s1", -117.79909556715964, 0.14197922877448832),
-                ("s2", -117.79909556715964, 0.14197922877448832),
-                ("s3", -227.68404835199726, -213.46552273481612),
-                ("s4", 11.97493101455705, -11.856657718654716),
-                ("s5", 11.97493101455705, 208.96552273481612),
-                ("s6", -227.68404835199726, 208.96552273481612),
+                ("s0", -227.18422118380988, -11.856549900874967),
+                ("s1", -117.29888344527353, 0.14185992296433625),
+                ("s2", -117.29888344527353, 0.14185992296433625),
+                ("s3", -227.18422118380988, -213.4654128644585),
+                ("s4", 12.475676629678059, -11.856549900874967),
+                ("s5", 12.475676629678059, 208.96541286445853),
+                ("s6", -227.18422118380988, 208.96541286445853),
             ],
         );
     }

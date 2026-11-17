@@ -1144,6 +1144,9 @@ pub struct WardleyConfig {
     pub axis_font_size: f64,
     pub label_font_size: f64,
     pub show_grid: bool,
+    /// `useMaxWidth`: the svg is drawn 100% of mmdc's 784px page wide (never
+    /// wider than its own width) while the annotations box is measured.
+    pub use_max_width: bool,
 }
 
 impl WardleyConfig {
@@ -1162,6 +1165,7 @@ impl WardleyConfig {
             axis_font_size: num("axisFontSize", 12.0),
             label_font_size: num("labelFontSize", 10.0),
             show_grid: get("showGrid").and_then(Json::as_bool).unwrap_or(false),
+            use_max_width: get("useMaxWidth").and_then(Json::as_bool).unwrap_or(true),
         }
     }
 }
@@ -1295,6 +1299,7 @@ fn text(
         line_height: font * 1.2,
         font_size: font,
         bold: false,
+        weight: None,
         anchor,
         fill: fill.clone(),
     }
@@ -1836,14 +1841,26 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
                     .iter()
                     .map(|a| format!("{}. {}", a.number, a.text))
                     .collect();
-                // getComputedTextLength() runs while the texts still inherit the
-                // container's "trebuchet ms", verdana, arial (Arial) family, before
-                // they end up in the serif face they are drawn in.
+                // getComputedTextLength() and getBBox() run while the texts still
+                // inherit the container's "trebuchet ms", verdana, arial (Arial)
+                // family, before they end up in the serif face they are drawn in,
+                // and at the svg's screen scale: Chromium lays the text out at the
+                // screen size cut to 26.6 fixed point, its advance rounded up to
+                // 1/64 screen px, its box the rounded ascent and descent.
+                let scale = if wc.use_max_width {
+                    crate::text::mmdc_page_scale(width, height)
+                } else {
+                    1.0
+                };
+                let size = crate::text::shaping_size(fs * scale);
                 let max_w = lines
                     .iter()
-                    .map(|l| line_width(l, fs, false))
+                    .map(|l| crate::text::layout_unit_ceil(line_width(l, size, false)) / scale)
                     .fold(0.0, f64::max);
-                let max_h = fs * 1.15;
+                let max_h = lines
+                    .iter()
+                    .map(|l| crate::text::svg_line_box(size, l) / scale)
+                    .fold(0.0, f64::max);
                 let bw = max_w + bpad * 2.0 + 105.0;
                 let bh = sorted.len() as f64 * lh + bpad * 2.0 + max_h / 2.0;
                 let x = px(bx).min(width - pad - bw).max(pad);
@@ -2287,18 +2304,23 @@ annotation 1,[0.5, 0.5] \"First\"",
 
     #[test]
     fn annotations_box_is_measured_in_the_containers_font() {
-        // mermaid 12.3.0 (the gallery map): the box is 219.6425 wide, the widest
-        // line's getComputedTextLength() in Arial (the texts are drawn in Times
-        // later) plus 2·10 padding and 105. Chromium measures it 0.13px narrower
-        // at the svg's render-time scale; the plain Arial advance is 94.773.
+        // mermaid 12.3.0 (the gallery map, 1100 × 800): the box is 219.6425 wide,
+        // the widest line's getComputedTextLength() in Arial (the texts are drawn
+        // in Times later) plus 2·10 padding and 105. Chromium measures it at the
+        // svg's screen scale (784px page): laid out at 7.828125px, its advance
+        // rounded up to 1/64 screen px; the plain Arial advance is 94.773. The
+        // box is 74.3139 tall: the line box is 9 screen px, 12.628 units.
         let (_, els) = scene_elements(
             "wardley-beta
+size [1100, 800]
 annotations [0.10, 0.20]
 annotation 1,[0.78, 0.82] \"User touchpoints\"
-annotation 2,[0.70, 0.60] \"Integration layer\"",
+annotation 2,[0.70, 0.60] \"Integration layer\"
+annotation 3,[0.50, 0.40] \"Data persistence\"",
         );
         let (r, _, _) = rects(&els).into_iter().find(|r| close(r.1, 4.0)).unwrap();
-        assert!((r.w - 219.6425).abs() < 0.15, "{r:?}");
+        assert!((r.w - 219.642_517).abs() < 1e-3, "{r:?}");
+        assert!((r.h - 74.313_886).abs() < 1e-3, "{r:?}");
     }
 
     #[test]

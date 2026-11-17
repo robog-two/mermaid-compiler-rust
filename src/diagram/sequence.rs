@@ -565,6 +565,7 @@ fn line_text(x: f64, y: f64, shift: Baseline, line: &str, font_size: f64, fill: 
         line_height: font_size,
         font_size,
         bold: false,
+        weight: None,
         anchor: Anchor::Middle,
         fill: fill.clone(),
     }
@@ -1536,6 +1537,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
             line_height: pal.font_size * 1.5,
             font_size: pal.font_size,
             bold: false,
+            weight: None,
             anchor: Anchor::Start,
             fill: pal.text_color.clone(),
         }));
@@ -1770,6 +1772,7 @@ fn message_elements(pm: &Pending, pal: &Palette, cfg: &SequenceConfig) -> Elemen
                 line_height: size,
                 font_size: size,
                 bold: false,
+                weight: None,
                 anchor: Anchor::Middle,
                 fill: pal.sequence_number.clone(),
             },
@@ -2971,6 +2974,7 @@ A->>D: x"#,
                                 Some(*p)
                             }
                             PathCmd::Close => None,
+                            PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => None,
                         })
                         .collect(),
                 ),

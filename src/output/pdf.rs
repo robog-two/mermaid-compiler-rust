@@ -123,7 +123,7 @@ impl Ctx {
     }
 
     fn path(&mut self, cmds: &[PathCmd]) {
-        for c in cmds {
+        for c in crate::geom::flatten_arcs(cmds).iter() {
             let _ = match c {
                 PathCmd::MoveTo(p) => writeln!(self.out, "{} {} m", n(p.x), n(p.y)),
                 PathCmd::LineTo(p) => writeln!(self.out, "{} {} l", n(p.x), n(p.y)),
@@ -138,6 +138,8 @@ impl Ctx {
                     n(p.y)
                 ),
                 PathCmd::Close => writeln!(self.out, "h"),
+                // Flattened above.
+                PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => Ok(()),
             };
         }
     }
@@ -157,6 +159,8 @@ impl Ctx {
                 PathCmd::MoveTo(p) | PathCmd::LineTo(p) => finite(p),
                 PathCmd::CubicTo(a, b, p) => finite(a) && finite(b) && finite(p),
                 PathCmd::Close => true,
+                PathCmd::MoveBy(p) => finite(p),
+                PathCmd::ArcTo { rx, ry, to, .. } => rx.is_finite() && ry.is_finite() && finite(to),
             })
         {
             return;
@@ -243,6 +247,7 @@ impl Ctx {
             Geometry::Rect { rect, rx } => self.path(&rounded_rect(rect, *rx)),
             Geometry::Circle { c, r } => self.path(&crate::geom::ellipse(*c, *r, *r)),
             Geometry::Path(cmds) => self.path(cmds),
+            Geometry::Line { a, b } => self.path(&Geometry::line_path(*a, *b)),
         }
         let op = match (fill.is_some(), stroke.is_some()) {
             (true, true) => "B",
@@ -269,6 +274,7 @@ impl Ctx {
             Geometry::Rect { rect, rx } => rounded_rect(rect, *rx),
             Geometry::Circle { c, r } => crate::geom::ellipse(*c, *r, *r),
             Geometry::Path(cmds) => cmds.clone(),
+            Geometry::Line { a, b } => Geometry::line_path(*a, *b),
         };
         let subpaths = super::shadow::flatten(&cmds);
         let fill_a = fill.map_or(0.0, |f| f.a * paint.fill_opacity.unwrap_or(1.0));
@@ -426,11 +432,28 @@ impl Ctx {
     fn element(&mut self, el: &Element) {
         match el {
             Element::Group { children, .. } => children.iter().for_each(|c| self.element(c)),
+            Element::Clipped { rect, children } => {
+                let _ = writeln!(
+                    self.out,
+                    "q\n{} {} {} {} re W n",
+                    n(rect.x),
+                    n(rect.y),
+                    n(rect.w),
+                    n(rect.h)
+                );
+                children.iter().for_each(|c| self.element(c));
+                self.out.push_str("Q\n");
+            }
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
             Element::Text { text, .. } => self.text(text, None),
             Element::OutlinedText {
                 text, color, width, ..
             } => self.text(text, Some((color, *width))),
+            Element::Translated { dx, dy, children } => {
+                let _ = writeln!(self.out, "q\n1 0 0 1 {} {} cm", n(*dx), n(*dy));
+                children.iter().for_each(|c| self.element(c));
+                self.out.push_str("Q\n");
+            }
             Element::Rotated {
                 deg,
                 about,
@@ -893,6 +916,7 @@ mod tests {
             line_height: 16.8,
             font_size: 14.0,
             bold: false,
+            weight: None,
             anchor: Anchor::Start,
             fill: Color::new("#333"),
         };

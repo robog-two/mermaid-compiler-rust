@@ -4,6 +4,7 @@
 //! (the same metrics the PDF backend's built-in Helvetica uses), which gives sizes
 //! within a few percent of the browser's "trebuchet ms"/arial rendering.
 
+pub mod inter;
 pub mod serif;
 
 use crate::geom::Point;
@@ -834,6 +835,20 @@ pub fn layout_unit_ceil(w: f64) -> f64 {
 pub fn shaping_size(font_size: f64) -> f64 {
     let effective = (font_size as f32 * 100.0).floor() / 100.0;
     f64::from((effective * 64.0) as i32) / 64.0
+}
+
+/// Screen pixels per user unit of a `width` × `height` viewBox drawn as mmdc
+/// draws a `useMaxWidth` svg: 100% of its 784px page wide (never wider than
+/// `width`), its height following the aspect ratio cut down to a layout unit,
+/// and the viewBox fitted into that box (`meet`, the smaller of the two scales).
+/// Text an svg measures while on the page is laid out at its screen size.
+pub fn mmdc_page_scale(width: f64, height: f64) -> f64 {
+    let w = width.min(784.0);
+    if w <= 0.0 || height <= 0.0 {
+        return 1.0;
+    }
+    let h = (w * height / width * 64.0).floor() / 64.0;
+    (w / width).min(h / height)
 }
 
 /// The box of one SVG text line drawn as mermaid's `createText` draws SVG labels,
