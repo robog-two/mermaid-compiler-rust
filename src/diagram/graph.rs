@@ -820,7 +820,7 @@ fn edge_label_block(label: &str, font: f64) -> TextBlock {
 /// the label's bounding box, and so its size in the layout, includes it.
 const SVG_EDGE_LABEL_PAD: f64 = 2.0;
 /// Where ELK's coordinates start in ours: the root's 12px padding.
-const ELK_ORIGIN: f64 = 12.0;
+pub(crate) const ELK_ORIGIN: f64 = 12.0;
 
 /// [`edge_label_block`] for `htmlLabels: false`: SVG text wrapped at the same 200px.
 fn svg_edge_label_block(label: &str, font: f64) -> TextBlock {
@@ -1146,6 +1146,7 @@ pub fn render_with(
                 width: browser_size(measured[i].w, elk, drawn_as_circle(&nodes[i], cfg.look)),
                 height: browser_size(measured[i].h, elk, drawn_as_circle(&nodes[i], cfg.look)),
                 cluster: nodes[i].cluster.map(|c| c.0),
+                centered_ports: false,
             })
             .collect(),
         edges: g
@@ -2906,7 +2907,7 @@ const ELK_MIN_MARKER_SEGMENT: f64 = 8.0;
 /// segment for the end's marker (`offset`) goes too
 /// (`ensureStart/EndMarkerSegmentLength`). `clip`: `None` for an outline
 /// point that differs from the port only by rounding.
-fn kept_port(
+pub(crate) fn kept_port(
     port: Point,
     clip: Option<Point>,
     offset: f64,
@@ -3136,7 +3137,10 @@ fn collinear(a: Point, b: Point, c: Point) -> bool {
 
 /// A straightened route without the ports [`kept_port`] put in, where they
 /// are still where they were.
-fn without_kept_ports(mut pts: Vec<Point>, [start, end]: [Option<Point>; 2]) -> Vec<Point> {
+pub(crate) fn without_kept_ports(
+    mut pts: Vec<Point>,
+    [start, end]: [Option<Point>; 2],
+) -> Vec<Point> {
     if let Some(p) = end
         && pts.len() > 2
         && pts[pts.len() - 2] == p

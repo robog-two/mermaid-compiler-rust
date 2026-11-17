@@ -961,6 +961,7 @@ mod tests {
                     width: 60.0,
                     height: 40.0,
                     cluster: None,
+                    centered_ports: false,
                 })
                 .collect(),
             edges: edges

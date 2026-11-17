@@ -60,6 +60,10 @@ pub struct LayoutNode {
     pub width: f64,
     pub height: f64,
     pub cluster: Option<usize>,
+    /// ELK `portAlignment.default: CENTER` (mermaid's `spreadPorts`): the
+    /// node's ports on a side stand one port spacing apart about its middle
+    /// instead of spread over the side.
+    pub centered_ports: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1465,6 +1469,11 @@ fn finish_rng(
             &end_labels,
             elk_spacing(graph, input.node_sep),
             elk_port_inset(graph),
+            &input
+                .nodes
+                .iter()
+                .map(|n| n.centered_ports)
+                .collect::<Vec<_>>(),
         )
     });
     let (x, ports, elk_raw) = match elk_placed {
@@ -2255,7 +2264,13 @@ fn elk_port_inset(graph: ElkGraph) -> f64 {
 /// `(len - inset) - inset`, the ports' own height `(n + 1) * port_port`, the
 /// step `port_port + (room - height) / (n + 1)`, and each port one step on
 /// from the one before, starting one step past the inset.
-fn elk_port_offsets(n: usize, len: f64, inset: f64, port_port: f64) -> impl Iterator<Item = f64> {
+fn elk_port_offsets(
+    n: usize,
+    len: f64,
+    inset: f64,
+    port_port: f64,
+    center: bool,
+) -> impl Iterator<Item = f64> {
     let room = len - inset - inset;
     let (first, step) = if n == 1 {
         // `DISTRIBUTED` turns `CENTER` for a lone port (its height less the
@@ -2268,6 +2283,15 @@ fn elk_port_offsets(n: usize, len: f64, inset: f64, port_port: f64) -> impl Iter
             },
             0.0,
         )
+    } else if center {
+        // `CENTER`: the ports need `(n - 1) * port_port`; centred in the room,
+        // or crammed into it from its start.
+        let height = (n - 1) as f64 * port_port;
+        if room < height {
+            (inset, port_port + (room - height) / (n - 1) as f64)
+        } else {
+            (inset + (room - height) / 2.0, port_port)
+        }
     } else {
         let height = (n + 1) as f64 * port_port;
         let step = port_port + (room - height) / (n + 1) as f64;
@@ -2327,6 +2351,7 @@ fn elk_place(
     end_labels: &[[Option<f64>; 2]],
     spacing: elkbk::Spacing,
     port_inset: f64,
+    centered: &[bool],
 ) -> (Vec<f64>, Vec<f64>, Vec<f64>, ElkRaw) {
     let nv = verts.len();
     let kept_rank = |r: usize| {
@@ -2460,7 +2485,8 @@ fn elk_place(
             } else {
                 port_inset
             };
-            let offs = elk_port_offsets(side.len(), verts[v].w, inset, spacing.port_port);
+            let center = centered.get(v).copied().unwrap_or(false);
+            let offs = elk_port_offsets(side.len(), verts[v].w, inset, spacing.port_port, center);
             let crammed = verts[v].w < 2.0 * inset;
             for (&(_, _, _, ei), off) in side.iter().zip(offs) {
                 port[ei] = off;
@@ -4204,6 +4230,7 @@ mod tests {
             width: 80.0,
             height: 40.0,
             cluster,
+            centered_ports: false,
         }
     }
 
@@ -4482,6 +4509,7 @@ mod tests {
             width: w,
             height: h,
             cluster: None,
+            centered_ports: false,
         };
         let mut inp = input(
             vec![size(113.0, 31.0), size(42.0, 47.0), size(43.0, 44.0)],
@@ -4655,6 +4683,7 @@ mod tests {
                     width: 100.0,
                     height: 81.0,
                     cluster: None,
+                    centered_ports: false,
                 }],
                 vec![
                     LayoutEdge::new(0, 0, 1, Some((50.0, 21.0))),
@@ -5058,6 +5087,7 @@ mod tests {
                 width: 34.125,
                 height: 81.0,
                 cluster: None,
+                centered_ports: false,
             };
             let mut inp = elk(input(
                 vec![narrow.clone(), narrow.clone(), narrow],
@@ -5352,6 +5382,7 @@ mod tests {
             width: 0.0,
             height: 0.0,
             cluster: None,
+            centered_ports: false,
         };
         let out = layout(&elk(input(
             vec![point, node(None), node(None)],
@@ -5515,7 +5546,7 @@ mod tests {
     #[test]
     fn elk_port_offsets_on_short_sides() {
         let offs = |n: usize, len: f64, inset: f64| -> Vec<f64> {
-            elk_port_offsets(n, len, inset, 12.0).collect()
+            elk_port_offsets(n, len, inset, 12.0, false).collect()
         };
         let close = |a: Vec<f64>, b: &[f64]| {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3)
@@ -5532,7 +5563,7 @@ mod tests {
     fn elk_port_offsets_are_elks_doubles() {
         // Four ports on a 45px side in a container: ELK adds its step to the
         // port before, which leaves each a bit above the exact spread.
-        let got: Vec<f64> = elk_port_offsets(4, 45.0, 10.8, 12.0).collect();
+        let got: Vec<f64> = elk_port_offsets(4, 45.0, 10.8, 12.0, false).collect();
         assert_eq!(
             got,
             [
