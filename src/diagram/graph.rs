@@ -2498,7 +2498,7 @@ fn calc_label_position(points: &[Point]) -> Point {
 /// An end is `Some` when its arrow type is one of `markerOffsets`' keys: such
 /// an end on a zero-length segment gets mermaid's NaN angle, and d3 then
 /// writes `NaN` coordinates the browser does not draw.
-fn line_with_offset(data: &[Point], start: Option<f64>, end: Option<f64>) -> Vec<Point> {
+pub(crate) fn line_with_offset(data: &[Point], start: Option<f64>, end: Option<f64>) -> Vec<Point> {
     let last = data.len() - 1;
     let (first, final_) = (data[0], data[last]);
     let (start_key, end_key) = (start.is_some(), end.is_some());

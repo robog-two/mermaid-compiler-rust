@@ -1826,9 +1826,8 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         if e.line == Line::Dotted {
             paint = paint.dashed(vec![2.0]);
         }
-        // Each end leaves (and arrives) toward the middle point. The line stops
-        // 4px short of an arrow end (markerOffsets), where the 8px `pointEnd`
-        // marker is centred.
+        // Each end leaves (and arrives) toward the middle point; the 8px
+        // `pointEnd` marker is centred where the line stops.
         let toward = |from: Point, to: Point| {
             let d = to.minus(from);
             if d.len() < 1e-12 {
@@ -1837,14 +1836,18 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
                 d.norm()
             }
         };
-        let (out_a, in_b) = (toward(pa, mid), toward(mid, pb));
-        let trim = |h: Head| if h == Head::Arrow { 4.0 } else { 0.0 };
-        let sa = pa.plus(out_a.scale(trim(e.start)));
-        let sb = pb.minus(in_b.scale(trim(e.end)));
-        let path = geom::basis_curve(&[sa, mid, sb]);
+        // getLineFunctionsWithOffset: an arrow end (`arrow_point`) is pulled
+        // back 4px toward its neighbour, and a point within 4px of it on both
+        // axes is pushed clear of it.
+        let offset = |h: Head| (h == Head::Arrow).then_some(4.0);
+        let line =
+            crate::diagram::graph::line_with_offset(&[pa, mid, pb], offset(e.start), offset(e.end));
+        let path = geom::basis_curve(&line);
         if let Some(bb) = geom::path_bbox(&path) {
             bounds.add_rect(bb);
         }
+        // The markers turn with the curve's end tangents.
+        let (out_a, in_b) = (toward(line[0], line[1]), toward(line[1], line[2]));
         edges.push(Element::classed_shape(Geometry::Path(path), paint, "edge"));
         edges.extend(head(e.end, pb, in_b, &pal.line_color));
         edges.extend(head(e.start, pa, out_a.scale(-1.0), &pal.line_color));
