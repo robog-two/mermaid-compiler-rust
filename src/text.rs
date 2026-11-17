@@ -663,6 +663,14 @@ pub fn svg_bbox_extent(text: &str, font_size: f64, italic: bool) -> (f64, f64) {
     (left, right.max(layout_unit_ceil(x)))
 }
 
+/// Width of one HTML label line: its styled runs, each rounded up to a layout unit.
+pub fn html_line_width(line: &str, font_size: f64, bold: bool) -> f64 {
+    styled_runs(line, bold)
+        .iter()
+        .map(|r| layout_unit_ceil(line_width(&r.text, font_size, r.bold)))
+        .sum()
+}
+
 /// `w` rounded up to Chromium's layout unit (1/64 px), as an HTML box's
 /// width from its text is (a hair of float error is not rounded up).
 pub fn layout_unit_ceil(w: f64) -> f64 {
@@ -852,6 +860,18 @@ impl TextBlock {
     /// (SVG text's `getBBox` is not snapped.)
     pub fn html(mut self) -> Self {
         self.width = layout_unit_ceil(self.width);
+        self
+    }
+
+    /// [`TextBlock::html`] for lines with emphasis: Chromium sizes each styled run
+    /// (a `<strong>` or `<em>` and the text between them) in layout units, so a
+    /// line is the sum of its runs, each rounded up.
+    pub fn html_runs(mut self) -> Self {
+        self.width = self
+            .lines
+            .iter()
+            .map(|l| html_line_width(l, self.font_size, self.bold))
+            .fold(0.0, f64::max);
         self
     }
 

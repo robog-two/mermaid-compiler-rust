@@ -2884,32 +2884,13 @@ fn label_lines(label: &Label) -> Vec<String> {
         .collect()
 }
 
-/// Greedy word wrap of every line to `max` pixels (the label `max-width`).
-fn wrap_lines(lines: &[String], font: f64, bold: bool, max: f64) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in lines {
-        let mut cur = String::new();
-        for word in line.split_whitespace() {
-            let cand = if cur.is_empty() {
-                word.to_string()
-            } else {
-                format!("{cur} {word}")
-            };
-            if !cur.is_empty() && line_width(&cand, font, bold) > max {
-                out.push(std::mem::replace(&mut cur, word.to_string()));
-            } else {
-                cur = cand;
-            }
-        }
-        out.push(cur);
-    }
-    out
-}
-
 /// A measured text block.
 #[derive(Debug, Clone)]
 struct Block {
     lines: Vec<String>,
+    /// How far left of centre each line sits (a wrapped line keeps the space it
+    /// broke at, `break-spaces`).
+    shifts: Vec<f64>,
     font: f64,
     bold: bool,
     w: f64,
@@ -2927,21 +2908,73 @@ impl Block {
         } else {
             lines.len() as f64 * font * 1.5
         };
+        let shifts = vec![0.0; lines.len()];
         Block {
             lines,
+            shifts,
             font,
             bold,
             w,
             h,
         }
     }
+    /// An HTML label of `max-width: max` (`createText`): one line while it fits,
+    /// as wide as its text in layout units; else wrapped in a box of that width
+    /// (or its widest unbreakable piece), `break-spaces`.
     fn wrapped(lines: &[String], font: f64, bold: bool, max: f64) -> Block {
-        Block::new(wrap_lines(lines, font, bold, max), font, bold)
+        use crate::text::{BreakRule, break_space_shift, html_wrap_width, layout_unit_ceil};
+        let flagged = crate::text::wrap_lines_flagged(lines, max, font, bold, BreakRule::Browser);
+        let natural = lines
+            .iter()
+            .map(|l| {
+                line_width(
+                    &l.split_whitespace().collect::<Vec<_>>().join(" "),
+                    font,
+                    bold,
+                )
+            })
+            .fold(0.0, f64::max);
+        let shifts = flagged
+            .iter()
+            .map(|(l, sp)| {
+                if *sp {
+                    break_space_shift(l, font, bold)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut b = Block::new(flagged.into_iter().map(|(l, _)| l).collect(), font, bold);
+        b.w = if natural > max {
+            html_wrap_width(lines, max, font, bold)
+        } else {
+            layout_unit_ceil(b.w)
+        };
+        b.shifts = shifts;
+        b
     }
     fn text(&self, center: Point, color: &Color) -> Element {
         let mut t = Text::centered(center, &self.lines, self.font, self.font * 1.5, color);
         t.bold = self.bold;
-        Element::text(t)
+        if self.shifts.iter().all(|&s| s == 0.0) {
+            return Element::text(t);
+        }
+        Element::group(
+            "label",
+            self.lines
+                .iter()
+                .zip(&self.shifts)
+                .enumerate()
+                .map(|(i, (l, sh))| {
+                    Element::text(Text {
+                        x: t.x - sh,
+                        y: t.y + i as f64 * t.line_height,
+                        lines: vec![l.clone()],
+                        ..t.clone()
+                    })
+                })
+                .collect(),
+        )
     }
 }
 
@@ -4530,5 +4563,34 @@ mod tests {
         let mut found = Vec::new();
         dashes(&s.elements, &mut found);
         assert!(found.contains(&vec![9.0, 5.0]), "{found:?}");
+    }
+
+    #[test]
+    fn wrapped_labels_take_the_whole_wrapping_width() {
+        // mermaid 12.3.0: "Missing icon fallback" wraps in a 120px break-spaces
+        // box, so the actor is 140 wide (viewBox 400 for this chart), and its first
+        // line keeps the space it broke at (glyphs 1.95px left of centre).
+        let src = "usecase-beta\nactor Normal(\"Normal actor\")\nactor Fallback(\"Missing icon fallback\")@{ icon: \"not-registered:user\" }\nNormal --> Manage\nFallback --> Manage\n";
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        fn texts(els: &[Element], out: &mut Vec<Text>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => texts(children, out),
+                    Element::Text { text, .. } => out.push(text.clone()),
+                    _ => {}
+                }
+            }
+        }
+        let mut t = Vec::new();
+        texts(&r.scene.elements, &mut t);
+        let first = t.iter().find(|t| t.lines == ["Missing icon"]).unwrap();
+        let second = t.iter().find(|t| t.lines == ["fallback"]).unwrap();
+        let shift = second.x - first.x;
+        assert!((shift - crate::text::break_space_shift("Missing icon", 14.0, false)).abs() < 1e-9);
+        assert!((shift - 1.945).abs() < 0.01, "{shift}");
+        // The actors' column is as wide as the 140px wrapped actor: mermaid
+        // centres "Normal actor" at x 101.93 (glyphs from 61.859).
+        let normal = t.iter().find(|t| t.lines == ["Normal actor"]).unwrap();
+        assert!((normal.x - 101.9297).abs() < 0.01, "{}", normal.x);
     }
 }

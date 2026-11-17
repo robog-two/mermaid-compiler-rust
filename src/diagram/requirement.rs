@@ -497,7 +497,9 @@ pub fn to_graph(d: &RequirementDiagram) -> GraphDiagram {
         .iter()
         .zip(slots)
         .map(|(i, slot)| {
-            let mut n = Node::new(i.name.clone(), i.name.clone(), Shape::Requirement);
+            // Names and field values are markdown labels (`**bold**`, `_em_`, ...).
+            let md = |v: &str| crate::text::markdown_lines(v).join(" ");
+            let mut n = Node::new(i.name.clone(), md(&i.name), Shape::Requirement);
             n.color_slot = Some(slot);
             n.style = i.style.clone();
             n.classes = i.classes.clone();
@@ -514,7 +516,7 @@ pub fn to_graph(d: &RequirementDiagram) -> GraphDiagram {
                         f.push(format!("ID: {v}"));
                     }
                     if let Some(v) = text {
-                        f.push(format!("Text: {v}"));
+                        f.push(format!("Text: {}", md(v)));
                     }
                     if let Some(v) = risk {
                         f.push(format!("Risk: {v:?}"));
@@ -527,10 +529,10 @@ pub fn to_graph(d: &RequirementDiagram) -> GraphDiagram {
                 ItemKind::Element { ty, docref } => {
                     let mut f = Vec::new();
                     if let Some(v) = ty {
-                        f.push(format!("Type: {v}"));
+                        f.push(format!("Type: {}", md(v)));
                     }
                     if let Some(v) = docref {
-                        f.push(format!("Doc Ref: {v}"));
+                        f.push(format!("Doc Ref: {}", md(v)));
                     }
                     ("<<Element>>".to_string(), f)
                 }
@@ -708,5 +710,94 @@ mod tests {
         let b = render(SRC, None, &wide, &wide.palette()).unwrap().view_box;
         assert_eq!(a, b);
         assert!(a.x == -8.0 || a.x == 4.0, "{a:?}");
+    }
+
+    /// The full render's view box and its rectangles' widths.
+    fn boxes(src: &str) -> (crate::geom::Rect, Vec<f64>) {
+        use crate::scene::{Element, Geometry};
+        fn walk(els: &[Element], out: &mut Vec<(f64, Option<String>, f64)>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Rect { rect, .. },
+                        class,
+                        paint,
+                    } => out.push((rect.w, class.clone(), paint.stroke_width)),
+                    Element::Shape {
+                        geom: Geometry::Path(_),
+                        class: Some(c),
+                        paint,
+                    } if c == "divider" => out.push((-1.0, Some(c.clone()), paint.stroke_width)),
+                    _ => {}
+                }
+            }
+        }
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        let mut out = Vec::new();
+        walk(&r.scene.elements, &mut out);
+        (
+            r.scene.view_box,
+            out.iter()
+                .filter(|o| o.1.as_deref() == Some("basic label-container"))
+                .map(|o| o.0)
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn labels_are_markdown_measured_per_run_in_layout_units() {
+        // mermaid 12.3.0: `"__test_req__"` is <strong>, the text line
+        // "Text: <em>italicized text</em> <strong>bold text</strong>" is 175.859375
+        // wide (each run rounded up to 1/64 px), the box 20 more.
+        let src = "requirementDiagram\n\nrequirement \"__test_req__\" {\n    id: 1\n    text: \"*italicized text* **bold text**\"\n    risk: high\n    verifymethod: test\n}\n";
+        let (vb, w) = boxes(src);
+        assert_eq!(w, [195.859375]);
+        assert_eq!(vb.w, 211.859375);
+    }
+
+    #[test]
+    fn bold_class_reaches_every_label() {
+        // mermaid 12.3.0: viewBox width 386.46875 with `classDef important
+        // font-weight:bold` on both boxes.
+        let src = "requirementDiagram\n\nrequirement test_req:::important {\n    id: 1\n    text: \"class styling example\"\n    risk: low\n    verifymethod: test\n}\n\nelement test_entity {\n    type: simulation\n}\n\nclassDef important font-weight:bold\n\nclass test_entity important\nstyle test_entity fill:#f9f,stroke:#333\n";
+        let (vb, _) = boxes(src);
+        assert!((vb.w - 386.46875).abs() < 0.01, "{vb:?}");
+    }
+
+    #[test]
+    fn rough_outline_and_divider_widths() {
+        use crate::scene::{Element, Geometry};
+        // Classic look: rough.js strokes at 1.3 (outline and divider); neo's
+        // `.node path { stroke-width: 2px }` restyles both.
+        let widths = |src: &str| {
+            let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+            fn walk(els: &[Element], out: &mut Vec<f64>) {
+                for e in els {
+                    match e {
+                        Element::Group { children, .. } => walk(children, out),
+                        Element::Shape {
+                            geom: Geometry::Rect { .. } | Geometry::Path(_),
+                            class: Some(c),
+                            paint,
+                        } if c == "basic label-container" || c == "divider" => {
+                            out.push(paint.stroke_width)
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&r.scene.elements, &mut out);
+            out
+        };
+        let body = "requirementDiagram\nrequirement r {\n  id: 1\n  text: t\n}\n";
+        assert_eq!(widths(body), [2.0, 2.0]);
+        assert_eq!(
+            widths(&format!(
+                "---\nconfig:\n  theme: default\n  look: classic\n---\n{body}"
+            )),
+            [1.3, 1.3]
+        );
     }
 }

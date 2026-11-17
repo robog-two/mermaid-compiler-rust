@@ -4167,9 +4167,12 @@ fn requirement_metrics(node: &Node, font: f64) -> RequirementMetrics {
             .map(|s| s.lines.clone())
             .unwrap_or_default()
     };
-    let stereo = TextBlock::new(section(0), font, false);
-    let name = TextBlock::new(crate::text::label_lines(&node.label), font, true);
-    let body = TextBlock::new(section(1), font, false);
+    // Every line is an HTML label of its own, measured in layout units; a
+    // `font-weight: bold` style (classDef / style) reaches all of them.
+    let bold = node.style.bold.unwrap_or(false);
+    let stereo = TextBlock::new(section(0), font, bold).html_runs();
+    let name = TextBlock::new(crate::text::label_lines(&node.label), font, true).html_runs();
+    let body = TextBlock::new(section(1), font, bold).html_runs();
     let w = stereo.width.max(name.width).max(body.width) + REQ_PADDING;
     // Labels are centred on their y offset, so the content box starts half a
     // line above the first one; the box adds `padding` to that content box.
@@ -4226,6 +4229,9 @@ fn node_elements(
     // reaches: `strokeWidth` falls back to rough's 1.3 (`userNodeOverrides`).
     let default_width = match (kind, n.shape) {
         (DiagramKind::State, Shape::Choice | Shape::Note) => ROUGH_STROKE_WIDTH,
+        // requirementBox's outline is a rough.js path too, outside neo's
+        // `.node path { stroke-width }`.
+        (_, Shape::Requirement) if !lk.neo => ROUGH_STROKE_WIDTH,
         _ => lk.node_stroke_width,
     };
     let mut paint = Paint::both(
@@ -4440,12 +4446,18 @@ fn node_elements(
                 }
                 if !rm.body.is_empty() {
                     let divider = y0 + rm.stereo.height + rm.name.height + REQ_GAP;
+                    // A rough.js line: rough's 1.3, or neo's `.node path` width.
+                    let line_width = if lk.neo {
+                        lk.node_stroke_width
+                    } else {
+                        ROUGH_STROKE_WIDTH
+                    };
                     els.push(Element::classed_shape(
                         Geometry::Path(vec![
                             PathCmd::MoveTo(Point::new(x0, divider)),
                             PathCmd::LineTo(Point::new(x1, divider)),
                         ]),
-                        Paint::stroke(&stroke, 1.0),
+                        Paint::stroke(&stroke, line_width),
                         "divider",
                     ));
                     // Body lines are left-aligned `padding / 2` in from the edge.
@@ -4458,6 +4470,10 @@ fn node_elements(
                         &text_color,
                     )
                     .anchored(Anchor::Start, x0 + REQ_PADDING / 2.0);
+                    let t = Text {
+                        bold: rm.body.bold,
+                        ..t
+                    };
                     els.push(Element::classed_text(t, "label"));
                 }
                 return (els, Boundary::Rect(r));
