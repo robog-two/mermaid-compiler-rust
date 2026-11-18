@@ -298,6 +298,18 @@ impl Ctx {
         sh: &crate::scene::Shadow,
     ) {
         let Some(c) = resolve(&sh.color) else { return };
+        // A hard shadow (the redux themes' `feDropShadow` with no blur) is the
+        // silhouette's offset copy, filled flat in the shadow colour: vector,
+        // not a soft mask rasterised for every shape.
+        if sh.std_dev == 0.0 {
+            let mut flat = Paint::fill(&crate::scene::Color::new(format!(
+                "rgb({}, {}, {})",
+                c.r, c.g, c.b
+            )));
+            flat.opacity = Some(c.a * paint.opacity.unwrap_or(1.0));
+            self.shape(&geom.translated(sh.dx, sh.dy), &flat);
+            return;
+        }
         let cmds = match geom {
             Geometry::Rect { rect, rx } => rounded_rect(rect, *rx),
             Geometry::Circle { c, r } => crate::geom::ellipse(*c, *r, *r),

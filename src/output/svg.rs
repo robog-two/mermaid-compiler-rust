@@ -1,6 +1,6 @@
 //! `Scene` → SVG text, shaped like mermaid's output (`<svg id="my-svg" ...>`).
 
-use crate::geom::PathCmd;
+use crate::geom::{PathCmd, Rect};
 use crate::scene::{Anchor, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Shadow, Text};
 use std::fmt::Write as _;
 
@@ -135,6 +135,8 @@ struct Filters<'a> {
     brightness: Vec<(String, f64)>,
     /// [`SvgOptions::raster_scale`].
     raster_scale: Option<f64>,
+    /// Rasterising: how many per-shape shadow filters have been written.
+    local: std::cell::Cell<usize>,
 }
 
 impl Filters<'_> {
@@ -211,6 +213,35 @@ impl Filters<'_> {
             .position(|s| s == sh)
             .map(|k| format!(" filter=\"url(#{}-shadow-{k})\"", self.id))
             .unwrap_or_default()
+    }
+
+    /// The `filter` attribute of a shape casting `sh` when rasterising, its
+    /// filter written here over the shape's own box (grown by its stroke, the
+    /// blur and the offset) rather than the whole drawing: a renderer
+    /// allocates and blurs a filter's whole region for every shape using it.
+    /// Where the shape has no box, the shared filter.
+    fn local_shadow(&self, out: &mut String, sh: &Shadow, geom: &Geometry, p: &Paint) -> String {
+        let Some(bb) = geom.bbox() else {
+            return self.filter_attr(sh);
+        };
+        let grow = 2.0 * p.stroke_width + 4.0 * sh.std_dev + sh.dx.abs().max(sh.dy.abs()) + 2.0;
+        let k = self.local.get();
+        self.local.set(k + 1);
+        let id = format!("{}-shape-shadow-{k}", self.id);
+        out.push_str("<defs>");
+        write_shadow_filter(
+            out,
+            &id,
+            sh,
+            Rect::new(
+                bb.x - grow,
+                bb.y - grow,
+                bb.w + 2.0 * grow,
+                bb.h + 2.0 * grow,
+            ),
+        );
+        out.push_str("</defs>");
+        format!(" filter=\"url(#{id})\"")
     }
 
     /// mermaid's rule for each brightened class (timeline/styles.js
@@ -333,36 +364,52 @@ impl Filters<'_> {
                 );
                 continue;
             }
-            // An `feDropShadow` works in linear RGB: its colour converted.
-            let unit = |v: u8| {
-                let v = f64::from(v) / 255.0;
-                num(match sh.linear_rgb {
-                    false => v,
-                    true if v <= 0.04045 => v / 12.92,
-                    true => ((v + 0.055) / 1.055).powf(2.4),
-                })
-            };
-            let space = if sh.linear_rgb { "linearRGB" } else { "sRGB" };
-            let _ = write!(
-                out,
-                "<filter id=\"{}-shadow-{k}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"{space}\"><feColorMatrix in=\"SourceAlpha\" type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\"/><feGaussianBlur stdDeviation=\"{}\"/><feOffset dx=\"{}\" dy=\"{}\"/><feMerge><feMergeNode/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>",
-                self.id,
-                num(r.x - m),
-                num(r.y - m),
-                num(r.w + 2.0 * m),
-                num(r.h + 2.0 * m),
-                unit(c.r),
-                unit(c.g),
-                unit(c.b),
-                num(c.a),
-                num(sh.std_dev),
-                num(sh.dx),
-                num(sh.dy),
+            write_shadow_filter(
+                &mut out,
+                &format!("{}-shadow-{k}", self.id),
+                sh,
+                Rect::new(r.x - m, r.y - m, r.w + 2.0 * m, r.h + 2.0 * m),
             );
         }
         out.push_str("</defs>");
         out
     }
+}
+
+/// A shadow's filter, written as its parts: the shadow colour from the alpha
+/// (a colour matrix; an `feDropShadow` works in linear RGB, its colour
+/// converted), blurred, offset, under the source, over `region`.
+fn write_shadow_filter(out: &mut String, id: &str, sh: &Shadow, region: Rect) {
+    let c = crate::color::parse(sh.color.css()).unwrap_or(crate::color::Rgba {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 1.0,
+    });
+    let unit = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        num(match sh.linear_rgb {
+            false => v,
+            true if v <= 0.04045 => v / 12.92,
+            true => ((v + 0.055) / 1.055).powf(2.4),
+        })
+    };
+    let space = if sh.linear_rgb { "linearRGB" } else { "sRGB" };
+    let _ = write!(
+        out,
+        "<filter id=\"{id}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"{space}\"><feColorMatrix in=\"SourceAlpha\" type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\"/><feGaussianBlur stdDeviation=\"{}\"/><feOffset dx=\"{}\" dy=\"{}\"/><feMerge><feMergeNode/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>",
+        num(region.x),
+        num(region.y),
+        num(region.w),
+        num(region.h),
+        unit(c.r),
+        unit(c.g),
+        unit(c.b),
+        num(c.a),
+        num(sh.std_dev),
+        num(sh.dx),
+        num(sh.dy),
+    );
 }
 
 fn paint_attrs(p: &Paint, stroke_url: Option<String>) -> String {
@@ -685,7 +732,11 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
             out.push_str("</g>");
         }
         Element::Shape { geom, paint, class } => {
-            let attrs = paint_attrs(paint, fx.stroke_url(paint)) + &fx.attr(paint);
+            let shadow_attr = match &paint.shadow {
+                Some(sh) if fx.raster_scale.is_some() => fx.local_shadow(out, sh, geom, paint),
+                _ => fx.attr(paint),
+            };
+            let attrs = paint_attrs(paint, fx.stroke_url(paint)) + &shadow_attr;
             let cls = class_attr(class);
             match geom {
                 Geometry::Rect { rect, rx } => {
@@ -944,6 +995,7 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
         gradients: Vec::new(),
         brightness: Vec::new(),
         raster_scale: opt.raster_scale,
+        local: Default::default(),
     };
     fx.collect(&scene.elements);
     let _ = write!(
@@ -1075,6 +1127,7 @@ mod tests {
             gradients: Vec::new(),
             brightness: Vec::new(),
             raster_scale: None,
+            local: Default::default(),
         };
         fx.collect(&els);
         for e in &els {
