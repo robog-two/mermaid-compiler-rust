@@ -301,8 +301,10 @@ pub struct Text {
     /// mermaid's markup and a raster drawn from it the painted baseline.
     pub tspan_central: bool,
     /// An inline `font-family` (which wins over the stylesheet's), as
-    /// mermaid's unknown icon writes its `?` in `ArialMT, Arial`.
-    pub family: Option<&'static str>,
+    /// mermaid's unknown icon writes its `?` in `ArialMT, Arial`, or a
+    /// stylesheet's family for the text's class (usecase actors' `"Open
+    /// Sans", sans-serif`). The text is measured in its face.
+    pub family: Option<std::borrow::Cow<'static, str>>,
 }
 
 /// The first line's baseline below the top of a block of `line_height`
@@ -314,8 +316,8 @@ pub fn first_baseline(font_size: f64, line_height: f64) -> f64 {
     let html = (line_height - 1.5 * font_size).abs() < 1e-9
         || (line_height - crate::text::normal_line_height(font_size)).abs() < 1e-9;
     if html {
-        let ascent = (0.905 * font_size).round();
-        let descent = (0.212 * font_size).round();
+        let ascent = crate::text::ascent_px(font_size);
+        let descent = crate::text::descent_px(font_size);
         ((line_height - ascent - descent) / 2.0 + 1e-9).floor() + ascent
     } else {
         line_height / 2.0 + font_size * 0.35

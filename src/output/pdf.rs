@@ -825,6 +825,10 @@ fn image_objects(img: &super::image::Samples, mask_obj: usize) -> Vec<Vec<u8>> {
 
 /// Serialise a scene to a single-page PDF.
 pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
+    crate::text::with_family(&scene.font_family, || to_pdf_in_face(scene, opt))
+}
+
+fn to_pdf_in_face(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
     // mmdc asks for the svg's box rounded up plus the body margins, in CSS px.
     let (page_w, page_h) = match opt.paper {
         None => (

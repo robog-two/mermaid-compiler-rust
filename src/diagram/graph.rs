@@ -6062,7 +6062,7 @@ fn node_elements(
                 tspan_central: false,
                 // console.ts: `font-family: monospace` (DejaVu Sans Mono Bold
                 // where mmdc runs).
-                family: Some("monospace"),
+                family: Some("monospace".into()),
             };
             els.push(Element::classed_text(text, "console-glyph"));
         }
@@ -7119,7 +7119,7 @@ fn accent_parts(o: shapes::Outline, pal: &Palette) -> Vec<Element> {
             anchor: Anchor::Start,
             fill: pal.node_border.clone(),
             tspan_central: false,
-            family: Some("monospace"),
+            family: Some("monospace".into()),
         };
         els.push(Element::classed_text(text, "console-glyph"));
     }

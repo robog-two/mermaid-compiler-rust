@@ -347,11 +347,25 @@ fn class_attr(c: &Option<String>) -> String {
 /// `text` rule).
 fn family_attr(t: &Text) -> String {
     t.family
+        .as_ref()
         .map(|f| format!(" style=\"font-family:{}\"", esc(f)))
         .unwrap_or_default()
 }
 
+/// Run `f` measuring in the face `t` is drawn in: its own `font-family`, else
+/// the scene's (set around the whole drawing by [`to_svg`]).
+fn in_face<R>(t: &Text, f: impl FnOnce() -> R) -> R {
+    match &t.family {
+        Some(fam) => crate::text::with_family(fam, f),
+        None => f(),
+    }
+}
+
 fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option<f64>) {
+    in_face(t, || write_text_in_face(out, t, class, raster));
+}
+
+fn write_text_in_face(out: &mut String, t: &Text, class: &Option<String>, raster: Option<f64>) {
     if t.lines.iter().any(|l| crate::icons::has_icons(l)) {
         return write_text_with_icons(out, t, class);
     }
@@ -734,6 +748,10 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
 
 /// Serialise a scene to an SVG document string.
 pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
+    crate::text::with_family(&scene.font_family, || to_svg_in_face(scene, opt))
+}
+
+fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
     let vb = scene.view_box;
     let id = esc(opt.id);
     let mut out = String::with_capacity(4096 + scene.element_count() * 96);

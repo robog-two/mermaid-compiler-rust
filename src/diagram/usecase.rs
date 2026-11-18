@@ -2820,8 +2820,12 @@ struct Options {
     look: Look,
     actor_font: f64,
     actor_bold: bool,
+    /// `actorFontFamily` / `usecaseFontFamily`, which mermaid sets as the
+    /// svg's `--mermaid-usecase-*-font-family` for those labels' classes.
+    actor_family: String,
     usecase_font: f64,
     usecase_bold: bool,
+    usecase_family: String,
     node_spacing: f64,
     rank_spacing: f64,
     padding: f64,
@@ -2838,6 +2842,9 @@ struct Options {
     packs: crate::iconify::IconPacks,
 }
 
+/// The default `actorFontFamily` and `usecaseFontFamily` (config schema).
+const DEFAULT_LABEL_FAMILY: &str = "\"Open Sans\", sans-serif";
+
 fn is_bold(weight: Option<&str>) -> bool {
     weight
         .is_some_and(|w| matches!(w, "bold" | "bolder") || w.parse::<u32>().is_ok_and(|n| n >= 600))
@@ -2851,8 +2858,14 @@ impl Options {
             look: cfg.look,
             actor_font: num("actorFontSize", 14.0),
             actor_bold: is_bold(s("actorFontWeight")),
+            actor_family: s("actorFontFamily")
+                .unwrap_or(DEFAULT_LABEL_FAMILY)
+                .to_string(),
             usecase_font: num("usecaseFontSize", 12.0),
             usecase_bold: is_bold(s("usecaseFontWeight")),
+            usecase_family: s("usecaseFontFamily")
+                .unwrap_or(DEFAULT_LABEL_FAMILY)
+                .to_string(),
             node_spacing: num("nodeSpacing", 50.0),
             rank_spacing: num("rankSpacing", 50.0),
             padding: num("diagramPadding", 20.0),
@@ -2899,6 +2912,10 @@ struct Block {
     bold: bool,
     w: f64,
     h: f64,
+    /// The `font-family` the label's class takes from the stylesheet when it
+    /// is not the diagram's (actors and use cases: `actorFontFamily`,
+    /// `usecaseFontFamily`); measured and drawn in that face.
+    family: Option<String>,
 }
 
 impl Block {
@@ -2920,7 +2937,14 @@ impl Block {
             bold,
             w,
             h,
+            family: None,
         }
+    }
+    /// [`Block::wrapped`] in the face of a CSS `font-family` list.
+    fn wrapped_in(family: &str, lines: &[String], font: f64, bold: bool, max: f64) -> Block {
+        let mut b = crate::text::with_family(family, || Block::wrapped(lines, font, bold, max));
+        b.family = Some(family.to_string());
+        b
     }
     /// An HTML label of `max-width: max` (`createText`): one line while it fits,
     /// as wide as its text in layout units; else wrapped in a box of that width
@@ -2963,8 +2987,15 @@ impl Block {
         b
     }
     fn text(&self, center: Point, color: &Color) -> Element {
+        match &self.family {
+            Some(f) => crate::text::with_family(f, || self.text_in_face(center, color)),
+            None => self.text_in_face(center, color),
+        }
+    }
+    fn text_in_face(&self, center: Point, color: &Color) -> Element {
         let mut t = Text::centered(center, &self.lines, self.font, self.font * 1.5, color);
         t.bold = self.bold;
+        t.family = self.family.clone().map(Into::into);
         if self.shifts.iter().all(|&s| s == 0.0) {
             return Element::text(t);
         }
@@ -3076,9 +3107,16 @@ fn compiled_style(
 const ICON_SIZE: f64 = 42.0;
 
 fn measure_actor(a: &Actor, o: &Options) -> (Shape, f64, f64) {
-    let label = Block::wrapped(&label_lines(&a.label), o.actor_font, o.actor_bold, o.wrap);
+    let label = Block::wrapped_in(
+        &o.actor_family,
+        &label_lines(&a.label),
+        o.actor_font,
+        o.actor_bold,
+        o.wrap,
+    );
     let stereotype = a.stereotype.as_ref().map(|s| {
-        Block::wrapped(
+        Block::wrapped_in(
+            &o.actor_family,
             &[format!("«{}»", decode_entities(s))],
             o.actor_font,
             o.actor_bold,
@@ -3116,11 +3154,11 @@ fn measure_use_case(u: &UseCase, o: &Options) -> (Shape, f64, f64) {
     let text = label_lines(&u.label);
     if u.business && u.shape == UseCaseShape::Ellipse {
         // usecaseBusiness.ts: the stereotype keeps its own label above the main one.
-        let label = Block::wrapped(&text, font, bold, o.wrap);
-        let stereotype = u
-            .stereotype
-            .as_ref()
-            .map(|s| Block::wrapped(&[format!("«{}»", decode_entities(s))], font, bold, o.wrap));
+        let fam = &o.usecase_family;
+        let label = Block::wrapped_in(fam, &text, font, bold, o.wrap);
+        let stereotype = u.stereotype.as_ref().map(|s| {
+            Block::wrapped_in(fam, &[format!("«{}»", decode_entities(s))], font, bold, o.wrap)
+        });
         let label_w = label
             .w
             .max(o.min_width)
@@ -3151,7 +3189,7 @@ fn measure_use_case(u: &UseCase, o: &Options) -> (Shape, f64, f64) {
         lines.push(format!("«{}»", decode_entities(s)));
     }
     lines.extend(text);
-    let label = Block::wrapped(&lines, font, bold, o.wrap);
+    let label = Block::wrapped_in(&o.usecase_family, &lines, font, bold, o.wrap);
     let lw = label.w.max(o.min_width);
     let lh = label.h.max(font * 1.5);
     match u.shape {
@@ -3180,8 +3218,13 @@ fn measure_json(
     font: f64,
     style: &StyleOverrides,
 ) -> (Shape, f64, f64) {
-    let title = Block::new(vec![j.id.clone()], font, false);
-    let cell = |s: &str| Block::new(vec![s.to_string()], font, false);
+    // HTML labels: each as wide as its text in layout units.
+    let cell = |s: &str| {
+        let mut b = Block::new(vec![s.to_string()], font, false);
+        b.w = crate::text::layout_unit_ceil(b.w);
+        b
+    };
+    let title = cell(&j.id);
     let rows: Vec<(Block, Block)> = j
         .rows
         .iter()

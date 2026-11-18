@@ -918,8 +918,18 @@ pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bo
 pub fn html_line_width(line: &str, font_size: f64, bold: bool) -> f64 {
     styled_runs(line, bold)
         .iter()
-        .map(|r| layout_unit_ceil(line_width(&r.text, font_size, r.bold)))
+        .map(|r| layout_unit_ceil(run_width(r, font_size)))
         .sum()
+}
+
+/// Width of one styled run ([`styled_runs`]) in its weight and slant.
+pub fn run_width(r: &StyledRun, font_size: f64) -> f64 {
+    if r.italic {
+        let marked = format!("{}{}{}", mark::ITALIC_ON, r.text, mark::ITALIC_OFF);
+        line_width(&marked, font_size, r.bold)
+    } else {
+        line_width(&r.text, font_size, r.bold)
+    }
 }
 
 /// `w` rounded up to Chromium's layout unit (1/64 px), as an HTML box's
