@@ -273,12 +273,45 @@ pub fn rounded_rect_path(x: f64, y: f64, w: f64, h: f64, r: f64) -> String {
     )
 }
 
+/// rectWithTitle.ts under the handDrawn look (a state with a description):
+/// the `w`×`h` box centred on the origin as a rough path with `rx`
+/// corners, and its title divider `div` below the top as a rough line, both
+/// with the node's options. The box comes first and alone is measured.
+pub fn state_box(w: f64, h: f64, rx: f64, div: f64, st: &HandStyle) -> HandNode {
+    let (x, y) = (-w / 2.0, -h / 2.0);
+    let rect = rough::path(&rounded_rect_path(x, y, w, h, rx), node_options(st));
+    let line = rough::line(x, y + div, x + w, y + div, node_options(st));
+    let paths: Vec<Vec<PathCmd>> = rect
+        .sets
+        .iter()
+        .filter(|s| !s.ops.is_empty())
+        .map(|s| set_cmds(&s.ops, Point::default()))
+        .collect();
+    let bbox = super::svgbbox::cubic_group_box(&paths)
+        .map_or(Rect::new(x, y, w, h), |[x, y, w, h]| Rect::new(x, y, w, h));
+    HandNode {
+        pieces: vec![
+            piece(rect, Point::default()),
+            Piece {
+                drawable: line,
+                at: Point::default(),
+                measured: false,
+            },
+        ],
+        bbox,
+        boundary: Bound::Rect,
+    }
+}
+
 /// What a cluster's hand-drawn frame depends on besides its rect (its paint
 /// leaves the geometry alone).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameStyle {
     pub seed: f64,
     pub stroke_width: f64,
+    /// A state composite (`roundedWithTitle`) with a title this high; a
+    /// subgraph (`rect`) otherwise.
+    pub composite: Option<f64>,
 }
 
 /// clusters.js `rect` under the handDrawn look: `rc.path` of the frame
@@ -296,6 +329,31 @@ pub fn cluster_frame(r: Rect, style: FrameStyle) -> Drawable {
         ..Options::default()
     };
     crate::rough::path(&rounded_rect_path(r.x, r.y, r.w, r.h, 0.0), o)
+}
+
+/// `getBBox()` of a cluster's hand-drawn frame at `r` (in mermaid's frame):
+/// [`cluster_frame`], or a composite's outer path and body rectangle (see
+/// `hand_composite` in the graph renderer).
+pub fn frame_bbox(r: Rect, style: FrameStyle) -> Option<Rect> {
+    let Some(th) = style.composite else {
+        return drawable_bbox(&cluster_frame(r, style));
+    };
+    let solid = || Options {
+        fill: Some("#000".into()),
+        fill_style: "solid".into(),
+        seed: style.seed,
+        ..Options::default()
+    };
+    let outer = rough::path(
+        &rounded_rect_path(r.x, r.y, r.w, r.h, 10.0),
+        Options {
+            roughness: 0.7,
+            ..solid()
+        },
+    );
+    let inner = rough::rectangle(r.x, r.y + th + 2.0, r.w, (r.h - th - 6.0).max(0.0), solid());
+    let a = drawable_bbox(&outer)?;
+    Some(drawable_bbox(&inner).map_or(a, |b| a.union(&b)))
 }
 
 /// `getBBox()` of the group rough.js draws `d` as.

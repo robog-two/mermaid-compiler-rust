@@ -899,6 +899,8 @@ struct Measured {
     /// Under the handDrawn look, the drawn node's `getBBox()` in its own frame
     /// (`w`×`h` is then its size).
     hand: Option<Rect>,
+    /// A hand-drawn described state's box before it was measured.
+    nominal: Option<(f64, f64)>,
 }
 
 fn compartment_layout(
@@ -1174,6 +1176,7 @@ fn measure_node(
         w,
         h,
         hand: None,
+        nominal: None,
     }
 }
 
@@ -1656,10 +1659,17 @@ pub fn render_with(
             model.hand_frames = g
                 .clusters
                 .iter()
-                .map(|c| {
-                    (c.kind == ClusterKind::Group).then(|| hand::FrameStyle {
+                .zip(&cluster_titles)
+                .map(|(c, t)| {
+                    let composite = match c.kind {
+                        ClusterKind::Group => None,
+                        ClusterKind::Composite => Some(if t.is_empty() { 0.0 } else { t.height }),
+                        _ => return None,
+                    };
+                    Some(hand::FrameStyle {
                         seed,
                         stroke_width: c.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH),
+                        composite,
                     })
                 })
                 .collect();
@@ -4462,6 +4472,7 @@ fn hand_cluster(
     let style = hand::FrameStyle {
         seed,
         stroke_width: c.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH),
+        composite: None,
     };
     let d = hand::cluster_frame(Rect::new(r.x + at.x, r.y + at.y, r.w, r.h), style);
     let slot_fill = slot
@@ -5340,7 +5351,9 @@ fn node_elements(
     font: f64,
     kind: DiagramKind,
 ) -> (Vec<Element>, Boundary) {
-    let (w, h) = (m.w, m.h);
+    // A hand-drawn described state is laid out at its drawing's size, but
+    // its box and rows stay where the nominal box puts them.
+    let (w, h) = m.nominal.unwrap_or((m.w, m.h));
     // Flowchart CSS (`.node circle, .node path { fill: mainBkg; stroke: nodeBorder;
     // stroke-width: 2px }`) overrides the state shapes' own attributes; `f-circ` keeps
     // its inline `fill: nodeBorder !important`.
@@ -5435,7 +5448,7 @@ fn node_elements(
     let mut els = Vec::new();
     let hand = lk
         .hand_seed
-        .filter(|_| m.hand.is_some())
+        .filter(|_| m.hand.is_some() && m.nominal.is_none())
         .and_then(|seed| hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)));
     let boundary = if let Some(hn) = hand {
         els.extend(hand_elements(&hn, c, n.style.dash.as_ref()));
@@ -5616,18 +5629,26 @@ fn node_elements(
                     }
                     return (els, Boundary::Rect(r));
                 }
-                els.push(Element::classed_shape(
-                    Geometry::Rect {
-                        rect: r,
-                        rx: layout.rx,
-                    },
-                    paint.clone(),
-                    "basic label-container",
-                ));
+                let rough = lk
+                    .hand_seed
+                    .and_then(|seed| hand_state_box(n, m, pal, lk, seed));
+                match &rough {
+                    Some(hn) => els.extend(hand_elements(hn, c, n.style.dash.as_ref())),
+                    None => els.push(Element::classed_shape(
+                        Geometry::Rect {
+                            rect: r,
+                            rx: layout.rx,
+                        },
+                        paint.clone(),
+                        "basic label-container",
+                    )),
+                }
                 let mut y = y0;
                 for (i, (sec, block)) in n.sections.iter().zip(&m.sections).enumerate() {
                     let sh = layout.heights.get(i).copied().unwrap_or(0.0);
-                    if i > 0 && state {
+                    if i > 0 && rough.is_some() {
+                        // (drawn with the box)
+                    } else if i > 0 && state {
                         // rectWithTitle.ts: a `<line class="divider">`, which
                         // no neo rule reaches: `.statediagram-state .divider
                         // { stroke: stateBorder || nodeBorder }`.
@@ -5882,12 +5903,43 @@ fn hand_style(n: &Node, pal: &Palette, lk: &Look, seed: f64) -> hand::HandStyle 
     }
 }
 
+/// A described state's hand-drawn box ([`hand::state_box`]) at its nominal
+/// size (`m.nominal`, else `m.w`×`m.h`), or `None` for other nodes.
+fn hand_state_box(
+    n: &Node,
+    m: &Measured,
+    pal: &Palette,
+    lk: &Look,
+    seed: f64,
+) -> Option<hand::HandNode> {
+    let layout = m.compartments.as_ref()?;
+    if !(lk.state && n.shape == Shape::Compartments && m.svg_class.is_none()) {
+        return None;
+    }
+    let (w, h) = m.nominal.unwrap_or((m.w, m.h));
+    let div = layout.heights.first().copied().unwrap_or(0.0);
+    // dataFetcher gives every state `rx: 10`.
+    Some(hand::state_box(
+        w,
+        h,
+        10.0,
+        div,
+        &hand_style(n, pal, lk, seed),
+    ))
+}
+
 /// Under the handDrawn look, size node `n` by its drawing's box, as
 /// `updateNodeBounds` does.
 fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
     let Some(seed) = lk.hand_seed else {
         return;
     };
+    if let Some(hn) = hand_state_box(n, m, pal, lk, seed) {
+        m.nominal = Some((m.w, m.h));
+        (m.w, m.h) = (hn.bbox.w, hn.bbox.h);
+        m.hand = Some(hn.bbox);
+        return;
+    }
     if let Some(hn) = hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)) {
         (m.w, m.h) = (hn.bbox.w, hn.bbox.h);
         m.hand = Some(hn.bbox);

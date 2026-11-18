@@ -803,8 +803,7 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
                 res.add_box(rect);
                 // The rough strokes reach past the frame.
                 if let Some(style) = ctx.model.hand_frames.get(*c).copied().flatten() {
-                    let frame = crate::diagram::hand::cluster_frame(rect, style);
-                    if let Some(b) = crate::diagram::hand::drawable_bbox(&frame) {
+                    if let Some(b) = crate::diagram::hand::frame_bbox(rect, style) {
                         res.add_box(b);
                     }
                 }
