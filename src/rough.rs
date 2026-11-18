@@ -68,7 +68,7 @@ impl Random {
 type Stream = Rc<Cell<i32>>;
 
 /// rough.js drawing options (`Options` / `ResolvedOptions`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Options {
     pub max_randomness_offset: f64,
     pub roughness: f64,
@@ -164,7 +164,7 @@ pub struct OpSet {
 }
 
 /// What a generator call returns: its op sets in drawing order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Drawable {
     pub shape: &'static str,
     pub sets: Vec<OpSet>,

@@ -40,7 +40,7 @@ pub struct HandStyle {
 }
 
 /// One rough.js drawing placed at `at` in the node's frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Piece {
     pub drawable: Drawable,
     pub at: Point,
@@ -49,7 +49,7 @@ pub struct Piece {
 }
 
 /// A hand-drawn node in its own frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HandNode {
     pub pieces: Vec<Piece>,
     /// `getBBox()` of the measured group, in the node's frame.
@@ -570,6 +570,24 @@ pub enum Sized {
     Subroutine { w: f64, h: f64 },
     /// A rough path of path data `d` placed at `at`.
     Path { d: String, at: Point },
+    /// cylinder.ts: the outline without its top's front half (moved to the
+    /// frame's corner, and measured), then that half unfilled where the
+    /// node's frame starts (`w` across, `h` the body below the top cap).
+    Cylinder { w: f64, h: f64, rx: f64, ry: f64 },
+    /// tiltedCylinder.ts: cylinder.ts on its side (`h` high, `w` the body
+    /// beside the left cap).
+    TiltedCylinder { w: f64, h: f64, rx: f64, ry: f64 },
+    /// person.ts: the rounded body (`w` wide from `body_top`, `body_h`
+    /// high, corners `body_r`), then the head circle of radius `head_r`
+    /// centred at `head_y`, one measured group.
+    Person {
+        w: f64,
+        body_top: f64,
+        body_h: f64,
+        body_r: f64,
+        head_y: f64,
+        head_r: f64,
+    },
 }
 
 /// `shape` drawn by rough.js with the node's options, centred on the origin
@@ -614,6 +632,64 @@ pub fn sized_node(shape: &Sized, st: &HandStyle) -> HandNode {
             ]
         }
         Sized::Path { d, at } => vec![piece(rough::path(d, o()), *at)],
+        Sized::Cylinder { w, h, rx, ry } => {
+            let outer = format!(
+                "M{},{} M{},{} a{},{} 0,0,0 {},0 l0,{} a{},{} 0,0,0 {},0 l0,{}",
+                0.0, ry, w, ry, rx, ry, -w, h, rx, ry, w, -h
+            );
+            let inner = format!("M{},{} a{},{} 0,0,0 {},0", -w / 2.0, -h / 2.0, rx, ry, w);
+            let io = Options {
+                fill: Some("none".into()),
+                ..o()
+            };
+            vec![
+                piece(
+                    rough::path(&outer, o()),
+                    Point::new(-w / 2.0, -(h / 2.0 + ry)),
+                ),
+                Piece {
+                    drawable: rough::path(&inner, io),
+                    at: origin,
+                    measured: false,
+                },
+            ]
+        }
+        Sized::TiltedCylinder { w, h, rx, ry } => {
+            let outer = format!(
+                "M{},{} M{},{} a{},{} 0,0,0 {},{} l{},0 a{},{} 0,0,0 {},{} l{},0",
+                0.0, 0.0, w, 0.0, rx, ry, 0.0, -h, -w, rx, ry, 0.0, h, w
+            );
+            let inner = format!("M{},{} a{},{} 0,0,0 0,{}", w / 2.0, -h / 2.0, rx, ry, h);
+            let io = Options {
+                fill: Some("none".into()),
+                ..o()
+            };
+            vec![
+                piece(rough::path(&outer, o()), Point::new(-w / 2.0, h / 2.0)),
+                Piece {
+                    drawable: rough::path(&inner, io),
+                    at: origin,
+                    measured: false,
+                },
+            ]
+        }
+        Sized::Person {
+            w,
+            body_top,
+            body_h,
+            body_r,
+            head_y,
+            head_r,
+        } => vec![
+            piece(
+                rough::path(
+                    &rounded_rect_path(-w / 2.0, *body_top, *w, *body_h, *body_r),
+                    o(),
+                ),
+                origin,
+            ),
+            piece(rough::circle(0.0, *head_y, head_r * 2.0, o()), origin),
+        ],
     };
     let mut hn = HandNode {
         pieces,

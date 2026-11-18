@@ -21,7 +21,6 @@ use crate::json::Json;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
 use crate::text;
 use crate::theme::Palette;
-use std::f64::consts::PI;
 
 // ---------------------------------------------------------------------------
 // IR
@@ -861,6 +860,17 @@ pub struct C4Conf {
     pub wrap: bool,
     /// Indexed like [`ELEMENT_COLORS`].
     looks: Vec<ElementLook>,
+    /// Under `look: handDrawn`: the seed and `themeVariables.radius`.
+    pub hand: Option<C4Hand>,
+}
+
+/// What the handDrawn look draws the cards with besides their colours.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct C4Hand {
+    /// `handDrawnSeed` (zero already replaced).
+    pub seed: f64,
+    /// `themeVariables.radius ?? 5`: roundedRect's corners.
+    pub radius: f64,
 }
 
 impl Default for C4Conf {
@@ -877,6 +887,7 @@ impl Default for C4Conf {
                     border: (*border).to_string(),
                 })
                 .collect(),
+            hand: None,
         }
     }
 }
@@ -1101,17 +1112,26 @@ impl Section {
 enum CardGeom {
     Rounded,
     Framed,
+    /// `w` and `total` are the drawing's nominal size.
     Person {
+        w: f64,
+        total: f64,
         head_r: f64,
         overlap: f64,
         body_h: f64,
         body_r: f64,
     },
+    /// `h` is the body between the caps' centres.
     Cylinder {
+        rx: f64,
         ry: f64,
+        h: f64,
     },
+    /// `w` is the body between the caps' centres.
     HorizontalCylinder {
         rx: f64,
+        ry: f64,
+        w: f64,
     },
 }
 
@@ -1125,6 +1145,9 @@ struct CardLayout {
     /// Centre of the label block relative to the card centre.
     label_dx: f64,
     label_dy: f64,
+    /// Under the handDrawn look: the rough drawing round the card's centre,
+    /// whose measured box (`updateNodeBounds`) is the card's size.
+    hand: Option<super::hand::HandNode>,
 }
 
 /// Size a card like the unified shapes do for a `buildC4Node` node
@@ -1189,6 +1212,8 @@ fn measure_shape(s: &Shape, conf: &C4Conf) -> CardLayout {
             // Label centred on the body.
             let dy = total / 2.0 - body_h / 2.0;
             let geom = CardGeom::Person {
+                w,
+                total,
                 head_r,
                 overlap,
                 body_h,
@@ -1201,22 +1226,42 @@ fn measure_shape(s: &Shape, conf: &C4Conf) -> CardLayout {
             let rx = w / 2.0;
             let ry = rx / (2.5 + w / 50.0);
             let h = bh + p + ry;
-            (w, h + 2.0 * ry, CardGeom::Cylinder { ry }, 0.0, p / 1.5)
+            // `updateNodeBounds`: the browser's box of the drawn path.
+            let (bw, bh) = super::svgbbox::cylinder_box(w, h, rx, ry);
+            (bw, bh, CardGeom::Cylinder { rx, ry, h }, 0.0, p / 1.5)
         }
         NodeShape::HorizontalCylinder => {
             let h = bh + p / 2.0;
             let ry = h / 2.0;
             let rx = ry / (2.5 + h / 50.0);
             let w = node_w.max(bw) + rx + p / 2.0;
-            (
-                w + 2.0 * rx,
-                h,
-                CardGeom::HorizontalCylinder { rx },
-                -rx,
-                0.0,
-            )
+            let (bw, bh) = super::svgbbox::tilted_cylinder_box(w, h, rx, ry);
+            (bw, bh, CardGeom::HorizontalCylinder { rx, ry, w }, -rx, 0.0)
         }
     };
+    let hand = conf.hand.map(|hd| {
+        let look = conf.look(&s.type_name());
+        let st = super::hand::HandStyle {
+            fill: s.style.bg.clone().unwrap_or_else(|| look.bg.clone()),
+            stroke: s
+                .style
+                .border
+                .clone()
+                .unwrap_or_else(|| look.border.clone()),
+            stroke_width: 1.3,
+            seed: hd.seed,
+            radius: hd.radius,
+            line: String::new(),
+            end_dot: String::new(),
+            note_fill: String::new(),
+            note_stroke: String::new(),
+            horizontal: false,
+            state: false,
+        };
+        super::hand::sized_node(&hand_geometry(geom, w, h, hd.radius), &st)
+    });
+    // mermaid sizes the card by the rough drawing's box.
+    let (w, h) = hand.as_ref().map_or((w, h), |hn| (hn.bbox.w, hn.bbox.h));
     CardLayout {
         w,
         h,
@@ -1225,6 +1270,47 @@ fn measure_shape(s: &Shape, conf: &C4Conf) -> CardLayout {
         label_h: bh,
         label_dx: dx,
         label_dy: dy,
+        hand,
+    }
+}
+
+/// What each shape's handDrawn branch draws for a card of nominal size
+/// `w`×`h`.
+fn hand_geometry(geom: CardGeom, w: f64, h: f64, radius: f64) -> super::hand::Sized {
+    use super::hand::Sized;
+    match geom {
+        // roundedRect: drawRect with `rx = ry = themeVariables.radius ?? 5`.
+        CardGeom::Rounded => Sized::Rect { w, h, rx: radius },
+        CardGeom::Framed => Sized::Subroutine { w, h },
+        CardGeom::Person {
+            head_r,
+            overlap,
+            body_h,
+            body_r,
+            ..
+        } => {
+            let top = -h / 2.0;
+            Sized::Person {
+                w,
+                body_top: top + 2.0 * head_r - overlap,
+                body_h,
+                body_r,
+                head_y: top + head_r,
+                head_r,
+            }
+        }
+        CardGeom::Cylinder { rx, ry, h } => Sized::Cylinder {
+            w: 2.0 * rx,
+            h,
+            rx,
+            ry,
+        },
+        CardGeom::HorizontalCylinder { rx, ry, w } => Sized::TiltedCylinder {
+            w,
+            h: 2.0 * ry,
+            rx,
+            ry,
+        },
     }
 }
 
@@ -1734,13 +1820,14 @@ fn card_intersect(card: &CardLayout, r: Rect, p: Point) -> Point {
     match card.geom {
         CardGeom::Rounded | CardGeom::Framed => intersect_rect(r, p),
         CardGeom::Person {
+            w,
+            total,
             head_r,
             overlap,
             body_r,
             ..
-        } => intersect_polygon(r, &person_outline(r.w, r.h, head_r, overlap, body_r), p),
-        CardGeom::Cylinder { ry } => {
-            let rx = r.w / 2.0;
+        } => intersect_polygon(r, &person_outline(w, total, head_r, overlap, body_r), p),
+        CardGeom::Cylinder { rx, ry, .. } => {
             let mut pos = intersect_rect(r, p);
             let x = pos.x - c.x;
             if rx != 0.0
@@ -1759,8 +1846,7 @@ fn card_intersect(card: &CardLayout, r: Rect, p: Point) -> Point {
             }
             pos
         }
-        CardGeom::HorizontalCylinder { rx } => {
-            let ry = r.h / 2.0;
+        CardGeom::HorizontalCylinder { rx, ry, .. } => {
             let mut pos = intersect_rect(r, p);
             let y = pos.y - c.y;
             if ry != 0.0
@@ -1798,6 +1884,23 @@ fn draw_shape(s: &Shape, card: &CardLayout, r: Rect, conf: &C4Conf) -> Element {
     let c = r.center();
     let mut els = Vec::new();
     match card.geom {
+        _ if card.hand.is_some() => {
+            if let Some(hn) = &card.hand {
+                // `.c4-shape path { stroke-width: 2px }` outranks rough.js's
+                // `stroke-width` attributes, the hachure's included.
+                let mut drawn = super::graph::hand_elements(hn, c, None);
+                for g in &mut drawn {
+                    if let Element::Group { children, .. } = g {
+                        for k in children {
+                            if let Element::Shape { paint, .. } = k {
+                                paint.stroke_width = 2.0;
+                            }
+                        }
+                    }
+                }
+                els.extend(drawn);
+            }
+        }
         CardGeom::Rounded => els.push(Element::rect(r, 12.0, paint)),
         CardGeom::Framed => {
             els.push(Element::rect(r, 0.0, paint));
@@ -1823,40 +1926,67 @@ fn draw_shape(s: &Shape, card: &CardLayout, r: Rect, conf: &C4Conf) -> Element {
                 paint,
             ));
         }
-        CardGeom::Cylinder { ry } => {
-            let rx = r.w / 2.0;
-            let top = Point::new(c.x, r.y + ry);
-            let bot = Point::new(c.x, r.bottom() - ry);
-            let mut body = vec![PathCmd::MoveTo(Point::new(r.x, top.y))];
-            body.extend(geom::elliptic_arc_cubics(top, rx, ry, PI, 2.0 * PI));
-            body.push(PathCmd::LineTo(Point::new(r.right(), bot.y)));
-            body.extend(geom::elliptic_arc_cubics(bot, rx, ry, 0.0, PI));
-            body.push(PathCmd::Close);
-            els.push(Element::path(body, paint));
-            let mut seam = vec![PathCmd::MoveTo(Point::new(r.x, top.y))];
-            seam.extend(geom::elliptic_arc_cubics(top, rx, ry, PI, 0.0));
-            els.push(Element::path(seam, Paint::stroke(&stroke, 2.0)));
-        }
-        CardGeom::HorizontalCylinder { rx } => {
-            let ry = r.h / 2.0;
-            let left = Point::new(r.x + rx, c.y);
-            let right = Point::new(r.right() - rx, c.y);
-            let mut body = vec![PathCmd::MoveTo(Point::new(left.x, r.y))];
-            body.push(PathCmd::LineTo(Point::new(right.x, r.y)));
-            body.extend(geom::elliptic_arc_cubics(
-                right,
+        CardGeom::Cylinder { rx, ry, h } => {
+            // createCylinderPathD: one path, filled and stroked (the top's
+            // front half drawn by its second arc), in its own frame at
+            // `translate(-w / 2, -(h / 2 + ry))` (where the browser measures
+            // and paints it, in single precision).
+            let w = 2.0 * rx;
+            let arc = |dx: f64| PathCmd::ArcTo {
                 rx,
                 ry,
-                -PI / 2.0,
-                PI / 2.0,
-            ));
-            body.push(PathCmd::LineTo(Point::new(left.x, r.bottom())));
-            body.extend(geom::elliptic_arc_cubics(left, rx, ry, PI / 2.0, 1.5 * PI));
-            body.push(PathCmd::Close);
-            els.push(Element::path(body, paint));
-            let mut seam = vec![PathCmd::MoveTo(Point::new(right.x, r.bottom()))];
-            seam.extend(geom::elliptic_arc_cubics(right, rx, ry, PI / 2.0, 1.5 * PI));
-            els.push(Element::path(seam, Paint::stroke(&stroke, 2.0)));
+                large: false,
+                sweep: false,
+                to: Point::new(dx, 0.0),
+                rel: true,
+            };
+            let body = Element::path(
+                vec![
+                    PathCmd::MoveTo(Point::new(0.0, ry)),
+                    arc(w),
+                    arc(-w),
+                    PathCmd::LineTo(Point::new(0.0, ry + h)),
+                    arc(w),
+                    PathCmd::LineTo(Point::new(w, ry)),
+                ],
+                paint,
+            );
+            els.push(Element::Translated {
+                dx: c.x - w / 2.0,
+                dy: c.y - (h / 2.0 + ry),
+                children: vec![body],
+            });
+        }
+        CardGeom::HorizontalCylinder { rx, ry, w } => {
+            // tiltedCylinder.ts's createCylinderPathD: one path, the right
+            // cap's inner half a subpath of it, in its own frame at
+            // `translate(-w / 2, h / 2)`.
+            let h = 2.0 * ry;
+            let arc = |sweep: bool, dy: f64| PathCmd::ArcTo {
+                rx,
+                ry,
+                large: false,
+                sweep,
+                to: Point::new(0.0, dy),
+                rel: true,
+            };
+            let body = Element::path(
+                vec![
+                    PathCmd::MoveTo(Point::new(0.0, 0.0)),
+                    arc(true, -h),
+                    PathCmd::LineTo(Point::new(w, -h)),
+                    arc(true, h),
+                    PathCmd::MoveTo(Point::new(w, -h)),
+                    arc(false, h),
+                    PathCmd::LineTo(Point::new(0.0, 0.0)),
+                ],
+                paint,
+            );
+            els.push(Element::Translated {
+                dx: c.x - w / 2.0,
+                dy: c.y + h / 2.0,
+                children: vec![body],
+            });
         }
     }
     // Stacked label: bold name, smaller type line, description.
@@ -1887,13 +2017,16 @@ fn draw_shape(s: &Shape, card: &CardLayout, r: Rect, conf: &C4Conf) -> Element {
 }
 
 /// Arrowhead (`M 0 0 L 10 5 L 0 10 z`, 1px past the line end) pointing along `dir` (unit).
+/// The marker's path is filled only: nothing strokes it (mermaid's C4 styles
+/// have no marker rule, and a marker's content does not inherit the line's
+/// stroke).
 fn arrowhead(end: Point, dir: Point, color: &Color) -> Element {
     let tip = end.plus(dir);
     let back = tip.minus(dir.scale(10.0));
     let n = Point::new(-dir.y, dir.x).scale(5.0);
     Element::path(
         geom::polygon(&[tip, back.plus(n), back.minus(n)]),
-        Paint::both(color, color, 1.0),
+        Paint::fill(color),
     )
 }
 
@@ -2103,7 +2236,11 @@ pub fn render(
     // The rows per line come from the diagram (`UpdateLayoutConfig`) only:
     // mermaid's db starts from 4 and 2 whatever the `c4` config says.
     let d = parse(body, title)?;
-    let conf = C4Conf::from_config(cfg);
+    let mut conf = C4Conf::from_config(cfg);
+    conf.hand = (cfg.look == crate::config::Look::HandDrawn).then(|| C4Hand {
+        seed: cfg.hand_drawn_seed(),
+        radius: pal.radius.unwrap_or(5.0),
+    });
     let lconf = LayoutConf::from_config(cfg);
     let lay = layout(&d, &conf, &lconf);
     draw(&d, &lay, &conf, &lconf, pal)
@@ -2463,6 +2600,73 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         assert_eq!(d.boundaries[0].style.border.as_deref(), Some("red"));
     }
 
+    /// The path data of every shape in `src`'s rendered scene.
+    fn drawn_paths(src: &str) -> Vec<String> {
+        let r = crate::render::render(src, &crate::config::MermaidConfig::default()).unwrap();
+        let scene = r.scene;
+        let mut out = Vec::new();
+        let mut stack: Vec<&Element> = scene.elements.iter().collect();
+        while let Some(e) = stack.pop() {
+            match e {
+                Element::Group { children, .. } | Element::Translated { children, .. } => {
+                    stack.extend(children)
+                }
+                Element::Shape {
+                    geom: crate::scene::Geometry::Path(cmds),
+                    ..
+                } => out.push(crate::output::svg::path_data(cmds)),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn hand_drawn_cards_match_mermaid() {
+        // mermaid 12.3.0, `look: handDrawn`, seed 5: each card is sized by its
+        // rough drawing's box, which moves every later card; the first path of
+        // each card starts here (its node's translate plus rough.js's first
+        // point).
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 5\n---\nC4Container\n  \
+                   title Containers\n  Person(user, \"User\", \"Uses the app\")\n  \
+                   Container(web, \"Web App\", \"React\", \"Front end\")\n  \
+                   ContainerDb(db, \"Database\", \"Postgres\", \"Stores data\")\n  \
+                   ContainerQueue(q, \"Queue\", \"Kafka\", \"Events\")\n  \
+                   Component(comp, \"Component\", \"Rust\", \"Core logic\")\n  \
+                   Rel(user, web, \"Uses\")\n  Rel(web, db, \"Reads\")\n  \
+                   Rel(web, q, \"Publishes\")\n  Rel(q, comp, \"Feeds\")\n";
+        let paths = drawn_paths(src);
+        for start in [
+            "M157.134,270.95C",
+            "M470.752,169.865C",
+            "M152.115,457.324C",
+            "M152.44,661.935C",
+        ] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
+    }
+
+    #[test]
+    fn classic_cylinders_are_one_path_in_their_own_frame() {
+        // cylinder.ts / tiltedCylinder.ts draw one path each (no separate
+        // seam), whose box the browser measures in its own frame: a 216 wide
+        // container database is 164.94134521484375 tall in mermaid 12.3.0.
+        let rx = 108.0;
+        let ry = rx / (2.5 + 216.0 / 50.0);
+        let h = 133.26977523400987;
+        assert_eq!(
+            super::super::svgbbox::cylinder_box(216.0, h, rx, ry),
+            (216.0, 164.94134521484375)
+        );
+        let src = "C4Container\n  ContainerDb(db, \"Database\", \"Postgres\", \"Stores data\")\n";
+        let paths = drawn_paths(src);
+        assert_eq!(
+            paths.iter().filter(|d| d.contains('a')).count(),
+            1,
+            "{paths:?}"
+        );
+    }
+
     #[test]
     fn person_outline_clips_relationships() {
         let card = measure_shape(&shape(r#"Person(a, "A")"#), &C4Conf::default());
@@ -2629,7 +2833,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
     fn cylinder_intersect_drops_onto_the_cap() {
         let card = measure_shape(&shape(r#"SystemDb(a, "D")"#), &C4Conf::default());
         let r = Rect::new(0.0, 0.0, card.w, card.h);
-        let CardGeom::Cylinder { ry } = card.geom else {
+        let CardGeom::Cylinder { ry, .. } = card.geom else {
             panic!("not a cylinder")
         };
         // Straight up: the top of the cap; off-centre, the rectangle hit
