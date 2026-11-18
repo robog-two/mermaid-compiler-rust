@@ -371,8 +371,12 @@ pub fn size(
             let w = 20f64.max(tw + px + 2.0 * side).max((tw + px) * 1.25);
             at(w, h)
         }
-        // stateStart.ts / stateEnd.ts / filledCircle.ts: 14px circles.
-        Shape::StateStart | Shape::SmallCircle | Shape::StateEnd => at(14.0, 14.0),
+        // stateStart.ts / filledCircle.ts: 14px circles.
+        Shape::StateStart | Shape::SmallCircle => at(14.0, 14.0),
+        // stateEnd.ts: `updateNodeBounds` measures its rough.js circle, whose
+        // curves bulge a hair past the 14px circle on the right
+        // (`getBBox()` -7, -7, 14.013293266296387 × 14).
+        Shape::StateEnd => at(STATE_END_BOX_W, 14.0),
         // forkJoin.ts: 70×10, rotated for LR/RL.
         Shape::ForkBar if horizontal => at(10.0, 70.0),
         Shape::ForkBar => at(70.0, 10.0),
@@ -600,6 +604,10 @@ fn ruled_rect(r: Rect, rules: &[(Point, Point)]) -> Outline {
         glyphs: Vec::new(),
     }
 }
+
+/// The width of stateEnd's rough.js circle (diameter 14, roughness 0) as
+/// Chromium's `getBBox()` measures it.
+pub(crate) const STATE_END_BOX_W: f64 = 14.013293266296387;
 
 /// rough.js's options for the classic and neo looks: roughness 0, solid fill.
 fn flat_rough() -> crate::rough::Options {

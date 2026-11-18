@@ -2092,7 +2092,16 @@ pub fn render_with(
         bounds.add_rect(r);
         let t = &cluster_titles[ci];
         let mut children: Vec<Element> = Vec::new();
-        if empty_of[ci].is_none() {
+        // An empty subgraph under ELK is a point, and the cluster shape draws it
+        // as its title's width (plus the padding) by its 0 height.
+        let elk_point = elk && flow_leaf && empty_of[ci].is_some();
+        if empty_of[ci].is_none() || elk_point {
+            let r = if elk_point {
+                let w = if t.is_empty() { 0.0 } else { t.width } + title_pad;
+                Rect::new(r.x + r.w / 2.0 - w / 2.0, r.y + r.h / 2.0, w, 0.0)
+            } else {
+                r
+            };
             let alt = depth(&g.clusters, ClusterId(ci)) % 2 == 1;
             // The frame mermaid draws the cluster in, as for the edges below:
             // the hachure's scan lines are rounded in absolute coordinates.
@@ -2111,7 +2120,9 @@ pub fn render_with(
                     bounds.add_rect(b);
                 }
             }
-            if let Some(sh) = shadow {
+            // A region's `rect.divider` sits in no `.cluster` (and is no
+            // `rect.outer`): the neo look's shadow rules miss it.
+            if let Some(sh) = shadow.filter(|_| c.kind != ClusterKind::Region) {
                 cast_shadow(&mut shapes, sh);
             }
             if lk.neo {
@@ -4068,7 +4079,7 @@ fn align_degenerate_nodes(centers: &mut [Point], sizes: &[(f64, f64)], anchors: 
 
 /// Half the width `updateNodeBounds` gives a state end: the getBBox of its
 /// rough.js circle of diameter 14 (single precision), a hair over 14.
-const STATE_END_R: f64 = 14.013293266296387 / 2.0;
+const STATE_END_R: f64 = shapes::STATE_END_BOX_W / 2.0;
 
 fn clip_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
     if elk {
@@ -6321,6 +6332,9 @@ fn node_elements(
                 return (els, Boundary::Rect(r));
             }
             Shape::EntityTable => {
+                // The colour themes' slot rule (`[data-color-id].node path`) fills
+                // every path of the entity, its rows' included, with the slot fill.
+                let slot_fill = slot_colors(n.color_slot, pal).and_then(|s| s.fill);
                 let colors = TableColors {
                     paint: &paint,
                     // erBox's dividers are rough.js polygons stroked at rough's 1.3;
@@ -6334,16 +6348,8 @@ fn node_elements(
                     text: &text_color,
                     // Rows are striped with `rowOdd`; the colour themes paint every row
                     // with the slot fill instead (`er/styles.ts` `.node path`): no stripe.
-                    odd_row: pal.er_row_odd.as_ref().filter(|_| {
-                        slot_colors(n.color_slot, pal)
-                            .and_then(|s| s.fill)
-                            .is_none()
-                    }),
-                    even_row: pal.er_row_even.as_ref().filter(|_| {
-                        slot_colors(n.color_slot, pal)
-                            .and_then(|s| s.fill)
-                            .is_none()
-                    }),
+                    odd_row: slot_fill.as_ref().or(pal.er_row_odd.as_ref()),
+                    even_row: slot_fill.as_ref().or(pal.er_row_even.as_ref()),
                 };
                 let Some((hn, body)) = lk
                     .hand_seed

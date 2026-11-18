@@ -911,6 +911,11 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             let r = Rect::new(lane_left, lane_top, width, height);
             bounds.add_rect(r);
             let mut children = vec![Element::rect(r, 0.0, paint)];
+            // `.cluster rect` casts the neo look's shadow; only the lanes'
+            // (`.swimlane.cluster rect`) are reset to `filter: none`.
+            if let Some(sh) = pal.drop_shadow.as_ref().filter(|_| gcfg.look == ConfigLook::Neo) {
+                graph::cast_shadow(&mut children, sh);
+            }
             if !t.is_empty() {
                 children.push(Element::classed_text(
                     Text::centered(
