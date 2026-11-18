@@ -268,6 +268,28 @@ fn icon_char(style: Option<u8>, _name: &str) -> Option<char> {
     }
 }
 
+/// Which Font Awesome font draws the icon character `c`: `Some(true)` for the
+/// brands font (`fab:`), `Some(false)` for the free one (`fa:`, `fas:`, `far:`,
+/// and a class Font Awesome does not define, whose `<i>` still has the free
+/// family), `None` when `c` is not a Font Awesome icon (a registered pack's icon
+/// is an `<svg>`, not a glyph).
+pub fn is_brand_icon(c: char) -> Option<bool> {
+    let code = c as u32;
+    if !(BASE..=EMPTY).contains(&code) {
+        return None;
+    }
+    #[cfg(feature = "icons")]
+    {
+        if (NOTDEF..NOTDEF + 3).contains(&code) {
+            return Some(code - NOTDEF == 2);
+        }
+        let d = data::get();
+        Some(code != EMPTY && code - BASE >= d.style_base[2])
+    }
+    #[cfg(not(feature = "icons"))]
+    Some(false)
+}
+
 /// Advance (font units) and outline of an icon character.
 #[cfg(feature = "icons")]
 fn glyph(icon: char) -> Option<(f64, Vec<PathCmd>)> {

@@ -100,3 +100,20 @@ TeX Gyre Heros 2.004
   The fonts are the unmodified OpenType files of version 2.004;
   assets/fonts/README-TeX-Gyre-Heros.txt and MANIFEST-TeX-Gyre-Heros.txt are
   the package's own readme and manifest.
+
+
+Embedded web fonts (SVG output)
+-------------------------------
+
+  assets/fontembed/*.woff2, assets/fontembed/*.css
+  (compiled in with the `font-embed` cargo feature)
+
+  The woff2 files are the ones mermaid-cli embeds into the SVGs it writes,
+  unchanged: @fontsource-variable/recursive@5.3.0 and @fontsource/open-sans@5.3.0
+  (SIL Open Font License 1.1, see above) and the web fonts of
+  @fortawesome/fontawesome-free@7.3.1 (SIL Open Font License 1.1 with the
+  Reserved Font Name "Font Awesome"; the CSS carries the package's licence
+  text, as mermaid-cli writes it). The CSS files are those packages'
+  stylesheets as mermaid-cli serialises them, each with its licence comment,
+  and a placeholder where the font's data URL goes (tools/gen_font_embed.py).
+  Every embedded sheet carries the licence text, as the OFL requires.

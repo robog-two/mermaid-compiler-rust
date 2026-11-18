@@ -18,7 +18,7 @@ name = "mmdc"
 path = "src/main.rs"
 
 [features]
-default = ["png", "icons", "fonts"]
+default = ["png", "icons", "fonts", "font-embed"]
 # PNG rasterisation via resvg (pure Rust). Disable with --no-default-features
 # for a minimal build (only taffy) that supports SVG, PDF and Markdown output.
 png = ["dep:resvg", "dep:miniz_oxide"]
@@ -31,6 +31,11 @@ icons = []
 # and for PDF text outside Windows-1252 (assets/fonts, ~1.5 MB). Text is
 # measured from compiled-in tables either way.
 fonts = []
+# SVG output embeds the web fonts a diagram uses as `@font-face` rules with woff2
+# `data:` URLs, as mmdc does unless `--no-font-embed` (Recursive Variable, Open
+# Sans, Font Awesome Free; SIL OFL 1.1; assets/fontembed, ~0.8 MB, the exact
+# files mmdc embeds). Without it SVG text only names its font families.
+font-embed = []
 
 [dependencies]
 # CSS flexbox / grid / block layout for box-shaped diagrams (block, kanban, C4, ...).

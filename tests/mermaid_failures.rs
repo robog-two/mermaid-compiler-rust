@@ -13,7 +13,12 @@ use mmdc::render;
 
 fn svg(src: &str) -> String {
     let r = render::render(src, &MermaidConfig::default()).expect("renders");
-    output::encode_svg(&r, &EncodeOptions::default())
+    // Without the fonts: their base64 data may spell "NaN" or "inf".
+    let enc = EncodeOptions {
+        font_embed: false,
+        ..EncodeOptions::default()
+    };
+    output::encode_svg(&r, &enc)
 }
 
 fn check(src: &str, clusters: &[&str]) {

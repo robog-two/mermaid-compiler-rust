@@ -178,6 +178,7 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
         size: opts.size,
         scale: opts.scale,
         paper: opts.pdf_paper_format,
+        font_embed: opts.font_embed,
     };
     let jobs = opts.jobs.unwrap_or_else(|| {
         (std::thread::available_parallelism()

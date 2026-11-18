@@ -25,7 +25,11 @@ It is wired up in `src/diagram/mod.rs` (detection) and `src/render.rs` (dispatch
   the classic themes, Recursive Variable for the redux themes (mermaid's default for flowcharts,
   sequence, class, state, ER, ...), Open Sans for `"Open Sans"` families. Text drawn in a family
   of its own (C4 cards, usecase actors) is measured inside `text::with_family(family, ..)` and
-  carries `Text::family`, so the SVG / PDF writers place it in the same face.
+  carries `Text::family`, so the SVG / PDF writers place it in the same face. SVG output also embeds
+  the web fonts (`@font-face`, woff2) of the families the scene's texts use, as mmdc does
+  (`output/fontembed.rs`; `--no-font-embed` turns it off), so a text in `Open Sans` or
+  `Recursive Variable` needs its family in `Text::family` (or the scene's `font_family`), spelt as
+  mmdc's CSS spells it.
 - **Colours** come from `Palette` (`pal.main_bkg`, `pal.node_border`, `pal.line_color`, `pal.text_color`,
   `pal.scale_color(i)` / `pal.scale_text_color(i)` for per-section colours, `pal.dark`, ...). Do not edit
   `theme.rs`; derive what you need locally.

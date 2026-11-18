@@ -1,6 +1,8 @@
 //! Output encoders. Everything here is a pure function of the scene and options,
 //! except PNG font loading, which `Rasterizer` does once up front.
 
+#[cfg(feature = "font-embed")]
+pub mod fontembed;
 mod image;
 pub mod pdf;
 #[cfg(feature = "png")]
@@ -47,6 +49,10 @@ pub struct EncodeOptions {
     pub size: Option<u32>,
     pub scale: f64,
     pub paper: Option<Paper>,
+    /// Embed the web fonts the drawing uses in SVG output (mmdc's default;
+    /// `--no-font-embed` turns it off). Needs the `font-embed` feature; PNG and
+    /// PDF output are not affected.
+    pub font_embed: bool,
 }
 
 impl Default for EncodeOptions {
@@ -57,6 +63,7 @@ impl Default for EncodeOptions {
             size: None,
             scale: 1.0,
             paper: None,
+            font_embed: true,
         }
     }
 }
@@ -134,7 +141,7 @@ pub fn encode_svg(r: &Rendered, opt: &EncodeOptions) -> String {
             height: r.scene.view_box.h,
         },
     };
-    svg::to_svg(
+    let mut svg = svg::to_svg(
         &r.scene,
         &SvgOptions {
             id: &opt.svg_id,
@@ -143,7 +150,12 @@ pub fn encode_svg(r: &Rendered, opt: &EncodeOptions) -> String {
             theme_css: r.theme_css.as_deref(),
             raster_scale: None,
         },
-    )
+    );
+    #[cfg(feature = "font-embed")]
+    if opt.font_embed {
+        fontembed::embed(&r.scene, &mut svg);
+    }
+    svg
 }
 
 /// The svg's box in mmdc's PDF. Without a paper format it is the box on the
