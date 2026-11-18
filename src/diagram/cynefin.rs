@@ -1001,6 +1001,7 @@ pub fn draw(d: &Cynefin, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                         anchor: Anchor::Middle,
                         fill: t.text_color.clone(),
                         tspan_central: false,
+                        dy_tspans: false,
                         family: None,
                     },
                     "cynefinArrowLabel",

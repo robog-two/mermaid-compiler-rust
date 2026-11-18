@@ -1748,6 +1748,7 @@ pub fn draw(g: &Grammar, m: &Metrics, st: &Style) -> Scene {
                 anchor: Anchor::Start,
                 fill: st.rule_name.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             "railroad-rule-name",

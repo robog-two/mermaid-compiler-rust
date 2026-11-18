@@ -292,10 +292,36 @@ impl Filters<'_> {
                 b: 0,
                 a: 1.0,
             });
-            let unit = |v: u8| num(f64::from(v) / 255.0);
+            if sh.linear_rgb && self.raster_scale.is_none() {
+                // As mermaid writes it, its region the default one, 130% wide
+                // and tall.
+                let _ = write!(
+                    out,
+                    "<filter id=\"{}-shadow-{k}\" height=\"130%\" width=\"130%\"><feDropShadow dx=\"{}\" dy=\"{}\" stdDeviation=\"{}\" flood-opacity=\"{}\" flood-color=\"#{:02X}{:02X}{:02X}\"/></filter>",
+                    self.id,
+                    num(sh.dx),
+                    num(sh.dy),
+                    num(sh.std_dev),
+                    num(c.a),
+                    c.r,
+                    c.g,
+                    c.b,
+                );
+                continue;
+            }
+            // An `feDropShadow` works in linear RGB: its colour converted.
+            let unit = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                num(match sh.linear_rgb {
+                    false => v,
+                    true if v <= 0.04045 => v / 12.92,
+                    true => ((v + 0.055) / 1.055).powf(2.4),
+                })
+            };
+            let space = if sh.linear_rgb { "linearRGB" } else { "sRGB" };
             let _ = write!(
                 out,
-                "<filter id=\"{}-shadow-{k}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"sRGB\"><feColorMatrix in=\"SourceAlpha\" type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\"/><feGaussianBlur stdDeviation=\"{}\"/><feOffset dx=\"{}\" dy=\"{}\"/><feMerge><feMergeNode/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>",
+                "<filter id=\"{}-shadow-{k}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"{space}\"><feColorMatrix in=\"SourceAlpha\" type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\"/><feGaussianBlur stdDeviation=\"{}\"/><feOffset dx=\"{}\" dy=\"{}\"/><feMerge><feMergeNode/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>",
                 self.id,
                 num(r.x - m),
                 num(r.y - m),
@@ -372,6 +398,7 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option
                     &Text {
                         y,
                         tspan_central: false,
+                        dy_tspans: false,
                         family: None,
                         ..t.clone()
                     },
@@ -384,6 +411,7 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option
                     out,
                     &Text {
                         tspan_central: false,
+                        dy_tspans: false,
                         family: None,
                         ..t.clone()
                     },
@@ -407,6 +435,55 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option
         );
         write_line(out, &t.lines[0], t);
         out.push_str("</tspan></text>");
+        return;
+    }
+    if t.dy_tspans && raster.is_none() {
+        let _ = write!(
+            out,
+            "<text{}{} x=\"{}\" y=\"{}\" dy=\"1em\" alignment-baseline=\"middle\" dominant-baseline=\"middle\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}>",
+            class_attr(class),
+            family_attr(t),
+            num(t.x),
+            num(t.y),
+            num(t.font_size),
+            esc(t.fill.css()),
+            weight_attr(t)
+        );
+        let step = num(t.line_height / t.font_size);
+        for (i, line) in t.lines.iter().enumerate() {
+            let dy = if i == 0 { "1" } else { &step };
+            let _ = write!(out, "<tspan x=\"{}\" dy=\"{dy}em\">", num(t.x));
+            write_line(out, line, t);
+            out.push_str("</tspan>");
+        }
+        out.push_str("</text>");
+        return;
+    }
+    if t.dy_tspans {
+        // Rasterising: each line at the baseline Chromium computes for it.
+        use crate::diagram::xychart::js_num;
+        let _ = write!(
+            out,
+            "<text{}{} x=\"{}\" y=\"{}\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}>",
+            class_attr(class),
+            family_attr(t),
+            num(t.x),
+            js_num(t.line_y(0)),
+            num(t.font_size),
+            esc(t.fill.css()),
+            weight_attr(t)
+        );
+        for (i, line) in t.lines.iter().enumerate() {
+            let _ = write!(
+                out,
+                "<tspan x=\"{}\" y=\"{}\">",
+                num(t.x),
+                js_num(t.line_y(i))
+            );
+            write_line(out, line, t);
+            out.push_str("</tspan>");
+        }
+        out.push_str("</text>");
         return;
     }
     let _ = write!(
@@ -780,13 +857,22 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
             );
         }
     }
+    // A timeline's in full, as mermaid writes it (a browser sizes the
+    // drawing from it).
+    let vb_num = |v: f64| {
+        if scene.kind == DiagramKind::Timeline {
+            crate::diagram::xychart::js_num(v)
+        } else {
+            num(v)
+        }
+    };
     let _ = write!(
         out,
         " viewBox=\"{} {} {} {}\" role=\"graphics-document document\" aria-roledescription=\"{}\"",
-        num(vb.x),
-        num(vb.y),
-        num(vb.w),
-        num(vb.h),
+        vb_num(vb.x),
+        vb_num(vb.y),
+        vb_num(vb.w),
+        vb_num(vb.h),
         scene.kind.role()
     );
     if scene.acc_title.is_some() {
@@ -847,6 +933,7 @@ mod tests {
             anchor: Anchor::Middle,
             fill: crate::scene::Color::new("#28253D"),
             tspan_central: true,
+            dy_tspans: false,
             family: None,
         };
         let mut out = String::new();
@@ -923,6 +1010,7 @@ mod tests {
             dy: 2.0,
             std_dev: 1.0,
             color: Color::new("rgba(185, 185, 185, 0.5)"),
+            linear_rgb: false,
         };
         let paint = Paint::fill(&Color::new("#fff")).with_shadow(Some(sh));
         let els = vec![

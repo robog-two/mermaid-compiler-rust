@@ -569,6 +569,7 @@ fn line_text(x: f64, y: f64, shift: Baseline, line: &str, font_size: f64, fill: 
         anchor: Anchor::Middle,
         fill: fill.clone(),
         tspan_central: false,
+        dy_tspans: false,
         family: None,
     }
 }
@@ -611,6 +612,7 @@ fn tspan_lines(cx: f64, cy: f64, lines: &[String], font_size: f64, fill: &Color)
             let dy = i as f64 * font_size - font_size * (n - 1.0) / 2.0;
             Text {
                 tspan_central: true,
+                dy_tspans: false,
                 family: None,
                 ..line_text(cx, cy + dy, BASELINE_CENTRAL, l, font_size, fill)
             }
@@ -892,6 +894,7 @@ fn css_shadow(theme: ThemeName) -> Option<Shadow> {
         dy,
         std_dev: 2.0,
         color: Color::new(color),
+        linear_rgb: false,
     };
     match theme {
         ThemeName::Default | ThemeName::Base | ThemeName::Dark | ThemeName::Neutral => {
@@ -1547,6 +1550,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
             anchor: Anchor::Start,
             fill: pal.text_color.clone(),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         }));
     }
@@ -1784,6 +1788,7 @@ fn message_elements(pm: &Pending, pal: &Palette, cfg: &SequenceConfig) -> Elemen
                 anchor: Anchor::Middle,
                 fill: pal.sequence_number.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             "sequenceNumber",
@@ -2695,6 +2700,7 @@ mod tests {
             dy: 2.0,
             std_dev: 2.0,
             color: Color::new("rgba(185, 185, 185, 1)"),
+            linear_rgb: false,
         });
         let shadows = |look: Look| -> Vec<(String, Option<Shadow>)> {
             let s = draw(src, look);

@@ -2149,6 +2149,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 anchor: Anchor::Middle,
                 fill: text_fill,
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             }));
         }

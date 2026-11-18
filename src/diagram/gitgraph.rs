@@ -1181,6 +1181,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 anchor: Anchor::Start,
                 fill: st.branch_label(k),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             };
             branch_els.push(Element::classed_text(
@@ -1407,6 +1408,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 anchor: Anchor::Middle,
                 fill: pal.text_color.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             "gitTitleText",
@@ -1488,6 +1490,7 @@ fn commit_label(
                 pal.commit_label_color.clone()
             },
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         },
         "commit-label",
@@ -1566,6 +1569,7 @@ fn commit_tags(
         anchor: Anchor::Start,
         fill: pal.tag_label_color.clone(),
         tspan_central: false,
+        dy_tspans: false,
         family: None,
     };
     for (k, t) in c.tags.iter().rev().enumerate() {

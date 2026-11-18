@@ -1714,6 +1714,7 @@ fn tspan_lines(lines: &[String], x: f64, y: f64, font: f64, bold: bool, fill: &C
         anchor: Anchor::Middle,
         fill: fill.clone(),
         tspan_central: false,
+        dy_tspans: false,
         family: None,
     })
 }
@@ -2011,6 +2012,7 @@ fn draw_shape(s: &Shape, card: &CardLayout, r: Rect, conf: &C4Conf) -> Element {
             anchor: Anchor::Middle,
             fill: font.clone(),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         };
         els.push(Element::classed_text(t, class));
@@ -2210,6 +2212,7 @@ pub fn draw(
                 anchor: Anchor::Start,
                 fill: marker.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             "c4-title",

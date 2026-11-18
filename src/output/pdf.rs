@@ -346,7 +346,7 @@ impl Ctx {
                 Anchor::Middle => t.x - w / 2.0,
                 Anchor::End => t.x - w,
             };
-            let y = t.y + i as f64 * t.line_height;
+            let y = t.line_y(i);
             if crate::icons::has_icons(line) {
                 self.line_with_icons(line, x, y, t);
                 continue;
@@ -1104,6 +1104,7 @@ mod tests {
             anchor: Anchor::Start,
             fill: Color::new("#333"),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         };
         let scene = Scene {

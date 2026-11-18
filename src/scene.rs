@@ -121,6 +121,10 @@ pub struct Shadow {
     /// The standard deviation of the blur.
     pub std_dev: f64,
     pub color: Color,
+    /// An SVG `<filter>` of its own (`feDropShadow`) rather than a CSS
+    /// filter function: it works in `linearRGB`, the shape it draws
+    /// (`SourceGraphic`) quantised through that space as well.
+    pub linear_rgb: bool,
 }
 
 impl Paint {
@@ -300,6 +304,13 @@ pub struct Text {
     /// (see [`crate::text::painted_tspan_central`]), so SVG output writes
     /// mermaid's markup and a raster drawn from it the painted baseline.
     pub tspan_central: bool,
+    /// mermaid writes this text as timeline's `wrap` does: `<text dy="1em"
+    /// dominant-baseline="middle">` at `y` with one `<tspan x dy>` per line,
+    /// the first `1em` and each further one `line_height` (in em) below the
+    /// last. SVG output writes that markup, so a browser lays it out as it
+    /// lays out mermaid's; the other backends draw each line at the baseline
+    /// [`Text::line_y`] gives, Chromium's for it.
+    pub dy_tspans: bool,
     /// An inline `font-family` (which wins over the stylesheet's), as
     /// mermaid's unknown icon writes its `?` in `ArialMT, Arial`.
     pub family: Option<&'static str>,
@@ -343,6 +354,7 @@ impl Text {
             anchor: Anchor::Middle,
             fill: fill.clone(),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         }
     }
@@ -360,8 +372,26 @@ impl Text {
             anchor: Anchor::Middle,
             fill: fill.clone(),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         }
+    }
+    /// The alphabetic baseline of line `i`. For [`Text::dy_tspans`] text, as
+    /// Chromium computes it: the `dy` lengths resolved and accumulated in
+    /// single precision (`1em`, then `line_height / font_size` em per line)
+    /// and the `middle` baseline shift added.
+    pub fn line_y(&self, i: usize) -> f64 {
+        if !self.dy_tspans {
+            return self.y + i as f64 * self.line_height;
+        }
+        let em = self.font_size as f32;
+        let step = (self.line_height / self.font_size) as f32 * em;
+        let mut acc = em;
+        for _ in 0..i {
+            acc += step;
+        }
+        f64::from(self.y as f32 + acc)
+            + crate::text::baseline_shift(crate::text::Baseline::Middle, self.font_size)
     }
     pub fn bold(mut self) -> Self {
         self.bold = true;

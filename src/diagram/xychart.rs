@@ -124,6 +124,7 @@ pub(crate) fn text_at(
         anchor,
         fill: fill.clone(),
         tspan_central: false,
+        dy_tspans: false,
         family: None,
     }
 }
@@ -685,7 +686,18 @@ pub(crate) fn js_num(v: f64) -> String {
     } else if v.is_finite() && v == v.trunc() && v.abs() < 1e21 {
         format!("{v:.0}")
     } else {
-        format!("{v}")
+        // The shortest digits that read back as `v`; where two such strings
+        // are equally near its exact value, JavaScript takes the even one
+        // (636.20001220703125 prints 636.2000122070312), which the
+        // correctly rounded (ties to even) form of as many decimals is.
+        let s = format!("{v}");
+        let decimals = s.find('.').map_or(0, |at| s.len() - at - 1);
+        let even = format!("{v:.decimals$}");
+        if even.parse::<f64>() == Ok(v) {
+            even
+        } else {
+            s
+        }
     }
 }
 
