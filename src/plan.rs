@@ -124,8 +124,143 @@ pub fn output_dir(output: &str) -> String {
     }
 }
 
+/// Where an icon pack's JSON or a remote image is read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resource {
+    /// A local file (a `file://` URL or a path).
+    File(PathBuf),
+    /// An `http:` or `https:` URL, fetched with `curl`.
+    Http(String),
+}
+
+/// Where `url` is read from: `http(s)://` URLs as they are, `file://` URLs
+/// and absolute paths as files, relative paths against `cwd`; `None` for any
+/// other scheme.
+pub fn resource(url: &str, cwd: &Path) -> Option<Resource> {
+    let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Some(Resource::Http(url.to_string()));
+    }
+    if lower.starts_with("file:") {
+        // file:///path, file://localhost/path, file:/path
+        let rest = &url[5..];
+        let path = match rest.strip_prefix("//") {
+            Some(r) => {
+                let slash = r.find('/')?;
+                let host = &r[..slash];
+                if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+                    return None;
+                }
+                &r[slash..]
+            }
+            None => rest,
+        };
+        let path = path.split(['?', '#']).next().unwrap_or(path);
+        return Some(Resource::File(PathBuf::from(percent_decode(path))));
+    }
+    // A Windows drive letter is a path, any other `scheme:` is not supported.
+    let scheme = url.split_once(':').map(|(s, _)| s);
+    if scheme.is_some_and(|s| {
+        s.len() > 1
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    }) {
+        return None;
+    }
+    Some(Resource::File(absolutize(cwd, Path::new(url))))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Where `--iconPacks <package>` looks for an installed package's
+/// `icons.json`, nearest first: `node_modules/<package>/icons.json` in `cwd`
+/// and each of its ancestors (Node's resolution from the working directory).
+pub fn icon_pack_files(package: &str, cwd: &Path) -> Vec<PathBuf> {
+    cwd.ancestors()
+        .map(|d| d.join("node_modules").join(package).join("icons.json"))
+        .collect()
+}
+
+/// The `unpkg.com` URL of a package's `icons.json`, tried when it is not
+/// installed.
+pub fn icon_pack_cdn_url(package: &str) -> String {
+    format!("https://unpkg.com/{package}/icons.json")
+}
+
+/// The `prefix` of an Iconify JSON icon set, which `--iconPacks` registers it
+/// under.
+pub fn icon_pack_prefix(json: &str) -> Option<String> {
+    match crate::json::parse(json).ok()?.get("prefix")? {
+        crate::json::Json::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// `prefix#url` of `--iconPacksNamesAndUrls`: the name before the first `#`,
+/// the URL after it.
+pub fn split_icon_pack_arg(arg: &str) -> (String, String) {
+    match arg.split_once('#') {
+        Some((n, u)) => (n.to_string(), u.to_string()),
+        None => (arg.to_string(), String::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resources_by_scheme() {
+        let cwd = Path::new("/work");
+        assert_eq!(
+            resource("https://x.org/a.json", cwd),
+            Some(Resource::Http("https://x.org/a.json".into()))
+        );
+        assert_eq!(
+            resource("file:///tmp/my%20icons.json", cwd),
+            Some(Resource::File("/tmp/my icons.json".into()))
+        );
+        assert_eq!(
+            resource("file://localhost/tmp/a.json", cwd),
+            Some(Resource::File("/tmp/a.json".into()))
+        );
+        assert_eq!(resource("file://other/tmp/a.json", cwd), None);
+        assert_eq!(
+            resource("icons/a.json", cwd),
+            Some(Resource::File("/work/icons/a.json".into()))
+        );
+        assert_eq!(resource("ftp://x/a.json", cwd), None);
+        assert_eq!(
+            icon_pack_files("@iconify-json/logos", Path::new("/a/b"))[1],
+            PathBuf::from("/a/node_modules/@iconify-json/logos/icons.json")
+        );
+        assert_eq!(
+            icon_pack_prefix(r#"{"prefix": "logos", "icons": {}}"#),
+            Some("logos".into())
+        );
+        assert_eq!(icon_pack_prefix(r#"{"icons": {}}"#), None);
+        assert_eq!(
+            split_icon_pack_arg("az#https://x/#frag"),
+            ("az".into(), "https://x/#frag".into())
+        );
+    }
+
     use super::*;
 
     #[test]

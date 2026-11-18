@@ -404,6 +404,19 @@ pub enum Element {
     Image {
         rect: Rect,
         href: String,
+        /// The image's bytes as a `data:` URI when `href` is remote and the
+        /// caller fetched it: PNG and PDF output draw this, SVG output keeps
+        /// the link, as mmdc's browser does.
+        inline: Option<String>,
+    },
+    /// An Iconify icon as mermaid inserts it (`<g><svg …>…</svg></g>`, see
+    /// [`crate::iconify`]): `svg` is the `<svg>` element, whose viewport
+    /// (its `width` × `height`) lands on `rect`; `color` is the `color` its
+    /// `currentColor` takes (the wrapper's `style="color: …"`).
+    Icon {
+        rect: Rect,
+        color: Option<Color>,
+        svg: String,
     },
     /// Children composited as one layer at `opacity` (SVG `<g opacity>`): where
     /// they overlap they do not darken each other, as the silhouette a filter
@@ -482,9 +495,15 @@ impl Element {
                 class,
                 children: all(children),
             },
-            Element::Image { rect, href } => Element::Image {
+            Element::Image { rect, href, inline } => Element::Image {
                 rect: Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h),
                 href,
+                inline,
+            },
+            Element::Icon { rect, color, svg } => Element::Icon {
+                rect: Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h),
+                color,
+                svg,
             },
             Element::Shape { geom, paint, class } => Element::Shape {
                 geom: geom.translated(dx, dy),

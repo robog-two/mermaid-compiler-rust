@@ -154,7 +154,10 @@ impl Filters<'_> {
                         self.gradients.push(g.clone());
                     }
                 }
-                Element::Text { .. } | Element::OutlinedText { .. } | Element::Image { .. } => {}
+                Element::Text { .. }
+                | Element::OutlinedText { .. }
+                | Element::Image { .. }
+                | Element::Icon { .. } => {}
             }
         }
     }
@@ -535,7 +538,12 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
         Element::Text { text, class } | Element::OutlinedText { text, class, .. } => {
             write_text(out, text, class, fx.raster_scale)
         }
-        Element::Image { rect, href } => {
+        Element::Image { rect, href, inline } => {
+            // A rasteriser draws the fetched bytes of a remote image.
+            let href = match (fx.raster_scale, inline) {
+                (Some(_), Some(data)) => data,
+                _ => href,
+            };
             let _ = write!(
                 out,
                 "<image href=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\"/>",
@@ -544,6 +552,18 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 num(rect.y),
                 num(rect.w),
                 num(rect.h)
+            );
+        }
+        Element::Icon { rect, color, svg } => {
+            let style = color
+                .as_ref()
+                .map(|c| format!(" style=\"color: {};\"", esc(c.css())))
+                .unwrap_or_default();
+            let _ = write!(
+                out,
+                "<g transform=\"translate({},{})\"{style}><g>{svg}</g></g>",
+                num(rect.x),
+                num(rect.y)
             );
         }
         Element::Faded {

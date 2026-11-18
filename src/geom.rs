@@ -121,6 +121,10 @@ impl Bounds {
     pub fn rect(&self) -> Rect {
         self.0.unwrap_or_default()
     }
+    /// The box, or `None` when nothing was added.
+    pub fn get(&self) -> Option<Rect> {
+        self.0
+    }
 }
 
 /// Path commands understood by every output backend.

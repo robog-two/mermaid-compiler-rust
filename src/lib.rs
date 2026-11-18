@@ -25,6 +25,7 @@ pub mod diagram;
 pub mod error;
 pub mod fonts;
 pub mod geom;
+pub mod iconify;
 pub mod icons;
 pub mod json;
 pub mod layout;

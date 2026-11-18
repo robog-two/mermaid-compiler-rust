@@ -1449,6 +1449,7 @@ mod tests {
             Element::Text { .. }
             | Element::OutlinedText { .. }
             | Element::Image { .. }
+            | Element::Icon { .. }
             | Element::Rotated { .. }
             | Element::Translated { .. } => {}
         }

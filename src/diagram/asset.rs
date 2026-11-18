@@ -12,6 +12,7 @@
 //! those fail as mmdc does there.
 
 use crate::geom::{Point, Rect};
+use crate::scene::{Color, Element};
 
 use super::graph::{Asset, Shape};
 
@@ -42,8 +43,12 @@ pub struct Layout {
     pub w: f64,
     pub h: f64,
     pub frame: Frame,
-    /// The unknown icon's square, for an icon node.
+    /// The icon's square, for an icon node.
     pub icon: Option<Rect>,
+    /// What the icon draws (its `getBBox()`, centred on the square): the
+    /// square itself for `unknownIcon`; a registered icon's content can be
+    /// smaller or reach past it, and the node's measured box takes it in.
+    pub icon_ink: Option<Rect>,
     /// The image's box, for an image node.
     pub image: Option<Rect>,
     /// The label box (`bbox`), empty for no label.
@@ -123,7 +128,7 @@ pub fn label_wrap(shape: Shape, a: &Asset, wrapping: f64) -> f64 {
 pub const LABEL_P_PADDING: f64 = 2.0;
 
 /// `max(assetHeight ?? 48, assetWidth ?? 48)`.
-fn icon_size(a: &Asset) -> f64 {
+pub fn icon_size(a: &Asset) -> f64 {
     a.h.unwrap_or(48.0).max(a.w.unwrap_or(48.0))
 }
 
@@ -175,7 +180,13 @@ pub fn layout(shape: Shape, a: &Asset, bw: f64, bh: f64, pad: f64, wrapping: f64
             )
         }
         Shape::IconCircle => {
-            let d = size * std::f64::consts::SQRT_2 + 40.0;
+            // Round the drawn icon's box (`getBBox()`): all of the square for
+            // `unknownIcon`.
+            let (cw, ch) = match &a.icon_svg {
+                Some(svg) => svg.bbox.map_or((0.0, 0.0), |b| (b.w, b.h)),
+                None => (size, size),
+            };
+            let d = cw.max(ch) * std::f64::consts::SQRT_2 + 40.0;
             (d, d, Frame::Circle(Point::new(0.0, fy), d / 2.0))
         }
         Shape::ImageSquare => {
@@ -198,6 +209,10 @@ pub fn layout(shape: Shape, a: &Asset, bw: f64, bh: f64, pad: f64, wrapping: f64
     let label = Rect::new(-bw / 2.0, label_top, bw, bh);
     let icon =
         (shape != Shape::ImageSquare).then(|| Rect::centered(Point::new(0.0, fy), size, size));
+    let icon_ink = icon.and_then(|sq| match &a.icon_svg {
+        Some(svg) => svg.bbox.map(|b| Rect::centered(sq.center(), b.w, b.h)),
+        None => Some(sq),
+    });
     let image = (shape == Shape::ImageSquare).then(|| {
         let y = if top { h / 2.0 - frame_h } else { -h / 2.0 };
         Rect::new(-frame_w / 2.0, y, frame_w, frame_h)
@@ -215,6 +230,7 @@ pub fn layout(shape: Shape, a: &Asset, bw: f64, bh: f64, pad: f64, wrapping: f64
         h,
         frame,
         icon,
+        icon_ink,
         image,
         label,
         clip,
@@ -225,6 +241,17 @@ pub fn layout(shape: Shape, a: &Asset, bw: f64, bh: f64, pad: f64, wrapping: f64
 /// fetching: a `data:` URI's PNG, GIF, JPEG or WebP header, or an SVG's
 /// `width` and `height`.
 pub fn natural_size(url: &str) -> Option<(f64, f64)> {
+    bytes_size(&data_uri(url)?.1)
+}
+
+/// The natural size of an image file's bytes (PNG, GIF, JPEG, WebP, or an SVG
+/// with a width and height).
+pub fn bytes_size(bytes: &[u8]) -> Option<(f64, f64)> {
+    raster_size(bytes).or_else(|| svg_size(bytes))
+}
+
+/// A `data:` URI's media type (as written, possibly empty) and decoded bytes.
+pub fn data_uri(url: &str) -> Option<(String, Vec<u8>)> {
     let rest = url.trim().strip_prefix("data:")?;
     let (meta, payload) = rest.split_once(',')?;
     let bytes = if meta.ends_with(";base64") {
@@ -232,7 +259,66 @@ pub fn natural_size(url: &str) -> Option<(f64, f64)> {
     } else {
         percent_decode(payload)
     };
-    raster_size(&bytes).or_else(|| svg_size(&bytes))
+    let mime = meta
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    Some((mime, bytes))
+}
+
+/// Image bytes as a base64 `data:` URI, typed by their signature.
+pub fn to_data_uri(bytes: &[u8]) -> String {
+    let mime = if bytes.starts_with(b"\x89PNG") {
+        "image/png"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.starts_with(&[0xff, 0xd8]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else if svg_size(bytes).is_some()
+        || std::str::from_utf8(bytes).is_ok_and(|s| s.contains("<svg"))
+    {
+        "image/svg+xml"
+    } else {
+        "application/octet-stream"
+    };
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len() * 4 / 3 + 32);
+    out.push_str("data:");
+    out.push_str(mime);
+    out.push_str(";base64,");
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// A registered icon drawn as mermaid places it: its drawn content
+/// (`getBBox()`) centred on `centre`, its `currentColor` `color`.
+pub fn icon_element(svg: &crate::iconify::IconSvg, centre: Point, color: Color) -> Element {
+    let b = svg.bbox.unwrap_or_default();
+    Element::Icon {
+        rect: Rect::new(
+            centre.x - b.w / 2.0 - b.x,
+            centre.y - b.h / 2.0 - b.y,
+            svg.width,
+            svg.height,
+        ),
+        color: Some(color),
+        svg: svg.markup.clone(),
+    }
 }
 
 fn base64(s: &str) -> Option<Vec<u8>> {

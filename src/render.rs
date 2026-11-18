@@ -38,11 +38,48 @@ fn graph_options(cfg: &MermaidConfig) -> diagram::graph::RenderOptions {
 /// What mermaid reads from its surroundings rather than from the diagram: the
 /// library never reads the clock itself, so a caller that wants a gantt chart's
 /// today line passes the time in.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RenderEnv {
     /// "Now" in milliseconds since 1970-01-01T00:00Z (mermaid's `new Date()`);
     /// `None` leaves out everything that depends on it (the gantt today line).
     pub now_ms: Option<i64>,
+    /// The bytes of the remote images the diagram links to ([`remote_images`]),
+    /// by URL, as the caller fetched them; an image missing here cannot be
+    /// decoded, as in a browser without network.
+    pub images: RemoteImages,
+}
+
+/// Fetched remote images by URL.
+pub type RemoteImages = std::sync::Arc<std::collections::BTreeMap<String, Vec<u8>>>;
+
+/// The remote images (URLs other than `data:`) a definition's diagram links
+/// to, which mermaid's browser would fetch to size and draw them. Empty when
+/// there are none, or the definition does not parse.
+pub fn remote_images(source: &str, base: &MermaidConfig) -> Vec<String> {
+    let graph = || -> Result<diagram::graph::GraphDiagram> {
+        let pre = diagram::preprocess(source)?;
+        let mut cfg = base.clone();
+        for layer in &pre.config_layers {
+            cfg = cfg.with_directive(layer).map_err(Error::Config)?;
+        }
+        let kind = diagram::detect(&pre.body)?;
+        let cfg = cfg.scoped(kind.config_key());
+        let opts = diagram::flowchart::ParseOptions {
+            inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
+        };
+        match kind {
+            DiagramType::Flowchart => {
+                diagram::flowchart::parse_with(&pre.body, pre.title.clone(), opts)
+            }
+            DiagramType::Swimlane if diagram::swimlane::other_layout(&cfg).is_some() => {
+                diagram::swimlane::parse_flowchart(&pre.body, pre.title.clone(), opts)
+            }
+            _ => Err(Error::Render(String::new())),
+        }
+    };
+    graph()
+        .map(|g| diagram::flowchart::remote_images(&g))
+        .unwrap_or_default()
 }
 
 /// Parse, lay out and draw one mermaid definition, as of no particular time
@@ -98,7 +135,8 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
             let opts = diagram::flowchart::ParseOptions {
                 inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
             };
-            let g = diagram::flowchart::parse_with(&pre.body, pre.title.clone(), opts)?;
+            let mut g = diagram::flowchart::parse_with(&pre.body, pre.title.clone(), opts)?;
+            diagram::flowchart::attach_assets(&mut g, &cfg.icon_packs, &env.images)?;
             (
                 diagram::graph::render_with(&g, &cfg.flowchart, &pal, &graph_options(&cfg)),
                 cfg.flowchart.use_max_width,
@@ -225,7 +263,8 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
                 let opts = diagram::flowchart::ParseOptions {
                     inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
                 };
-                let g = diagram::swimlane::parse_flowchart(&pre.body, pre.title.clone(), opts)?;
+                let mut g = diagram::swimlane::parse_flowchart(&pre.body, pre.title.clone(), opts)?;
+                diagram::flowchart::attach_assets(&mut g, &cfg.icon_packs, &env.images)?;
                 let fcfg = crate::config::GraphConfig {
                     layout,
                     ..cfg.flowchart.clone()

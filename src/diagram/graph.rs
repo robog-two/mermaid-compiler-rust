@@ -285,8 +285,14 @@ pub struct Asset {
     pub constraint: bool,
     /// `form`: `square`, `circle` or `rounded` (an icon's frame).
     pub form: Option<String>,
-    /// The image's natural size, where its `data:` URI tells it.
+    /// The image's natural size, where its `data:` URI (or the fetched
+    /// bytes of a remote image) tells it.
     pub natural: Option<(f64, f64)>,
+    /// A remote image's fetched bytes as a `data:` URI, for PNG and PDF.
+    pub inline: Option<String>,
+    /// The icon drawn from a registered icon pack (`None`: mermaid's
+    /// `unknownIcon`).
+    pub icon_svg: Option<crate::iconify::IconSvg>,
 }
 
 /// Whether `shape` is an icon or image node's ([`Asset`]).
@@ -1327,7 +1333,7 @@ fn measure_node(
                 // The layout takes the whole drawing's box (its rough.js
                 // circle reaches a hair past the outer box).
                 let mut ink = Rect::centered(Point::default(), l.w, l.h).union(&l.label);
-                for r in [l.icon, l.image].into_iter().flatten() {
+                for r in [l.icon_ink, l.image].into_iter().flatten() {
                     ink = ink.union(&r);
                 }
                 if let super::asset::Frame::Circle(p, r) = l.frame
@@ -6682,7 +6688,7 @@ fn measure_hand(
         // outer box where their strokes fell, the label, icon and image.
         let hn = hand_asset(n, l, pal, seed);
         let mut b = hn.bbox.union(&l.label);
-        for r in [l.icon, l.image].into_iter().flatten() {
+        for r in [l.icon_ink, l.image].into_iter().flatten() {
             b = b.union(&r);
         }
         (m.w, m.h) = (b.w, b.h);
@@ -6887,17 +6893,37 @@ fn asset_elements(
         els.push(Element::rect(at(l.label), 0.0, Paint::fill(bg)));
     }
     if let Some(r) = l.icon {
-        // unknownIcon: the blue square and its `?`.
         let r = at(r);
-        els.push(Element::rect(
-            r,
-            0.0,
-            Paint::fill(&Color::new(super::asset::UNKNOWN_ICON_FILL)),
-        ));
-        els.push(super::archicons::unknown(r));
+        match n.asset.as_ref().and_then(|a| a.icon_svg.as_ref()) {
+            // The icon's drawn content centred on its square, coloured in the
+            // node's stroke (icon.ts and the other icon shapes).
+            Some(svg) => {
+                let color = n
+                    .style
+                    .stroke
+                    .clone()
+                    .unwrap_or_else(|| pal.node_border.clone());
+                els.push(super::asset::icon_element(svg, r.center(), color));
+            }
+            // unknownIcon: the blue square and its `?`.
+            None => {
+                els.push(Element::rect(
+                    r,
+                    0.0,
+                    Paint::fill(&Color::new(super::asset::UNKNOWN_ICON_FILL)),
+                ));
+                els.push(super::archicons::unknown(r));
+            }
+        }
     }
-    if let (Some(r), Some(href)) = (l.image, n.asset.as_ref().and_then(|a| a.img.clone())) {
-        els.push(Element::Image { rect: at(r), href });
+    if let (Some(r), Some(a)) = (l.image, n.asset.as_ref())
+        && let Some(href) = a.img.clone()
+    {
+        els.push(Element::Image {
+            rect: at(r),
+            href,
+            inline: a.inline.clone(),
+        });
     }
     match l.clip(m.h) {
         Some(pts) => Boundary::Outline(c, hand::in_box(c, m.w, m.h, pts)),

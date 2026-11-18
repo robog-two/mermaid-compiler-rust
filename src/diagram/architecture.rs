@@ -710,6 +710,34 @@ fn icon_glyph(icon: Option<&str>, r: Rect) -> Vec<Element> {
     super::archicons::builtin(name, r).unwrap_or_else(|| vec![super::archicons::unknown(r)])
 }
 
+/// An icon from a registered pack (`getIconSVG(name, { fallbackPrefix:
+/// 'mermaid-architecture' })` where the name's prefix is not the built-in
+/// set's), drawn `r.w` square at `r`'s corner; `None` for a built-in name or
+/// one no pack has. With it, the box of what the icon draws.
+fn pack_icon(
+    cfg: &MermaidConfig,
+    name: &str,
+    r: Rect,
+    uniq: &str,
+) -> Option<(Element, Option<Rect>)> {
+    const BUILTIN: &str = "mermaid-architecture";
+    let (prefix, _) = crate::iconify::icon_prefix(name, Some(BUILTIN))?;
+    if prefix == BUILTIN {
+        return None;
+    }
+    let data = cfg.icon_packs.lookup(name, Some(BUILTIN))?;
+    let svg = crate::iconify::icon_svg(&data, r.w, uniq);
+    let ink = svg.bbox.map(|b| Rect::new(r.x + b.x, r.y + b.y, b.w, b.h));
+    Some((
+        Element::Icon {
+            rect: Rect::new(r.x, r.y, svg.width, svg.height),
+            color: None,
+            svg: svg.markup,
+        },
+        ink,
+    ))
+}
+
 /// Boxes from mermaid's fcose placement: a service's icon has its top left
 /// corner at the node's cytoscape position, and the groups' boxes are drawn
 /// shifted by half an icon the same way (svgDraw.ts).
@@ -822,8 +850,13 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let mut baseline = r.y + 2.0 + font;
         if let Some(icon) = &g.icon {
             let ir = Rect::new(r.x + 1.0, r.y + 1.0, group_icon, group_icon);
-            children.push(Element::rect(ir, 0.0, Paint::fill(&icon_bg)));
-            children.extend(icon_glyph(Some(icon), ir));
+            match pack_icon(cfg, icon, ir, &format!("group-{}", g.id)) {
+                Some((el, _)) => children.push(el),
+                None => {
+                    children.push(Element::rect(ir, 0.0, Paint::fill(&icon_bg)));
+                    children.extend(icon_glyph(Some(icon), ir));
+                }
+            }
             x = ir.right() + 3.0;
             // svgDraw.ts: the title moves down `fontSize / 2 - 3` past an icon.
             baseline += ac.font_size / 2.0 - 3.0;
@@ -862,8 +895,26 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
 
     for (i, n) in d.nodes.iter().enumerate() {
         let ib = lay.icon_box[i];
+        // An icon from a registered pack: the diagram's box takes in what it
+        // draws (`getBBox()`), not its whole square.
+        let user = match &n.kind {
+            NodeKind::Service {
+                icon: Some(icon),
+                icon_text: None,
+                ..
+            } => pack_icon(cfg, icon, ib, &format!("service-{}", n.id)),
+            _ => None,
+        };
         // The title (when any) adds its own text box below.
-        bounds.add_rect(ib);
+        match &user {
+            Some((_, ink)) => {
+                if let Some(r) = ink {
+                    bounds.add_rect(*r);
+                }
+            }
+            None => bounds.add_rect(ib),
+        }
+        let user = user.map(|(el, _)| el);
         let children = match &n.kind {
             // mermaid draws junctions as fully transparent icon-sized rects.
             NodeKind::Junction => vec![Element::shape(
@@ -875,13 +926,18 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 icon_text,
                 title,
             } => {
-                let mut v = vec![Element::classed_shape(
-                    // wrapIcon's `<rect width="80" height="80">`: square corners.
-                    Geometry::Rect { rect: ib, rx: 0.0 },
-                    Paint::fill(&icon_bg),
-                    "node-bkg",
-                )];
-                if let Some(t) = icon_text {
+                // An icon from a registered pack has no background of its own.
+                let packed = user.is_some();
+                let mut v = vec![user.unwrap_or_else(|| {
+                    Element::classed_shape(
+                        // wrapIcon's `<rect width="80" height="80">`: square corners.
+                        Geometry::Rect { rect: ib, rx: 0.0 },
+                        Paint::fill(&icon_bg),
+                        "node-bkg",
+                    )
+                })];
+                if packed {
+                } else if let Some(t) = icon_text {
                     let b = TextBlock::label(t, font);
                     v.push(Element::text(Text::centered(
                         ib.center(),

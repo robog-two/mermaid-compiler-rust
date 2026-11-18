@@ -917,7 +917,27 @@ fn builtin_icon(kind: &IconRef, x: f64, y: f64) -> Vec<PathCmd> {
     v
 }
 
-fn icon_elements(icon: &IconRef, x: f64, y: f64, color: &Color) -> Vec<Element> {
+fn icon_elements(
+    icon: &IconRef,
+    x: f64,
+    y: f64,
+    color: &Color,
+    packs: &crate::iconify::IconPacks,
+) -> Vec<Element> {
+    // An icon from a registered pack, in `.treeView-node-icon`'s colour.
+    if let IconRef::External(name) = icon
+        && let Some(data) = packs.lookup(name, None)
+    {
+        let svg = crate::iconify::icon_svg(&data, ICON_SIZE, &format!("tree-{x}-{y}"));
+        return vec![Element::group(
+            "treeView-node-icon",
+            vec![Element::Icon {
+                rect: Rect::new(x, y, svg.width, svg.height),
+                color: Some(color.clone()),
+                svg: svg.markup,
+            }],
+        )];
+    }
     match icon {
         IconRef::File | IconRef::Folder => vec![Element::classed_shape(
             Geometry::Path(builtin_icon(icon, x, y)),
@@ -955,7 +975,13 @@ fn icon_elements(icon: &IconRef, x: f64, y: f64, color: &Color) -> Vec<Element> 
 }
 
 /// Draw a laid-out tree.
-pub fn draw(lay: &Layout, cfg: &LayoutConfig, colors: &Colors, pal: &Palette) -> Scene {
+pub fn draw(
+    lay: &Layout,
+    cfg: &LayoutConfig,
+    colors: &Colors,
+    pal: &Palette,
+    packs: &crate::iconify::IconPacks,
+) -> Scene {
     let fs = cfg.font_size;
     let label_text = |x: f64, cy: f64, s: &str, fill: &Color| Text {
         x,
@@ -989,6 +1015,7 @@ pub fn draw(lay: &Layout, cfg: &LayoutConfig, colors: &Colors, pal: &Palette) ->
                 row.bbox.x + cfg.padding_x,
                 row.bbox.y + cfg.padding_y,
                 &colors.icon,
+                packs,
             ));
         }
         let mut class = String::from("treeView-node-label");
@@ -1045,7 +1072,7 @@ pub fn render(
     let tv = parse(body)?;
     let (lc, colors) = config(cfg);
     let lay = layout(&tv, &lc);
-    let mut scene = draw(&lay, &lc, &colors, pal);
+    let mut scene = draw(&lay, &lc, &colors, pal, &cfg.icon_packs);
     scene.acc_title = tv.acc_title;
     scene.acc_descr = tv.acc_descr;
     Ok(scene)

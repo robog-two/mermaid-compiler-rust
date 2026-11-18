@@ -2289,7 +2289,10 @@ mod tests {
 
     /// The `today` line(s) of a full render at `now`: `(x, y1, y2, paint)`.
     fn today_lines(src: &str, now: Option<i64>) -> Vec<(f64, f64, f64, Paint)> {
-        let env = crate::render::RenderEnv { now_ms: now };
+        let env = crate::render::RenderEnv {
+            now_ms: now,
+            ..Default::default()
+        };
         let r = crate::render::render_with_env(src, &MermaidConfig::default(), &env).unwrap();
         fn walk(els: &[Element], out: &mut Vec<(f64, f64, f64, Paint)>) {
             for e in els {
@@ -2331,7 +2334,10 @@ mod tests {
         let r = crate::render::render_with_env(
             src,
             &MermaidConfig::default(),
-            &crate::render::RenderEnv { now_ms: Some(NOW) },
+            &crate::render::RenderEnv {
+                now_ms: Some(NOW),
+                ..Default::default()
+            },
         )
         .unwrap();
         let opt = crate::output::svg::SvgOptions {

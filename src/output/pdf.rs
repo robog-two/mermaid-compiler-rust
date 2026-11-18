@@ -103,6 +103,9 @@ struct Ctx {
     /// Faded groups: the content streams of transparency-group form XObjects
     /// `/L{index}`, each drawn at its group's opacity.
     layers: Vec<String>,
+    /// Images and icons, image XObjects `/Im{index}` (each with its soft mask,
+    /// if any), keyed by what they draw so a repeated image is stored once.
+    images: Vec<(String, super::image::Samples)>,
 }
 
 fn n(v: f64) -> String {
@@ -432,6 +435,36 @@ impl Ctx {
         self.out.push_str(" ET\n");
     }
 
+    /// Draw an image XObject over `rect` (stored once per `key`); nothing
+    /// when `decode` cannot decode it.
+    fn image(
+        &mut self,
+        rect: &Rect,
+        key: String,
+        decode: impl FnOnce() -> Option<super::image::Samples>,
+    ) {
+        let idx = match self.images.iter().position(|(k, _)| *k == key) {
+            Some(i) => i,
+            None => {
+                let Some(samples) = decode() else {
+                    return;
+                };
+                self.images.push((key, samples));
+                self.images.len() - 1
+            }
+        };
+        // The unit square, its first row on top, onto the box (user space
+        // runs downwards).
+        let _ = writeln!(
+            self.out,
+            "q {} 0 0 {} {} {} cm /Im{idx} Do Q",
+            n(rect.w),
+            n(-rect.h),
+            n(rect.x),
+            n(rect.y + rect.h)
+        );
+    }
+
     fn element(&mut self, el: &Element) {
         match el {
             Element::Group { children, .. } => children.iter().for_each(|c| self.element(c)),
@@ -464,8 +497,25 @@ impl Ctx {
                 let _ = writeln!(self.out, "/L{idx} Do\nQ");
             }
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
-            // Raster images are not embedded in PDF output.
-            Element::Image { .. } => {}
+            Element::Image { rect, href, inline } => {
+                let src = inline.as_deref().unwrap_or(href);
+                // A raster image is stored once at its own size; an SVG once
+                // per size it is rasterised at.
+                let key = if super::image::is_svg(src) {
+                    format!("{} {} {src}", rect.w, rect.h)
+                } else {
+                    src.to_string()
+                };
+                self.image(rect, key, || super::image::image(src, rect.w, rect.h));
+            }
+            Element::Icon { rect, color, svg } => {
+                let color = color.as_ref().map(|c| c.css());
+                self.image(
+                    rect,
+                    format!("{} {} {} {svg}", rect.w, rect.h, color.unwrap_or("")),
+                    || super::image::inline_svg(svg, rect.w, rect.h, color),
+                );
+            }
             Element::Text { text, .. } => self.text(text, None),
             Element::OutlinedText {
                 text, color, width, ..
@@ -681,6 +731,71 @@ fn embedded_font_objects(face: usize, glyphs: &BTreeMap<u16, char>, first: usize
     ]
 }
 
+fn has_mask(img: &super::image::Samples) -> bool {
+    matches!(img, super::image::Samples::Flate { alpha: Some(_), .. })
+}
+
+/// An image XObject and, for a translucent one, its soft mask (object
+/// `mask_obj`).
+fn image_objects(img: &super::image::Samples, mask_obj: usize) -> Vec<Vec<u8>> {
+    use super::image::Samples;
+    let stream = |dict: String, data: &[u8]| {
+        let mut o = format!("{dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+        o.extend_from_slice(data);
+        o.extend_from_slice(b"\nendstream");
+        o
+    };
+    match img {
+        Samples::Jpeg {
+            data,
+            width,
+            height,
+            components,
+            inverted,
+        } => {
+            let (cs, decode) = match components {
+                1 => ("/DeviceGray", ""),
+                4 if *inverted => ("/DeviceCMYK", " /Decode [1 0 1 0 1 0 1 0]"),
+                4 => ("/DeviceCMYK", ""),
+                _ => ("/DeviceRGB", ""),
+            };
+            vec![stream(
+                format!(
+                    "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace {cs} /BitsPerComponent 8{decode} /Filter /DCTDecode"
+                ),
+                data,
+            )]
+        }
+        Samples::Flate {
+            width,
+            height,
+            rgb,
+            alpha,
+        } => {
+            let smask = if alpha.is_some() {
+                format!(" /SMask {mask_obj} 0 R")
+            } else {
+                String::new()
+            };
+            let mut out = vec![stream(
+                format!(
+                    "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceRGB /BitsPerComponent 8{smask} /Filter /FlateDecode"
+                ),
+                rgb,
+            )];
+            if let Some(a) = alpha {
+                out.push(stream(
+                    format!(
+                        "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode"
+                    ),
+                    a,
+                ));
+            }
+            out
+        }
+    }
+}
+
 /// Serialise a scene to a single-page PDF.
 pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
     let (page_w_px, page_h_px, draw_w) = match opt.paper {
@@ -707,6 +822,7 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         gradients: Vec::new(),
         shadows: Vec::new(),
         layers: Vec::new(),
+        images: Vec::new(),
     };
 
     // Page background (Puppeteer prints the body background) unless transparent.
@@ -773,9 +889,22 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
     let shadow_base = pattern_base + ctx.gradients.len();
     // Faded groups' form XObjects follow the shadow images, one object each.
     let layer_base = shadow_base + 2 * ctx.shadows.len();
+    // Images follow the groups: each image, then its soft mask if it has one.
+    let mut image_objs = Vec::with_capacity(ctx.images.len());
+    let mut next = layer_base + ctx.layers.len();
+    for (_, img) in &ctx.images {
+        image_objs.push(next);
+        next += 1 + usize::from(has_mask(img));
+    }
     let xobjects: String = (0..ctx.shadows.len())
         .map(|i| format!(" /Sh{i} {} 0 R", shadow_base + 2 * i))
         .chain((0..ctx.layers.len()).map(|i| format!(" /L{i} {} 0 R", layer_base + i)))
+        .chain(
+            image_objs
+                .iter()
+                .enumerate()
+                .map(|(i, o)| format!(" /Im{i} {o} 0 R")),
+        )
         .collect();
     let patterns = if xobjects.is_empty() {
         patterns
@@ -877,6 +1006,10 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
             )
             .into_bytes(),
         );
+    }
+
+    for ((_, img), &obj) in ctx.images.iter().zip(&image_objs) {
+        objects.extend(image_objects(img, obj + 1));
     }
 
     let mut pdf: Vec<u8> = format!("%PDF-{version}\n").into_bytes();

@@ -1045,6 +1045,7 @@ fn translate(e: Element, dx: f64, dy: f64) -> Element {
         | Element::Clipped { .. }
         | Element::Faded { .. }
         | Element::Image { .. }
+        | Element::Icon { .. }
         | Element::Translated { .. }) => e.translated(dx, dy),
         Element::Group {
             id,

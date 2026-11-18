@@ -1,6 +1,7 @@
 //! Output encoders. Everything here is a pure function of the scene and options,
 //! except PNG font loading, which `Rasterizer` does once up front.
 
+mod image;
 pub mod pdf;
 #[cfg(feature = "png")]
 pub mod png;

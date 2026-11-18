@@ -28,6 +28,62 @@ pub struct ParseOptions {
     pub inherit_dir: bool,
 }
 
+/// The images a flowchart links to rather than embeds (`img:` URLs that are
+/// not `data:` URIs), which mermaid's browser fetches.
+pub fn remote_images(g: &GraphDiagram) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for n in &g.nodes {
+        if let Some(url) = n
+            .asset
+            .as_ref()
+            .filter(|_| n.shape == Shape::ImageSquare)
+            .and_then(|a| a.img.as_ref())
+            .filter(|u| !u.trim_start().starts_with("data:"))
+        {
+            if !out.contains(url) {
+                out.push(url.clone());
+            }
+        }
+    }
+    out
+}
+
+/// What a flowchart's icon and image nodes take from outside the diagram:
+/// icons from the registered packs (an icon no pack has stays mermaid's
+/// `unknownIcon`), and remote images' fetched bytes, which size and draw
+/// them. A remote image that was not fetched, or does not decode, fails the
+/// render, as mermaid's `img.decode()` rejects it.
+pub fn attach_assets(
+    g: &mut GraphDiagram,
+    packs: &crate::iconify::IconPacks,
+    images: &crate::render::RemoteImages,
+) -> Result<()> {
+    for n in &mut g.nodes {
+        let shape = n.shape;
+        let Some(a) = n.asset.as_mut() else {
+            continue;
+        };
+        if shape == Shape::ImageSquare {
+            let url = a.img.clone().unwrap_or_default();
+            if url.trim_start().starts_with("data:") {
+                continue;
+            }
+            let bytes = images.get(&url);
+            a.natural = bytes.and_then(|b| super::asset::bytes_size(b));
+            a.inline = bytes.map(|b| super::asset::to_data_uri(b));
+            if a.natural.is_none() {
+                return Err(Error::Render(super::asset::UNDECODABLE.to_string()));
+            }
+        } else if let Some(icon) = a.icon.as_deref().filter(|_| !packs.is_empty()) {
+            // icon.ts and its siblings: `getIconSVG(icon, { fallbackPrefix: '' })`.
+            a.icon_svg = packs
+                .lookup(icon, Some(""))
+                .map(|d| crate::iconify::icon_svg(&d, super::asset::icon_size(a), &n.id));
+        }
+    }
+    Ok(())
+}
+
 /// Parse a preprocessed flowchart body.
 pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
     parse_with(body, title, ParseOptions::default())
@@ -581,18 +637,18 @@ impl Builder {
             if let Some(s) = n.asset.as_ref().and_then(asset_shape) {
                 n.shape = s;
             }
-            // imageSquare.ts awaits `img.decode()`: an image mermaid cannot
-            // decode (a remote one where mmdc has no network) fails the
-            // render. Its natural size is only read from a `data:` URI; a
-            // remote image whose `w` and `h` size it alone is drawn.
+            // imageSquare.ts awaits `img.decode()`: a `data:` URI mermaid
+            // cannot decode fails the render. A remote image's natural size
+            // comes from its fetched bytes ([`attach_assets`]).
             if let Some(a) = n.asset.as_mut().filter(|_| n.shape == Shape::ImageSquare) {
                 let url = a.img.clone().unwrap_or_default();
-                a.natural = super::asset::natural_size(&url);
-                let data = url.trim_start().starts_with("data:");
-                if a.natural.is_none() && (data || super::asset::needs_natural(a)) {
-                    return Err(crate::error::Error::Render(
-                        super::asset::UNDECODABLE.to_string(),
-                    ));
+                if url.trim_start().starts_with("data:") {
+                    a.natural = super::asset::natural_size(&url);
+                    if a.natural.is_none() {
+                        return Err(crate::error::Error::Render(
+                            super::asset::UNDECODABLE.to_string(),
+                        ));
+                    }
                 }
             }
         }

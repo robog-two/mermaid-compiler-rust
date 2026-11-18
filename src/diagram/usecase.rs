@@ -2834,6 +2834,8 @@ struct Options {
     role: RoleColors,
     /// `handDrawnSeed` under `look: handDrawn`.
     hand: Option<f64>,
+    /// The registered icon packs (icon actors).
+    packs: crate::iconify::IconPacks,
 }
 
 fn is_bold(weight: Option<&str>) -> bool {
@@ -2862,6 +2864,7 @@ impl Options {
             line_hops: cfg.elk_line_hops(),
             role: role_colors(cfg.theme, &cfg.theme_variables, pal),
             hand: (cfg.look == Look::HandDrawn).then(|| cfg.hand_drawn_seed()),
+            packs: cfg.icon_packs.clone(),
         }
     }
     fn neo(&self) -> bool {
@@ -2991,6 +2994,9 @@ enum Shape {
         business: bool,
         label: Block,
         stereotype: Option<Block>,
+        /// An icon actor's icon from a registered pack (`None`: mermaid's
+        /// unknown-icon fallback).
+        icon: Option<crate::iconify::IconSvg>,
     },
     Ellipse {
         label: Block,
@@ -3066,6 +3072,9 @@ fn compiled_style(
     StyleOverrides::parse(&joined.join(",")).merged(&StyleOverrides::parse(&inline.join(",")))
 }
 
+/// usecaseActorIcon.ts's `ICON_SIZE`.
+const ICON_SIZE: f64 = 42.0;
+
 fn measure_actor(a: &Actor, o: &Options) -> (Shape, f64, f64) {
     let label = Block::wrapped(&label_lines(&a.label), o.actor_font, o.actor_bold, o.wrap);
     let stereotype = a.stereotype.as_ref().map(|s| {
@@ -3089,6 +3098,13 @@ fn measure_actor(a: &Actor, o: &Options) -> (Shape, f64, f64) {
             business: a.business,
             label,
             stereotype,
+            // usecaseActorIcon.ts: `getIconSVG(icon, { 42 square, fallbackPrefix: 'fa' })`.
+            icon: a
+                .icon
+                .as_deref()
+                .filter(|_| a.kind == ActorType::Icon)
+                .and_then(|i| o.packs.lookup(i, Some("fa")))
+                .map(|d| crate::iconify::icon_svg(&d, ICON_SIZE, &a.id)),
         },
         w,
         h,
@@ -3439,6 +3455,7 @@ fn draw_node(
             business,
             label,
             stereotype,
+            icon,
         } => {
             let paint = painted(&n.style, slot, &role.actor_bkg, &role.actor_border, 2.0);
             let line = Paint::stroke(&paint.stroke, paint.stroke_width);
@@ -3517,18 +3534,40 @@ fn draw_node(
                             sh,
                         );
                     }
-                    let ir = Rect::new(g.x - 21.0, g.y - 23.0, 42.0, 42.0);
-                    let fallback = Geometry::Rect { rect: ir, rx: 0.0 };
-                    push_shadowed(
-                        &mut els,
-                        Element::classed_shape(
-                            fallback,
-                            Paint::fill(&Color::new("#087ebf")),
-                            "usecase-actor-icon-fallback",
-                        ),
-                        sh,
-                    );
-                    els.push(super::archicons::unknown(ir));
+                    let ir = Rect::new(g.x - 21.0, g.y - 23.0, ICON_SIZE, ICON_SIZE);
+                    if let Some(svg) = icon {
+                        // The icon's content centred 2px above the glyph's
+                        // origin. `.usecase-actor-icon` fills and strokes the
+                        // glyph group, and the icon's elements inherit that
+                        // (stroke-width 2px), `currentColor` the actor's text.
+                        let color = n
+                            .style
+                            .color
+                            .clone()
+                            .unwrap_or_else(|| pal.actor_text.clone());
+                        let mut el = super::asset::icon_element(svg, ir.center(), color);
+                        if let Element::Icon { svg, .. } = &mut el {
+                            *svg = format!(
+                                "<g fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\">{svg}</g>",
+                                crate::output::svg::esc(paint.fill.css()),
+                                crate::output::svg::esc(paint.stroke.css()),
+                                crate::output::svg::num(paint.stroke_width)
+                            );
+                        }
+                        els.push(Element::group("usecase-actor-icon-symbol", vec![el]));
+                    } else {
+                        let fallback = Geometry::Rect { rect: ir, rx: 0.0 };
+                        push_shadowed(
+                            &mut els,
+                            Element::classed_shape(
+                                fallback,
+                                Paint::fill(&Color::new("#087ebf")),
+                                "usecase-actor-icon-fallback",
+                            ),
+                            sh,
+                        );
+                        els.push(super::archicons::unknown(ir));
+                    }
                 }
             }
             if *business {
@@ -5129,8 +5168,10 @@ mod tests {
                     | Element::Translated { children, .. }
                     | Element::Clipped { children, .. }
                     | Element::Faded { children, .. } => dashes(children, out),
-                    Element::Text { .. } | Element::OutlinedText { .. } | Element::Image { .. } => {
-                    }
+                    Element::Text { .. }
+                    | Element::OutlinedText { .. }
+                    | Element::Image { .. }
+                    | Element::Icon { .. } => {}
                 }
             }
         }

@@ -165,9 +165,7 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
             std::fs::read_to_string(css).map_err(|e| format!("Failed to read \"{css}\": {e}"))?,
         );
     }
-    if !opts.icon_packs.is_empty() || !opts.icon_packs_names_and_urls.is_empty() {
-        log.warn("Icon packs are accepted for compatibility but are not rendered by this implementation.");
-    }
+    config.icon_packs = load_icon_packs(&opts, log)?;
     for flag in &opts.ignored_legacy {
         log.warn(&format!(
             "Option '{flag}' is no longer supported by mermaid-cli and is ignored."
@@ -195,7 +193,7 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
     };
     let format = plan::infer_format(&output_name, format)?;
     let rasterizer = make_rasterizer(format)?;
-    let env = render_env()?;
+    let mut env = render_env()?;
 
     let definition = match &input {
         Some(p) => {
@@ -230,6 +228,7 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
             })
             .collect();
         let defs: Vec<&str> = charts.iter().map(|c| c.definition).collect();
+        env.images = fetch_remote_images(&defs, &config, log);
         let results = render_parallel(
             &defs,
             &config,
@@ -269,6 +268,7 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
     }
 
     log.info("Generating single mermaid chart");
+    env.images = fetch_remote_images(&[definition.as_str()], &config, log);
     let (bytes, _, _) = render_one(
         &definition,
         &config,
@@ -289,6 +289,115 @@ fn run(opts: CliOptions, log: &mut Log) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Read a local file, or fetch an `http(s)` URL with `curl` (this program has
+/// no HTTP client of its own).
+fn read_resource(url: &str) -> Result<Vec<u8>, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    match plan::resource(url, &cwd) {
+        Some(plan::Resource::File(p)) => {
+            std::fs::read(&p).map_err(|e| format!("Failed to read \"{}\": {e}", p.display()))
+        }
+        Some(plan::Resource::Http(u)) => curl(&u),
+        None => Err(format!("Unsupported URL \"{url}\"")),
+    }
+}
+
+/// `curl -fsSL <url>`'s output.
+fn curl(url: &str) -> Result<Vec<u8>, String> {
+    let out = std::process::Command::new("curl")
+        .args(["-fsSL", "--max-time", "120", "--", url])
+        .output()
+        .map_err(|e| {
+            format!("Fetching \"{url}\" needs `curl`, which could not be run ({e}). Install curl, or use a local file.")
+        })?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!("Failed to fetch \"{url}\": {why}"));
+    }
+    Ok(out.stdout)
+}
+
+/// The icon packs of `--iconPacks` (installed packages, else their
+/// `icons.json` on unpkg.com) and `--iconPacksNamesAndUrls` (files or URLs).
+/// mmdc rejects a package it cannot find; a pack named with a URL is fetched
+/// when needed and, if that fails, its icons draw as unknown, so a failed
+/// load is only a warning here.
+fn load_icon_packs(opts: &CliOptions, log: &Log) -> Result<mmdc::iconify::IconPacks, String> {
+    let mut packs: Vec<(String, Result<String, String>)> = Vec::new();
+    if opts.icon_packs.is_empty() && opts.icon_packs_names_and_urls.is_empty() {
+        return Ok(mmdc::iconify::IconPacks::default());
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let flags = "--iconPacks <icon-packages...>";
+    for pkg in &opts.icon_packs {
+        let spec = format!("{pkg}/icons.json");
+        let local = plan::icon_pack_files(pkg, &cwd)
+            .into_iter()
+            .find(|p| p.is_file());
+        let (from, text) = match local {
+            Some(p) => {
+                let text = std::fs::read_to_string(&p).map_err(|_| {
+                    format!(
+                        "error: option '{flags}' argument '{pkg}' is invalid. Failed to read icon pack JSON from {:?}.",
+                        format!("file://{}", p.display())
+                    )
+                })?;
+                (format!("file://{}", p.display()), text)
+            }
+            None => {
+                let url = plan::icon_pack_cdn_url(pkg);
+                let bytes = curl(&url).map_err(|e| {
+                    format!(
+                        "error: option '{flags}' argument '{pkg}' is invalid. Could not find icon pack {spec:?}. Have you installed them with 'npm install {pkg}'? ({e})"
+                    )
+                })?;
+                (url, String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+        if json::parse(&text).is_err() {
+            return Err(format!(
+                "error: option '{flags}' argument '{pkg}' is invalid. Failed to parse icon pack JSON from {spec:?}."
+            ));
+        }
+        let prefix = plan::icon_pack_prefix(&text).ok_or_else(|| {
+            format!(
+                "error: option '{flags}' argument '{pkg}' is invalid. Invalid icon pack JSON from {from:?}. Missing or invalid \"prefix\" property."
+            )
+        })?;
+        packs.push((prefix, Ok(text)));
+    }
+    for arg in &opts.icon_packs_names_and_urls {
+        let (name, url) = plan::split_icon_pack_arg(arg);
+        let text = read_resource(&url).map(|b| String::from_utf8_lossy(&b).into_owned());
+        if let Err(e) = &text {
+            log.warn(&format!("Failed to fetch icon: {name} ({e})"));
+        }
+        packs.push((name, text));
+    }
+    Ok(mmdc::iconify::IconPacks::new(packs))
+}
+
+/// Fetch the remote images the definitions link to (mermaid's browser loads
+/// them to size and draw them). One that cannot be fetched is left out, so
+/// its diagram fails as mermaid's does without network.
+fn fetch_remote_images(defs: &[&str], config: &MermaidConfig, log: &Log) -> render::RemoteImages {
+    let mut images = std::collections::BTreeMap::new();
+    for def in defs {
+        for url in render::remote_images(def, config) {
+            if images.contains_key(&url) {
+                continue;
+            }
+            match read_resource(&url) {
+                Ok(bytes) => {
+                    images.insert(url, bytes);
+                }
+                Err(e) => log.warn(&format!("Failed to load image \"{url}\": {e}")),
+            }
+        }
+    }
+    std::sync::Arc::new(images)
 }
 
 #[cfg(feature = "png")]
@@ -334,7 +443,10 @@ fn render_env() -> Result<render::RenderEnv, String> {
             .ok()
             .and_then(|d| i64::try_from(d.as_millis()).ok()),
     };
-    Ok(render::RenderEnv { now_ms })
+    Ok(render::RenderEnv {
+        now_ms,
+        ..Default::default()
+    })
 }
 
 fn render_one(

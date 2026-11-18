@@ -411,6 +411,9 @@ pub struct MermaidConfig {
     /// Every JSON layer applied, in order, for diagram-specific options that
     /// have no typed field (read with [`MermaidConfig::section`]).
     pub raw: Vec<Json>,
+    /// The icon packs registered with mermaid (mmdc's `--iconPacks` and
+    /// `--iconPacksNamesAndUrls`; not part of mermaid's JSON config).
+    pub icon_packs: crate::iconify::IconPacks,
 }
 
 impl Default for MermaidConfig {
@@ -431,6 +434,7 @@ impl Default for MermaidConfig {
             sequence: SequenceConfig::default(),
             pie: PieConfig::default(),
             raw: Vec::new(),
+            icon_packs: Default::default(),
         }
     }
 }
