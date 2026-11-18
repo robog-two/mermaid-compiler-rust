@@ -779,6 +779,25 @@ pub fn svg_bbox_extent(text: &str, font_size: f64, italic: bool) -> (f64, f64) {
     svg_bbox_extent_styled(text, font_size, false, italic)
 }
 
+/// The ink extent of `c` in one of the ink tables: ASCII, and the guillemets
+/// that wrap a class annotation (`«interface»`), whose ink reaches past their
+/// advance (Liberation Sans' `glyf`; other characters count by their advance).
+fn glyph_ink(table: &[(i16, i16); 94], c: char) -> Option<(i16, i16)> {
+    let face = if std::ptr::eq(table, &ARIAL_BOLD_INK) {
+        1
+    } else if std::ptr::eq(table, &ARIAL_ITALIC_INK) {
+        2
+    } else {
+        0
+    };
+    match c {
+        '!'..='~' => Some(table[(c as u32 - 0x21) as usize]),
+        '«' => Some([(83, 1056), (92, 1047), (76, 1131)][face]),
+        '»' => Some([(83, 1056), (93, 1048), (5, 1061)][face]),
+        _ => None,
+    }
+}
+
 /// [`svg_bbox_extent`] for any weight: bold (`font-weight` 600 and up, drawn
 /// with the bold face) takes the bold advances and ink.
 pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bool) -> (f64, f64) {
@@ -797,8 +816,7 @@ pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bo
         if let Some(p) = prev {
             x += kerning_em(p, c, bold) * font_size;
         }
-        if let 0x21..=0x7E = c as u32 {
-            let (lo, hi) = table[(c as u32 - 0x21) as usize];
+        if let Some((lo, hi)) = glyph_ink(table, c) {
             let ink = |u: i16| f64::from(u) / 2048.0 * font_size;
             left = left.min(x + (ink(lo) + 0.005).floor());
             right = right.max(x + (ink(hi) - 0.005).ceil());
@@ -871,8 +889,7 @@ pub fn svg_word_runs_box(line: &str, font_size: f64, bold: bool) -> (f64, f64, f
             x += layout_unit_ceil(run);
             run = 0.0;
         }
-        if let 0x21..=0x7E = c as u32 {
-            let (lo, hi) = ink_table[(c as u32 - 0x21) as usize];
+        if let Some((lo, hi)) = glyph_ink(ink_table, c) {
             let ink = |u: i16| f64::from(u) / 2048.0 * size;
             left = left.min(x + run + (ink(lo) + 0.005).floor());
             right = right.max(x + run + (ink(hi) - 0.005).ceil());
@@ -1020,6 +1037,41 @@ impl TextBlock {
             y: center.y - self.height / 2.0 + self.font_size,
             ..Text::centered(center, &self.lines, self.font_size, self.line_height, fill)
         }
+    }
+
+    /// An SVG label drawn centred on `center` by its text's bounding box, as
+    /// `computeLabelTransform` centres edge and terminal labels (it takes the
+    /// `getBBox()` origin into account, unlike `labelHelper`): the box top is
+    /// the first line's ascent above its baseline, 1em below the label's
+    /// origin, and a centred line's ink need not be symmetric about its anchor.
+    /// HTML blocks are drawn as [`TextBlock::centered_text`] draws them.
+    pub fn bbox_centered_text(&self, center: Point, fill: &Color) -> Text {
+        if !self.svg {
+            return self.centered_text(center, fill);
+        }
+        let (left, right) = self.svg_ink_extent();
+        let ascent = (0.905 * self.font_size).round();
+        Text {
+            x: center.x - (left + right) / 2.0,
+            y: center.y + ascent - self.height / 2.0,
+            ..Text::centered(center, &self.lines, self.font_size, self.line_height, fill)
+        }
+    }
+
+    /// The horizontal extent of an SVG block's `getBBox()` about its anchor,
+    /// its lines centred (`text-anchor: middle`).
+    pub fn svg_ink_extent(&self) -> (f64, f64) {
+        self.lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let (x, w, advance) = svg_word_runs_box(l, self.font_size, self.bold);
+                (x - advance / 2.0, x + w - advance / 2.0)
+            })
+            .fold(None, |acc: Option<(f64, f64)>, (a, b)| {
+                Some(acc.map_or((a, b), |(l, r)| (l.min(a), r.max(b))))
+            })
+            .unwrap_or((0.0, 0.0))
     }
 
     /// Measure already-split lines.

@@ -204,6 +204,19 @@ pub fn parse(body: &str, title: Option<String>) -> Result<GraphDiagram> {
             b.state_decl(line, rest.trim())?;
             continue;
         }
+        // The grammar needs no line break between statements: a line of ids
+        // (`title My Title`) declares each of them, and only its last word
+        // may start a transition or a description.
+        let mut s = s.as_str();
+        while let Some((w, after)) = s.split_once(char::is_whitespace) {
+            let after = after.trim_start();
+            let plain = !w.is_empty() && !w.contains([':', '-', '{', '}', '[', '"', ',']);
+            if !plain || after.is_empty() || after.starts_with("--") || after.starts_with(':') {
+                break;
+            }
+            b.touch(w);
+            s = after;
+        }
         if let Some(arrow) = s.find("-->") {
             let from = s[..arrow].trim();
             let (to, label) = match s[arrow + 3..].split_once(':') {

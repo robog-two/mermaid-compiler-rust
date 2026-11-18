@@ -359,15 +359,17 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
             continue;
         }
         if let Some((cls, member)) = s.split_once(':') {
-            let (cls, _) = split_generic(cls.trim());
+            let (cls, _) = split_generic(&class_name(cls.trim()));
             b.add_member(&cls, member.trim());
             continue;
         }
+        // A bare class name (its words run together) is a statement that adds
+        // nothing: classDiagram.jison has no rule for it, so mermaid neither
+        // creates the class nor complains (`title My Title` is dropped).
         let (name, _) = split_generic(s.trim());
-        if name.contains(char::is_whitespace) {
+        if name.contains(char::is_whitespace) && !plain_words(&name) {
             return Err(Error::parse(line, format!("{s}\nUnexpected statement")));
         }
-        b.class(&name);
     }
     if open_class.is_some() || !b.ns_stack.is_empty() {
         return Err(Error::parse(
@@ -377,6 +379,35 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
     }
     let explicit = b.ns_explicit.clone();
     Ok((b.finish(direction, title), explicit))
+}
+
+/// Words of a class name the lexer reads as separate tokens (its whitespace
+/// skipped): letters, digits and `_`, none of them a keyword.
+fn plain_words(name: &str) -> bool {
+    const KEYWORDS: [&str; 10] = [
+        "class",
+        "namespace",
+        "note",
+        "style",
+        "classDef",
+        "cssClass",
+        "callback",
+        "link",
+        "click",
+        "href",
+    ];
+    name.split_whitespace()
+        .all(|w| w.chars().all(|c| c.is_alphanumeric() || c == '_') && !KEYWORDS.contains(&w))
+}
+
+/// A class name as `className` reads it: consecutive `alphaNumToken`s with the
+/// whitespace between them skipped, so `title A` names the class `titleA`.
+fn class_name(name: &str) -> String {
+    if name.contains(char::is_whitespace) && plain_words(name) {
+        name.split_whitespace().collect()
+    } else {
+        name.to_string()
+    }
 }
 
 fn split_generic(name: &str) -> (String, Option<String>) {
@@ -513,6 +544,7 @@ fn parse_relation(s: &str) -> Option<(String, String, Edge)> {
         Head::None
     };
     let (left_name, left_card) = take_cardinality(left.trim(), true);
+    let left_name = class_name(&left_name);
     let (rhs, label) = match right.split_once(':') {
         Some((r, l)) => (
             r.trim(),
@@ -521,6 +553,7 @@ fn parse_relation(s: &str) -> Option<(String, String, Edge)> {
         None => (right.trim(), None),
     };
     let (right_name, right_card) = take_cardinality(rhs, false);
+    let right_name = class_name(&right_name);
     if left_name.is_empty()
         || right_name.is_empty()
         || left_name.contains(' ')

@@ -697,10 +697,6 @@ pub fn parse(body: &str, title: Option<String>) -> Result<ErDiagram> {
             });
             continue;
         }
-        if lower.starts_with("title ") || lower == "title" {
-            d.title = Some(s[5..].trim().to_string()).filter(|t| !t.is_empty());
-            continue;
-        }
         if let Some(rest) = s.strip_prefix("classDef ") {
             let (names, st) = rest
                 .trim()
@@ -862,6 +858,19 @@ fn statement(d: &mut ErDiagram, s: &str, line: usize) -> Result<(Vec<String>, Op
     if c.eat("{") {
         register(d, &a);
         return Ok((vec![a.name.clone()], Some(a.name)));
+    }
+    // Statements need no line break between them: an entity name followed by
+    // something other than a relationship declares that entity, and the rest
+    // is the next statement (erDiagram.jison has no `title`, so `title My
+    // Title` declares three entities).
+    let rest = c.rest().to_string();
+    if cardinality(&mut Cur::new(&rest)).is_none()
+        && entity_ref(&mut Cur::new(&rest), line).is_ok_and(|r| r.is_some())
+    {
+        register(d, &a);
+        let (mut names, opened) = statement(d, &rest, line)?;
+        names.insert(0, a.name);
+        return Ok((names, opened));
     }
     // erDiagram.jison only takes `name[Alias]` on an entity declaration (with or
     // without a block), not as a relationship end.

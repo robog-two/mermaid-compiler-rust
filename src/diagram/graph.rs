@@ -692,7 +692,188 @@ struct CompartmentLayout {
     rx: f64,
 }
 
+/// A class box as `classBox` lays it out with SVG labels (`textHelper`'s
+/// `useHtmlLabels: false` path), relative to the node's centre: each text is
+/// placed by its own `getBBox()`, so the box follows the fonts' rounded
+/// line boxes rather than the compartment model of HTML labels.
+#[derive(Debug, Clone, PartialEq)]
+struct SvgClassBox {
+    w: f64,
+    h: f64,
+    /// The dividers' heights.
+    dividers: Vec<f64>,
+    /// `(section, line, first baseline, start x)`; section 0 holds the
+    /// annotation (if any) as line `usize::MAX`.
+    texts: Vec<(usize, usize, f64, f64)>,
+}
+
+/// One `addText` call of `textHelper`: a `<text>` of `lines` whose box is
+/// moved up by half a line of its height (`-height / (2·lines)`), and its
+/// first baseline 1em below that `<text>`'s origin.
+struct SvgClassText {
+    height: f64,
+    lines: usize,
+    /// `getBBox()` left and right, from its start.
+    left: f64,
+    right: f64,
+}
+
+fn svg_class_text(lines: &[String], font: f64, bold: bool) -> SvgClassText {
+    let b = TextBlock::svg(lines.to_vec(), font, bold);
+    let (left, right) = lines
+        .iter()
+        .map(|l| {
+            let (x, w, _) = crate::text::svg_word_runs_box(l, font, bold);
+            (x, x + w)
+        })
+        .fold((0.0f64, 0.0f64), |(a, b), (l, r)| (a.min(l), b.max(r)));
+    SvgClassText {
+        height: b.height,
+        lines: lines.len().max(1),
+        left,
+        right,
+    }
+}
+
+/// [`SvgClassBox`] for a class: `textHelper` stacks the annotation, the name,
+/// the members and the methods (members and methods `TEXT_PADDING` 3px apart),
+/// and `classBox` frames them, moving every group by `y + PADDING - 4`.
+fn svg_class_box(node: &Node, font: f64, pad: f64) -> SvgClassBox {
+    let gap = pad;
+    // The box top of a text of height `h` in its group, `y` down the group:
+    // its first baseline is 1em below, the ascent above that.
+    let ascent = (0.905 * font).round();
+    let top_of = |t: &SvgClassText, y: f64| y - t.height / (2.0 * t.lines as f64) + font - ascent;
+    let name = svg_class_text(
+        node.sections
+            .first()
+            .map(|s| s.lines.as_slice())
+            .unwrap_or(&[]),
+        font,
+        true,
+    );
+    let ann = node
+        .annotation
+        .as_ref()
+        .map(|a| svg_class_text(std::slice::from_ref(a), font, false));
+    let rows = |i: usize| -> Vec<SvgClassText> {
+        node.sections
+            .get(i)
+            .map(|s| {
+                s.lines
+                    .iter()
+                    .map(|l| svg_class_text(std::slice::from_ref(l), font, false))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (members, methods) = (rows(1), rows(2));
+    // Each group's items `height + 3` apart, from 0.
+    let offsets = |items: &[SvgClassText]| -> Vec<f64> {
+        let mut y = 0.0;
+        items
+            .iter()
+            .map(|t| {
+                let at = y;
+                y += t.height + 3.0;
+                at
+            })
+            .collect()
+    };
+    let group_box = |items: &[SvgClassText]| -> Option<(f64, f64)> {
+        let offs = offsets(items);
+        let top = items
+            .iter()
+            .zip(&offs)
+            .map(|(t, &y)| top_of(t, y))
+            .fold(f64::INFINITY, f64::min);
+        let bottom = items
+            .iter()
+            .zip(&offs)
+            .map(|(t, &y)| top_of(t, y) + t.height)
+            .fold(f64::NEG_INFINITY, f64::max);
+        (top <= bottom).then_some((top, bottom))
+    };
+    let ann_h = ann.as_ref().map_or(0.0, |t| t.height);
+    let name_h = name.height;
+    let mem_box = group_box(&members);
+    let mem_h = mem_box.map_or(0.0, |(t, b)| b - t);
+    let mem_h_gap = if mem_h <= 0.0 { gap / 2.0 } else { mem_h };
+    // textHelper's group offsets.
+    let members_y = ann_h + name_h + 2.0 * gap;
+    let methods_y = ann_h + name_h + mem_h_gap + 4.0 * gap;
+    // The text's bounding box over every group.
+    let mut top = f64::INFINITY;
+    let mut bottom = f64::NEG_INFINITY;
+    let mut add = |t: f64, b: f64| {
+        top = top.min(t);
+        bottom = bottom.max(b);
+    };
+    if let Some(a) = &ann {
+        add(top_of(a, 0.0), top_of(a, 0.0) + a.height);
+    }
+    add(top_of(&name, ann_h), top_of(&name, ann_h) + name.height);
+    if let Some((t, b)) = mem_box {
+        add(members_y + t, members_y + b);
+    }
+    if let Some((t, b)) = group_box(&methods) {
+        add(methods_y + t, methods_y + b);
+    }
+    let half = ann
+        .iter()
+        .chain(std::iter::once(&name))
+        .map(|t| (t.right - t.left) / 2.0)
+        .fold(0.0, f64::max);
+    let reach = members
+        .iter()
+        .chain(&methods)
+        .map(|t| t.right)
+        .fold(0.0, f64::max);
+    let w = half + half.max(reach);
+    let mut h = bottom - top;
+    let (no_members, no_methods) = (members.is_empty(), methods.is_empty());
+    if no_members && no_methods {
+        h += gap;
+    } else if no_methods {
+        h += 2.0 * gap;
+    }
+    let y = -h / 2.0;
+    let extra_box = no_members && no_methods;
+    let box_h = h + 2.0 * pad + if extra_box { 2.0 * pad } else { 0.0 };
+    // classBox re-reads the groups' heights, less PADDING/2 for an extra box.
+    let less = if extra_box { pad / 2.0 } else { 0.0 };
+    let (ann_h2, name_h2, mem_h2) = (ann_h - less, name_h - less, mem_h - less);
+    let shift = y + pad - if extra_box { pad } else { 0.0 } - 4.0;
+    let mut texts = Vec::new();
+    if let Some(a) = &ann {
+        let x = -(a.right - a.left) / 2.0 - a.left;
+        texts.push((0, usize::MAX, shift + top_of(a, 0.0) + ascent, x));
+    }
+    let name_x = -(name.right - name.left) / 2.0 - name.left;
+    let name_top = shift + ann_h + top_of(&name, 0.0);
+    for k in 0..name.lines {
+        texts.push((0, k, name_top + ascent + 1.1 * font * k as f64, name_x));
+    }
+    let start = -w / 2.0;
+    for (k, (t, off)) in members.iter().zip(offsets(&members)).enumerate() {
+        texts.push((1, k, shift + members_y + top_of(t, off) + ascent, start));
+    }
+    let methods_at = ann_h2 + name_h2 + mem_h2.max(gap / 2.0) + y + 4.0 * gap + pad - 4.0;
+    for (k, (t, off)) in methods.iter().zip(offsets(&methods)).enumerate() {
+        texts.push((2, k, methods_at + top_of(t, off) + ascent, start));
+    }
+    let first = ann_h2 + name_h2 + y + pad;
+    let dividers = vec![first, ann_h2 + name_h2 + mem_h2 + y + 2.0 * gap + pad];
+    SvgClassBox {
+        w: w + 2.0 * pad,
+        h: box_h,
+        dividers,
+        texts,
+    }
+}
+
 struct Measured {
+    svg_class: Option<SvgClassBox>,
     block: TextBlock,
     sections: Vec<TextBlock>,
     /// A class box's `«annotation»` block, stacked on top of its name (section 0).
@@ -795,6 +976,17 @@ fn compartment_layout(
     (layout, w + 2.0 * pad, h)
 }
 
+/// An SVG block as wide as its widest line's `getBBox()` (`textHelper` sizes
+/// a class box by its groups' boxes, which reach each glyph's ink).
+fn svg_bbox_wide(mut b: TextBlock) -> TextBlock {
+    b.width = b
+        .lines
+        .iter()
+        .map(|l| crate::text::svg_word_runs_box(l, b.font_size, b.bold).1)
+        .fold(0.0, f64::max);
+    b
+}
+
 #[allow(clippy::too_many_arguments)]
 fn measure_node(
     node: &Node,
@@ -820,6 +1012,13 @@ fn measure_node(
             block.lines
         };
         block = TextBlock::svg(lines, font, bold);
+        // labelHelper sizes the label by its text's `getBBox()`, which reaches
+        // each glyph's ink.
+        block.width = block
+            .lines
+            .iter()
+            .map(|l| crate::text::svg_word_runs_box(l, font, bold).1)
+            .fold(0.0, f64::max);
     } else if wrap_width > 0.0 && !block.is_empty() {
         let raw = block.lines.clone();
         let flagged = crate::text::wrap_lines_flagged(
@@ -910,18 +1109,20 @@ fn measure_node(
                         (false, _) => TextBlock::new(s.lines.clone(), font, s.bold).html(),
                         // shapeUtil's textHelper: one `<text>` per line, annotation and
                         // name box on box, members and methods 3px apart.
-                        (true, DiagramKind::Class) => TextBlock::svg_stacked(
+                        (true, DiagramKind::Class) => svg_bbox_wide(TextBlock::svg_stacked(
                             s.lines.clone(),
                             font,
                             s.bold,
                             Some(if i == 0 { 0.0 } else { 3.0 }),
-                        ),
+                        )),
                         (true, _) => TextBlock::svg(s.lines.clone(), font, s.bold),
                     })
                     .collect();
                 annotation = node.annotation.as_ref().map(|a| {
                     let lines = vec![a.clone()];
-                    if svg {
+                    if svg && kind == DiagramKind::Class {
+                        svg_bbox_wide(TextBlock::svg_stacked(lines, font, false, Some(0.0)))
+                    } else if svg {
                         TextBlock::svg_stacked(lines, font, false, Some(0.0))
                     } else {
                         TextBlock::new(lines, font, false).html()
@@ -944,7 +1145,11 @@ fn measure_node(
             _ => (tw.max(20.0), th.max(10.0)),
         },
     };
+    let svg_class = (svg && kind == DiagramKind::Class && node.shape == Shape::Compartments)
+        .then(|| svg_class_box(node, font, pad));
+    let (w, h) = svg_class.as_ref().map_or((w, h), |b| (b.w, b.h));
     Measured {
+        svg_class,
         block,
         sections,
         annotation,
@@ -1030,7 +1235,11 @@ fn svg_edge_label_block(label: &str, font: f64) -> TextBlock {
         font,
         false,
     );
-    TextBlock::svg(lines, font, false)
+    let mut b = TextBlock::svg(lines, font, false);
+    // The label is as wide as its text's bounding box.
+    let (left, right) = b.svg_ink_extent();
+    b.width = right - left;
+    b
 }
 
 /// The diagram with Font Awesome references (`fa:fa-car`) in its HTML labels
@@ -1380,7 +1589,11 @@ pub fn render_with(
                         }),
                     from_cluster,
                     to_cluster,
-                    terminals: if elk { terminal_sizes(e) } else { [None; 2] },
+                    terminals: if elk {
+                        terminal_sizes(e, !cfg.html_edge_labels)
+                    } else {
+                        [None; 2]
+                    },
                 }
             })
             .collect(),
@@ -2019,10 +2232,13 @@ pub fn render_with(
     if elk {
         let mut terms = Vec::new();
         for (ei, e) in g.edges.iter().enumerate() {
-            let sizes = terminal_sizes(e);
+            let sizes = terminal_sizes(e, !cfg.html_edge_labels);
             for (k, (end, size)) in [e.from, e.to].into_iter().zip(sizes).enumerate() {
                 if let (Endpoint::Node(NodeId(node)), Some(_)) = (end, size) {
-                    let b = terminal_block(if k == 0 { &e.start_label } else { &e.end_label });
+                    let b = terminal_block(
+                        if k == 0 { &e.start_label } else { &e.end_label },
+                        !cfg.html_edge_labels,
+                    );
                     terms.push(elkedges::Terminal {
                         edge: ei,
                         start: k == 0,
@@ -2276,7 +2492,12 @@ pub fn render_with(
                 };
                 (
                     Rect::centered(at, block.width + pad, block.height + pad),
-                    Paint::fill(fill).with_opacity(0.5),
+                    // The class stylesheet has no `.edgeLabel rect { opacity }`.
+                    if g.kind == DiagramKind::Class {
+                        Paint::fill(fill)
+                    } else {
+                        Paint::fill(fill).with_opacity(0.5)
+                    },
                 )
             } else {
                 // An HTML label's background is its `<p>`'s: the text box itself.
@@ -2315,7 +2536,7 @@ pub fn render_with(
                     .into_iter()
                     .chain([
                         Element::rect(r, 0.0, bg),
-                        Element::text(block.centered_text(at, &text_color)),
+                        Element::text(block.bbox_centered_text(at, &text_color)),
                     ])
                     .collect(),
             ));
@@ -2325,13 +2546,30 @@ pub fn render_with(
                 .into_iter()
                 .zip(terminal_at[ei])
             {
-                if let (Some(_), Some(at)) = (txt, at) {
-                    let b = terminal_block(txt);
-                    bounds.add_rect(Rect::centered(at, b.width, b.height));
-                    label_els.push(Element::classed_text(
-                        Text::centered(at, &b.lines, b.font_size, b.line_height, &text_color),
-                        "edgeTerminals",
-                    ));
+                if let (Some(t), Some(at)) = (txt, at) {
+                    let b = terminal_block(txt, !cfg.html_edge_labels);
+                    let text = if b.svg {
+                        // Outside any `.label`, the SVG text takes the root's
+                        // `fill: textColor`.
+                        bounds.add_rect(Rect::centered(at, b.width, b.height));
+                        let fill = e
+                            .style
+                            .color
+                            .clone()
+                            .unwrap_or_else(|| pal.text_color.clone());
+                        b.bbox_centered_text(at, &fill)
+                    } else {
+                        // `setTerminalWidth`: the box is at least 9px a character wide.
+                        let w = b.width.max(9.0 * t.encode_utf16().count() as f64);
+                        bounds.add_rect(Rect::new(
+                            at.x - b.width / 2.0,
+                            at.y - b.height / 2.0,
+                            w,
+                            b.height,
+                        ));
+                        Text::centered(at, &b.lines, b.font_size, b.line_height, &text_color)
+                    };
+                    label_els.push(Element::classed_text(text, "edgeTerminals"));
                 }
             }
         }
@@ -2466,10 +2704,12 @@ pub fn render_with(
         let tw = crate::text::line_width(t, size, false);
         let ascent = (0.905 * size).round();
         let cx = content.x + content.w / 2.0;
+        // Its `getBBox()` reaches each glyph's ink, rounded out to whole pixels.
+        let (left, right) = crate::text::svg_bbox_extent(t, size, false);
         bounds.add_rect(Rect::new(
-            cx - tw / 2.0,
+            cx - tw / 2.0 + left,
             baseline - ascent,
-            tw,
+            right - left,
             crate::text::svg_line_box(size, t),
         ));
         let lines = vec![t.clone()];
@@ -3009,8 +3249,17 @@ const TERMINAL_FONT_SIZE: f64 = 11.0;
 /// by which mermaid pads a terminal label for ELK past its end's marker.
 const TERMINAL_MARKER_CLEARANCE: f64 = 6.0;
 
-fn terminal_block(text: &Option<String>) -> TextBlock {
-    TextBlock::label(text.as_deref().unwrap_or(""), TERMINAL_FONT_SIZE)
+/// A terminal label as `createLabel` measures it: an HTML label's box, or
+/// (`htmlLabels: false`) its SVG text's bounding box, centred on its anchor.
+fn terminal_block(text: &Option<String>, svg: bool) -> TextBlock {
+    let raw = text.as_deref().unwrap_or("");
+    if !svg {
+        return TextBlock::label(raw, TERMINAL_FONT_SIZE);
+    }
+    let mut b = TextBlock::svg(crate::text::label_lines(raw), TERMINAL_FONT_SIZE, false);
+    let (left, right) = b.svg_ink_extent();
+    b.width = right - left;
+    b
 }
 
 fn terminal_pad(head: Head) -> f64 {
@@ -3022,9 +3271,9 @@ fn terminal_pad(head: Head) -> f64 {
 }
 
 /// The sizes ELK reserves for an edge's terminal labels (`terminalElkLabels`).
-fn terminal_sizes(e: &Edge) -> [Option<(f64, f64)>; 2] {
+fn terminal_sizes(e: &Edge, svg: bool) -> [Option<(f64, f64)>; 2] {
     let size = |text: &Option<String>, head: Head| {
-        let b = terminal_block(text);
+        let b = terminal_block(text, svg);
         let pad = 2.0 * terminal_pad(head);
         (!b.is_empty()).then_some((b.width + pad, b.height + pad))
     };
@@ -4633,6 +4882,9 @@ fn node_elements(
         .color
         .clone()
         .unwrap_or_else(|| match (kind, n.shape) {
+            // An SVG note label is a `.label text`, which the class stylesheet
+            // fills with `classText` (`noteTextColor` styles only HTML).
+            (DiagramKind::Class, Shape::Note) if m.block.svg => pal.class_text.clone(),
             (_, Shape::Note) => pal.note_text.clone(),
             (DiagramKind::Flowchart, _) => pal.flow_text.clone(),
             (DiagramKind::State, _) => pal.state_label.clone(),
@@ -4793,6 +5045,44 @@ fn node_elements(
                 let Some(layout) = &m.compartments else {
                     return (els, Boundary::Rect(r));
                 };
+                if let Some(sc) = &m.svg_class {
+                    els.push(Element::classed_shape(
+                        Geometry::Rect { rect: r, rx: 0.0 },
+                        paint.clone(),
+                        "basic label-container",
+                    ));
+                    for &dy in &sc.dividers {
+                        els.push(Element::classed_shape(
+                            Geometry::Path(vec![
+                                PathCmd::MoveTo(Point::new(x0, c.y + dy)),
+                                PathCmd::LineTo(Point::new(x1, c.y + dy)),
+                            ]),
+                            Paint::stroke(&stroke, 1.0),
+                            "divider",
+                        ));
+                    }
+                    for &(si, li, base, x) in &sc.texts {
+                        let (line, bold) = match (si, li) {
+                            (0, usize::MAX) => (n.annotation.clone().unwrap_or_default(), false),
+                            _ => (
+                                n.sections[si].lines.get(li).cloned().unwrap_or_default(),
+                                si == 0,
+                            ),
+                        };
+                        let mut t = Text::centered(
+                            Point::new(c.x + x, c.y),
+                            std::slice::from_ref(&line),
+                            font,
+                            font,
+                            &text_color,
+                        )
+                        .anchored(Anchor::Start, c.x + x);
+                        t.y = c.y + base;
+                        t.bold = bold;
+                        els.push(Element::classed_text(t, "label"));
+                    }
+                    return (els, Boundary::Rect(r));
+                }
                 els.push(Element::classed_shape(
                     Geometry::Rect {
                         rect: r,
@@ -5008,9 +5298,9 @@ fn node_elements(
             at.y -= font - (0.905 * font).round();
         }
         let mut t = m.block.centered_text(at, &text_color);
-        if m.block.svg && kind == DiagramKind::State {
-            // State nodes centre their label box (`centerLabel`), but the state
-            // stylesheet has no `text-anchor: middle`: SVG text starts at its left.
+        if m.block.svg && matches!(kind, DiagramKind::State | DiagramKind::Class) {
+            // State nodes and class notes centre their label box, but neither
+            // stylesheet has `text-anchor: middle`: SVG text starts at its left.
             t = t.anchored(Anchor::Start, at.x - m.label_w / 2.0);
         }
         t.bold = m.block.bold;
