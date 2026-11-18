@@ -258,6 +258,43 @@ pub fn rounded_rect_path(x: f64, y: f64, w: f64, h: f64, r: f64) -> String {
     )
 }
 
+/// What a cluster's hand-drawn frame depends on besides its rect (its paint
+/// leaves the geometry alone).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameStyle {
+    pub seed: f64,
+    pub stroke_width: f64,
+}
+
+/// clusters.js `rect` under the handDrawn look: `rc.path` of the frame
+/// (`roughness: 0.7`, a hachure fill at `fillWeight: 3`), with `r` in the
+/// frame mermaid draws it in (the hachure's scan lines are rounded there).
+pub fn cluster_frame(r: Rect, style: FrameStyle) -> Drawable {
+    let o = Options {
+        roughness: 0.7,
+        // Any fill: only that there is one shapes the drawing.
+        fill: Some("#000".into()),
+        fill_weight: 3.0,
+        hachure_gap: 1.5,
+        seed: style.seed,
+        stroke_width: style.stroke_width,
+        ..Options::default()
+    };
+    crate::rough::path(&rounded_rect_path(r.x, r.y, r.w, r.h, 0.0), o)
+}
+
+/// `getBBox()` of the group rough.js draws `d` as.
+pub fn drawable_bbox(d: &Drawable) -> Option<Rect> {
+    let paths: Vec<Vec<PathCmd>> = d
+        .sets
+        .iter()
+        .filter(|s| !s.ops.is_empty())
+        .map(|s| set_cmds(&s.ops, Point::default()))
+        .collect();
+    let [x, y, w, h] = super::svgbbox::cubic_group_box(&paths)?;
+    Some(Rect::new(x, y, w, h))
+}
+
 /// `userNodeOverrides(node, {})`.
 pub fn node_options(st: &HandStyle) -> Options {
     Options {

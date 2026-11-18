@@ -3848,6 +3848,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             cluster_td: vec![false; clusters.len()],
             turns: Vec::new(),
             cluster_pads: Vec::new(),
+            hand_frames: Vec::new(),
         }),
     };
     let out = layout::layout(&input);

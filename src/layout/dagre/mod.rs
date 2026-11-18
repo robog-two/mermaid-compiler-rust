@@ -37,6 +37,10 @@ pub struct DagreModel {
     /// Per cluster: its `padding` (by which the frame's shape pads the title
     /// and offsets the drawing it holds); 8 when left out.
     pub cluster_pads: Vec<f64>,
+    /// Per cluster under the handDrawn look: the rough.js frame mermaid draws
+    /// (whose `getBBox()` sizes a cluster laid out in a graph of its own);
+    /// empty in the other looks.
+    pub hand_frames: Vec<Option<crate::diagram::hand::FrameStyle>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -797,6 +801,13 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
                 };
                 let rect = Rect::new(n.x - width / 2.0, n.y - n.height / 2.0, width, n.height);
                 res.add_box(rect);
+                // The rough strokes reach past the frame.
+                if let Some(style) = ctx.model.hand_frames.get(*c).copied().flatten() {
+                    let frame = crate::diagram::hand::cluster_frame(rect, style);
+                    if let Some(b) = crate::diagram::hand::drawable_bbox(&frame) {
+                        res.add_box(b);
+                    }
+                }
                 res.clusters.push((*c, rect, sub.dir));
                 res.centres.push((*c, Point::new(n.x, n.y)));
                 res.cluster_origins.push((*c, Point::default()));
@@ -1001,6 +1012,7 @@ mod tests {
             cluster_td: Vec::new(),
             turns: Vec::new(),
             cluster_pads: Vec::new(),
+            hand_frames: Vec::new(),
         };
         (inp, model)
     }

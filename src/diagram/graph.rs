@@ -1644,7 +1644,20 @@ pub fn render_with(
         dagre: None,
     };
     if dagre_engine {
-        input.dagre = Some(dagre_model(g, &nodes, &empty_of, &pos_of));
+        let mut model = dagre_model(g, &nodes, &empty_of, &pos_of);
+        if let Some(seed) = lk.hand_seed {
+            model.hand_frames = g
+                .clusters
+                .iter()
+                .map(|c| {
+                    (c.kind == ClusterKind::Group).then(|| hand::FrameStyle {
+                        seed,
+                        stroke_width: c.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH),
+                    })
+                })
+                .collect();
+        }
+        input.dagre = Some(model);
     }
     // ER group titles wrap at the group's laid-out width. Under ELK mermaid lays
     // out once, with each title measured at the wrapping width, and wraps it again
@@ -2496,6 +2509,12 @@ pub fn render_with(
                 let ops: Vec<_> = drawn.sets.into_iter().flat_map(|s| s.ops).collect();
                 rough_d = Some(crate::rough::ops_to_path(&ops));
                 let drawn = hand::set_cmds(&ops, Point::new(-shift.x, -shift.y));
+                if !dagre_engine {
+                    // The viewBox holds the strokes as drawn.
+                    if let Some(b) = geom::path_bbox(&drawn) {
+                        bounds.add_rect(b);
+                    }
+                }
                 if !degenerate {
                     // The markers sit on the drawn path's ends, along its ends.
                     let (end, start) = heads.split_at(end_heads.min(heads.len()));
@@ -3471,6 +3490,7 @@ fn dagre_model(
             cluster_td: g.clusters.iter().map(|c| c.direction_td).collect(),
             turns,
             cluster_pads,
+            hand_frames: Vec::new(),
         };
     }
     // Collapsed subgraphs take their place among the expanded ones.
@@ -3506,6 +3526,7 @@ fn dagre_model(
         cluster_td: g.clusters.iter().map(|c| c.direction_td).collect(),
         turns,
         cluster_pads,
+        hand_frames: Vec::new(),
     }
 }
 
@@ -4306,20 +4327,11 @@ fn hand_cluster(
     seed: f64,
     at: Point,
 ) -> Vec<Element> {
-    let o = crate::rough::Options {
-        roughness: 0.7,
-        fill: Some(pal.cluster_bkg.css().to_string()),
-        fill_weight: 3.0,
-        hachure_gap: 1.5,
-        stroke: pal.cluster_border.css().to_string(),
+    let style = hand::FrameStyle {
         seed,
         stroke_width: c.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH),
-        ..Default::default()
     };
-    let d = crate::rough::path(
-        &hand::rounded_rect_path(r.x + at.x, r.y + at.y, r.w, r.h, 0.0),
-        o,
-    );
+    let d = hand::cluster_frame(Rect::new(r.x + at.x, r.y + at.y, r.w, r.h), style);
     let slot_fill = slot
         .and_then(|s| s.fill.clone())
         .unwrap_or_else(Color::none);
