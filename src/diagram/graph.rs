@@ -3472,6 +3472,41 @@ pub(crate) fn d3_path_data(g: &Geometry) -> String {
     d
 }
 
+/// `insertEdge` under the handDrawn look for a diagram drawing its own edges:
+/// the path data it would have drawn for `cmds` (through `pts`; ELK's
+/// `rounded` curve when `rounded`), in the frame `shift` away from ours,
+/// handed to rough.js (`roughness: 0.3`). Returns the drawn path in our frame
+/// and the markers `heads` (the first `end_heads` of them at the end, the
+/// rest at the start) moved onto the drawn path's ends.
+pub(crate) fn rough_edge(
+    cmds: &[PathCmd],
+    pts: &[Point],
+    rounded: bool,
+    shift: Point,
+    seed: f64,
+    heads: Vec<Element>,
+    end_heads: usize,
+) -> (Vec<PathCmd>, Vec<Element>) {
+    let d = if rounded {
+        let local: Vec<Point> = pts.iter().map(|p| p.plus(shift)).collect();
+        rounded_path_data(&local, EDGE_CORNER_RADIUS)
+    } else {
+        d3_path_data(&Geometry::Path(cmds.to_vec()).translated(shift.x, shift.y))
+    };
+    let o = crate::rough::Options {
+        roughness: 0.3,
+        seed,
+        ..Default::default()
+    };
+    let drawn = crate::rough::path(&d, o);
+    let ops: Vec<_> = drawn.sets.into_iter().flat_map(|s| s.ops).collect();
+    let drawn = hand::set_cmds(&ops, Point::new(-shift.x, -shift.y));
+    let (end, start) = heads.split_at(end_heads.min(heads.len()));
+    let mut moved = reoriented(end, path_end(cmds), path_end(&drawn));
+    moved.extend(reoriented(start, path_start(cmds), path_start(&drawn)));
+    (drawn, moved)
+}
+
 /// The path data mermaid's `generateRoundedPath` writes for `points`.
 fn rounded_path_data(points: &[Point], radius: f64) -> String {
     const EPS: f64 = 1e-5;
@@ -4110,6 +4145,13 @@ pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
             };
             exit(inner.x, out.x, r.x, r.right()).min(exit(inner.y, out.y, r.y, r.bottom()))
         }
+        // On the axis through the centre `intersect.ellipse` of the centre
+        // itself is NaN, so `outlineAttachPoint` gives up and mermaid takes
+        // the centre ray's crossing (which a port inside the outline, as a
+        // hand-drawn ellipse's smaller rough box leaves it, lies beyond).
+        Boundary::Ellipse(c, rx, ry) if inner.dist(*c) < 1e-9 => {
+            return geom::clip_ellipse(*c, *rx, *ry, port);
+        }
         Boundary::Ellipse(c, rx, ry) => {
             // |(inner + t * out - c) / r|^2 = 1, the positive root.
             let (px, py) = ((inner.x - c.x) / rx, (inner.y - c.y) / ry);
@@ -4627,7 +4669,7 @@ fn hand_cluster(
 /// went, see [`layout::ElkExact::joints`]) that a straight run passes and that
 /// lie inside one of `pts`' segments put back in, once each. (A corner of
 /// `joints` may since have been straightened away: it stays out.)
-fn with_joints(pts: &[Point], joints: &[Point]) -> Vec<Point> {
+pub(crate) fn with_joints(pts: &[Point], joints: &[Point]) -> Vec<Point> {
     let inner: Vec<Point> = joints
         .windows(3)
         .filter(|w| collinear(w[0], w[1], w[2]))

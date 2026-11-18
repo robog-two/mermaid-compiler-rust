@@ -563,6 +563,8 @@ pub enum Sized {
     Rect { w: f64, h: f64, rx: f64 },
     /// circle.ts: `rc.circle` of radius `r`.
     Circle(f64),
+    /// usecaseEllipse.ts / usecaseBusiness.ts: `rc.ellipse` of radii `rx`, `ry`.
+    Ellipse { rx: f64, ry: f64 },
     /// doubleCircle.ts: two circles at roughness 0.2, stroked 2.5 and 1.5.
     DoubleCircle { inner: f64, outer: f64 },
     /// subroutine.ts: the `w`×`h` rectangle (frame included) and its two
@@ -606,6 +608,10 @@ pub fn sized_node(shape: &Sized, st: &HandStyle) -> HandNode {
             vec![piece(d, origin)]
         }
         Sized::Circle(r) => vec![piece(rough::circle(0.0, 0.0, r * 2.0, o()), origin)],
+        Sized::Ellipse { rx, ry } => vec![piece(
+            rough::ellipse(0.0, 0.0, rx * 2.0, ry * 2.0, o()),
+            origin,
+        )],
         Sized::DoubleCircle { inner, outer } => {
             let ring = |r: f64, width: f64| {
                 let ro = Options {
@@ -691,13 +697,13 @@ pub fn sized_node(shape: &Sized, st: &HandStyle) -> HandNode {
             piece(rough::circle(0.0, *head_y, head_r * 2.0, o()), origin),
         ],
     };
-    let mut hn = HandNode {
-        pieces,
-        bbox: Rect::default(),
-        boundary: Bound::Rect,
-    };
-    hn.bbox = hn
-        .pieces
+    measured_node(pieces)
+}
+
+/// A node of `pieces` whose box is the measured pieces' (`updateNodeBounds`
+/// of their group), clipped as a rectangle.
+pub fn measured_node(pieces: Vec<Piece>) -> HandNode {
+    let bbox = pieces
         .iter()
         .filter(|pc| pc.measured)
         .filter_map(|pc| {
@@ -705,7 +711,11 @@ pub fn sized_node(shape: &Sized, st: &HandStyle) -> HandNode {
         })
         .reduce(|a, b| a.union(&b))
         .unwrap_or_default();
-    hn
+    HandNode {
+        pieces,
+        bbox,
+        boundary: Bound::Rect,
+    }
 }
 
 /// question.ts's path for a diamond of side `s`, and where it is placed.

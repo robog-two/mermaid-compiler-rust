@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 
 use super::graph::{Head, StyleOverrides};
+use super::hand::{self, HandNode, HandStyle};
 use super::markers::{self, End, MarkerColors};
 use super::shapes::{Boundary as Clip, ShapeMetrics};
 use crate::config::{Curve, LayoutAlgorithm, Look, MermaidConfig};
@@ -2831,6 +2832,8 @@ struct Options {
     layout: LayoutAlgorithm,
     line_hops: crate::linejump::LineHops,
     role: RoleColors,
+    /// `handDrawnSeed` under `look: handDrawn`.
+    hand: Option<f64>,
 }
 
 fn is_bold(weight: Option<&str>) -> bool {
@@ -2858,6 +2861,7 @@ impl Options {
             layout: cfg.layout,
             line_hops: cfg.elk_line_hops(),
             role: role_colors(cfg.theme, &cfg.theme_variables, pal),
+            hand: (cfg.look == Look::HandDrawn).then(|| cfg.hand_drawn_seed()),
         }
     }
     fn neo(&self) -> bool {
@@ -3029,6 +3033,9 @@ struct VNode {
     cluster: Option<usize>,
     style: StyleOverrides,
     slot: Option<SlotColors>,
+    /// Under the handDrawn look: the rough body round the node's centre
+    /// (actors: their glyph, round the glyph's origin).
+    hand: Option<HandNode>,
 }
 
 /// `getCompiledStyles` (the `default` class, then the named classes, later declarations
@@ -3252,6 +3259,162 @@ fn painted(
     p
 }
 
+/// usecaseBusiness.ts's marker, from below the label's right end out to the
+/// ellipse's upper right, relative to the node's centre.
+fn business_marker_ends(label_w: f64, rx: f64, ry: f64) -> (Point, Point) {
+    let inset = (NODE_PADDING / 5.0).clamp(1.0, NODE_PADDING / 2.0);
+    let (sx, ex) = (label_w / 2.0 + inset, rx - inset);
+    let on = |x: f64| ry * (1.0 - (x / rx).powi(2)).max(0.0).sqrt();
+    (Point::new(sx, on(sx)), Point::new(ex, -on(ex)))
+}
+
+/// Where an actor `h` tall centred on `c` draws its glyph from.
+fn glyph_origin(c: Point, h: f64) -> Point {
+    let content_h = h - 2.0 * NODE_PADDING;
+    Point::new(c.x, c.y - content_h / 2.0 + FIGURE_H / 2.0)
+}
+
+/// `userNodeOverrides(node, {})`: the node's own `fill`, `stroke` and
+/// `stroke-width`, else `mainBkg`, `nodeBorder` and 1.3.
+fn hand_style(style: &StyleOverrides, pal: &Palette, seed: f64) -> HandStyle {
+    HandStyle {
+        fill: style.fill.clone().unwrap_or_else(|| pal.main_bkg.clone()).0,
+        stroke: style
+            .stroke
+            .clone()
+            .unwrap_or_else(|| pal.node_border.clone())
+            .0,
+        stroke_width: style.stroke_width.unwrap_or(1.3),
+        seed,
+        radius: 0.0,
+        line: String::new(),
+        end_dot: String::new(),
+        note_fill: String::new(),
+        note_stroke: String::new(),
+        horizontal: false,
+        state: false,
+    }
+}
+
+/// What a node's handDrawn branch draws with rough.js: use case bodies,
+/// notes and JSON tables round the node's centre, an actor's glyph round its
+/// own origin.
+fn hand_body(n: &VNode, pal: &Palette, seed: f64) -> Option<HandNode> {
+    use super::hand::{Piece, Sized};
+    let st = hand_style(&n.style, pal, seed);
+    let o = || hand::node_options(&st);
+    let at = Point::default();
+    let unmeasured = |drawable| Piece {
+        drawable,
+        at,
+        measured: false,
+    };
+    let unfilled = || crate::rough::Options {
+        fill: Some("none".into()),
+        ..o()
+    };
+    Some(match &n.shape {
+        Shape::Actor { kind, .. } => hand::measured_node(match kind {
+            ActorType::Normal => vec![unmeasured(crate::rough::path(STICK_FIGURE, o()))],
+            // usecaseActorHollow.ts: the head circle goes in first, then the
+            // body before it.
+            ActorType::Hollow => vec![
+                unmeasured(crate::rough::path(HOLLOW_BODY, unfilled())),
+                unmeasured(crate::rough::circle(0.0, -23.0, 18.0, unfilled())),
+            ],
+            ActorType::Awesome => {
+                vec![unmeasured(crate::rough::path(AWESOME_SILHOUETTE, o()))]
+            }
+            ActorType::Icon => vec![unmeasured(crate::rough::rectangle(
+                -26.0,
+                -28.0,
+                52.0,
+                52.0,
+                o(),
+            ))],
+        }),
+        Shape::Ellipse { rx, ry, .. } => {
+            hand::sized_node(&Sized::Ellipse { rx: *rx, ry: *ry }, &st)
+        }
+        // The layout measures the whole node group (`insertMeasuredNode`):
+        // the marker can reach past the rough ellipse.
+        Shape::Business {
+            rx, ry, label_w, ..
+        } => {
+            let mut hn = hand::sized_node(&Sized::Ellipse { rx: *rx, ry: *ry }, &st);
+            let (a, b) = business_marker_ends(*label_w, *rx, *ry);
+            let m = Rect::new(
+                a.x.min(b.x),
+                a.y.min(b.y),
+                (a.x - b.x).abs(),
+                (a.y - b.y).abs(),
+            );
+            hn.bbox = hn.bbox.union(&m);
+            hn
+        }
+        Shape::Rect { .. } => hand::sized_node(
+            &Sized::Rect {
+                w: n.w,
+                h: n.h,
+                rx: 0.0,
+            },
+            &st,
+        ),
+        // note.ts: the note's colours over the node's own.
+        Shape::Note { .. } => {
+            let st = HandStyle {
+                fill: pal.note_bkg.0.clone(),
+                stroke: pal.note_border.0.clone(),
+                ..st.clone()
+            };
+            hand::sized_node(
+                &Sized::Rect {
+                    w: n.w,
+                    h: n.h,
+                    rx: 0.0,
+                },
+                &st,
+            )
+        }
+        // usecaseJsonTable.ts: the outer border (measured), the title cell,
+        // then each row's value cell and key cell.
+        Shape::Json {
+            key_w,
+            value_w,
+            title_h,
+            row_h,
+            border,
+            ..
+        } => {
+            let inner_w = key_w + value_w;
+            let inner_h = title_h + row_h.iter().sum::<f64>();
+            let (left, top) = (-inner_w / 2.0, -inner_h / 2.0);
+            let (tw, th) = (inner_w + 2.0 * border, inner_h + 2.0 * border);
+            let cell = |x: f64, y: f64, w: f64, h: f64| {
+                unmeasured(crate::rough::rectangle(x, y, w, h, o()))
+            };
+            let mut pieces = vec![Piece {
+                measured: true,
+                ..cell(-tw / 2.0, -th / 2.0, tw, th)
+            }];
+            pieces.push(cell(left, top, inner_w, *title_h));
+            // Each row is a group at `translate(0, rowTop)`, its cells drawn
+            // from y = 0 there.
+            let mut y = top + title_h;
+            for h in row_h {
+                for (x, w) in [(left + key_w, *value_w), (left, *key_w)] {
+                    pieces.push(Piece {
+                        at: Point::new(0.0, y),
+                        ..cell(x, 0.0, w, *h)
+                    });
+                }
+                y += h;
+            }
+            hand::measured_node(pieces)
+        }
+    })
+}
+
 /// Draw one node centred on `c`; returns its elements and its clipping boundary.
 fn draw_node(
     n: &VNode,
@@ -3264,6 +3427,12 @@ fn draw_node(
     let r = Rect::centered(c, n.w, n.h);
     let slot = n.slot.as_ref();
     let role = &o.role;
+    // The rough body, painted with rough.js's own attributes.
+    let rough = |at: Point| {
+        n.hand
+            .as_ref()
+            .map(|hn| super::graph::hand_elements(hn, at, n.style.dash.as_ref()))
+    };
     match &n.shape {
         Shape::Actor {
             kind,
@@ -3286,8 +3455,12 @@ fn draw_node(
             path_paint.stroke_width = path_w;
             let content_h = n.h - 2.0 * NODE_PADDING;
             let top = c.y - content_h / 2.0;
-            let g = Point::new(c.x, top + FIGURE_H / 2.0);
+            let g = glyph_origin(c, n.h);
+            let hand_glyph = rough(g);
+            let hand = hand_glyph.is_some();
+            els.extend(hand_glyph.into_iter().flatten());
             match kind {
+                _ if hand && *kind != ActorType::Icon => {}
                 ActorType::Normal => els.push(Element::classed_shape(
                     Geometry::Path(svg_path(STICK_FIGURE, g)),
                     path_paint.clone(),
@@ -3337,11 +3510,13 @@ fn draw_node(
                         rect: Rect::new(g.x - 26.0, g.y - 28.0, 52.0, 52.0),
                         rx: 4.0,
                     };
-                    push_shadowed(
-                        &mut els,
-                        Element::classed_shape(frame, frame_paint, "usecase-actor-icon-frame"),
-                        sh,
-                    );
+                    if !hand {
+                        push_shadowed(
+                            &mut els,
+                            Element::classed_shape(frame, frame_paint, "usecase-actor-icon-frame"),
+                            sh,
+                        );
+                    }
                     let ir = Rect::new(g.x - 21.0, g.y - 23.0, 42.0, 42.0);
                     let fallback = Geometry::Rect { rect: ir, rx: 0.0 };
                     push_shadowed(
@@ -3384,11 +3559,14 @@ fn draw_node(
         }
         Shape::Ellipse { label, rx, ry } => {
             let paint = painted(&n.style, slot, &role.bkg, &role.border, 2.0);
-            els.push(Element::classed_shape(
-                Geometry::Path(geom::ellipse(c, *rx, *ry)),
-                paint,
-                "basic label-container",
-            ));
+            match rough(c) {
+                Some(drawn) => els.extend(drawn),
+                None => els.push(Element::classed_shape(
+                    Geometry::Path(geom::ellipse(c, *rx, *ry)),
+                    paint,
+                    "basic label-container",
+                )),
+            }
             let color = n
                 .style
                 .color
@@ -3417,19 +3595,17 @@ fn draw_node(
                     1.0
                 }),
             );
+            match rough(c) {
+                Some(drawn) => els.extend(drawn),
+                None => els.push(Element::classed_shape(
+                    Geometry::Path(geom::ellipse(c, *rx, *ry)),
+                    paint,
+                    "basic label-container usecase-business-ellipse",
+                )),
+            }
+            let (a, b) = business_marker_ends(*label_w, *rx, *ry);
             els.push(Element::classed_shape(
-                Geometry::Path(geom::ellipse(c, *rx, *ry)),
-                paint,
-                "basic label-container usecase-business-ellipse",
-            ));
-            let inset = (NODE_PADDING / 5.0).clamp(1.0, NODE_PADDING / 2.0);
-            let (sx, ex) = (label_w / 2.0 + inset, rx - inset);
-            let on = |x: f64| ry * (1.0 - (x / rx).powi(2)).max(0.0).sqrt();
-            els.push(Element::classed_shape(
-                Geometry::Path(vec![
-                    PathCmd::MoveTo(Point::new(c.x + sx, c.y + on(sx))),
-                    PathCmd::LineTo(Point::new(c.x + ex, c.y - on(ex))),
-                ]),
+                Geometry::Path(vec![PathCmd::MoveTo(c.plus(a)), PathCmd::LineTo(c.plus(b))]),
                 line,
                 "usecase-business-marker",
             ));
@@ -3447,16 +3623,31 @@ fn draw_node(
         Shape::Rect { label } => {
             let paint = painted(&n.style, slot, &role.bkg, &role.border, 2.0);
             let geom = Geometry::Rect { rect: r, rx: 0.0 };
-            push_shadowed(
-                &mut els,
-                Element::classed_shape(geom, paint, "basic label-container"),
-                sh,
-            );
+            match rough(c) {
+                Some(drawn) => els.extend(drawn),
+                None => push_shadowed(
+                    &mut els,
+                    Element::classed_shape(geom, paint, "basic label-container"),
+                    sh,
+                ),
+            }
             let color = n
                 .style
                 .color
                 .clone()
                 .unwrap_or_else(|| pal.primary_text.clone());
+            els.push(label.text(c, &color));
+            (els, Clip::Rect(r))
+        }
+        Shape::Note { label } if n.hand.is_some() => {
+            // note.ts under handDrawn: a rough rectangle (roughness 0.7,
+            // hachure) in the note's colours.
+            els.extend(rough(c).into_iter().flatten());
+            let color = n
+                .style
+                .color
+                .clone()
+                .unwrap_or_else(|| pal.note_text.clone());
             els.push(label.text(c, &color));
             (els, Clip::Rect(r))
         }
@@ -3543,21 +3734,34 @@ fn draw_node(
                 neo_outline(&mut paint, pal, n.style.stroke.is_some());
             }
             let outer = Geometry::Rect { rect: r, rx: 0.0 };
-            push_shadowed(
-                &mut els,
-                Element::classed_shape(outer, paint.clone(), "label-container usecase-json-border"),
-                sh,
-            );
+            let hand_cells = rough(c);
+            let hand = hand_cells.is_some();
+            match hand_cells {
+                Some(drawn) => els.extend(drawn),
+                None => push_shadowed(
+                    &mut els,
+                    Element::classed_shape(
+                        outer,
+                        paint.clone(),
+                        "label-container usecase-json-border",
+                    ),
+                    sh,
+                ),
+            }
             let color = n
                 .style
                 .color
                 .clone()
                 .unwrap_or_else(|| pal.primary_text.clone());
             let inner_w = key_w + value_w;
-            let (left, mut y) = (r.x + border, r.y + border);
+            let inner_h = title_h + row_h.iter().sum::<f64>();
+            let (left, mut y) = (c.x - inner_w / 2.0, c.y - inner_h / 2.0);
             // Each cell is a `rect` of the node, so under neo it casts its own
             // drop shadow (`.node rect { filter }`), painted over what came before.
             let cell = |els: &mut Vec<Element>, x: f64, y: f64, w: f64, h: f64| {
+                if hand {
+                    return;
+                }
                 let geom = Geometry::Rect {
                     rect: Rect::new(x, y, w, h),
                     rx: 0.0,
@@ -3639,6 +3843,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             cluster: cluster_of(&a.parent),
             style: compiled_style(&d.class_defs, &a.classes, &a.styles),
             slot: next_slot(),
+            hand: None,
         });
     }
     for u in &d.use_cases {
@@ -3652,6 +3857,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             cluster: cluster_of(&u.parent),
             style: compiled_style(&d.class_defs, &u.classes, &u.styles),
             slot: next_slot(),
+            hand: None,
         });
     }
     for n in &d.notes {
@@ -3665,6 +3871,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             cluster: None,
             style: compiled_style(&d.class_defs, &[], &[]),
             slot: None,
+            hand: None,
         });
     }
     for j in &d.json_tables {
@@ -3679,7 +3886,19 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             cluster: None,
             style,
             slot: None,
+            hand: None,
         });
+    }
+    if let Some(seed) = o.hand {
+        for n in &mut nodes {
+            n.hand = hand_body(n, pal, seed);
+            // `updateNodeBounds` measures the rough body (an actor keeps its
+            // invisible outline rect).
+            if let (Some(hn), false) = (&n.hand, matches!(n.shape, Shape::Actor { .. })) {
+                n.w = hn.bbox.w;
+                n.h = hn.bbox.h;
+            }
+        }
     }
     let index: HashMap<&str, usize> = nodes
         .iter()
@@ -3854,6 +4073,13 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
     let out = layout::layout(&input);
 
     let mut bounds = Bounds::default();
+    // The layout's origin: ELK's 12px root padding (the dagre port lays out
+    // inside dagre's 8px margins itself).
+    let origin = if o.layout == LayoutAlgorithm::Elk {
+        12.0
+    } else {
+        0.0
+    };
 
     // System boundaries (`usecaseSystemBoundary` in clusters.js).
     let mut cluster_els = Vec::new();
@@ -3894,8 +4120,66 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             .color
             .clone()
             .unwrap_or_else(|| pal.title_color.clone());
-        if package {
-            let tab_w = w.min((c.title.w + 20.0).max(80.0));
+        let tab_w = w.min((c.title.w + 20.0).max(80.0));
+        if let Some(seed) = o.hand {
+            // Under handDrawn: rough rectangles in the frame mermaid draws
+            // them in (`userNodeOverrides` with the cluster's colours, 1px);
+            // a palette slot's rule restrokes (and refills) both paths.
+            let opts = crate::rough::Options {
+                fill: Some(
+                    c.style
+                        .fill
+                        .clone()
+                        .unwrap_or_else(|| pal.cluster_bkg.clone())
+                        .0,
+                ),
+                stroke: c
+                    .style
+                    .stroke
+                    .clone()
+                    .unwrap_or_else(|| pal.cluster_border.clone())
+                    .0,
+                stroke_width: c.style.stroke_width.unwrap_or(1.0),
+                ..hand::node_options(&hand_style(&StyleOverrides::default(), pal, seed))
+            };
+            let at = Point::new(-origin, -origin);
+            let rect = |x: f64, y: f64, w: f64, h: f64| hand::Piece {
+                drawable: crate::rough::rectangle(x + origin, y + origin, w, h, opts.clone()),
+                at,
+                measured: true,
+            };
+            let body = rect(r.x, r.y + tab_h, w, h - tab_h);
+            let pieces = if package {
+                vec![rect(r.x, r.y, tab_w, tab_h), body]
+            } else {
+                vec![body]
+            };
+            let hn = hand::measured_node(pieces);
+            bounds.add_rect(hn.drawn_bbox());
+            let mut drawn =
+                super::graph::hand_elements(&hn, Point::default(), c.style.dash.as_ref());
+            if let Some(sl) = &c.slot {
+                for g in &mut drawn {
+                    if let Element::Group { children, .. } = g {
+                        for k in children {
+                            if let Element::Shape { paint, .. } = k {
+                                paint.stroke = sl.border.clone();
+                                if let Some(f) = &sl.fill {
+                                    paint.fill = f.clone();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            children.extend(drawn);
+            let at = if package {
+                Point::new(r.x + tab_w / 2.0, r.y + tab_h / 2.0)
+            } else {
+                Point::new(r.center().x, r.y + c.title.h / 2.0)
+            };
+            children.push(c.title.text(at, &title_color));
+        } else if package {
             let tab = Geometry::Rect {
                 rect: Rect::new(r.x, r.y, tab_w, tab_h),
                 rx: 0.0,
@@ -3945,7 +4229,20 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
     for (i, n) in nodes.iter().enumerate() {
         let c = out.nodes[i];
         let (els, clip) = draw_node(n, c, o, pal, shadow_of);
-        bounds.add_rect(Rect::centered(c, n.w, n.h));
+        // A rough body's box is its own, off the centre (an actor keeps its
+        // outline rect round it).
+        if n.hand.is_none() || matches!(n.shape, Shape::Actor { .. }) {
+            bounds.add_rect(Rect::centered(c, n.w, n.h));
+        }
+        if let Some(hn) = &n.hand {
+            // The viewBox holds the strokes as drawn.
+            let at = match n.shape {
+                Shape::Actor { .. } => glyph_origin(c, n.h),
+                _ => c,
+            };
+            let b = hn.drawn_bbox();
+            bounds.add_rect(Rect::new(b.x + at.x, b.y + at.y, b.w, b.h));
+        }
         clips.push(clip);
         node_els.push(Element::Group {
             id: Some(format!("usecase-{}", n.id)),
@@ -4060,10 +4357,27 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             }
         }
     }
-    for ((e, route), label_pos) in edges.iter().zip(routes).zip(label_at) {
+    for (ei, ((e, route), label_pos)) in edges.iter().zip(routes).zip(label_at).enumerate() {
         let Some(mut pts) = route else {
             continue;
         };
+        if elk && o.hand.is_some() {
+            // mermaid's ELK routes hold the ports beside the outline points,
+            // and a point where an edge crosses a boundary; a straight run
+            // through them draws the same, but rough.js draws each segment.
+            if let Some(p) = kept[ei][0].filter(|p| pts.len() >= 2 && *p != pts[0] && *p != pts[1])
+            {
+                pts.insert(1, p);
+            }
+            let n = pts.len();
+            if let Some(p) = kept[ei][1].filter(|p| n >= 2 && *p != pts[n - 1] && *p != pts[n - 2])
+            {
+                pts.insert(n - 1, p);
+            }
+            if let Some(j) = out.elk_exact.as_ref().and_then(|x| x.joints.get(ei)) {
+                pts = super::graph::with_joints(&pts, j);
+            }
+        }
         if elk {
             hop_edges.push(crate::linejump::EdgeGeom {
                 points: pts.clone(),
@@ -4098,6 +4412,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         let margin = neo && !e.animated;
         let mut heads =
             markers::elements(e.end, End::End, pts[last], end_dir, colors, width, margin);
+        let end_heads = heads.len();
         heads.extend(markers::elements(
             e.start,
             End::Start,
@@ -4117,11 +4432,28 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         for p in &pts {
             bounds.add_point(*p);
         }
-        let cmds = match o.curve {
+        let mut cmds = match o.curve {
             _ if elk => geom::rounded_path(&pts, super::graph::EDGE_CORNER_RADIUS),
             Curve::Linear | Curve::Step => geom::polyline(&pts),
             Curve::Basis => geom::basis_curve(&pts),
         };
+        if let Some(seed) = o.hand {
+            // `insertEdge` hands the path to rough.js (`roughness: 0.3`).
+            let (drawn, moved) = super::graph::rough_edge(
+                &cmds,
+                &pts,
+                elk,
+                Point::new(origin, origin),
+                seed,
+                heads,
+                end_heads,
+            );
+            if let Some(b) = geom::path_bbox(&drawn) {
+                bounds.add_rect(b);
+            }
+            cmds = drawn;
+            heads = moved;
+        }
         let mut paint = Paint::stroke(&stroke, width);
         let dotted = !matches!(
             e.kind,
@@ -4189,13 +4521,6 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         }
     }
 
-    // The layout's origin: ELK's 12px root padding (the dagre port lays out
-    // inside dagre's 8px margins itself).
-    let origin = if o.layout == LayoutAlgorithm::Elk {
-        12.0
-    } else {
-        0.0
-    };
     let mut elements: Vec<Element> = vec![
         Element::group("clusters", cluster_els),
         Element::group("edgePaths", edge_els),
@@ -4848,6 +5173,58 @@ mod tests {
         // centres "Normal actor" at x 101.93 (glyphs from 61.859).
         let normal = t.iter().find(|t| t.lines == ["Normal actor"]).unwrap();
         assert!((normal.x - 101.9297).abs() < 0.01, "{}", normal.x);
+    }
+
+    /// Path data of every shape in `src`'s scene.
+    fn drawn_paths(src: &str) -> Vec<String> {
+        fn walk(els: &[Element], out: &mut Vec<String>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. }
+                    | Element::Rotated { children, .. }
+                    | Element::Translated { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => out.push(crate::output::svg::path_data(cmds)),
+                    _ => {}
+                }
+            }
+        }
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        let mut out = Vec::new();
+        walk(&r.scene.elements, &mut out);
+        out
+    }
+
+    #[test]
+    fn hand_drawn_nodes_and_edges_match_mermaid() {
+        // mermaid 12.3.0, `look: handDrawn`, seed 31: the use case is laid
+        // out by its rough ellipse's box (154.05 wide, not 160), the edge
+        // ends on the nominal ellipse (ELK's port lies inside it) and is a
+        // rough path (roughness 0.3).
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 31\n  theme: dark\n---\n\
+                   usecase-beta\nactor Admin\nManage(\"Manage users\")\nAdmin --> Manage\n";
+        let paths = drawn_paths(src);
+        assert!(
+            paths
+                .iter()
+                .any(|d| d.starts_with("M87.573,73.064C") && d.ends_with("121.029,72.301")),
+            "{paths:?}"
+        );
+        // Seed 7: a business use case is laid out by its whole group's box
+        // (the marker reaches past the rough ellipse): its ellipse's first
+        // path starts at (156.509, 69.567).
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 7\n  theme: forest\n---\n\
+                   usecase-beta\nactor SalesAgent(\"Sales agent\")@{ business: true } <<Employee>>\n\
+                   actor Broker@{ type: hollow, business: true }\n\
+                   Quote(\"Prepare quote\")@{ business: true } <<Core>>\nPriced[Costs 19.95 EUR]\n\
+                   SalesAgent --> Quote\nBroker --> Priced\nQuote ..> : include Priced\n";
+        let paths = drawn_paths(src);
+        assert!(
+            paths.iter().any(|d| d.starts_with("M156.509,69.567C")),
+            "{paths:?}"
+        );
     }
 
     #[test]
