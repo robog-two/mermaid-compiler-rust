@@ -4580,8 +4580,8 @@ fn hand_cluster(
 
 /// `pts` with the points of `joints` (an ELK route before its collinear points
 /// went, see [`layout::ElkExact::joints`]) that a straight run passes and that
-/// lie inside one of `pts`' segments put back in. (A corner of `joints` may
-/// since have been straightened away: it stays out.)
+/// lie inside one of `pts`' segments put back in, once each. (A corner of
+/// `joints` may since have been straightened away: it stays out.)
 fn with_joints(pts: &[Point], joints: &[Point]) -> Vec<Point> {
     let inner: Vec<Point> = joints
         .windows(3)
@@ -4602,9 +4602,11 @@ fn with_joints(pts: &[Point], joints: &[Point]) -> Vec<Point> {
             .map(|j| (p.dist(*j), *j))
             .collect();
         on.sort_by(|a, b| a.0.total_cmp(&b.0));
+        on.dedup_by(|a, b| a.1.dist(b.1) <= 1e-9);
         out.extend(on.into_iter().map(|(_, j)| j));
     }
-    out.dedup_by(|a, b| a.dist(*b) <= 1e-9);
+    // (A point the route itself repeats, a straightened jog's zero-width
+    // step, stays: rough.js draws it as a segment of its own.)
     out
 }
 
@@ -6440,6 +6442,46 @@ mod tests {
         assert!(
             d.as_deref().unwrap_or("").starts_with("M480.89,323.683C"),
             "{d:?}"
+        );
+    }
+
+    /// mermaid 12.3.0 (`look: handDrawn`, ELK): straightening the jog to an
+    /// inline label leaves the route a zero-width step (a point twice),
+    /// which rough.js draws as a segment of its own: three segments, six
+    /// strokes, the second a dot at (61.541, 341.314).
+    #[test]
+    fn hand_drawn_routes_keep_a_straightened_jogs_repeated_point() {
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 4242\n  theme: forest\n---\n\
+                   stateDiagram-v2\n  [*] --> Open\n  Open --> Closed : close\n  \
+                   Closed --> Open : open\n  Closed --> Locked : lock\n  \
+                   Locked --> Closed : unlock\n  state join_state <<join>>\n  \
+                   Open --> join_state\n  Locked --> join_state\n  join_state --> [*]";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .unwrap()
+            .scene;
+        let mut all = Vec::new();
+        scene.elements.iter().for_each(|e| walk(e, &mut all));
+        let d = all
+            .iter()
+            .find_map(|e| match e {
+                Element::Group {
+                    id: Some(i),
+                    children,
+                    ..
+                } if i.starts_with("L-Closed-Locked-") => children.iter().find_map(|c| match c {
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => Some(crate::output::svg::path_data(cmds)),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert_eq!(d.matches('M').count(), 6, "{d}");
+        assert!(
+            d.contains("M61.541,341.314C61.541,341.314,61.541,341.314,61.541,341.314M"),
+            "{d}"
         );
     }
 
