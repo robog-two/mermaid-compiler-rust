@@ -54,8 +54,6 @@ pub struct HandNode {
     pub pieces: Vec<Piece>,
     /// `getBBox()` of the measured group, in the node's frame.
     pub bbox: Rect,
-    /// The size the layout gets, where the shape does not take the bbox's.
-    pub size: Option<(f64, f64)>,
     boundary: Bound,
 }
 
@@ -590,7 +588,7 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
             let d = rough::rectangle(-w / 2.0, -h / 2.0, w, h, fo);
             (vec![piece(d, origin)], Bound::Rect)
         }
-        // choice.ts: the 28px diamond as a rough path; the node stays 28×28.
+        // choice.ts: the 28px diamond as a rough path.
         Shape::Choice => {
             let path = path_from_points(&[
                 Point::new(0.0, 14.0),
@@ -625,17 +623,11 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
         .collect();
     let [x, y, w, h] = super::svgbbox::cubic_group_box(&paths)?;
     let bbox = Rect::new(x + at.x, y + at.y, w, h);
-    // forkJoin.ts adds half the state padding (8) to the measured size;
-    // choice.ts keeps 28×28.
-    let size = match shape {
-        Shape::ForkBar => Some((bbox.w + 4.0, bbox.h + 4.0)),
-        Shape::Choice => Some((28.0, 28.0)),
-        _ => None,
-    };
+    // (choice.ts sets 28×28, but the layout gets the drawn group's box;
+    // forkJoin.ts's `state.padding` is not in the config it reads.)
     Some(HandNode {
         pieces,
         bbox,
-        size,
         boundary,
     })
 }

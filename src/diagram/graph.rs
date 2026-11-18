@@ -4307,6 +4307,9 @@ fn cluster_shapes(
             inner_paint.dash = c.style.dash.clone();
             let th = if t.is_empty() { 0.0 } else { t.height };
             let inner = Rect::new(r.x, r.y + th + 2.0, r.w, (r.h - th - 6.0).max(0.0));
+            if let Some(seed) = lk.hand_seed {
+                return hand_composite(r, inner, alt, seed, hand_at, [&outer, &inner_paint]);
+            }
             vec![
                 Element::rect(r, rx, outer),
                 Element::rect(inner, 0.0, inner_paint),
@@ -4324,11 +4327,115 @@ fn cluster_shapes(
                 .and_then(|s| s.fill.clone())
                 .or_else(|| pal.alt_background.clone())
                 .unwrap_or_else(|| Color::new("#efefef"));
+            if let Some(seed) = lk.hand_seed {
+                // clusters.js `divider` under the handDrawn look: a rough
+                // rectangle (`roughness: 0.5`, solid `altBackground ?? #efefef`,
+                // `nodeBorder` dashed 5).
+                let fill = slot
+                    .as_ref()
+                    .and_then(|s| s.fill.clone())
+                    .or_else(|| pal.alt_background.clone())
+                    .unwrap_or_else(|| Color::new("#efefef"));
+                let d = crate::rough::rectangle(
+                    r.x + hand_at.x,
+                    r.y + hand_at.y,
+                    r.w,
+                    r.h,
+                    crate::rough::Options {
+                        roughness: 0.5,
+                        fill: Some(fill.css().to_string()),
+                        fill_style: "solid".into(),
+                        seed,
+                        ..Default::default()
+                    },
+                );
+                let kids = d
+                    .sets
+                    .iter()
+                    .filter(|s| !s.ops.is_empty())
+                    .map(|set| {
+                        let p = match set.kind {
+                            crate::rough::SetKind::FillPath => Paint::fill(&fill),
+                            _ => {
+                                let mut p = Paint::stroke(&stroke, d.options.stroke_width);
+                                p.dash = Some(vec![5.0]);
+                                p
+                            }
+                        };
+                        let at = Point::new(-hand_at.x, -hand_at.y);
+                        Element::shape(Geometry::Path(hand::set_cmds(&set.ops, at)), p)
+                    })
+                    .collect();
+                return vec![Element::group("divider", kids)];
+            }
             let mut paint = Paint::both(&fill, &stroke, lk.node_stroke_width);
             paint.dash = Some(vec![10.0, 10.0]);
             vec![Element::rect(r, 0.0, paint)]
         }
     }
+}
+
+/// clusters.js `roundedWithTitle` under the handDrawn look: the outer frame
+/// as a rough path with 10px corners (`roughness: 0.7`, a solid title fill),
+/// the body as a rough rectangle (rough.js's default roughness 1; an
+/// alternate composite's body hachured), drawn in mermaid's frame (`at`) and
+/// painted as the classic rects would be (`paints`: outer, inner).
+fn hand_composite(
+    r: Rect,
+    inner: Rect,
+    alt: bool,
+    seed: f64,
+    at: Point,
+    paints: [&Paint; 2],
+) -> Vec<Element> {
+    let outer = crate::rough::path(
+        &hand::rounded_rect_path(r.x + at.x, r.y + at.y, r.w, r.h, 10.0),
+        crate::rough::Options {
+            roughness: 0.7,
+            fill: Some(paints[0].fill.css().to_string()),
+            fill_style: "solid".into(),
+            seed,
+            ..Default::default()
+        },
+    );
+    let body = crate::rough::rectangle(
+        inner.x + at.x,
+        inner.y + at.y,
+        inner.w,
+        inner.h,
+        crate::rough::Options {
+            fill: Some(paints[1].fill.css().to_string()),
+            fill_style: if alt { "hachure" } else { "solid" }.into(),
+            seed,
+            ..Default::default()
+        },
+    );
+    let mut els = Vec::new();
+    for (d, paint) in [(&outer, paints[0]), (&body, paints[1])] {
+        let (fill, stroke) = (&paint.fill, &paint.stroke);
+        let kids = d
+            .sets
+            .iter()
+            .filter(|s| !s.ops.is_empty())
+            .map(|set| {
+                let p = match set.kind {
+                    crate::rough::SetKind::Path => {
+                        let mut p = Paint::stroke(stroke, d.options.stroke_width);
+                        p.dash = paint.dash.clone();
+                        p
+                    }
+                    crate::rough::SetKind::FillSketch => Paint::stroke(fill, d.fill_weight()),
+                    crate::rough::SetKind::FillPath => Paint::fill(fill),
+                };
+                Element::shape(
+                    Geometry::Path(hand::set_cmds(&set.ops, Point::new(-at.x, -at.y))),
+                    p,
+                )
+            })
+            .collect();
+        els.push(Element::group("", kids));
+    }
+    els
 }
 
 /// clusters.js `rect` under the handDrawn look: the frame as a rough.js path
@@ -5771,7 +5878,7 @@ fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
         return;
     };
     if let Some(hn) = hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)) {
-        (m.w, m.h) = hn.size.unwrap_or((hn.bbox.w, hn.bbox.h));
+        (m.w, m.h) = (hn.bbox.w, hn.bbox.h);
         m.hand = Some(hn.bbox);
     }
 }
