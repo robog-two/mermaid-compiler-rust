@@ -4190,12 +4190,41 @@ pub fn node_size(
     pal: &Palette,
     horizontal: bool,
 ) -> (f64, f64) {
-    let m = measure_node(
+    let (m, _) = measure_single(n, kind, cfg, pal, horizontal);
+    (m.w, m.h)
+}
+
+/// Under the handDrawn look, the box node `n`'s drawing covers in its own
+/// frame (off its centre: the strokes are random).
+pub fn node_drawn_box(
+    n: &Node,
+    kind: DiagramKind,
+    cfg: &GraphConfig,
+    pal: &Palette,
+    horizontal: bool,
+) -> Option<Rect> {
+    measure_single(n, kind, cfg, pal, horizontal).0.hand
+}
+
+/// A node measured on its own as [`render`] measures it (under the
+/// handDrawn look: by its drawing's box), and the look it is drawn with.
+fn measure_single(
+    n: &Node,
+    kind: DiagramKind,
+    cfg: &GraphConfig,
+    pal: &Palette,
+    horizontal: bool,
+) -> (Measured, Look) {
+    let mut lk = themed_look(look(kind), kind, cfg.look, pal);
+    lk.hand_seed = (cfg.look == ConfigLook::HandDrawn).then_some(cfg.hand_drawn_seed);
+    lk.horizontal = horizontal;
+    let font = pal.font_size;
+    let mut m = measure_node(
         n,
         kind,
         cfg.padding,
         cfg.diagram_padding,
-        pal.font_size,
+        font,
         horizontal,
         cfg.look,
         cfg.min_node_width,
@@ -4203,7 +4232,8 @@ pub fn node_size(
         !cfg.html_labels,
         1.0,
     );
-    (m.w, m.h)
+    measure_hand(n, &mut m, pal, &lk, font);
+    (m, lk)
 }
 
 /// Draw node `index` of a graph centred on `c`, exactly as [`render`] would (palette
@@ -4217,21 +4247,8 @@ pub fn draw_node(
     horizontal: bool,
     c: Point,
 ) -> (Element, Boundary) {
-    let lk = themed_look(look(kind), kind, cfg.look, pal);
     let font = pal.font_size;
-    let m = measure_node(
-        n,
-        kind,
-        cfg.padding,
-        cfg.diagram_padding,
-        font,
-        horizontal,
-        cfg.look,
-        cfg.min_node_width,
-        cfg.wrapping_width,
-        !cfg.html_labels,
-        1.0,
-    );
+    let (m, lk) = measure_single(n, kind, cfg, pal, horizontal);
     let slot = slot_colors(n.color_slot, pal);
     let painted = Node {
         style: slot_styled(&n.style, slot.as_ref()),
@@ -6341,7 +6358,7 @@ pub(crate) fn hand_elements(
 
 /// `t` as one text element, or, where a line is drawn off centre (`shifts`,
 /// see [`TextBlock::shifts`]), one per line in a group.
-fn shifted_lines(t: Text, shifts: &[f64], class: &str) -> Element {
+pub(crate) fn shifted_lines(t: Text, shifts: &[f64], class: &str) -> Element {
     if shifts.iter().all(|&s| s == 0.0) {
         return Element::classed_text(t, class);
     }

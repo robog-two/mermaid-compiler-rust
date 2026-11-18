@@ -608,13 +608,26 @@ pub fn render(
 
 /// An edge label as `labelRect` measures it: an HTML label wrapped at 120px.
 fn edge_label_block(label: &str, font: f64) -> Option<TextBlock> {
-    let lines = crate::text::wrap(
-        label,
+    let flagged = crate::text::wrap_lines_flagged(
+        &crate::text::label_lines(label),
         LABEL_WRAP,
         font,
         false,
         crate::text::BreakRule::Browser,
     );
+    // A line that broke at a space keeps it (`white-space: break-spaces`),
+    // which moves its glyphs left of the centre.
+    let shifts: Vec<f64> = flagged
+        .iter()
+        .map(|(l, at_space)| {
+            if *at_space {
+                crate::text::break_space_shift(l, font, false)
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let lines: Vec<String> = flagged.into_iter().map(|(l, _)| l).collect();
     let natural = TextBlock::new(lines.clone(), font, false);
     if natural.is_empty() {
         return None;
@@ -622,6 +635,9 @@ fn edge_label_block(label: &str, font: f64) -> Option<TextBlock> {
     let mut b = natural.html();
     if lines.len() > 1 {
         b.width = crate::text::html_wrap_width(&lines, LABEL_WRAP, font, false);
+    }
+    if shifts.iter().any(|&s| s != 0.0) {
+        b.shifts = shifts;
     }
     Some(b)
 }
@@ -642,6 +658,87 @@ fn box_paint(style: &graph::StyleOverrides, slot: Option<ColorSlot>, pal: &Palet
     let mut paint = Paint::both(&fill, &stroke, style.stroke_width.unwrap_or(1.0));
     paint.dash = style.dash.clone();
     paint
+}
+
+/// swimlane.js under the handDrawn look: the title strip and the body as
+/// rough rectangles (`userNodeOverrides` with the cluster's colours; a
+/// top-to-bottom title's hachure at `fillWeight: 3`, the body unfilled), drawn
+/// body first. A palette slot's rules restroke each one's first path (its
+/// hachure, in the slot's fill) and its second (the outline, in its border);
+/// the lane's own `fill` / `stroke` styles go inline on the title's. Each
+/// element with its drawn box.
+fn hand_lane(
+    title: Rect,
+    body: Rect,
+    style: &graph::StyleOverrides,
+    slot: Option<crate::theme::SlotColors>,
+    lr: bool,
+    seed: f64,
+    pal: &Palette,
+) -> Vec<(Element, Rect)> {
+    let base = crate::rough::Options {
+        roughness: 0.7,
+        fill_style: "hachure".into(),
+        fill_weight: 1.5,
+        hachure_gap: 1.5,
+        stroke: pal.cluster_border.0.clone(),
+        seed,
+        stroke_width: style.stroke_width.unwrap_or(1.3),
+        ..Default::default()
+    };
+    let title_o = crate::rough::Options {
+        fill: Some(pal.cluster_bkg.0.clone()),
+        fill_weight: if lr { 1.5 } else { 3.0 },
+        ..base.clone()
+    };
+    let body_o = crate::rough::Options {
+        fill: Some("none".into()),
+        ..base
+    };
+    // rough.js draws the title first; the body goes in before it.
+    let t = crate::rough::rectangle(title.x, title.y, title.w, title.h, title_o);
+    let b = crate::rough::rectangle(body.x, body.y, body.w, body.h, body_o);
+    [(b, "swimlane-body", false), (t, "swimlane-title", true)]
+        .into_iter()
+        .map(|(d, class, is_title)| {
+            let bx = super::hand::drawable_bbox(&d).unwrap_or_default();
+            let hn = super::hand::measured_node(vec![super::hand::Piece {
+                drawable: d,
+                at: Point::default(),
+                measured: true,
+            }]);
+            let mut els = graph::hand_elements(&hn, Point::default(), style.dash.as_ref());
+            for g in &mut els {
+                if let Element::Group { children, .. } = g {
+                    for (k, el) in children.iter_mut().enumerate() {
+                        let Element::Shape { paint, .. } = el else {
+                            continue;
+                        };
+                        if let Some(sl) = &slot {
+                            if k == 1 {
+                                paint.stroke = sl.border.clone();
+                            } else if let Some(f) = &sl.fill {
+                                paint.stroke = f.clone();
+                            }
+                        }
+                        if is_title {
+                            if k == 1 {
+                                if let Some(c) = &style.stroke {
+                                    paint.stroke = c.clone();
+                                }
+                                if let Some(w) = style.stroke_width {
+                                    paint.stroke_width = w;
+                                }
+                            } else if let Some(f) = &style.fill {
+                                paint.stroke = f.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            (Element::group(class, els), bx)
+        })
+        .collect()
 }
 
 /// Draw a parsed swimlane diagram.
@@ -679,6 +776,7 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let at = |id: &str| data.node(id);
     let center = |n: &model::LNode| Point::new(n.x.unwrap_or(0.0), n.y.unwrap_or(0.0));
     let lr_lanes = data.direction == "LR";
+    let hand_seed = (gcfg.look == ConfigLook::HandDrawn).then_some(gcfg.hand_drawn_seed);
 
     let mut bounds = Bounds::default();
     // Lanes and the subgraphs nested in them, in the order `getData` lists them.
@@ -752,22 +850,38 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             }
             bounds.add_rect(title_rect);
             bounds.add_rect(body_rect);
-            children.push(Element::classed_shape(
-                Geometry::Rect {
-                    rect: body_rect,
-                    rx: 0.0,
-                },
-                paint.clone(),
-                "swimlane-body",
-            ));
-            children.push(Element::classed_shape(
-                Geometry::Rect {
-                    rect: title_rect,
-                    rx: 0.0,
-                },
-                paint,
-                "swimlane-title",
-            ));
+            if let Some(seed) = hand_seed {
+                let lane = hand_lane(
+                    title_rect,
+                    body_rect,
+                    &style,
+                    slot.and_then(|s| pal.color_slots.as_ref().map(|p| p.slot(s))),
+                    lr_lanes,
+                    seed,
+                    pal,
+                );
+                for (el, b) in lane {
+                    bounds.add_rect(b);
+                    children.push(el);
+                }
+            } else {
+                children.push(Element::classed_shape(
+                    Geometry::Rect {
+                        rect: body_rect,
+                        rx: 0.0,
+                    },
+                    paint.clone(),
+                    "swimlane-body",
+                ));
+                children.push(Element::classed_shape(
+                    Geometry::Rect {
+                        rect: title_rect,
+                        rx: 0.0,
+                    },
+                    paint,
+                    "swimlane-title",
+                ));
+            }
             if !t.is_empty() {
                 // The label's box counts towards the diagram's bounds even where
                 // it overflows a title strip squeezed below its height.
@@ -824,7 +938,11 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let c = at(&nd.id).map(center).unwrap_or_default();
         let (el, boundary) =
             graph::draw_node(nd, i, DiagramKind::Flowchart, gcfg, pal, horizontal, c);
-        bounds.add_rect(Rect::centered(c, sizes[i].0, sizes[i].1));
+        // A rough node's box is its drawing's, off its centre.
+        match graph::node_drawn_box(nd, DiagramKind::Flowchart, gcfg, pal, horizontal) {
+            Some(b) => bounds.add_rect(Rect::new(b.x + c.x, b.y + c.y, b.w, b.h)),
+            None => bounds.add_rect(Rect::centered(c, sizes[i].0, sizes[i].1)),
+        }
         boundaries.push(boundary);
         node_els.push(el);
     }
@@ -908,6 +1026,7 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             width,
             neo,
         );
+        let end_heads = heads.len();
         heads.extend(markers::elements(
             e.start,
             End::Start,
@@ -918,7 +1037,25 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             neo,
         ));
         let plain = geom::rounded_path(&drawn, EDGE_CORNER_RADIUS);
-        let cmds = hopped[k].clone().unwrap_or_else(|| plain.clone());
+        let mut cmds = hopped[k].clone().unwrap_or_else(|| plain.clone());
+        if let Some(seed) = hand_seed {
+            // `insertEdge` hands the rounded path to rough.js (roughness 0.3)
+            // and moves the markers onto the drawn ends.
+            let (rough, moved) = graph::rough_edge(
+                &plain,
+                &drawn,
+                true,
+                Point::default(),
+                seed,
+                std::mem::take(&mut heads),
+                end_heads,
+            );
+            if let Some(b) = geom::path_bbox(&rough) {
+                bounds.add_rect(b);
+            }
+            cmds = rough;
+            heads = moved;
+        }
         let mut paint = Paint::stroke(&stroke, width);
         // A neo edge hides its first and last `markerOffsets2` px under its
         // markers by an inline pattern measured along its path (`insertEdge`).
@@ -975,17 +1112,24 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             .color
             .clone()
             .unwrap_or_else(|| pal.text_color.clone());
+        // swimlane's edge label: a 0.1px `rect` at its centre, which
+        // `.edgeLabel rect` fills at half opacity, then the label.
+        let dot = Element::rect(
+            Rect::new(c.x, c.y, 0.1, 0.1),
+            0.0,
+            Paint::fill(&pal.edge_label_background).with_opacity(0.5),
+        );
+        let text = Text::centered(c, &block.lines, font, block.line_height, &color);
         label_els.push(Element::group(
             "edgeLabel",
             vec![
+                dot,
                 Element::rect(r, 0.0, Paint::fill(&pal.edge_label_background)),
-                Element::text(Text::centered(
-                    c,
-                    &block.lines,
-                    font,
-                    block.line_height,
-                    &color,
-                )),
+                if block.shifts.is_empty() {
+                    Element::text(text)
+                } else {
+                    graph::shifted_lines(text, &block.shifts, "")
+                },
             ],
         ));
     }
@@ -1058,6 +1202,48 @@ mod tests {
 
     fn lane_ids(sl: &Swimlanes) -> Vec<&str> {
         sl.lanes.iter().map(|l| l.id.as_str()).collect()
+    }
+
+    /// Path data of every shape in `src`'s scene.
+    fn drawn_paths(src: &str) -> Vec<String> {
+        fn walk(els: &[Element], out: &mut Vec<String>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. }
+                    | Element::Rotated { children, .. }
+                    | Element::Translated { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => out.push(crate::output::svg::path_data(cmds)),
+                    _ => {}
+                }
+            }
+        }
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        let mut out = Vec::new();
+        walk(&r.scene.elements, &mut out);
+        out
+    }
+
+    #[test]
+    fn hand_drawn_lanes_and_nodes_match_mermaid() {
+        // mermaid 12.3.0, `look: handDrawn`, seed 21: the nodes are laid out
+        // by their rough drawings' boxes (the lanes come out 935 wide, not
+        // 953 as at the nominal sizes); the first node's rough rectangle and
+        // the last lane's body start here.
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 21\n  layout: swimlane\n---\n\
+                   swimlane-beta LR\n  subgraph Customer\n    request[Request service]\n    \
+                   receive[Receive update]\n  end\n  subgraph Support\n    triage[Triage request]\n    \
+                   answer[Send answer]\n  end\n  subgraph Engineering\n    \
+                   investigate[Investigate issue]\n    fix[Prepare fix]\n  end\n  \
+                   request --> triage\n  triage -->|Known issue| answer\n  \
+                   triage -->|Needs code change| investigate\n  investigate --> fix --> answer\n  \
+                   answer --> receive\n";
+        let paths = drawn_paths(src);
+        for start in ["M-54.131,-25.349C", "M-72.446,411.378C"] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
     }
 
     #[test]
