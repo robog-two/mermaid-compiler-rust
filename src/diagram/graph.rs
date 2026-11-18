@@ -6220,7 +6220,11 @@ fn set_opacity(e: &mut Element, o: f64) {
 /// A hand-drawn node's paths centred on `c`, painted as rough.js's SVG
 /// renderer paints them: hachure lines stroked in the fill colour at the fill
 /// weight, outlines stroked in the stroke colour, solid fills filled.
-fn hand_elements(hn: &hand::HandNode, c: Point, dash: Option<&Vec<f64>>) -> Vec<Element> {
+pub(crate) fn hand_elements(
+    hn: &hand::HandNode,
+    c: Point,
+    dash: Option<&Vec<f64>>,
+) -> Vec<Element> {
     let mut out = Vec::new();
     for pc in &hn.pieces {
         let o = &pc.drawable.options;

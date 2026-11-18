@@ -713,13 +713,16 @@ fn make_edge(from: String, to: String, toks: &[Tok], line_no: usize, s: &str) ->
 // ---------------------------------------------------------------------------
 
 /// Sizes used by the layout.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Metrics {
     pub font: f64,
     /// `block.padding`: gap between blocks and inset of composites.
     pub pad: f64,
     /// The neo look, whose shapes pad their labels by fixed amounts of their own.
     pub neo: bool,
+    /// Under the handDrawn look: rough.js's options for the nodes (each
+    /// block's own style applied in [`hand_style`]).
+    pub hand: Option<super::hand::HandStyle>,
 }
 
 /// The primitive a block shape draws, around the node centre.
@@ -767,6 +770,8 @@ struct NodeGeom {
     /// The label's lines as laid out, and whether its box cuts the text off.
     lines: Vec<String>,
     clipped: bool,
+    /// What the shape's handDrawn branch draws (`None`: no rough variant).
+    rough: Option<super::hand::Sized>,
 }
 
 /// A block label laid out in at most `limit` pixels (`createText`'s
@@ -844,6 +849,8 @@ fn node_geom(
     // The width `labelHelper` lays the label out in (`node.width`, or no limit).
     let wrap = |w: f64| if cell.is_some() { w } else { f64::INFINITY };
     let mut label_off = Point::new(0.0, 0.0);
+    use super::hand::Sized;
+    let mut rough = None;
     let (prim, fitted) = match shape {
         BlockShape::Rect | BlockShape::Rounded => {
             // squareRect / drawRect: labelPaddingX = 2p, labelPaddingY = p (neo:
@@ -858,6 +865,7 @@ fn node_geom(
             };
             let w = (lw + 2.0 * pad_x).max(nw);
             let h = (lh + 2.0 * pad_y).max(nh);
+            rough = Some(Sized::Rect { w, h, rx });
             (Prim::Rect { w, h, rx }, f)
         }
         BlockShape::Diamond => {
@@ -866,6 +874,8 @@ fn node_geom(
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
             let s = lw + p + lh + p;
+            let (d, at) = super::hand::question_path(s);
+            rough = Some(Sized::Path { d, at });
             let pts = [
                 (s / 2.0, 0.0),
                 (s, -s / 2.0),
@@ -896,6 +906,8 @@ fn node_geom(
             } else {
                 lw + 2.0 * m + pad_w
             };
+            let (d, at) = super::hand::hexagon_path(w, h, m);
+            rough = Some(Sized::Path { d, at });
             let pts = [
                 (m, 0.0),
                 (w - m, 0.0),
@@ -929,6 +941,17 @@ fn node_geom(
             let notch = h / 4.0;
             let w = (lw + pick(p, 42.0)).max(nw - notch);
             let dx = notch / 2.0;
+            let local = [
+                Point::new(-w / 2.0 - notch, -h / 2.0),
+                Point::new(-w / 2.0, 0.0),
+                Point::new(-w / 2.0 - notch, h / 2.0),
+                Point::new(w / 2.0, h / 2.0),
+                Point::new(w / 2.0, -h / 2.0),
+            ];
+            rough = Some(Sized::Path {
+                d: super::hand::path_from_points(&local),
+                at: Point::new(dx, 0.0),
+            });
             let pts = vec![
                 Point::new(-w / 2.0 - notch + dx, -h / 2.0),
                 Point::new(-w / 2.0 + dx, 0.0),
@@ -961,12 +984,19 @@ fn node_geom(
                 BlockShape::Trapezoid => [(-s, 0.0), (w + s, 0.0), (w, -h), (0.0, -h)],
                 _ => [(0.0, 0.0), (w, 0.0), (w + s, -h), (-s, -h)],
             };
+            let local: Vec<Point> = pts.iter().map(|&(x, y)| Point::new(x, y)).collect();
+            rough = Some(Sized::Path {
+                d: super::hand::path_from_points(&local),
+                at: Point::new(-w / 2.0, h / 2.0),
+            });
             (Prim::Poly(shift(&pts, w, h)), f)
         }
         BlockShape::Circle => {
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
-            (Prim::Circle(lw.hypot(lh) / 2.0 + pick(p / 2.0, 16.0)), f)
+            let r = lw.hypot(lh) / 2.0 + pick(p / 2.0, 16.0);
+            rough = Some(Sized::Circle(r));
+            (Prim::Circle(r), f)
         }
         BlockShape::DoubleCircle => {
             // doublecircle: a laid-out one takes half the cell width as its
@@ -979,7 +1009,9 @@ fn node_geom(
             } else {
                 lw.hypot(lh) / 2.0
             } + pick(p, 16.0);
-            (Prim::DoubleCircle(inner, inner + pick(5.0, 12.0)), f)
+            let outer = inner + pick(5.0, 12.0);
+            rough = Some(Sized::DoubleCircle { inner, outer });
+            (Prim::DoubleCircle(inner, outer), f)
         }
         BlockShape::Stadium => {
             // stadiumDimensions: the arc is a 50-point polygon, so the caps are a
@@ -993,6 +1025,10 @@ fn node_geom(
             let w = (lw + h / 4.0 + px)
                 .max(1.5 * h + (h - inscribed))
                 .max(lw + px + h - cap);
+            rough = Some(Sized::Path {
+                d: super::hand::path_from_points(&stadium_points(w, h)),
+                at: Point::default(),
+            });
             (Prim::Stadium { w, h }, f)
         }
         BlockShape::Subroutine => {
@@ -1001,6 +1037,7 @@ fn node_geom(
             // Neo pads by 28 and 12.
             let w = (lw + 2.0 * SUBROUTINE_FRAME + pick(p, 28.0)).max(nw);
             let h = (lh + pick(p, 12.0)).max(nh);
+            rough = Some(Sized::Subroutine { w, h });
             (Prim::Subroutine { w, h }, f)
         }
         BlockShape::Cylinder => {
@@ -1032,6 +1069,7 @@ fn node_geom(
         label_h: fitted.h,
         lines: fitted.lines,
         clipped: fitted.clipped,
+        rough,
     }
 }
 
@@ -1072,7 +1110,14 @@ impl NodeGeom {
     /// `getBBox()`. A cylinder's path is drawn about its own corner and moved
     /// into place by a transform, and the browser measures it in single
     /// precision there, which the rows' heights carry.
-    fn measured_size(&self) -> (f64, f64) {
+    /// [`NodeGeom::measured_size`], drawn by rough.js under the handDrawn look.
+    fn measured_size_in(&self, hand: Option<&super::hand::HandStyle>) -> (f64, f64) {
+        if let Some(hn) = self.hand_node(hand) {
+            let b =
+                hn.drawn_bbox()
+                    .union(&Rect::centered(self.label_off, self.label_w, self.label_h));
+            return (b.w, b.h);
+        }
         if let Prim::Cylinder { w, h, rx, ry } = self.prim {
             let l = Rect::centered(self.label_off, self.label_w, self.label_h);
             let [_, _, bw, bh] =
@@ -1081,6 +1126,12 @@ impl NodeGeom {
         }
         let b = self.bbox();
         (b.w, b.h)
+    }
+
+    /// The rough.js drawing of the shape under the handDrawn look.
+    fn hand_node(&self, hand: Option<&super::hand::HandStyle>) -> Option<super::hand::HandNode> {
+        let (st, shape) = (hand?, self.rough.as_ref()?);
+        Some(super::hand::sized_node(shape, st))
     }
 
     /// The node's bounding box around its centre (shape and label, as `getBBox`).
@@ -1252,7 +1303,7 @@ fn label_box(label: &str, font: f64) -> TextBlock {
 /// `calculateBlockSize`: the bounding box of the block as drawn unpositioned.
 fn node_size(label: &str, shape: BlockShape, span: usize, m: &Metrics) -> (f64, f64) {
     let tb = label_box(label, m.font);
-    node_geom(shape, &tb, None, span, (m.pad, m.neo)).measured_size()
+    node_geom(shape, &tb, None, span, (m.pad, m.neo)).measured_size_in(m.hand.as_ref())
 }
 
 /// Working copy of a block for mermaid's sizing passes (`block.size`).
@@ -1488,6 +1539,10 @@ pub(crate) enum Outline {
     Rect(Rect),
     Ellipse(Point, f64, f64),
     Polygon(Point, Vec<Point>),
+    /// `intersect.polygon` as written: of the crossings of the segment from
+    /// the centre to the point, the one nearest the point (a polygon that
+    /// doubles back, as subroutine's frame, has several).
+    NearestPolygon(Point, Vec<Point>),
     /// A cylinder's centre, bounding box size and cap radii.
     Cylinder(Point, f64, f64, f64, f64),
 }
@@ -1498,6 +1553,24 @@ impl Outline {
             Outline::Rect(r) => geom::clip_rect(r, toward),
             Outline::Ellipse(c, rx, ry) => geom::clip_ellipse(*c, *rx, *ry, toward),
             Outline::Polygon(c, pts) => geom::clip_polygon(*c, pts, toward),
+            Outline::NearestPolygon(c, pts) => {
+                let d = toward.minus(*c);
+                let mut best: Option<f64> = None;
+                for (i, &a) in pts.iter().enumerate() {
+                    let e = pts[(i + 1) % pts.len()].minus(a);
+                    let den = d.x * e.y - d.y * e.x;
+                    if den.abs() < 1e-12 {
+                        continue;
+                    }
+                    let ac = a.minus(*c);
+                    let t = (ac.x * e.y - ac.y * e.x) / den;
+                    let u = (ac.x * d.y - ac.y * d.x) / den;
+                    if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
+                        best = Some(best.map_or(t, |bt: f64| bt.max(t)));
+                    }
+                }
+                best.map_or(*c, |t| c.plus(d.scale(t)))
+            }
             &Outline::Cylinder(c, bw, bh, rx, ry) => {
                 // cylinder.ts `intersect`: the box's, moved onto the cap's
                 // ellipse when it lands on the top or bottom side.
@@ -1663,6 +1736,19 @@ pub fn render(
         font: pal.font_size,
         pad: cfg.section_f64("block", "padding", 8.0),
         neo: cfg.look == crate::config::Look::Neo,
+        hand: (cfg.look == crate::config::Look::HandDrawn).then(|| super::hand::HandStyle {
+            fill: pal.main_bkg.css().to_string(),
+            stroke: pal.node_border.css().to_string(),
+            stroke_width: 1.3,
+            seed: cfg.hand_drawn_seed(),
+            radius: pal.radius.unwrap_or(5.0),
+            line: pal.line_color.css().to_string(),
+            end_dot: pal.node_border.css().to_string(),
+            note_fill: pal.note_bkg.css().to_string(),
+            note_stroke: pal.note_border.css().to_string(),
+            horizontal: false,
+            state: false,
+        }),
     };
     let placed = layout(&d, &m);
     Ok(draw(&d, &placed, &m, pal))
@@ -1747,7 +1833,12 @@ fn draw_blocks(
                 let tb = label_box(label, m.font);
                 let g = node_geom(*shape, &tb, Some((r.w, r.h)), b.span.max(1), (m.pad, m.neo));
                 let c = r.center();
-                let bb = g.bbox();
+                let hand = m.hand.as_ref().map(|h| hand_style(h, &st));
+                let rough = g.hand_node(hand.as_ref());
+                let bb = match &rough {
+                    Some(hn) => hn.drawn_bbox().union(&g.bbox()),
+                    None => g.bbox(),
+                };
                 bounds.add_rect(Rect::new(bb.x + c.x, bb.y + c.y, bb.w, bb.h));
                 let mut paint = Paint::both(
                     st.fill.as_ref().unwrap_or(&pal.main_bkg),
@@ -1756,7 +1847,50 @@ fn draw_blocks(
                     st.stroke_width.unwrap_or(pal.stroke_width.unwrap_or(1.0)),
                 );
                 paint.dash = st.dash.clone();
-                let (mut els, outline) = g.draw(c, &paint);
+                let (mut els, mut outline) = g.draw(c, &paint);
+                if let Some(hn) = &rough {
+                    els = super::graph::hand_elements(hn, c, st.dash.as_ref());
+                    // The shapes' `intersect`s see the node as big as its
+                    // rough drawing (`updateNodeBounds`).
+                    let (w, h) = (hn.bbox.w, hn.bbox.h);
+                    outline = match (&g.prim, outline) {
+                        (Prim::Rect { .. }, _) => Outline::Rect(Rect::centered(c, w, h)),
+                        // subroutine.ts: the frame's polygon.
+                        (Prim::Subroutine { w: ow, h: oh }, _) => {
+                            let (iw, ih) = (ow - 2.0 * SUBROUTINE_FRAME, *oh);
+                            let local = [
+                                (0.0, 0.0),
+                                (iw, 0.0),
+                                (iw, -ih),
+                                (0.0, -ih),
+                                (0.0, 0.0),
+                                (-8.0, 0.0),
+                                (iw + 8.0, 0.0),
+                                (iw + 8.0, -ih),
+                                (-8.0, -ih),
+                                (-8.0, 0.0),
+                            ]
+                            .map(|(x, y)| Point::new(x, y))
+                            .to_vec();
+                            Outline::NearestPolygon(c, super::hand::in_box(c, w, h, local))
+                        }
+                        // question.ts: a diamond as wide as the box.
+                        (Prim::Poly(_), _) if *shape == BlockShape::Diamond => {
+                            let local = vec![
+                                Point::new(w / 2.0, 0.0),
+                                Point::new(w, -w / 2.0),
+                                Point::new(w / 2.0, -w),
+                                Point::new(0.0, -w / 2.0),
+                            ];
+                            Outline::Polygon(c, super::hand::in_box(c, w, h, local))
+                        }
+                        (Prim::Poly(_) | Prim::Stadium { .. }, Outline::Polygon(_, pts)) => {
+                            let local = pts.iter().map(|q| q.minus(c)).collect();
+                            Outline::Polygon(c, super::hand::in_box(c, w, h, local))
+                        }
+                        (_, o) => o,
+                    };
+                }
                 if m.neo {
                     neo_node(&mut els, *shape, &st, pal);
                 }
@@ -1801,6 +1935,22 @@ fn draw_blocks(
                 out.push(Element::group(class, els));
             }
         }
+    }
+}
+
+/// `userNodeOverrides` for a block styled `st`.
+fn hand_style(base: &super::hand::HandStyle, st: &StyleOverrides) -> super::hand::HandStyle {
+    super::hand::HandStyle {
+        fill: st
+            .fill
+            .as_ref()
+            .map_or(base.fill.clone(), |c| c.css().to_string()),
+        stroke: st
+            .stroke
+            .as_ref()
+            .map_or(base.stroke.clone(), |c| c.css().to_string()),
+        stroke_width: st.stroke_width.unwrap_or(base.stroke_width),
+        ..base.clone()
     }
 }
 
@@ -2001,8 +2151,10 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
 fn outline_center(o: &Outline) -> Point {
     match o {
         Outline::Rect(r) => r.center(),
-        Outline::Ellipse(c, _, _) | Outline::Polygon(c, _) => *c,
-        Outline::Cylinder(c, ..) => *c,
+        Outline::Ellipse(c, _, _)
+        | Outline::Polygon(c, _)
+        | Outline::NearestPolygon(c, _)
+        | Outline::Cylinder(c, ..) => *c,
     }
 }
 
@@ -2231,6 +2383,7 @@ class c hot
             font: 16.0,
             pad: 8.0,
             neo: false,
+            hand: None,
         }
     }
 
@@ -2799,5 +2952,36 @@ class c hot
         let mut fills = Vec::new();
         walk(&scene.elements, &mut fills);
         assert_eq!(fills, ["#000000", "#000000"]);
+    }
+
+    /// mermaid 12.3.0 under `look: handDrawn` (seed 19): blocks are sized by
+    /// their rough drawings, then drawn into their cells by rough.js again
+    /// (Alpha's fill sketch from (0.265, -102.482), Beta's circle from
+    /// (136.368, -66.521)).
+    #[test]
+    fn hand_drawn_blocks_match_mermaid() {
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 19\n---\nblock\n  \
+                   columns 3\n  a[\"Alpha\"] b((\"Beta\")) c{\"Gamma\"}\n  d([\"Delta\"]) \
+                   e[\"Epsilon\"] f(\"Zeta\")\n  a --> b\n  b --> d\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .unwrap()
+            .scene;
+        fn walk(els: &[Element], out: &mut Vec<String>) {
+            for el in els {
+                match el {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => out.push(crate::output::svg::path_data(cmds)),
+                    _ => {}
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        walk(&scene.elements, &mut paths);
+        for start in ["M0.265,-102.482C", "M136.368,-66.521C"] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
     }
 }

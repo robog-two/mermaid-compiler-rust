@@ -111,7 +111,7 @@ impl HandNode {
 
 /// `intersect.polygon`'s placement: the points' least x and y on the box's
 /// left and top sides.
-fn in_box(c: Point, w: f64, h: f64, local: Vec<Point>) -> Vec<Point> {
+pub fn in_box(c: Point, w: f64, h: f64, local: Vec<Point>) -> Vec<Point> {
     let min_x = local.iter().map(|q| q.x).fold(f64::INFINITY, f64::min);
     let min_y = local.iter().map(|q| q.y).fold(f64::INFINITY, f64::min);
     let (left, top) = (c.x - w / 2.0 - min_x, c.y - h / 2.0 - min_y);
@@ -328,7 +328,7 @@ fn cloud_path(tw: f64, th: f64, p: f64) -> (String, f64, f64) {
 }
 
 /// util.ts `createPathFromPoints`.
-fn path_from_points(pts: &[Point]) -> String {
+pub fn path_from_points(pts: &[Point]) -> String {
     let mut s: Vec<String> = pts
         .iter()
         .enumerate()
@@ -548,6 +548,119 @@ pub fn requirement_box(w: f64, h: f64, divider: Option<f64>, st: &HandStyle) -> 
         bbox,
         boundary: Bound::Rect,
     }
+}
+
+/// A shape at a size already settled (a block drawn into its cell), as its
+/// handDrawn branch draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Sized {
+    /// drawRect: `rc.rectangle`, or with `rx` a rough rounded-rectangle path.
+    Rect { w: f64, h: f64, rx: f64 },
+    /// circle.ts: `rc.circle` of radius `r`.
+    Circle(f64),
+    /// doubleCircle.ts: two circles at roughness 0.2, stroked 2.5 and 1.5.
+    DoubleCircle { inner: f64, outer: f64 },
+    /// subroutine.ts: the `w`×`h` rectangle (frame included) and its two
+    /// frame lines.
+    Subroutine { w: f64, h: f64 },
+    /// A rough path of path data `d` placed at `at`.
+    Path { d: String, at: Point },
+}
+
+/// `shape` drawn by rough.js with the node's options, centred on the origin
+/// (its box: what `updateNodeBounds` measures).
+pub fn sized_node(shape: &Sized, st: &HandStyle) -> HandNode {
+    let o = || node_options(st);
+    let origin = Point::default();
+    let pieces = match shape {
+        Sized::Rect { w, h, rx } => {
+            let (x, y) = (-w / 2.0, -h / 2.0);
+            let d = if *rx != 0.0 {
+                rough::path(&rounded_rect_path(x, y, *w, *h, *rx), o())
+            } else {
+                rough::rectangle(x, y, *w, *h, o())
+            };
+            vec![piece(d, origin)]
+        }
+        Sized::Circle(r) => vec![piece(rough::circle(0.0, 0.0, r * 2.0, o()), origin)],
+        Sized::DoubleCircle { inner, outer } => {
+            let ring = |r: f64, width: f64| {
+                let ro = Options {
+                    roughness: 0.2,
+                    stroke_width: width,
+                    ..o()
+                };
+                piece(rough::circle(0.0, 0.0, r * 2.0, ro), origin)
+            };
+            vec![ring(*outer, 2.5), ring(*inner, 1.5)]
+        }
+        Sized::Subroutine { w, h } => {
+            let (x, y) = (-w / 2.0, -h / 2.0);
+            let inner = w - 16.0;
+            let line = |lx: f64| Piece {
+                drawable: rough::line(lx, y, lx, y + h, o()),
+                at: origin,
+                measured: false,
+            };
+            vec![
+                piece(rough::rectangle(x, y, *w, *h, o()), origin),
+                line(x + 8.0 + inner),
+                line(x + 8.0),
+            ]
+        }
+        Sized::Path { d, at } => vec![piece(rough::path(d, o()), *at)],
+    };
+    let mut hn = HandNode {
+        pieces,
+        bbox: Rect::default(),
+        boundary: Bound::Rect,
+    };
+    hn.bbox = hn
+        .pieces
+        .iter()
+        .filter(|pc| pc.measured)
+        .filter_map(|pc| {
+            drawable_bbox(&pc.drawable).map(|b| Rect::new(b.x + pc.at.x, b.y + pc.at.y, b.w, b.h))
+        })
+        .reduce(|a, b| a.union(&b))
+        .unwrap_or_default();
+    hn
+}
+
+/// question.ts's path for a diamond of side `s`, and where it is placed.
+pub fn question_path(s: f64) -> (String, Point) {
+    let d = format!(
+        "M{},{} L{},{} L{},{} L{},{} Z",
+        s / 2.0,
+        0.0,
+        s,
+        -s / 2.0,
+        s / 2.0,
+        -s,
+        0.0,
+        -s / 2.0
+    );
+    (d, Point::new(-s / 2.0 + 0.5, s / 2.0))
+}
+
+/// hexagon.ts's `createHexagonPathD(0, 0, w, h, m)`, placed at (-w/2, h/2).
+pub fn hexagon_path(w: f64, h: f64, m: f64) -> (String, Point) {
+    let d = format!(
+        "M{},{} L{},{} L{},{} L{},{} L{},{} L{},{} Z",
+        m,
+        0.0,
+        w - m,
+        0.0,
+        w,
+        -h / 2.0,
+        w - m,
+        -h,
+        m,
+        -h,
+        0.0,
+        -h / 2.0
+    );
+    (d, Point::new(-w / 2.0, h / 2.0))
 }
 
 /// The pieces `range` of `hn` as a node of their own (to draw apart).
