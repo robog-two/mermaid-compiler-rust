@@ -667,24 +667,11 @@ fn cast_shadows(els: &mut Vec<Element>, sh: &DropShadow, shape: Shape) {
     let mut out = Vec::with_capacity(els.len() + 2);
     for el in els.drain(..) {
         match &el {
-            Element::Shape { geom, paint, .. } if each(geom) => {
-                if paint.fill.is_none() && sh.blurred().is_none() {
-                    // An unfilled source casts its stroke's shadow.
-                    let copy = Element::classed_shape(
-                        geom.translated(sh.dx, sh.dy),
-                        Paint {
-                            opacity: Some(sh.opacity * paint.opacity.unwrap_or(1.0)),
-                            ..Paint::stroke(&sh.color, paint.stroke_width)
-                        },
-                        "drop-shadow",
-                    );
-                    out.push(copy);
-                    out.push(el);
-                } else {
-                    let mut one = vec![el];
-                    cast_shadow(&mut one, sh);
-                    out.extend(one);
-                }
+            // An unfilled source casts its stroke's shadow through its filter.
+            Element::Shape { geom, .. } if each(geom) => {
+                let mut one = vec![el];
+                cast_shadow(&mut one, sh);
+                out.extend(one);
             }
             _ => out.push(el),
         }

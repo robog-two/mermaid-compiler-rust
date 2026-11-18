@@ -39,7 +39,10 @@ const VERTICAL: &str = "timeline TD
     2005 : YouTube";
 
 /// Every shape and text, with the translations of the groups it sits in added.
-fn flat(s: &Scene) -> (Vec<(Geometry, Paint, (f64, f64))>, Vec<(Text, (f64, f64))>) {
+type Placed<T> = Vec<(T, (f64, f64))>;
+
+#[allow(clippy::type_complexity)]
+fn flat(s: &Scene) -> (Vec<(Geometry, Paint, (f64, f64))>, Placed<Text>) {
     fn walk(
         els: &[Element],
         o: (f64, f64),
