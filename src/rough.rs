@@ -1739,7 +1739,7 @@ fn arc_points(
         if sweep != 0.0 && f2 > f1 {
             f2 = f1 + (PI * 120.0 / 180.0) * 1.0;
         } else {
-            f2 = f1 + (PI * 120.0 / 180.0) * -1.0;
+            f2 = f1 - (PI * 120.0 / 180.0);
         }
         *x2 = cx + *r1 * f2.cos();
         *y2 = cy + *r2 * f2.sin();
@@ -1789,7 +1789,7 @@ fn dist_to_segment_sq(p: P, v: P, w: P) -> f64 {
         return dist_sq(p, v);
     }
     let mut t = ((p[0] - v[0]) * (w[0] - v[0]) + (p[1] - v[1]) * (w[1] - v[1])) / l2;
-    t = t.min(1.0).max(0.0);
+    t = t.clamp(0.0, 1.0);
     dist_sq(p, lerp(v, w, t))
 }
 
@@ -1892,12 +1892,8 @@ fn curve_to_bezier(input: &[P], tightness: f64) -> Vec<P> {
         out.extend([input[0], input[1], input[2], input[2]]);
     } else {
         let mut points = vec![input[0], input[0]];
-        for i in 1..len {
-            points.push(input[i]);
-            if i == len - 1 {
-                points.push(input[i]);
-            }
-        }
+        points.extend_from_slice(&input[1..len]);
+        points.push(input[len - 1]);
         let s = 1.0 - tightness;
         out.push(points[0]);
         let mut i = 1;
