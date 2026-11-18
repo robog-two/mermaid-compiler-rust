@@ -962,6 +962,19 @@ fn er_rows(theme: ThemeName, p: &Palette, vars: &[(String, String)]) -> (Color, 
 }
 
 impl Palette {
+    /// `nodeTextColor || textColor`: the classic themes define no
+    /// `nodeTextColor` (whatever `node_text` holds for other uses).
+    pub fn node_text_or_text(&self) -> &Color {
+        match self.theme {
+            ThemeName::Default
+            | ThemeName::Null
+            | ThemeName::Dark
+            | ThemeName::Forest
+            | ThemeName::Neutral => &self.text_color,
+            _ => &self.node_text,
+        }
+    }
+
     /// Section colour `i` (`cScale`, wraps around).
     pub fn scale_color(&self, i: usize) -> &Color {
         &self.scale[i % self.scale.len()]

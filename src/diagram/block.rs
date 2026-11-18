@@ -1760,7 +1760,11 @@ fn draw_blocks(
                 if m.neo {
                     neo_node(&mut els, *shape, &st, pal);
                 }
-                let color: Color = st.color.clone().unwrap_or_else(|| pal.node_text.clone());
+                // `.label text, span { color: nodeTextColor || textColor }`.
+                let color: Color = st
+                    .color
+                    .clone()
+                    .unwrap_or_else(|| pal.node_text_or_text().clone());
                 let center = c.plus(g.label_off);
                 let mut t = Text::centered(center, &g.lines, m.font, tb.line_height, &color);
                 if g.clipped {
@@ -2773,5 +2777,27 @@ class c hot
             crate::text::line_width("\u{a0}", 16.0, false),
             crate::text::line_width(" ", 16.0, false)
         );
+    }
+
+    /// The classic themes define no `nodeTextColor`: a block's label takes
+    /// `textColor` (`.label text, span`), black under neutral (mermaid 12.3.0).
+    #[test]
+    fn neutral_labels_are_the_text_colour() {
+        let src = "---\nconfig:\n  theme: neutral\n---\nblock\n  A[\"One\"] B[\"Two\"]\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .unwrap()
+            .scene;
+        fn walk(els: &[Element], out: &mut Vec<String>) {
+            for el in els {
+                match el {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Text { text, .. } => out.push(text.fill.css().to_string()),
+                    _ => {}
+                }
+            }
+        }
+        let mut fills = Vec::new();
+        walk(&scene.elements, &mut fills);
+        assert_eq!(fills, ["#000000", "#000000"]);
     }
 }

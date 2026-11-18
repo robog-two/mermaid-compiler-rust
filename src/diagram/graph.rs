@@ -5510,21 +5510,9 @@ fn node_elements(
             (DiagramKind::State, _) => pal.state_label.clone(),
             // classDiagram's `.nodeLabel { color: classText }`.
             (DiagramKind::Class, _) => pal.class_text.clone(),
-            // erDiagram's and requirementDiagram's `.label { color: nodeTextColor
-            // || textColor }`: the
-            // classic themes define no `nodeTextColor`.
-            (DiagramKind::Er | DiagramKind::Requirement, _)
-                if matches!(
-                    pal.theme,
-                    ThemeName::Default
-                        | ThemeName::Null
-                        | ThemeName::Dark
-                        | ThemeName::Forest
-                        | ThemeName::Neutral
-                ) =>
-            {
-                pal.text_color.clone()
-            }
+            // erDiagram's and requirementDiagram's `.label { color:
+            // nodeTextColor || textColor }`.
+            (DiagramKind::Er | DiagramKind::Requirement, _) => pal.node_text_or_text().clone(),
             _ => pal.node_text.clone(),
         });
 
