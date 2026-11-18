@@ -27,6 +27,19 @@ impl Rendered {
 }
 
 /// Shared [`diagram::graph::RenderOptions`] of the flowchart / state / class renderers.
+/// A graph diagram with the references its HTML labels make to registered
+/// icon packs (`fa:fa-home` with a pack named `fa`) turned into the packs' icons.
+fn packed(
+    g: diagram::graph::GraphDiagram,
+    gcfg: &crate::config::GraphConfig,
+    cfg: &MermaidConfig,
+) -> diagram::graph::GraphDiagram {
+    if cfg.icon_packs.is_empty() {
+        return g;
+    }
+    diagram::graph::with_icons_from(&g, gcfg, &cfg.icon_packs).into_owned()
+}
+
 fn graph_options(cfg: &MermaidConfig) -> diagram::graph::RenderOptions {
     diagram::graph::RenderOptions {
         subgraph_title_margin: cfg.subgraph_title_margin(),
@@ -137,6 +150,7 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
             };
             let mut g = diagram::flowchart::parse_with(&pre.body, pre.title.clone(), opts)?;
             diagram::flowchart::attach_assets(&mut g, &cfg.icon_packs, &env.images)?;
+            let g = packed(g, &cfg.flowchart, &cfg);
             (
                 diagram::graph::render_with(&g, &cfg.flowchart, &pal, &graph_options(&cfg)),
                 cfg.flowchart.use_max_width,
@@ -144,6 +158,7 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
         }
         DiagramType::State => {
             let g = diagram::state::parse(&pre.body, pre.title.clone())?;
+            let g = packed(g, &cfg.state, &cfg);
             (
                 diagram::graph::render_with(&g, &cfg.state, &pal, &graph_options(&cfg)),
                 cfg.state.use_max_width,
@@ -154,6 +169,7 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
                 hierarchical_namespaces: cfg.section_bool("class", "hierarchicalNamespaces", true),
             };
             let g = diagram::class::parse_with(&pre.body, pre.title.clone(), opts)?;
+            let g = packed(g, &cfg.class, &cfg);
             let mut options = graph_options(&cfg);
             // Notes and lollipop interfaces wrap at labelHelper's fallback width,
             // `flowchart.wrappingWidth` (an HTML note keeps `white-space: nowrap`;
@@ -265,6 +281,7 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
                 };
                 let mut g = diagram::swimlane::parse_flowchart(&pre.body, pre.title.clone(), opts)?;
                 diagram::flowchart::attach_assets(&mut g, &cfg.icon_packs, &env.images)?;
+                let g = packed(g, &cfg.flowchart, &cfg);
                 let fcfg = crate::config::GraphConfig {
                     layout,
                     ..cfg.flowchart.clone()
@@ -311,6 +328,10 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
             cfg.use_max_width("usecase"),
         ),
     };
+    if !cfg.icon_packs.is_empty() {
+        scene.elements =
+            crate::icons::place_pack_icons(std::mem::take(&mut scene.elements), &cfg.icon_packs);
+    }
     scene.acc_title = pre.acc_title;
     scene.acc_descr = pre.acc_descr;
     Ok(Rendered {

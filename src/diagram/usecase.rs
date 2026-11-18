@@ -3251,6 +3251,59 @@ fn neo_outline(paint: &mut Paint, pal: &Palette, styled: bool) {
         .map(|(from, to)| Gradient::across_bbox(from, to));
 }
 
+/// What the page's stylesheet does to an icon actor's own elements (outside
+/// handDrawn), over their presentation attributes and what they inherit from
+/// the glyph group, losing only to their inline `style`:
+/// `.node.usecase-actor .usecase-actor-glyph path, … circle { stroke }` (the
+/// actor border, or the colour slot's); and under neo
+/// `[data-look="neo"].node rect, … polygon { stroke: nodeBorder }` and
+/// `[data-look="neo"].node path { stroke-width }`.
+fn icon_glyph_css(
+    svg: &str,
+    paint: &Paint,
+    slot: Option<&SlotColors>,
+    role: &RoleColors,
+    neo: bool,
+    path_w: f64,
+    pal: &Palette,
+) -> String {
+    use crate::iconify::with_css_rule;
+    let num = crate::output::svg::num;
+    let css = painted(
+        &StyleOverrides::default(),
+        slot,
+        &role.actor_bkg,
+        &role.actor_border,
+        2.0,
+    )
+    .stroke;
+    let stroke = css.css();
+    let mut out = with_css_rule(
+        svg,
+        &["path", "circle"],
+        "stroke",
+        stroke,
+        paint.stroke.css() != stroke,
+    );
+    if neo {
+        out = with_css_rule(
+            &out,
+            &["rect", "polygon"],
+            "stroke",
+            pal.node_border.css(),
+            true,
+        );
+        out = with_css_rule(
+            &out,
+            &["path"],
+            "stroke-width",
+            &num(path_w),
+            (path_w - paint.stroke_width).abs() > 1e-9,
+        );
+    }
+    out
+}
+
 fn painted(
     style: &StyleOverrides,
     slot: Option<&SlotColors>,
@@ -3545,6 +3598,10 @@ fn draw_node(
                             .unwrap_or_else(|| pal.actor_text.clone());
                         let mut el = super::asset::icon_element(svg, ir.center(), color);
                         if let Element::Icon { svg, .. } = &mut el {
+                            if !hand {
+                                *svg =
+                                    icon_glyph_css(svg, &paint, slot, role, o.neo(), path_w, pal);
+                            }
                             *svg = format!(
                                 "<g fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\">{svg}</g>",
                                 crate::output::svg::esc(paint.fill.css()),

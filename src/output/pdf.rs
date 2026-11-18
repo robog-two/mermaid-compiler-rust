@@ -33,23 +33,40 @@ impl Paper {
         "Letter", "Legal", "Tabloid", "Ledger", "A0", "A1", "A2", "A3", "A4", "A5", "A6",
     ];
 
-    /// Width and height in CSS pixels (96 per inch).
-    pub fn size_px(self) -> (f64, f64) {
-        let (w, h) = match self {
+    /// Width and height in inches, as Puppeteer's `paperFormats` hands them to
+    /// Chromium (the ISO sizes to 1/10000 inch).
+    pub fn size_in(self) -> (f64, f64) {
+        match self {
             Paper::Letter => (8.5, 11.0),
             Paper::Legal => (8.5, 14.0),
             Paper::Tabloid => (11.0, 17.0),
             Paper::Ledger => (17.0, 11.0),
-            Paper::A0 => (33.1, 46.8),
-            Paper::A1 => (23.4, 33.1),
-            Paper::A2 => (16.54, 23.4),
-            Paper::A3 => (11.7, 16.54),
-            Paper::A4 => (8.27, 11.7),
-            Paper::A5 => (5.83, 8.27),
-            Paper::A6 => (4.13, 5.83),
-        };
-        (w * 96.0, h * 96.0)
+            Paper::A0 => (33.1102, 46.811),
+            Paper::A1 => (23.3858, 33.1102),
+            Paper::A2 => (16.5354, 23.3858),
+            Paper::A3 => (11.6929, 16.5354),
+            Paper::A4 => (8.2677, 11.6929),
+            Paper::A5 => (5.8268, 8.2677),
+            Paper::A6 => (4.1339, 5.8268),
+        }
     }
+
+    /// The page's width and height in points, as Chromium writes them.
+    pub fn size_pt(self) -> (f64, f64) {
+        let (w, h) = self.size_in();
+        (page_side_pt(w), page_side_pt(h))
+    }
+}
+
+/// The length of a PDF page side Chromium prints for a requested `inches`:
+/// the length in points, as a 32-bit float, rounded up to whole points, then
+/// converted (in 32-bit floats) to whole 1/300-inch device units, rounded to
+/// nearest. So 652px (489pt) becomes 2037 units = 488.88pt, and 203px
+/// (152.25pt, so 153pt) 638 units = 153.12pt.
+pub fn page_side_pt(inches: f64) -> f64 {
+    let pt = ((inches * 72.0) as f32).ceil();
+    let units = (pt * (300.0f32 / 72.0)).round();
+    f64::from(units) * 72.0 / 300.0
 }
 
 impl FromStr for Paper {
@@ -75,7 +92,8 @@ impl FromStr for Paper {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PdfOptions {
     pub background: String,
-    /// Rendered diagram size in CSS pixels.
+    /// The `<svg>` element's CSS box on mmdc's page, in CSS pixels; the drawing
+    /// is fitted in it (`xMidYMid meet`).
     pub width: f64,
     pub height: f64,
     pub paper: Option<Paper>,
@@ -810,21 +828,16 @@ fn image_objects(img: &super::image::Samples, mask_obj: usize) -> Vec<Vec<u8>> {
 
 /// Serialise a scene to a single-page PDF.
 pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
-    let (page_w_px, page_h_px, draw_w) = match opt.paper {
+    // mmdc asks for the svg's box rounded up plus the body margins, in CSS px.
+    let (page_w, page_h) = match opt.paper {
         None => (
-            (opt.width.ceil() + 2.0 * BODY_MARGIN_PX),
-            (opt.height.ceil() + 2.0 * BODY_MARGIN_PX),
-            opt.width,
+            page_side_pt((opt.width.ceil() + 2.0 * BODY_MARGIN_PX) / 96.0),
+            page_side_pt((opt.height.ceil() + 2.0 * BODY_MARGIN_PX) / 96.0),
         ),
-        Some(p) => {
-            let (pw, ph) = p.size_px();
-            (pw, ph, opt.width.min(pw - 2.0 * BODY_MARGIN_PX))
-        }
+        Some(p) => p.size_pt(),
     };
-    let page_w = page_w_px * PX_TO_PT;
-    let page_h = page_h_px * PX_TO_PT;
     let vb = scene.view_box;
-    let k = if vb.w > 0.0 { draw_w / vb.w } else { 1.0 };
+    let (k, dx, dy) = super::fit_meet(vb.w, vb.h, opt.width, opt.height);
     let a = k * PX_TO_PT;
     let mut ctx = Ctx {
         out: String::new(),
@@ -851,7 +864,8 @@ pub fn to_pdf(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         );
     }
     let m = BODY_MARGIN_PX * PX_TO_PT;
-    let base = [a, 0.0, 0.0, -a, m - vb.x * a, page_h - m + vb.y * a];
+    let (mx, my) = (m + dx * PX_TO_PT, m + dy * PX_TO_PT);
+    let base = [a, 0.0, 0.0, -a, mx - vb.x * a, page_h - my + vb.y * a];
     let _ = writeln!(
         ctx.out,
         "q {} 0 0 {} {} {} cm",

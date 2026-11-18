@@ -286,6 +286,11 @@ fn js(v: f64) -> String {
 /// icon: `iconToSVG`, `replaceIDs` (ids prefixed from `uniq`, which should
 /// differ between icons of one document) and `iconToHTML`.
 pub fn icon_svg(icon: &IconData, size: f64, uniq: &str) -> IconSvg {
+    icon_svg_sized(icon, size, size, uniq)
+}
+
+/// [`icon_svg`] with a `width` × `height` viewport.
+pub fn icon_svg_sized(icon: &IconData, width: f64, height: f64, uniq: &str) -> IconSvg {
     let mut b = (icon.left, icon.top, icon.width, icon.height);
     let mut body = icon.body.clone();
     // iconToSVG: the icon's own transformations (the customisations have none).
@@ -347,9 +352,9 @@ pub fn icon_svg(icon: &IconData, size: f64, uniq: &str) -> IconSvg {
     } else {
         ""
     };
-    let s = js(size);
+    let (sw, sh) = (js(width), js(height));
     let markup = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\"{xlink} width=\"{s}\" height=\"{s}\" viewBox=\"{} {} {} {}\">{inner}</svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"{xlink} width=\"{sw}\" height=\"{sh}\" viewBox=\"{} {} {} {}\">{inner}</svg>",
         js(b.0),
         js(b.1),
         js(b.2),
@@ -357,17 +362,17 @@ pub fn icon_svg(icon: &IconData, size: f64, uniq: &str) -> IconSvg {
     );
     // The viewport maps the viewBox in (`xMidYMid meet`).
     let k = if b.2 > 0.0 && b.3 > 0.0 {
-        (size / b.2).min(size / b.3)
+        (width / b.2).min(height / b.3)
     } else {
         0.0
     };
-    let tx = (size - b.2 * k) / 2.0 - b.0 * k;
-    let ty = (size - b.3 * k) / 2.0 - b.1 * k;
+    let tx = (width - b.2 * k) / 2.0 - b.0 * k;
+    let ty = (height - b.3 * k) / 2.0 - b.1 * k;
     let bbox = content_box(&tree).map(|r| Rect::new(tx + r.x * k, ty + r.y * k, r.w * k, r.h * k));
     IconSvg {
         markup,
-        width: size,
-        height: size,
+        width,
+        height,
         bbox,
     }
 }
@@ -730,6 +735,90 @@ fn serialize(n: &Node, out: &mut String) {
             }
         }
     }
+}
+
+/// Whether an inline `style` sets the CSS property `prop`.
+fn style_sets(style: &str, prop: &str) -> bool {
+    style.split(';').any(|d| {
+        d.split_once(':')
+            .is_some_and(|(k, _)| k.trim().eq_ignore_ascii_case(prop))
+    })
+}
+
+/// An icon's markup (an `<svg>` element, as [`IconSvg::markup`]) under a page
+/// stylesheet rule `tags { prop: value }`: a CSS rule beats a presentation
+/// attribute and anything inherited, and loses to an inline `style`. The
+/// matching elements get `prop="value"`, except where their own `style` sets
+/// `prop`. An element that sets nothing itself and inherits nothing from inside
+/// the icon is left alone unless `always` (its value then comes from outside,
+/// where the caller already gives `value`). Markup with nothing to change is
+/// returned as it is.
+pub fn with_css_rule(markup: &str, tags: &[&str], prop: &str, value: &str, always: bool) -> String {
+    fn walk(
+        n: &mut Node,
+        tags: &[&str],
+        prop: &str,
+        value: &str,
+        always: bool,
+        inherited: bool,
+    ) -> bool {
+        let Node::Element {
+            tag,
+            attrs,
+            children,
+        } = n
+        else {
+            return false;
+        };
+        let style = attrs
+            .iter()
+            .find(|(k, _)| k == "style")
+            .is_some_and(|(_, v)| style_sets(v, prop));
+        let attr = attrs.iter().position(|(k, _)| k == prop);
+        let mut changed = false;
+        if tags.contains(&tag.as_str()) && !style && (always || inherited || attr.is_some()) {
+            match attr {
+                Some(i) if attrs[i].1 == value => {}
+                Some(i) => {
+                    attrs[i].1 = value.to_string();
+                    changed = true;
+                }
+                None => {
+                    attrs.push((prop.to_string(), value.to_string()));
+                    changed = true;
+                }
+            }
+        }
+        let inherited = inherited || style || attr.is_some();
+        for c in children {
+            changed |= walk(c, tags, prop, value, always, inherited);
+        }
+        changed
+    }
+    let mut tree = parse(markup);
+    let mut changed = false;
+    for n in &mut tree {
+        if let Node::Element {
+            attrs, children, ..
+        } = n
+        {
+            // The `<svg>` itself is the icon's root: what it sets is inherited.
+            let root = attrs
+                .iter()
+                .any(|(k, v)| k == prop || (k == "style" && style_sets(v, prop)));
+            for c in children {
+                changed |= walk(c, tags, prop, value, always, root);
+            }
+        }
+    }
+    if !changed {
+        return markup.to_string();
+    }
+    let mut out = String::with_capacity(markup.len() + 32);
+    for n in &tree {
+        serialize(n, &mut out);
+    }
+    out
 }
 
 // ───────────────────────────── getBBox ─────────────────────────────
@@ -1372,5 +1461,29 @@ mod tests {
             serialize(n, &mut s);
         }
         assert_eq!(s, "<g><a><path d=\"M0 0\"/></a></g>");
+    }
+
+    #[test]
+    fn css_rules_beat_attributes_not_inline_styles() {
+        let m = "<svg viewBox=\"0 0 4 4\"><path d=\"M0 0\" stroke=\"red\"/><path d=\"M1 1\" style=\"stroke: blue\"/><rect width=\"1\" height=\"1\"/></svg>";
+        let out = with_css_rule(m, &["path"], "stroke", "#000", false);
+        assert!(out.contains("<path d=\"M0 0\" stroke=\"#000\"/>"), "{out}");
+        assert!(out.contains("style=\"stroke: blue\"/>"), "{out}");
+        // Nothing to change: the markup comes back as it was.
+        let plain =
+            "<svg viewBox=\"0 0 4 4\"><rect width=\"1\" height=\"1\" stroke=\"red\"/></svg>";
+        assert_eq!(
+            with_css_rule(plain, &["path"], "stroke", "#000", true),
+            plain
+        );
+        // Inherited from inside the icon, or `always`: set.
+        let g = "<svg><g stroke=\"red\"><circle r=\"1\"/></g><circle r=\"2\"/></svg>";
+        let out = with_css_rule(g, &["circle"], "stroke", "#000", false);
+        assert!(
+            out.contains("<circle r=\"1\" stroke=\"#000\"/></g><circle r=\"2\"/>"),
+            "{out}"
+        );
+        let out = with_css_rule(g, &["circle"], "stroke", "#000", true);
+        assert!(out.contains("<circle r=\"2\" stroke=\"#000\"/>"), "{out}");
     }
 }

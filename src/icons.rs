@@ -35,9 +35,84 @@ const NOTDEF: u32 = 0xFF000;
 /// An empty box (a class Font Awesome does not define).
 const EMPTY: u32 = 0xFF010;
 
-/// Whether `c` stands for an icon.
+/// First character of the registered-pack icon range (Supplementary Private Use
+/// Area-B): `PACK_BASE + w` is an icon `w` hundredths of an em wide.
+const PACK_BASE: u32 = 0x100000;
+const PACK_LAST: u32 = 0x10FFFD;
+/// Unicode tag characters (U+E0020..=U+E007E) spell an ASCII name without
+/// taking any room: a pack icon's character is followed by its `prefix:name`.
+const TAG_BASE: u32 = 0xE0000;
+
+/// Whether `c` stands for an icon (Font Awesome's or a registered pack's).
 pub fn is_icon(c: char) -> bool {
-    (BASE..=EMPTY).contains(&(c as u32))
+    (BASE..=EMPTY).contains(&(c as u32)) || is_pack_icon(c)
+}
+
+/// Whether `c` stands for an icon from a registered pack.
+pub fn is_pack_icon(c: char) -> bool {
+    (PACK_BASE..=PACK_LAST).contains(&(c as u32))
+}
+
+/// Whether `c` is a tag character (part of a pack icon's name).
+pub fn is_tag(c: char) -> bool {
+    (TAG_BASE + 0x20..=TAG_BASE + 0x7E).contains(&(c as u32))
+}
+
+/// Advance of an icon character in em.
+pub fn advance_em(c: char) -> f64 {
+    if is_pack_icon(c) {
+        f64::from(c as u32 - PACK_BASE) / 100.0
+    } else {
+        ADVANCE_EM
+    }
+}
+
+/// The character (and name) a registered pack's icon travels as: mermaid's
+/// `getIconSVG(name, undefined, { class: "label-icon" })` gives it Iconify's
+/// default size, `height="1em"` and a width of its aspect ratio rounded up to
+/// 1/100 em (`calculateSize`).
+fn pack_icon_text(name: &str, icon: &crate::iconify::IconData) -> Option<String> {
+    let (w, h) = if icon.rotate.rem_euclid(2) == 1 {
+        (icon.height, icon.width)
+    } else {
+        (icon.width, icon.height)
+    };
+    let ratio = if h > 0.0 { w / h } else { 1.0 };
+    let hundredths = if ratio == 1.0 {
+        100.0
+    } else {
+        (ratio * 100.0).ceil()
+    };
+    if !(1.0..=f64::from(PACK_LAST - PACK_BASE)).contains(&hundredths) || !name.is_ascii() {
+        return None;
+    }
+    let mut out = String::new();
+    out.push(char::from_u32(PACK_BASE + hundredths as u32)?);
+    for b in name.bytes() {
+        out.push(char::from_u32(TAG_BASE + u32::from(b))?);
+    }
+    Some(out)
+}
+
+/// The pack icons in a display line: `(byte offset of the icon character, the
+/// character, its `prefix:name`)`.
+pub fn pack_icons(line: &str) -> Vec<(usize, char, String)> {
+    let mut out: Vec<(usize, char, String)> = Vec::new();
+    for (i, c) in line.char_indices() {
+        if is_pack_icon(c) {
+            out.push((i, c, String::new()));
+        } else if is_tag(c) {
+            if let Some(last) = out.last_mut() {
+                last.2.push(char::from((c as u32 - TAG_BASE) as u8));
+            }
+        }
+    }
+    out
+}
+
+/// A display line without its tag characters.
+pub fn strip_tags(line: &str) -> String {
+    line.chars().filter(|&c| !is_tag(c)).collect()
 }
 
 /// Whether a display line contains icons.
@@ -110,6 +185,14 @@ pub fn outline(icon: char) -> Vec<PathCmd> {
 /// (mermaid's `replaceIconSubstring`; the regex has no word boundary, so `sofa:fa-x`
 /// matches from its `fa`).
 pub fn replace_references(label: &str) -> String {
+    replace_references_with(label, &crate::iconify::IconPacks::default())
+}
+
+/// [`replace_references`] with icon packs registered: a reference whose
+/// `prefix:name` a pack has (`isIconAvailable`; a pack named `fa`, `fab`, …)
+/// becomes that pack's icon, drawn by [`place_pack_icons`]; any other is Font
+/// Awesome's `<i>` element.
+pub fn replace_references_with(label: &str, packs: &crate::iconify::IconPacks) -> String {
     if !label.contains(":fa-") {
         return label.to_string();
     }
@@ -133,7 +216,14 @@ pub fn replace_references(label: &str) -> String {
             .unwrap_or(0);
         if name_len > 0 {
             let name = &tail[4..4 + name_len];
-            if let Some(c) = icon_char(style, name) {
+            let registered = format!("{}:{name}", &at[..prefix_len]);
+            let pack = (!packs.is_empty())
+                .then(|| packs.lookup(&registered, None))
+                .flatten()
+                .and_then(|icon| pack_icon_text(&registered, &icon));
+            if let Some(p) = pack {
+                out.push_str(&p);
+            } else if let Some(c) = icon_char(style, name) {
                 out.push(c);
             }
             rest = &tail[4 + name_len..];
@@ -181,6 +271,10 @@ fn icon_char(style: Option<u8>, _name: &str) -> Option<char> {
 /// Advance (font units) and outline of an icon character.
 #[cfg(feature = "icons")]
 fn glyph(icon: char) -> Option<(f64, Vec<PathCmd>)> {
+    if is_pack_icon(icon) {
+        // Drawn as its own `<svg>` ([`place_pack_icons`]).
+        return None;
+    }
     let code = icon as u32;
     let d = data::get();
     let g = if (NOTDEF..NOTDEF + 3).contains(&code) {
@@ -204,6 +298,145 @@ fn glyph(icon: char) -> Option<(f64, Vec<PathCmd>)> {
 #[cfg(not(feature = "icons"))]
 fn glyph(_icon: char) -> Option<(f64, Vec<PathCmd>)> {
     None
+}
+
+/// Draw the registered packs' icons in the scene's labels
+/// ([`replace_references_with`]): each becomes the pack's `<svg>` after its
+/// text (`.label-icon`: an inline-block `1em` high, its bottom `0.125em` below
+/// the baseline, as wide as its character's advance), and the text keeps the
+/// character as an empty box. In a node label `.node .label-icon path` fills
+/// the icon's paths with the label colour. Elements without such icons are
+/// returned as they are.
+pub fn place_pack_icons(
+    elements: Vec<crate::scene::Element>,
+    packs: &crate::iconify::IconPacks,
+) -> Vec<crate::scene::Element> {
+    use crate::scene::Element;
+    let mut out = Vec::with_capacity(elements.len());
+    let mut n = 0usize;
+    for el in elements {
+        match el {
+            Element::Group {
+                id,
+                class,
+                children,
+            } => out.push(Element::Group {
+                id,
+                class,
+                children: place_pack_icons(children, packs),
+            }),
+            Element::Faded {
+                opacity,
+                class,
+                children,
+            } => out.push(Element::Faded {
+                opacity,
+                class,
+                children: place_pack_icons(children, packs),
+            }),
+            Element::Rotated {
+                deg,
+                about,
+                children,
+            } => out.push(Element::Rotated {
+                deg,
+                about,
+                children: place_pack_icons(children, packs),
+            }),
+            Element::Clipped { rect, children } => out.push(Element::Clipped {
+                rect,
+                children: place_pack_icons(children, packs),
+            }),
+            Element::Brightened {
+                factor,
+                class,
+                children,
+            } => out.push(Element::Brightened {
+                factor,
+                class,
+                children: place_pack_icons(children, packs),
+            }),
+            Element::Translated { dx, dy, children } => out.push(Element::Translated {
+                dx,
+                dy,
+                children: place_pack_icons(children, packs),
+            }),
+            Element::Text { text, class }
+                if text.lines.iter().any(|l| l.chars().any(is_pack_icon)) =>
+            {
+                let node = class.as_deref() == Some("nodeLabel");
+                let icons = label_icons(&text, packs, node, &mut n);
+                let text = crate::scene::Text {
+                    lines: text.lines.iter().map(|l| strip_tags(l)).collect(),
+                    ..text
+                };
+                out.push(Element::Text { text, class });
+                out.extend(icons);
+            }
+            Element::OutlinedText {
+                text,
+                class,
+                color,
+                width,
+            } if text.lines.iter().any(|l| l.chars().any(is_pack_icon)) => {
+                let icons = label_icons(&text, packs, false, &mut n);
+                let text = crate::scene::Text {
+                    lines: text.lines.iter().map(|l| strip_tags(l)).collect(),
+                    ..text
+                };
+                out.push(Element::OutlinedText {
+                    text,
+                    class,
+                    color,
+                    width,
+                });
+                out.extend(icons);
+            }
+            el => out.push(el),
+        }
+    }
+    out
+}
+
+/// The icon elements of one text's pack icons (see [`place_pack_icons`]).
+fn label_icons(
+    t: &crate::scene::Text,
+    packs: &crate::iconify::IconPacks,
+    node: bool,
+    n: &mut usize,
+) -> Vec<crate::scene::Element> {
+    use crate::scene::{Anchor, Element};
+    let fs = t.font_size;
+    let mut out = Vec::new();
+    for (i, line) in t.lines.iter().enumerate() {
+        let baseline = t.y + i as f64 * t.line_height;
+        let w = crate::text::line_width(line, fs, t.bold);
+        let x0 = match t.anchor {
+            Anchor::Start => t.x,
+            Anchor::Middle => t.x - w / 2.0,
+            Anchor::End => t.x - w,
+        };
+        for (at, c, name) in pack_icons(line) {
+            let Some(icon) = packs.lookup(&name, None) else {
+                continue;
+            };
+            let x = x0 + crate::text::line_width(&line[..at], fs, t.bold);
+            let (iw, ih) = (advance_em(c) * fs, fs);
+            *n += 1;
+            let svg = crate::iconify::icon_svg_sized(&icon, iw, ih, &format!("label-icon-{n}"));
+            let markup = if node {
+                crate::iconify::with_css_rule(&svg.markup, &["path"], "fill", "currentColor", true)
+            } else {
+                svg.markup
+            };
+            out.push(Element::Icon {
+                rect: crate::geom::Rect::new(x, baseline + 0.125 * fs - ih, iw, ih),
+                color: Some(t.fill.clone()),
+                svg: markup,
+            });
+        }
+    }
+    out
 }
 
 #[cfg(feature = "icons")]

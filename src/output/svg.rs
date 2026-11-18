@@ -1170,7 +1170,13 @@ mod tests {
         let draw = |scene: &Scene| {
             let svg = to_svg(scene, &opts(Some(1.0)));
             let png = rast
-                .png_scaled(&svg, 40, 20, Some(1.0), Some(crate::color::Rgba::WHITE))
+                .png_placed(
+                    &svg,
+                    40,
+                    20,
+                    (1.0, 0.0, 0.0),
+                    Some(crate::color::Rgba::WHITE),
+                )
                 .unwrap();
             Pixmap::decode_png(&png).unwrap().data().to_vec()
         };

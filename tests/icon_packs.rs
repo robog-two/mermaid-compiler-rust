@@ -204,6 +204,84 @@ fn without_packs_icons_stay_unknown() {
     assert_eq!(output::encode_svg(&r, &EncodeOptions::default()), s);
 }
 
+/// A pack registered as `fa`: mermaid's `replaceIconSubstring` draws its icon
+/// for `fa:fa-home` (`getIconSVG(…, { class: "label-icon" })`: 1em high, its
+/// aspect ratio wide, its bottom 0.125em below the baseline). Checked against
+/// mmdc with mdi registered as `fa`: the icon at y 26.75, 14 × 14.
+#[test]
+fn fa_references_draw_a_pack_named_fa() {
+    const FA: &str = r##"{ "prefix": "fa", "width": 24, "height": 24, "icons": {
+      "home": { "body": "<path d=\"M10 20v-6h4v6h5v-8h3L12 3L2 12h3v8z\" fill=\"#123456\"/>" },
+      "wide": { "body": "<rect width=\"30\" height=\"20\" fill=\"currentColor\"/>", "width": 30, "height": 20 } } }"##;
+    let cfg = MermaidConfig {
+        icon_packs: IconPacks::new(vec![("fa".into(), Ok(FA.into()))]),
+        ..MermaidConfig::default()
+    };
+    let src = "flowchart LR\n  A[\"fa:fa-home Home\"] -- fa:fa-home edge --> B[\"fa:fa-car car\"]\n  B --> C[\"fa:fa-wide w\"]\n";
+    let r = render::render(src, &cfg).unwrap();
+    let s = output::encode_svg(&r, &EncodeOptions::default());
+    let found = icons(&s);
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert_eq!(
+        found[0],
+        ("204.006,26.25".into(), "0 0 24 24".into()),
+        "edge"
+    );
+    assert_eq!(found[1].1, "0 0 24 24");
+    assert!(found[1].0.ends_with(",26.75"), "{found:?}");
+    assert!(s.contains("width=\"14\" height=\"14\" viewBox=\"0 0 24 24\""));
+    // 30 / 20 = 1.5em.
+    assert!(s.contains("width=\"21\" height=\"14\" viewBox=\"0 0 30 20\""));
+    // `.node .label-icon path { fill: currentColor }`; an edge label keeps the fill.
+    assert_eq!(s.matches("fill=\"currentColor\"/></svg>").count(), 2, "{s}");
+    assert!(s.contains("fill=\"#123456\"/></svg>"));
+    // `fa-car` is not in the pack: Font Awesome's glyph.
+    assert!(s.contains("class=\"fa-icon\""));
+    // No tag characters reach the output.
+    assert!(!s.chars().any(|c| ('\u{E0000}'..='\u{E007F}').contains(&c)));
+    // Without the pack the home icon is Font Awesome's.
+    let plain = render::render(src, &MermaidConfig::default()).unwrap();
+    let p = output::encode_svg(&plain, &EncodeOptions::default());
+    assert!(icons(&p).is_empty());
+}
+
+/// `.node.usecase-actor .usecase-actor-glyph path, … circle { stroke }` beats
+/// an icon's own stroke attribute (and what it inherits), not its inline
+/// style; neo strokes its rects in the node border. Computed styles checked
+/// in Chromium against mmdc.
+#[test]
+fn usecase_icon_actor_css_beats_presentation_attributes() {
+    const T2: &str = r##"{ "prefix": "t2", "width": 16, "height": 16, "icons": {
+      "strk": { "body": "<path d=\"M2 8h12M8 2v12\" fill=\"none\" stroke=\"#e33\" stroke-width=\"2\"/>" },
+      "inl": { "body": "<path d=\"M2 8h12M8 2v12\" fill=\"none\" style=\"stroke:#3a3\" stroke-width=\"2\"/>" },
+      "grp": { "body": "<g stroke=\"#e33\" stroke-width=\"2\"><path d=\"M2 2L14 14\"/><rect x=\"2\" y=\"10\" width=\"4\" height=\"4\" fill=\"none\"/></g>" } } }"##;
+    let cfg = MermaidConfig {
+        icon_packs: IconPacks::new(vec![("t2".into(), Ok(T2.into()))]),
+        ..MermaidConfig::default()
+    };
+    let body = "usecase-beta\nactor A(\"S\")@{ icon: \"t2:strk\" }\nactor B(\"I\")@{ icon: \"t2:inl\" }\nactor C(\"G\")@{ icon: \"t2:grp\" }\nA --> U\nB --> U\nC --> U\n";
+    let svg_of = |look: &str| {
+        let src = format!("---\nconfig:\n  look: {look}\n---\n{body}");
+        let r = render::render(&src, &cfg).unwrap();
+        output::encode_svg(&r, &EncodeOptions::default())
+    };
+    let neo = svg_of("neo");
+    assert!(neo.contains(
+        "<path d=\"M2 8h12M8 2v12\" fill=\"none\" stroke=\"#A78BFA\" stroke-width=\"2\"/>"
+    ));
+    assert!(neo.contains(
+        "<path d=\"M2 8h12M8 2v12\" fill=\"none\" style=\"stroke:#3a3\" stroke-width=\"2\"/>"
+    ));
+    assert!(neo.contains("<path d=\"M2 2L14 14\" stroke=\"#A78BFA\""));
+    assert!(neo.contains("height=\"4\" fill=\"none\" stroke=\"#28253D\"/>"));
+    let classic = svg_of("classic");
+    assert!(classic.contains("<path d=\"M2 2L14 14\" stroke=\"#A78BFA\"/><rect x=\"2\" y=\"10\" width=\"4\" height=\"4\" fill=\"none\"/>"));
+    // handDrawn has no such rule: the icon keeps its own strokes.
+    let hand = svg_of("handDrawn");
+    assert!(hand.contains("fill=\"none\" stroke=\"#e33\" stroke-width=\"2\"/>"));
+    assert!(hand.contains("<path d=\"M2 2L14 14\"/>"));
+}
+
 /// A 40 × 20 PNG of one colour.
 fn png(rgb: [u8; 3]) -> Vec<u8> {
     fn crc(data: &[u8]) -> u32 {

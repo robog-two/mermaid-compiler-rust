@@ -250,7 +250,7 @@ fn pdf_output() {
     );
     assert!(out.status.success());
     assert!(
-        text(&std::fs::read(d.join("a4.pdf")).unwrap()).contains("/MediaBox [0 0 595.44 842.4]")
+        text(&std::fs::read(d.join("a4.pdf")).unwrap()).contains("/MediaBox [0 0 595.92 841.92]")
     );
 }
 

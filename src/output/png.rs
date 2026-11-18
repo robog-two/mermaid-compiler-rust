@@ -58,18 +58,29 @@ impl Rasterizer {
         height: u32,
         background: Option<crate::color::Rgba>,
     ) -> Result<Vec<u8>, String> {
-        self.png_scaled(svg, width, height, None, background)
+        self.render(svg, width, height, None, background)
     }
 
-    /// [`Rasterizer::png`] at `scale` device pixels per SVG pixel. The canvas is
-    /// the diagram's size rounded up to whole pixels, as Chromium's screenshot of
-    /// the `<svg>` crops it; the drawing is not stretched to fill that rounding.
-    pub fn png_scaled(
+    /// Render `svg` to a `width`×`height` PNG with its drawing at `scale`
+    /// device pixels per SVG pixel and its top left at (`dx`, `dy`), as
+    /// [`crate::output::png_layout`] places mmdc's.
+    pub fn png_placed(
         &self,
         svg: &str,
         width: u32,
         height: u32,
-        scale: Option<f64>,
+        (scale, dx, dy): (f64, f64, f64),
+        background: Option<crate::color::Rgba>,
+    ) -> Result<Vec<u8>, String> {
+        self.render(svg, width, height, Some((scale, dx, dy)), background)
+    }
+
+    fn render(
+        &self,
+        svg: &str,
+        width: u32,
+        height: u32,
+        placed: Option<(f64, f64, f64)>,
         background: Option<crate::color::Rgba>,
     ) -> Result<Vec<u8>, String> {
         let tree = usvg::Tree::from_str(svg, &self.opt)
@@ -85,17 +96,17 @@ impl Rasterizer {
             ));
         }
         let size = tree.size();
-        let k = scale.map_or_else(
+        let (k, dx, dy) = placed.map_or_else(
             || {
                 let sx = width as f32 / size.width().max(1.0);
                 let sy = height as f32 / size.height().max(1.0);
-                sx.min(sy)
+                (sx.min(sy), 0.0, 0.0)
             },
-            |k| k as f32,
+            |(k, dx, dy)| (k as f32, dx as f32, dy as f32),
         );
         resvg::render(
             &tree,
-            tiny_skia::Transform::from_scale(k, k),
+            tiny_skia::Transform::from_row(k, 0.0, 0.0, k, dx, dy),
             &mut pixmap.as_mut(),
         );
         pixmap
