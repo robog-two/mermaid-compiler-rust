@@ -597,6 +597,40 @@ pub enum Sized {
 
 /// `shape` drawn by rough.js with the node's options, centred on the origin
 /// (its box: what `updateNodeBounds` measures).
+/// collapsedGroup.ts under handDrawn: the `w`×`h` box as a rough path of
+/// rounded corners `rx`, filled solid in `fill` (an unfilled flow's
+/// `fill: none` keeps the hachure, at fill weight 0) and stroked `stroke`
+/// (at `stroke_width` where the style sets one). The node is measured by it.
+pub fn collapsed_group(
+    w: f64,
+    h: f64,
+    rx: f64,
+    fill: &str,
+    stroke: &str,
+    stroke_width: Option<f64>,
+    st: &HandStyle,
+) -> HandNode {
+    let base = node_options(st);
+    let o = Options {
+        fill: Some(fill.to_string()),
+        stroke: stroke.to_string(),
+        stroke_width: stroke_width.unwrap_or(base.stroke_width),
+        fill_style: if fill == "none" {
+            base.fill_style.clone()
+        } else {
+            "solid".into()
+        },
+        fill_weight: if fill == "none" {
+            0.0
+        } else {
+            base.fill_weight
+        },
+        ..base
+    };
+    let d = rough::path(&rounded_rect_path(-w / 2.0, -h / 2.0, w, h, rx), o);
+    measured_node(vec![piece(d, Point::default())])
+}
+
 pub fn sized_node(shape: &Sized, st: &HandStyle) -> HandNode {
     let o = || node_options(st);
     let origin = Point::default();

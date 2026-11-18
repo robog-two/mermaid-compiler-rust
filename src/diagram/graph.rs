@@ -1501,7 +1501,7 @@ pub fn render_with(
         })
         .collect();
     for (n, m) in nodes.iter().zip(measured.iter_mut()) {
-        measure_hand(n, m, pal, &lk, font);
+        measure_hand(n, m, pal, &lk, font, g.kind);
     }
     for (ci, p) in empty_of.iter().enumerate() {
         if let Some(p) = *p {
@@ -4308,7 +4308,7 @@ fn measure_single(
         !cfg.html_labels,
         1.0,
     );
-    measure_hand(n, &mut m, pal, &lk, font);
+    measure_hand(n, &mut m, pal, &lk, font, kind);
     (m, lk)
 }
 
@@ -5702,7 +5702,28 @@ fn node_elements(
         .hand_seed
         .filter(|_| m.hand.is_some() && m.nominal.is_none())
         .and_then(|seed| hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)));
-    let boundary = if let Some(hn) = hand {
+    let collapsed = lk
+        .hand_seed
+        .and_then(|seed| hand_collapsed_group(n, m, pal, lk, seed, kind));
+    let boundary = if let Some(hn) = collapsed {
+        let mut drawn = hand_elements(&hn, c, None);
+        // flowchart/styles.ts: a palette slot's colours on both paths
+        // (`.collapsed-group path { stroke; fill }`), outranking rough.js's.
+        if let Some(sc) = slot_colors(n.color_slot, pal).filter(|_| kind != DiagramKind::Agentflow)
+        {
+            for_each_shape(&mut drawn, &mut |p: &mut Paint| {
+                if p.fill.is_none() {
+                    p.stroke = sc.border.clone();
+                }
+                if let Some(f) = &sc.fill {
+                    p.fill = f.clone();
+                }
+            });
+        }
+        els.extend(drawn);
+        // `intersect.rect(node)`: the measured box.
+        Boundary::Rect(Rect::centered(c, m.w, m.h))
+    } else if let Some(hn) = hand {
         let mut drawn = hand_elements(&hn, c, n.style.dash.as_ref());
         if let Some(o) = paint.opacity {
             // classDb's `interfaceN` node: `cssStyles: ['opacity: 0;']` on
@@ -5758,7 +5779,19 @@ fn node_elements(
                         }
                         _ => "basic label-container",
                     };
-                    els.push(Element::classed_shape(part.geom, paint.clone(), class));
+                    let geom = match part.geom {
+                        Geometry::Rect { rect, .. }
+                            if n.shape == Shape::CollapsedGroup
+                                && kind != DiagramKind::Agentflow =>
+                        {
+                            Geometry::Rect {
+                                rect,
+                                rx: COLLAPSED_GROUP_RADIUS,
+                            }
+                        }
+                        g => g,
+                    };
+                    els.push(Element::classed_shape(geom, paint.clone(), class));
                 }
                 PartStyle::Line => els.push(Element::shape(
                     part.geom,
@@ -6185,17 +6218,27 @@ fn node_elements(
         let agentflow = kind == DiagramKind::Agentflow;
         let marker =
             slot_colors(n.color_slot, pal).map_or(pal.cluster_border.clone(), |s| s.border);
-        let (sep_color, dot_color, dot_opacity) = if agentflow {
-            (
+        // Under handDrawn the group is a `rough-node`, which those `.node`
+        // rules miss: the separator and the dots keep the collapsed style's
+        // stroke (a flowchart's palette slot still repaints them), at the
+        // default width and opaque.
+        let hand = lk.hand_seed.is_some();
+        let (sep_color, dot_color, dot_opacity) = match (agentflow, hand) {
+            (true, false) => (
                 pal.flow_container_stroke.clone(),
                 pal.node_border.clone(),
                 0.5,
-            )
-        } else {
-            (marker.clone(), marker, 0.6)
+            ),
+            (true, true) => (
+                pal.flow_container_stroke.clone(),
+                pal.flow_container_stroke.clone(),
+                1.0,
+            ),
+            (false, false) => (marker.clone(), marker, 0.6),
+            (false, true) => (marker.clone(), marker, 1.0),
         };
         let sep_y = y0 + shapes::COLLAPSED_PAD + m.block.height + 8.0;
-        let mut sep = Paint::stroke(&sep_color, 0.75);
+        let mut sep = Paint::stroke(&sep_color, if hand { 1.0 } else { 0.75 });
         sep.dash = Some(vec![3.0, 3.0]);
         els.push(Element::classed_shape(
             Geometry::Path(vec![
@@ -6206,7 +6249,17 @@ fn node_elements(
             "collapsed-separator",
         ));
         let mut dot = Paint::fill(&dot_color);
-        dot.opacity = Some(dot_opacity);
+        dot.opacity = (dot_opacity < 1.0).then_some(dot_opacity);
+        // `[data-look="neo"].node circle` outranks `.node .collapsed-indicator`'s
+        // `stroke: none`: the dots take the neo outline (`.node circle`'s width).
+        if lk.neo && !agentflow {
+            dot.stroke = pal.node_border.clone();
+            dot.stroke_width = lk.node_stroke_width;
+            dot.stroke_gradient = pal
+                .node_gradient
+                .as_ref()
+                .map(|(from, to)| Gradient::across_bbox(from, to));
+        }
         // `[data-look="neo"].node circle` casts the neo drop shadow, which the
         // dot's own opacity then fades with it.
         let shadow = pal.drop_shadow.as_ref().filter(|_| lk.neo);
@@ -6303,6 +6356,50 @@ fn hand_style(n: &Node, pal: &Palette, lk: &Look, seed: f64) -> hand::HandStyle 
     }
 }
 
+/// collapsedGroup.ts under handDrawn ([`hand::collapsed_group`]) at the
+/// nominal size: a flowchart subgraph's `collapsed-group` style (rx 8,
+/// clusterBkg on clusterBorder), an agentflow flow's `flow-collapsed` (rx 10,
+/// unfilled, `flowContainerStroke` at 0.75). `None` for other nodes.
+fn hand_collapsed_group(
+    n: &Node,
+    m: &Measured,
+    pal: &Palette,
+    lk: &Look,
+    seed: f64,
+    kind: DiagramKind,
+) -> Option<hand::HandNode> {
+    if n.shape != Shape::CollapsedGroup {
+        return None;
+    }
+    let (w, h) = m.nominal.unwrap_or((m.w, m.h));
+    let st = hand_style(n, pal, lk, seed);
+    Some(if kind == DiagramKind::Agentflow {
+        hand::collapsed_group(
+            w,
+            h,
+            10.0,
+            "none",
+            pal.flow_container_stroke.css(),
+            Some(0.75),
+            &st,
+        )
+    } else {
+        hand::collapsed_group(
+            w,
+            h,
+            COLLAPSED_GROUP_RADIUS,
+            pal.cluster_bkg.css(),
+            pal.cluster_border.css(),
+            None,
+            &st,
+        )
+    })
+}
+
+/// collapsedGroup.ts' `RADIUS`, a collapsed subgraph's corners (a flow's
+/// keep its expanded container's 10).
+const COLLAPSED_GROUP_RADIUS: f64 = 8.0;
+
 /// A hand-drawn box with compartments (a described state's
 /// [`hand::state_box`], a class's [`hand::class_box`]) at its nominal size
 /// (`m.nominal`, else `m.w`×`m.h`), or `None` for other nodes.
@@ -6392,10 +6489,25 @@ fn hand_er_box(
 
 /// Under the handDrawn look, size node `n` by its drawing's box, as
 /// `updateNodeBounds` does.
-fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look, font: f64) {
+fn measure_hand(
+    n: &Node,
+    m: &mut Measured,
+    pal: &Palette,
+    lk: &Look,
+    font: f64,
+    kind: DiagramKind,
+) {
     let Some(seed) = lk.hand_seed else {
         return;
     };
+    if let Some(hn) = hand_collapsed_group(n, m, pal, lk, seed, kind) {
+        // `updateNodeBounds(node, rect)`: the rough box alone; the separator,
+        // dots and label stay where the nominal box puts them.
+        m.nominal = Some((m.w, m.h));
+        (m.w, m.h) = (hn.bbox.w, hn.bbox.h);
+        m.hand = Some(hn.drawn_bbox());
+        return;
+    }
     if let Some(hn) = hand_state_box(n, m, pal, lk, seed) {
         m.nominal = Some((m.w, m.h));
         // A class box reaches the layout at its whole drawing's size, its
@@ -6425,6 +6537,17 @@ fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look, font: f64)
     if let Some(hn) = hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)) {
         (m.w, m.h) = (hn.bbox.w, hn.bbox.h);
         m.hand = Some(hn.drawn_bbox());
+    }
+}
+
+/// `f` on the paint of every shape in `els`.
+fn for_each_shape(els: &mut [Element], f: &mut dyn FnMut(&mut Paint)) {
+    for e in els {
+        match e {
+            Element::Group { children, .. } => for_each_shape(children, f),
+            Element::Shape { paint, .. } => f(paint),
+            _ => {}
+        }
     }
 }
 
