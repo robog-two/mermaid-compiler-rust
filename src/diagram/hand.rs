@@ -58,8 +58,10 @@ pub struct HandNode {
 }
 
 /// How a shape's `intersect` sees the node (`w`/`h` are its measured size).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Bound {
+    /// `intersect.polygon(node, points)` with these points.
+    Points(Vec<Point>),
     /// `intersect.rect(node)`.
     Rect,
     /// `intersect.circle(node, r)`.
@@ -92,9 +94,10 @@ impl HandNode {
     /// The edge-clipping boundary of the node centred on `c` with measured
     /// size `w`×`h`.
     pub fn boundary(&self, shape: Shape, m: &ShapeMetrics, c: Point, w: f64, h: f64) -> Boundary {
-        match self.boundary {
+        match &self.boundary {
+            Bound::Points(local) => Boundary::Outline(c, in_box(c, w, h, local.clone())),
             Bound::Rect => Boundary::Rect(Rect::centered(c, w, h)),
-            Bound::Circle(r) => Boundary::Ellipse(c, r, r),
+            Bound::Circle(r) => Boundary::Ellipse(c, *r, *r),
             Bound::MeasuredCircle => Boundary::Ellipse(c, w / 2.0, w / 2.0),
             Bound::Diamond => {
                 let s = w;
@@ -108,7 +111,7 @@ impl HandNode {
             }
             Bound::Polygon => Boundary::Polygon(c, in_box(c, w, h, poly(shape, m))),
             Bound::Outline => Boundary::Outline(c, in_box(c, w, h, poly(shape, m))),
-            Bound::Cylinder(rx, ry) => Boundary::Cylinder(Rect::centered(c, w, h), rx, ry),
+            Bound::Cylinder(rx, ry) => Boundary::Cylinder(Rect::centered(c, w, h), *rx, *ry),
         }
     }
 }
@@ -759,7 +762,7 @@ pub fn subset(hn: &HandNode, range: std::ops::Range<usize>) -> HandNode {
     HandNode {
         pieces: hn.pieces[range].to_vec(),
         bbox: hn.bbox,
-        boundary: hn.boundary,
+        boundary: hn.boundary.clone(),
     }
 }
 
@@ -866,6 +869,745 @@ pub fn set_cmds(ops: &[Op], at: Point) -> Vec<PathCmd> {
         .collect()
 }
 
+/// `generateCirclePoints`: `n` points from `a0` to `a1` degrees round
+/// (`cx`, `cy`), negated.
+fn circle_pts(cx: f64, cy: f64, r: f64, n: usize, a0: f64, a1: f64) -> Vec<Point> {
+    let (s, e) = (
+        a0 * std::f64::consts::PI / 180.0,
+        a1 * std::f64::consts::PI / 180.0,
+    );
+    let step = (e - s) / (n as f64 - 1.0);
+    (0..n)
+        .map(|i| {
+            let a = s + i as f64 * step;
+            Point::new(-(cx + r * a.cos()), -(cy + r * a.sin()))
+        })
+        .collect()
+}
+
+/// `generateFullSineWavePoints` (50 steps).
+fn sine_pts(x1: f64, y1: f64, x2: f64, y2: f64, amp: f64, cycles: f64) -> Vec<Point> {
+    let (dx, dy) = (x2 - x1, y2 - y1);
+    let freq = 2.0 * std::f64::consts::PI / (dx / cycles);
+    let mid = y1 + dy / 2.0;
+    (0..=50)
+        .map(|i| {
+            let t = f64::from(i) / 50.0;
+            let x = x1 + t * dx;
+            Point::new(x, mid + amp * (freq * (x - x1)).sin())
+        })
+        .collect()
+}
+
+fn pts(v: &[(f64, f64)]) -> Vec<Point> {
+    v.iter().map(|&(x, y)| Point::new(x, y)).collect()
+}
+
+/// The flowchart's newer shapes, which draw with rough.js in every look and
+/// take `userNodeOverrides` as it is (roughness 0.7, hachure) under
+/// handDrawn: their pieces and how their `intersect` sees them.
+fn extended(shape: Shape, tw: f64, th: f64, p: f64, st: &HandStyle) -> Option<(Vec<Piece>, Bound)> {
+    let o = || node_options(st);
+    let origin = Point::default();
+    let rpath = |points: &[Point]| rough::path(&path_from_points(points), o());
+    let polygon = |points: &[Point]| {
+        let raw: Vec<[f64; 2]> = points.iter().map(|q| [q.x, q.y]).collect();
+        rough::polygon(&raw, o())
+    };
+    Some(match shape {
+        // card.ts: the notched outline about its bottom-left corner.
+        Shape::Card => {
+            let (w, h) = (tw + p + 12.0, th + p);
+            let v = pts(&[
+                (12.0, -h),
+                (w, -h),
+                (w, 0.0),
+                (0.0, 0.0),
+                (0.0, -h + 12.0),
+                (12.0, -h),
+            ]);
+            (
+                vec![piece(rpath(&v), Point::new(-w / 2.0, h / 2.0))],
+                Bound::Points(v),
+            )
+        }
+        // shadedProcess.ts: `rc.polygon` of the frame and its inner line.
+        Shape::LinedRect => {
+            let (total_w, h) = (tw + 2.0 * p + 16.0, th + 2.0 * p);
+            let w = total_w - 8.0;
+            let (x, y) = (8.0 - total_w / 2.0, -h / 2.0);
+            let v = pts(&[
+                (x, y),
+                (x + w, y),
+                (x + w, y + h),
+                (x - 8.0, y + h),
+                (x - 8.0, y),
+                (x, y),
+                (x, y + h),
+            ]);
+            (vec![piece(polygon(&v), origin)], Bound::Rect)
+        }
+        // halfRoundedRectangle.ts: a 50-point arc for the right end.
+        Shape::Delay => {
+            let h = th.max(10.0) + 2.0 * p;
+            let r = h / 2.0;
+            let cap = r - (r * r - (th / 2.0) * (th / 2.0)).max(0.0).sqrt();
+            let w = tw.max(15.0) + cap * 2.0 + 2.0 * p;
+            let mut v = pts(&[(-w / 2.0, -h / 2.0), (w / 2.0 - r, -h / 2.0)]);
+            v.extend(circle_pts(-w / 2.0 + r, 0.0, r, 50, 90.0, 270.0));
+            v.extend(pts(&[(w / 2.0 - r, h / 2.0), (-w / 2.0, h / 2.0)]));
+            (vec![piece(rpath(&v), origin)], Bound::Points(v))
+        }
+        // triangle.ts / flippedTriangle.ts: as wide as high.
+        Shape::Triangle | Shape::FlippedTriangle => {
+            let w = tw + p;
+            let h = w + th;
+            let v = if shape == Shape::Triangle {
+                pts(&[(0.0, 0.0), (h, 0.0), (h / 2.0, -h)])
+            } else {
+                pts(&[(0.0, -h), (h, -h), (h / 2.0, 0.0)])
+            };
+            (
+                vec![piece(rpath(&v), Point::new(-h / 2.0, h / 2.0))],
+                Bound::Points(v),
+            )
+        }
+        // hourglass.ts: 30 square, about its corner.
+        Shape::Hourglass => {
+            let (w, h) = (30.0, 30.0);
+            let v = pts(&[(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)]);
+            (
+                vec![piece(rpath(&v), Point::new(-w / 2.0, -h / 2.0))],
+                Bound::Points(v),
+            )
+        }
+        // crossedCircle.ts: the circle, and its two diagonals in its group.
+        Shape::CrossedCircle => {
+            let r = 30.0_f64;
+            let (cx, cy) = (
+                (std::f64::consts::PI / 4.0).cos(),
+                (std::f64::consts::PI / 4.0).sin(),
+            );
+            let len = r * 2.0;
+            let q1 = (len / 2.0 * cx, len / 2.0 * cy);
+            let q2 = (-(len / 2.0) * cx, len / 2.0 * cy);
+            let q3 = (-(len / 2.0) * cx, -(len / 2.0) * cy);
+            let q4 = (len / 2.0 * cx, -(len / 2.0) * cy);
+            let d = format!(
+                "M {},{} L {},{} M {},{} L {},{}",
+                q2.0, q2.1, q4.0, q4.1, q1.0, q1.1, q3.0, q3.1
+            );
+            (
+                vec![
+                    piece(rough::circle(0.0, 0.0, r * 2.0, o()), origin),
+                    piece(rough::path(&d, o()), origin),
+                ],
+                Bound::Circle(r),
+            )
+        }
+        // slopedRect.ts: the top edge rises to the right; moved down h / 4.
+        Shape::SlopedRect => {
+            let w = tw + 2.0 * p;
+            let h = (th + 2.0 * p) * 1.5 / 1.5;
+            let (x, y) = (-w / 2.0, -h / 2.0);
+            let v = pts(&[(x, y), (x, y + h), (x + w, y + h), (x + w, y - h / 2.0)]);
+            (
+                vec![piece(rpath(&v), Point::new(0.0, h / 4.0))],
+                Bound::Points(v),
+            )
+        }
+        // windowPane.ts: the outline and the two pane lines, one path,
+        // moved by (5, 5).
+        Shape::WindowPane => {
+            let (w, h) = (tw + 2.0 * p + 10.0 - 10.0, th + 2.0 * p + 10.0 - 10.0);
+            let (x, y) = (-w / 2.0, -h / 2.0);
+            let d = format!(
+                "M{},{} L{},{} L{},{} L{},{} L{},{} M{},{} L{},{} M{},{} L{},{}",
+                x - 10.0,
+                y - 10.0,
+                x + w,
+                y - 10.0,
+                x + w,
+                y + h,
+                x - 10.0,
+                y + h,
+                x - 10.0,
+                y - 10.0,
+                x - 10.0,
+                y,
+                x + w,
+                y,
+                x,
+                y - 10.0,
+                x,
+                y + h
+            );
+            let v = pts(&[
+                (x - 10.0, y - 10.0),
+                (x - 10.0, y + h),
+                (x + w, y + h),
+                (x + w, y - 10.0),
+            ]);
+            (
+                vec![piece(rough::path(&d, o()), Point::new(5.0, 5.0))],
+                Bound::Points(v),
+            )
+        }
+        // dividedRect.ts: `rc.polygon` of the box and its header line.
+        Shape::DividedRect => {
+            let (w, h) = (tw + p, th + p);
+            let off = h * 0.2;
+            let (x, y) = (-w / 2.0, -h / 2.0 - off / 2.0);
+            let v = pts(&[
+                (x, y + off),
+                (-x, y + off),
+                (-x, -y),
+                (x, -y),
+                (x, y),
+                (-x, y),
+                (-x, y + off),
+            ]);
+            (vec![piece(polygon(&v), origin)], Bound::Rect)
+        }
+        // trapezoidalPentagon.ts.
+        Shape::NotchedPentagon => {
+            let (w, h) = (tw + 2.0 * p, th + 2.0 * p);
+            let v = pts(&[
+                (-w / 2.0 * 0.8, -h / 2.0),
+                (w / 2.0 * 0.8, -h / 2.0),
+                (w / 2.0, -h / 2.0 * 0.6),
+                (w / 2.0, h / 2.0),
+                (-w / 2.0, h / 2.0),
+                (-w / 2.0, -h / 2.0 * 0.6),
+            ]);
+            (vec![piece(rpath(&v), origin)], Bound::Points(v))
+        }
+        // multiRect.ts: the stack's outline, then the front card's.
+        Shape::StackedRect => {
+            let o5 = 5.0;
+            let (w, h) = (
+                tw + 2.0 * p + 2.0 * o5 - 2.0 * o5,
+                th + 2.0 * p + 2.0 * o5 - 2.0 * o5,
+            );
+            let (x, y) = (-w / 2.0, -h / 2.0);
+            let outer = pts(&[
+                (x - o5, y + o5),
+                (x - o5, y + h + o5),
+                (x + w - o5, y + h + o5),
+                (x + w - o5, y + h),
+                (x + w, y + h),
+                (x + w, y + h - o5),
+                (x + w + o5, y + h - o5),
+                (x + w + o5, y - o5),
+                (x + o5, y - o5),
+                (x + o5, y),
+                (x, y),
+                (x, y + o5),
+            ]);
+            let inner = pts(&[
+                (x, y + o5),
+                (x + w - o5, y + o5),
+                (x + w - o5, y + h),
+                (x + w, y + h),
+                (x + w, y),
+                (x, y),
+            ]);
+            (
+                vec![piece(rpath(&outer), origin), piece(rpath(&inner), origin)],
+                Bound::Points(outer),
+            )
+        }
+        // taggedRect.ts: the box, then its corner tag (solid) round it.
+        Shape::TaggedRect => {
+            let h = th + 2.0 * p;
+            let tag = 0.2 * h;
+            let w = tw + 2.0 * p + tag - tag;
+            let (x, y) = (-w / 2.0, -h / 2.0);
+            let rect = pts(&[
+                (x - tag / 2.0, y),
+                (x + w + tag / 2.0, y),
+                (x + w + tag / 2.0, y + h),
+                (x - tag / 2.0, y + h),
+            ]);
+            let corner = pts(&[
+                (x + w - tag / 2.0, y + h),
+                (x + w + tag / 2.0, y + h),
+                (x + w + tag / 2.0, y + h - tag),
+            ]);
+            let solid = Options {
+                fill_style: "solid".into(),
+                ..o()
+            };
+            (
+                vec![
+                    piece(rpath(&rect), origin),
+                    piece(rough::path(&path_from_points(&corner), solid), origin),
+                ],
+                Bound::Points(rect),
+            )
+        }
+        // waveEdgedRectangle.ts: a sine-wave bottom, moved up half the wave.
+        Shape::Document => {
+            let (w, h) = (tw + 2.0 * p, th + 2.0 * p);
+            let amp = h / 8.0;
+            let fh = h + amp;
+            let ex = if 14.0 - w > 0.0 {
+                (14.0 - w) / 2.0
+            } else {
+                0.0
+            };
+            let mut v = pts(&[(-w / 2.0 - ex, fh / 2.0)]);
+            v.extend(sine_pts(
+                -w / 2.0 - ex,
+                fh / 2.0,
+                w / 2.0 + ex,
+                fh / 2.0,
+                amp,
+                0.8,
+            ));
+            v.extend(pts(&[
+                (w / 2.0 + ex, -fh / 2.0),
+                (-w / 2.0 - ex, -fh / 2.0),
+            ]));
+            (
+                vec![piece(rpath(&v), Point::new(0.0, -amp / 2.0))],
+                Bound::Points(v),
+            )
+        }
+        // linedCylinder.ts: cylinder.ts's two paths (the front half filled
+        // too) and a second rim a tenth of the way down.
+        Shape::LinedCylinder => {
+            let w = tw + 2.0 * p;
+            let rx = w / 2.0;
+            let ry = rx / (2.5 + w / 50.0);
+            let h = th + ry + 2.0 * p;
+            let off = h * 0.1;
+            let outer = format!(
+                "M{},{} M{},{} a{},{} 0,0,0 {},0 l0,{} a{},{} 0,0,0 {},0 l0,{} M{},{} a{},{} 0,0,0 {},0",
+                0.0,
+                ry,
+                w,
+                ry,
+                rx,
+                ry,
+                -w,
+                h,
+                rx,
+                ry,
+                w,
+                -h,
+                0.0,
+                ry + off,
+                rx,
+                ry,
+                w
+            );
+            let inner = format!("M{},{} a{},{} 0,0,0 {},0", -w / 2.0, -h / 2.0, rx, ry, w);
+            (
+                vec![
+                    piece(
+                        rough::path(&outer, o()),
+                        Point::new(-w / 2.0, -(h / 2.0 + ry)),
+                    ),
+                    Piece {
+                        drawable: rough::path(&inner, o()),
+                        at: origin,
+                        measured: false,
+                    },
+                ],
+                Bound::Cylinder(rx, ry),
+            )
+        }
+        // tiltedCylinder.ts.
+        Shape::HorizontalCylinder => {
+            let h = th + p / 2.0;
+            let ry = h / 2.0;
+            let rx = ry / (2.5 + h / 50.0);
+            let w = tw + rx + p / 2.0;
+            let hn = sized_node(&Sized::TiltedCylinder { w, h, rx, ry }, st);
+            (hn.pieces, Bound::Rect)
+        }
+        // curvedTrapezoid.ts: a 50-point arc for the right end, about the
+        // top-left corner.
+        Shape::CurvedTrapezoid => {
+            let h = (th + 2.0 * p).max(5.0);
+            let r = h / 2.0;
+            let cap = r - (r * r - (th / 2.0) * (th / 2.0)).max(0.0).sqrt();
+            let side = (h / 4.0).max(cap);
+            let w = 20.0_f64
+                .max(tw + 2.0 * p + side * 2.0)
+                .max((tw + 2.0 * p) * 1.25);
+            let rw = w - r;
+            let q = h / 4.0;
+            let mut v = pts(&[(rw, 0.0), (q, 0.0), (0.0, h / 2.0), (q, h), (rw, h)]);
+            v.extend(circle_pts(-rw, -h / 2.0, r, 50, 270.0, 90.0));
+            (
+                vec![piece(rpath(&v), Point::new(-w / 2.0, -h / 2.0))],
+                Bound::Points(v),
+            )
+        }
+        // folder.ts: the tabbed outline.
+        Shape::Folder => {
+            let w = (tw + 2.0 * p).max(90.0);
+            let ch = th + 2.0 * p;
+            let tab_h = (ch * 0.16).min(14.0).max(8.0);
+            let total = ch + tab_h;
+            let tab_w = (w * 0.38).max(28.0);
+            let top = -total / 2.0;
+            let v = pts(&[
+                (-w / 2.0, top),
+                (-w / 2.0 + tab_w, top),
+                (-w / 2.0 + tab_w, top + tab_h),
+                (w / 2.0, top + tab_h),
+                (w / 2.0, total / 2.0),
+                (-w / 2.0, total / 2.0),
+            ]);
+            (vec![piece(rpath(&v), origin)], Bound::Points(v))
+        }
+        // bowTieRect.ts: elliptic ends of 20 points each, moved by rx / 2.
+        Shape::BowTieRect => {
+            let h = th + p;
+            let ry = h / 2.0;
+            let rx = ry / (2.5 + h / 50.0);
+            let (major, minor) = if rx >= ry { (rx, ry) } else { (ry, rx) };
+            let sagitta = minor * (1.0 - (1.0 - (h / major / 2.0) * (h / major / 2.0)).sqrt());
+            let w = tw + p * 2.0 + sagitta - sagitta;
+            let mut v = pts(&[(w / 2.0, -h / 2.0), (-w / 2.0, -h / 2.0)]);
+            v.extend(arc_pts(
+                -w / 2.0,
+                -h / 2.0,
+                -w / 2.0,
+                h / 2.0,
+                rx,
+                ry,
+                false,
+            ));
+            v.push(Point::new(w / 2.0, h / 2.0));
+            v.extend(arc_pts(w / 2.0, h / 2.0, w / 2.0, -h / 2.0, rx, ry, true));
+            (
+                vec![piece(rpath(&v), Point::new(rx / 2.0, 0.0))],
+                Bound::Points(v),
+            )
+        }
+        // lightningBolt.ts: 35 wide, 70 high, hanging from the centre.
+        Shape::Bolt => {
+            let (w, h, gap) = (35.0, 35.0, 7.0);
+            let v = pts(&[
+                (w, 0.0),
+                (0.0, h + gap / 2.0),
+                (w - 2.0 * gap, h + gap / 2.0),
+                (0.0, 2.0 * h),
+                (w, h - gap / 2.0),
+                (2.0 * gap, h - gap / 2.0),
+            ]);
+            (
+                vec![piece(rpath(&v), Point::new(-w / 2.0, -h))],
+                Bound::Points(v),
+            )
+        }
+        // multiWaveEdgedRectangle.ts: the stack's outline with a wavy
+        // bottom, then the front sheet's; moved up half the wave.
+        Shape::StackedDocument => {
+            let (w, h) = (tw + p * 2.0, th + p * 3.0);
+            let amp = h / 8.0;
+            let fh = h + amp / 2.0;
+            let (x, y) = (-w / 2.0, -fh / 2.0);
+            let off = 10.0;
+            let wave = sine_pts(x - off, y + fh + off, x + w - off, y + fh + off, amp, 0.8);
+            let last = wave[wave.len() - 1];
+            let mut outer = pts(&[(x - off, y + off), (x - off, y + fh + off)]);
+            outer.extend(wave);
+            outer.extend(pts(&[
+                (x + w - off, last.y - off),
+                (x + w, last.y - off),
+                (x + w, last.y - 2.0 * off),
+                (x + w + off, last.y - 2.0 * off),
+                (x + w + off, y - off),
+                (x + off, y - off),
+                (x + off, y),
+                (x, y),
+                (x, y + off),
+            ]));
+            let inner = pts(&[
+                (x, y + off),
+                (x + w - off, y + off),
+                (x + w - off, last.y - off),
+                (x + w, last.y - off),
+                (x + w, y),
+                (x, y),
+            ]);
+            let at = Point::new(0.0, -amp / 2.0);
+            (
+                vec![piece(rpath(&outer), at), piece(rpath(&inner), at)],
+                Bound::Points(outer),
+            )
+        }
+        // taggedWaveEdgedRectangle.ts: the wavy box, then its tag (solid)
+        // round it; moved up half the wave.
+        Shape::TaggedDocument => {
+            let (w, h) = (tw + p * 2.0, th + p * 2.0);
+            let amp = h / 8.0;
+            let (tag_w, tag_h) = (0.2 * w, 0.2 * h);
+            let fh = h + amp;
+            let mut v = pts(&[(-w / 2.0 - w / 2.0 * 0.1, fh / 2.0)]);
+            v.extend(sine_pts(
+                -w / 2.0 - w / 2.0 * 0.1,
+                fh / 2.0,
+                w / 2.0 + w / 2.0 * 0.1,
+                fh / 2.0,
+                amp,
+                0.8,
+            ));
+            v.extend(pts(&[
+                (w / 2.0 + w / 2.0 * 0.1, -fh / 2.0),
+                (-w / 2.0 - w / 2.0 * 0.1, -fh / 2.0),
+            ]));
+            let x = -w / 2.0 + w / 2.0 * 0.1;
+            let y = -fh / 2.0 - tag_h * 0.4;
+            let mut tag = pts(&[
+                (x + w - tag_w, (y + h) * 1.3),
+                (x + w, y + h - tag_h),
+                (x + w, (y + h) * 0.9),
+            ]);
+            tag.extend(sine_pts(
+                x + w,
+                (y + h) * 1.25,
+                x + w - tag_w,
+                (y + h) * 1.3,
+                -h * 0.02,
+                0.5,
+            ));
+            let solid = Options {
+                fill_style: "solid".into(),
+                ..o()
+            };
+            let at = Point::new(0.0, -amp / 2.0);
+            (
+                vec![
+                    piece(rpath(&v), at),
+                    piece(rough::path(&path_from_points(&tag), solid), at),
+                ],
+                Bound::Points(v),
+            )
+        }
+        // waveRectangle.ts: wavy top and bottom.
+        Shape::PaperTape => {
+            let (w, h) = (tw + p * 2.0, th + p);
+            let amp = h / 8.0;
+            let fh = h + amp * 2.0;
+            let mut v = pts(&[(-w / 2.0, fh / 2.0)]);
+            v.extend(sine_pts(-w / 2.0, fh / 2.0, w / 2.0, fh / 2.0, amp, 1.0));
+            v.push(Point::new(w / 2.0, -fh / 2.0));
+            v.extend(sine_pts(w / 2.0, -fh / 2.0, -w / 2.0, -fh / 2.0, amp, -1.0));
+            (vec![piece(rpath(&v), origin)], Bound::Points(v))
+        }
+        // curlyBraceLeft.ts / curlyBraceRight.ts / curlyBraces.ts: the open
+        // braces (unfilled) over an invisible hit polygon (`stroke-opacity: 0`).
+        Shape::BraceLeft | Shape::BraceRight | Shape::Braces => {
+            let (w, h) = (tw + p, th + p);
+            let r = (h * 0.1).max(5.0);
+            let c = circle_pts;
+            let left = || {
+                let mut v = c(w / 2.0, -h / 2.0, r, 30, -90.0, 0.0);
+                v.push(Point::new(-w / 2.0 - r, r));
+                v.extend(c(w / 2.0 + r * 2.0, -r, r, 20, -180.0, -270.0));
+                v.extend(c(w / 2.0 + r * 2.0, r, r, 20, -90.0, -180.0));
+                v.push(Point::new(-w / 2.0 - r, -h / 2.0));
+                v.extend(c(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                v
+            };
+            let right_of_braces = || {
+                let mut v = c(-w / 2.0 + r + r / 2.0, -h / 2.0, r, 20, -90.0, -180.0);
+                v.push(Point::new(w / 2.0 - r / 2.0, r));
+                v.extend(c(-w / 2.0 - r / 2.0, -r, r, 20, 0.0, 90.0));
+                v.extend(c(-w / 2.0 - r / 2.0, r, r, 20, -90.0, 0.0));
+                v.push(Point::new(w / 2.0 - r / 2.0, -r));
+                v.extend(c(-w / 2.0 + r + r / 2.0, h / 2.0, r, 30, -180.0, -270.0));
+                v
+            };
+            let left_rect = || {
+                let mut v = pts(&[(w / 2.0, -h / 2.0 - r), (-w / 2.0, -h / 2.0 - r)]);
+                v.extend(c(w / 2.0, -h / 2.0, r, 20, -90.0, 0.0));
+                v.push(Point::new(-w / 2.0 - r, -r));
+                v
+            };
+            let (braces, rect, dx): (Vec<Vec<Point>>, Vec<Point>, f64) = match shape {
+                Shape::BraceLeft => {
+                    let mut rect = left_rect();
+                    rect.extend(c(w / 2.0 + w * 0.1, -r, r, 20, -180.0, -270.0));
+                    rect.extend(c(w / 2.0 + w * 0.1, r, r, 20, -90.0, -180.0));
+                    rect.push(Point::new(-w / 2.0 - r, h / 2.0));
+                    rect.extend(c(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                    rect.extend(pts(&[(-w / 2.0, h / 2.0 + r), (w / 2.0, h / 2.0 + r)]));
+                    (vec![left()], rect, r)
+                }
+                Shape::BraceRight => {
+                    // curlyBraceRight.ts's `generateCirclePoints` does not negate.
+                    let cp = |cx: f64, cy: f64, r: f64, n: usize, a0: f64, a1: f64| {
+                        circle_pts(-cx, -cy, -r, n, a0, a1)
+                    };
+                    let mut v = cp(w / 2.0, -h / 2.0, r, 20, -90.0, 0.0);
+                    v.push(Point::new(w / 2.0 + r, -r));
+                    v.extend(cp(w / 2.0 + r * 2.0, -r, r, 20, -180.0, -270.0));
+                    v.extend(cp(w / 2.0 + r * 2.0, r, r, 20, -90.0, -180.0));
+                    v.push(Point::new(w / 2.0 + r, h / 2.0));
+                    v.extend(cp(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                    let mut rect = pts(&[(-w / 2.0, -h / 2.0 - r), (w / 2.0, -h / 2.0 - r)]);
+                    rect.extend(cp(w / 2.0, -h / 2.0, r, 20, -90.0, 0.0));
+                    rect.push(Point::new(w / 2.0 + r, -r));
+                    rect.extend(cp(w / 2.0 + r * 2.0, -r, r, 20, -180.0, -270.0));
+                    rect.extend(cp(w / 2.0 + r * 2.0, r, r, 20, -90.0, -180.0));
+                    rect.push(Point::new(w / 2.0 + r, h / 2.0));
+                    rect.extend(cp(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                    rect.extend(pts(&[(w / 2.0, h / 2.0 + r), (-w / 2.0, h / 2.0 + r)]));
+                    (vec![v], rect, -r)
+                }
+                _ => {
+                    let mut rect = left_rect();
+                    rect.extend(c(w / 2.0 + r * 2.0, -r, r, 20, -180.0, -270.0));
+                    rect.extend(c(w / 2.0 + r * 2.0, r, r, 20, -90.0, -180.0));
+                    rect.push(Point::new(-w / 2.0 - r, h / 2.0));
+                    rect.extend(c(w / 2.0, h / 2.0, r, 20, 0.0, 90.0));
+                    rect.extend(pts(&[
+                        (-w / 2.0, h / 2.0 + r),
+                        (w / 2.0 - r - r / 2.0, h / 2.0 + r),
+                    ]));
+                    rect.extend(right_of_braces());
+                    // Inserted first-child: the right brace, the left, the rect.
+                    (vec![right_of_braces(), left()], rect, r - r / 4.0)
+                }
+            };
+            let unfilled = || Options {
+                fill: Some("none".into()),
+                ..o()
+            };
+            let at = Point::new(dx, 0.0);
+            let open = |v: &[Point]| {
+                let d = path_from_points(v).replacen('Z', "", 1);
+                piece(rough::path(&d, unfilled()), at)
+            };
+            let mut pieces: Vec<Piece> = braces.iter().map(|v| open(v)).collect();
+            let mut hit = rough::path(&path_from_points(&rect), unfilled());
+            hit.options.stroke = "none".into();
+            pieces.push(piece(hit, at));
+            (pieces, Bound::Points(rect))
+        }
+        // bucket.ts: the rough body; the rim ellipse is drawn as classic.
+        Shape::Bucket => {
+            let w = (tw + p * 2.0).max(80.0);
+            let rim = (w * 0.08).min(12.0).max(5.0);
+            let total = th + p * 2.0 + rim;
+            let top = -total / 2.0 + rim;
+            let bottom = total / 2.0;
+            let bw = w * 0.72;
+            let d = format!(
+                "M{},{} L{},{} A{},{} 0 0 0 {},{} L{},{} A{},{} 0 0 0 {},{} Z",
+                -w / 2.0,
+                top,
+                -bw / 2.0,
+                bottom,
+                bw / 2.0,
+                rim,
+                bw / 2.0,
+                bottom,
+                w / 2.0,
+                top,
+                w / 2.0,
+                rim,
+                -w / 2.0,
+                top
+            );
+            let arc = |rx: f64, cy: f64, sign: f64| -> Vec<Point> {
+                (0..=12)
+                    .map(|i| {
+                        let t = std::f64::consts::PI - f64::from(i) * std::f64::consts::PI / 12.0;
+                        Point::new(rx * t.cos(), cy + sign * rim * t.sin())
+                    })
+                    .collect()
+            };
+            let mut outline = arc(w / 2.0, top, -1.0);
+            outline.extend(arc(bw / 2.0, bottom, 1.0).into_iter().rev());
+            (
+                vec![piece(rough::path(&d, o()), origin)],
+                Bound::Points(outline),
+            )
+        }
+        // console.ts / browser.ts: the rough rounded window; the decorations
+        // are drawn as classic.
+        Shape::Console | Shape::Browser => {
+            let band = if shape == Shape::Console { 20.0 } else { 18.0 };
+            let w = (tw + p * 2.0).max(90.0);
+            let h = th + p * 2.0 + band;
+            let d = rounded_rect_path(-w / 2.0, -h / 2.0, w, h, 12.0);
+            (vec![piece(rough::path(&d, o()), origin)], Bound::Rect)
+        }
+        // person.ts: the rough body and head; `intersect.polygon` of the
+        // head's arc and the body's rounded corners.
+        Shape::Person => {
+            let w = (tw + p * 2.0).max(100.0);
+            let head = (w * 0.23).max(16.0).min(56.0);
+            let overlap = head * 0.27;
+            let body_h = th + p * 2.0;
+            let body_r = (w * 0.177).min(body_h * 0.45);
+            let total = body_h + 2.0 * head - overlap;
+            let top = -total / 2.0;
+            let body_top = top + 2.0 * head - overlap;
+            let hn = sized_node(
+                &Sized::Person {
+                    w,
+                    body_top,
+                    body_h,
+                    body_r,
+                    head_y: top + head,
+                    head_r: head,
+                },
+                st,
+            );
+            let head_cy = top + head;
+            let phi = ((body_top - head_cy) / head).min(1.0).asin() * 180.0 / std::f64::consts::PI;
+            let mut v = circle_pts(0.0, -head_cy, head, 24, 180.0 + phi, -phi);
+            let (lx, rx) = (-(-w / 2.0 + body_r), -(w / 2.0 - body_r));
+            let (ty, by) = (-(body_top + body_r), -(total / 2.0 - body_r));
+            v.extend(circle_pts(lx, ty, body_r, 12, 90.0, 0.0));
+            v.extend(circle_pts(lx, by, body_r, 12, 360.0, 270.0));
+            v.extend(circle_pts(rx, by, body_r, 12, 270.0, 180.0));
+            v.extend(circle_pts(rx, ty, body_r, 12, 180.0, 90.0));
+            (hn.pieces, Bound::Points(v))
+        }
+        _ => return None,
+    })
+}
+
+/// bowTieRect.ts `generateArcPoints`: 20 points on the ellipse of radii
+/// `rx`, `ry` through the two points.
+fn arc_pts(x1: f64, y1: f64, x2: f64, y2: f64, rx: f64, ry: f64, cw: bool) -> Vec<Point> {
+    let (mx, my) = ((x1 + x2) / 2.0, (y1 + y2) / 2.0);
+    let angle = (y2 - y1).atan2(x2 - x1);
+    let (dx, dy) = ((x2 - x1) / 2.0, (y2 - y1) / 2.0);
+    let (tx, ty) = (dx / rx, dy / ry);
+    let dist = (tx * tx + ty * ty).sqrt();
+    let k = (1.0 - dist * dist).max(0.0).sqrt();
+    let sign = if cw { -1.0 } else { 1.0 };
+    let cx = mx + k * ry * angle.sin() * sign;
+    let cy = my - k * rx * angle.cos() * sign;
+    let a0 = ((y1 - cy) / ry).atan2((x1 - cx) / rx);
+    let a1 = ((y2 - cy) / ry).atan2((x2 - cx) / rx);
+    let mut range = a1 - a0;
+    if cw && range < 0.0 {
+        range += 2.0 * std::f64::consts::PI;
+    }
+    if !cw && range > 0.0 {
+        range -= 2.0 * std::f64::consts::PI;
+    }
+    (0..20)
+        .map(|i| {
+            let t = f64::from(i) / 19.0;
+            let a = a0 + t * range;
+            Point::new(cx + rx * a.cos(), cy + ry * a.sin())
+        })
+        .collect()
+}
+
 /// The hand-drawn `shape` around a label of `m.label`, or `None` for shapes
 /// not drawn here.
 pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> {
@@ -874,6 +1616,39 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
     let o = || node_options(st);
     let origin = Point::default();
     let (pieces, boundary) = match shape {
+        // datastore.ts: drawRect's rough rectangle (measured whole), whose
+        // outline then goes; rough lines along the outline's box's top and
+        // bottom take its place.
+        Shape::Datastore => {
+            let (w, h) = (tw + 4.0 * p, th + 2.0 * p);
+            let mut d = rough::rectangle(-w / 2.0, -h / 2.0, w, h, o());
+            let bbox = drawable_bbox(&d)?;
+            let outline: Vec<Vec<PathCmd>> = d
+                .sets
+                .iter()
+                .filter(|s| s.kind == rough::SetKind::Path && !s.ops.is_empty())
+                .map(|s| set_cmds(&s.ops, Point::default()))
+                .collect();
+            let [bx, by, bw, bh] = super::svgbbox::cubic_group_box(&outline)?;
+            d.sets.retain(|s| s.kind != rough::SetKind::Path);
+            let line = |y: f64| Piece {
+                drawable: rough::line(bx, y, bx + bw, y, o()),
+                at: origin,
+                measured: false,
+            };
+            let pieces = vec![piece(d, origin), line(by), line(by + bh)];
+            // The layout measures the whole group (`insertMeasuredNode`),
+            // the lines included.
+            let bbox = pieces[1..]
+                .iter()
+                .filter_map(|pc| drawable_bbox(&pc.drawable))
+                .fold(bbox, |a, b| a.union(&b));
+            return Some(HandNode {
+                pieces,
+                bbox,
+                boundary: Bound::Rect,
+            });
+        }
         // drawRect (squareRect: labelPadding 2p / p): rc.rectangle without rx.
         Shape::Rect => {
             let (w, h) = (tw + 4.0 * p, th + 2.0 * p);
@@ -1051,6 +1826,18 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
                 Bound::Cylinder(rx, ry),
             )
         }
+        // filledCircle.ts (a flowchart's `f-circ`): `rc.circle(0, 0, 14)`
+        // with the node's options, solid.
+        Shape::StateStart if !st.state => {
+            let fo = Options {
+                fill_style: "solid".into(),
+                ..o()
+            };
+            (
+                vec![piece(rough::circle(0.0, 0.0, 14.0, fo), origin)],
+                Bound::Circle(7.0),
+            )
+        }
         // stateStart.ts: `rc.circle(0, 0, 14, solidStateFill(lineColor))`.
         Shape::StateStart | Shape::SmallCircle => {
             let so = Options {
@@ -1146,7 +1933,7 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
             let d = rough::rectangle(-w / 2.0, -h / 2.0, w, h, no);
             (vec![piece(d, origin)], Bound::Rect)
         }
-        _ => return None,
+        _ => extended(shape, tw, th, p, st)?,
     };
     // The measured pieces share one frame (one group, or two groups side by
     // side in doubleCircle's).
@@ -1159,7 +1946,14 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
         .map(|s| set_cmds(&s.ops, Point::default()))
         .collect();
     let [x, y, w, h] = super::svgbbox::cubic_group_box(&paths)?;
-    let bbox = Rect::new(x + at.x, y + at.y, w, h);
+    let mut bbox = Rect::new(x + at.x, y + at.y, w, h);
+    if shape == Shape::Bucket {
+        // bucket.ts measures its group, the (classic) rim ellipse with it.
+        let w = (tw + p * 2.0).max(80.0);
+        let rim = (w * 0.08).min(12.0).max(5.0);
+        let top = -(th + p * 2.0 + rim) / 2.0 + rim;
+        bbox = bbox.union(&Rect::new(-w / 2.0, top - rim, w, 2.0 * rim));
+    }
     // (choice.ts sets 28×28, but the layout gets the drawn group's box;
     // forkJoin.ts's `state.padding` is not in the config it reads.)
     Some(HandNode {
@@ -1167,4 +1961,81 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
         bbox,
         boundary,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::scene::{Element, Geometry};
+
+    /// Path data of every shape in `src`'s scene.
+    fn drawn_paths(src: &str) -> Vec<String> {
+        fn walk(els: &[Element], out: &mut Vec<String>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. }
+                    | Element::Rotated { children, .. }
+                    | Element::Translated { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => out.push(crate::output::svg::path_data(cmds)),
+                    _ => {}
+                }
+            }
+        }
+        let r =
+            crate::render::render(src, &crate::config::MermaidConfig::default()).expect("renders");
+        let mut out = Vec::new();
+        walk(&r.scene.elements, &mut out);
+        out
+    }
+
+    /// mermaid 12.3.0, `look: handDrawn`, seed 15: the flowchart's newer
+    /// shapes draw with rough.js at roughness 0.7 and are laid out by their
+    /// drawings' boxes; each node's first rough path starts here.
+    #[test]
+    fn newer_flowchart_shapes_match_mermaid() {
+        let head = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 15\n---\nflowchart LR\n";
+        let src = format!(
+            "{head}  a@{{ shape: card, label: \"Card\" }}\n  b@{{ shape: lin-rect, label: \"Lined\" }}\n  \
+             c@{{ shape: delay, label: \"Delay\" }}\n  d@{{ shape: tri, label: \"Tri\" }}\n  \
+             e@{{ shape: flip-tri, label: \"Flip\" }}\n  f@{{ shape: hourglass, label: \"\" }}\n  \
+             g@{{ shape: cross-circ, label: \"\" }}\n  a --> b --> c\n  d --> e\n"
+        );
+        let paths = drawn_paths(&src);
+        for start in [
+            "M20.542,33.069C",
+            "M210.781,13.327C",
+            "M419.602,13.149C",
+            "M90.591,106.892C",
+            "M209.817,106.762C",
+            "M75.53,305.635C",
+            "M66.119,389.407C",
+        ] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
+        let src = format!(
+            "{head}  a@{{ shape: bow-rect, label: \"Bow\" }}\n  b@{{ shape: bolt, label: \"\" }}\n  \
+             c@{{ shape: brace, label: \"Brace\" }}\n  d@{{ shape: brace-r, label: \"BraceR\" }}\n  \
+             e@{{ shape: braces, label: \"Braces\" }}\n  f@{{ shape: f-circ, label: \"\" }}\n  \
+             g@{{ shape: docs, label: \"Docs\" }}\n  h@{{ shape: tag-doc, label: \"TagDoc\" }}\n  \
+             i@{{ shape: flag, label: \"Flag\" }}\n  j@{{ shape: fork, label: \"\" }}\n  \
+             a --> b --> c\n  d --> e\n"
+        );
+        let paths = drawn_paths(&src);
+        for start in [
+            "M31.468,32.389C",
+            "M281.469,51.679C",
+            "M425.158,71.206C",
+            "M174.788,125.65C",
+            "M362.695,171.65C",
+            "M100.096,213.742C",
+            "M13.481,289.371C",
+            "M16.39,410.216C",
+            "M23.726,520.555C",
+            "M93.491,611.372C",
+        ] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
+    }
 }

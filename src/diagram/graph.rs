@@ -5628,7 +5628,30 @@ fn node_elements(
             // the rough.js group too.
             drawn.iter_mut().for_each(|e| set_opacity(e, o));
         }
+        if n.shape == Shape::StateStart && kind == DiagramKind::Flowchart {
+            // filledCircle.ts: `fill: nodeBorder !important` on both paths.
+            for g in &mut drawn {
+                if let Element::Group { children, .. } = g {
+                    for k in children {
+                        if let Element::Shape { paint, .. } = k {
+                            paint.fill = pal.node_border.clone();
+                        }
+                    }
+                }
+            }
+        }
         els.extend(drawn);
+        // bucket.ts / browser.ts / console.ts draw their decorations as in
+        // the classic look.
+        if matches!(n.shape, Shape::Bucket | Shape::Browser | Shape::Console) {
+            let m2 = ShapeMetrics {
+                corner_radius: lk.rounded_rx,
+                ..m.metrics
+            };
+            if let Some(o) = shapes::outline(n.shape, c, w, h, &m2) {
+                els.extend(accent_parts(o, pal));
+            }
+        }
         hn.boundary(n.shape, &m.metrics, c, w, h)
     } else if let Some(o) = shapes::outline(
         n.shape,
@@ -6354,6 +6377,42 @@ pub(crate) fn hand_elements(
         out.push(Element::group("basic label-container", kids));
     }
     out
+}
+
+/// The accent decorations (lines, dots, glyphs) of a classic outline.
+fn accent_parts(o: shapes::Outline, pal: &Palette) -> Vec<Element> {
+    let mut els = Vec::new();
+    for part in o.parts {
+        match part.style {
+            PartStyle::AccentLine | PartStyle::AccentFaint => {
+                let mut accent = Paint::stroke(&pal.node_border, 1.0);
+                if part.style == PartStyle::AccentFaint {
+                    accent.opacity = Some(0.6);
+                }
+                els.push(Element::shape(part.geom, accent));
+            }
+            PartStyle::AccentDot => {
+                els.push(Element::shape(part.geom, Paint::fill(&pal.node_border)))
+            }
+            _ => {}
+        }
+    }
+    for g in o.glyphs {
+        let text = Text {
+            x: g.at.x,
+            y: g.at.y,
+            lines: vec![g.text.to_string()],
+            line_height: g.font_size,
+            font_size: g.font_size,
+            bold: g.bold,
+            weight: None,
+            anchor: Anchor::Start,
+            fill: pal.node_border.clone(),
+            tspan_central: false,
+        };
+        els.push(Element::classed_text(text, "console-glyph"));
+    }
+    els
 }
 
 /// `t` as one text element, or, where a line is drawn off centre (`shifts`,
