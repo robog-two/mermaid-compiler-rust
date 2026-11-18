@@ -1059,6 +1059,7 @@ fn node_geom(
             let ry = cylinder_ry(w);
             let h = min_h.max(lh) + q + ry;
             label_off = Point::new(0.0, p / 1.5);
+            rough = Some(Sized::Cylinder { w, h, rx, ry });
             (Prim::Cylinder { w, h, rx, ry }, f)
         }
     };
@@ -1884,6 +1885,9 @@ fn draw_blocks(
                             ];
                             Outline::Polygon(c, super::hand::in_box(c, w, h, local))
                         }
+                        // cylinder.ts: the box's crossing moved by the nominal
+                        // caps, the box the measured outline.
+                        (Prim::Cylinder { rx, ry, .. }, _) => Outline::Cylinder(c, w, h, *rx, *ry),
                         (Prim::Poly(_) | Prim::Stadium { .. }, Outline::Polygon(_, pts)) => {
                             let local = pts.iter().map(|q| q.minus(c)).collect();
                             Outline::Polygon(c, super::hand::in_box(c, w, h, local))
@@ -2983,5 +2987,20 @@ class c hot
         for start in ["M0.265,-102.482C", "M136.368,-66.521C"] {
             assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
         }
+        // Seed 12: a cylinder is cylinder.ts's rough outline (moved to its
+        // corner) and unfilled front half; the database's outline starts at
+        // (2.723, -67.767).
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 12\n---\nblock\n  \
+                   columns 3\n  db[(\"Database\")] a[\"App\"] c[(\"Cache\")]\n  \
+                   wide[(\"A wide cylinder\")]:2 x[\"X\"]\n  a --> db\n  a --> c\n  x --> wide\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .unwrap()
+            .scene;
+        let mut paths = Vec::new();
+        walk(&scene.elements, &mut paths);
+        assert!(
+            paths.iter().any(|d| d.starts_with("M2.723,-67.767C")),
+            "{paths:?}"
+        );
     }
 }
