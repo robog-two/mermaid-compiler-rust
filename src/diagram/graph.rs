@@ -717,7 +717,7 @@ fn small_shadow(
 /// themes' `url(#…-drop-shadow)`, an `feDropShadow` that works in linear RGB,
 /// the shape itself passing through it (a dark fill visibly so: #111113
 /// comes out #0D0D16).
-pub(super) fn cast_shadow(els: &mut Vec<Element>, sh: &DropShadow) {
+pub(super) fn cast_shadow(els: &mut [Element], sh: &DropShadow) {
     let shadow = sh.filter();
     if let Some(Element::Shape { paint, .. }) = els.first_mut()
         && !(paint.fill.is_none() && paint.stroke.is_none())

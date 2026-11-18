@@ -792,14 +792,17 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     ];
     bounds.add_rect(Rect::new(left_margin, depth_y - 2.0, x2 - left_margin, 4.0));
 
+    // setupGraphViewbox with `timeline.padding`.
+    let view_box = graph_view_box(bounds.rect(), padding);
+    let mut elements = vec![
+        Element::group("nodes", nodes),
+        Element::group("lines", back),
+    ];
+    snap_marker_clips(&mut elements, view_box);
     Scene {
         kind: DiagramKind::Timeline,
-        // setupGraphViewbox with `timeline.padding`.
-        view_box: graph_view_box(bounds.rect(), padding),
-        elements: vec![
-            Element::group("nodes", nodes),
-            Element::group("lines", back),
-        ],
+        view_box,
+        elements,
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -807,9 +810,36 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
 }
 
-/// The arrowhead marker's triangle in user space.
+/// The arrowhead marker's triangle in user space, clipped to the marker's
+/// viewport (`markerWidth` 6 × `markerHeight` 4, which the path fills);
+/// [`snap_marker_clips`] then puts the clip's edges where Chromium does.
 fn marker(pts: &[Point], fill: &Color) -> Element {
-    Element::path(geom::polygon(pts), Paint::fill(fill))
+    let mut b = Bounds::default();
+    for p in pts {
+        b.add_point(*p);
+    }
+    Element::Clipped {
+        rect: b.rect(),
+        children: vec![Element::path(geom::polygon(pts), Paint::fill(fill))],
+    }
+}
+
+/// Chromium clips a marker to its viewport with the edges snapped to the
+/// nearest device pixel: drawn 1:1, a whole unit from the view box's origin.
+fn snap_marker_clips(els: &mut [Element], vb: Rect) {
+    for e in els {
+        match e {
+            Element::Clipped { rect, .. } => {
+                let x0 = (rect.x - vb.x).round() + vb.x;
+                let y0 = (rect.y - vb.y).round() + vb.y;
+                let x1 = (rect.right() - vb.x).round() + vb.x;
+                let y1 = (rect.bottom() - vb.y).round() + vb.y;
+                *rect = Rect::new(x0, y0, x1 - x0, y1 - y0);
+            }
+            Element::Group { children, .. } => snap_marker_clips(children, vb),
+            _ => {}
+        }
+    }
 }
 
 /// `setupGraphViewbox`: the drawing's `getBBox()`, each of its numbers a
@@ -1088,6 +1118,7 @@ mod tests {
                 match x {
                     Element::Group { children, .. }
                     | Element::Brightened { children, .. }
+                    | Element::Clipped { children, .. }
                     | Element::Translated { children, .. } => walk(children, out),
                     _ => out.push(x),
                 }
