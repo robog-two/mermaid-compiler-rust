@@ -11,6 +11,8 @@ pub enum SvgSizing {
     MaxWidth,
     /// mmdc `--size`: `max-width`/`max-height` set to the given pixel size.
     Size(u32),
+    /// `--size` on a `useMaxWidth: false` diagram: mermaid's fixed `width` stays.
+    SizeFixed { size: u32, width: f64 },
     /// Fixed pixel dimensions (used internally for rasterising).
     Fixed { width: f64, height: f64 },
 }
@@ -942,6 +944,15 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
             let _ = write!(
                 out,
                 " width=\"100%\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"max-width: {s}px; background-color: {}; max-height: {s}px;\"{journey_par}",
+                scene.kind.svg_class(),
+                esc(opt.background)
+            );
+        }
+        SvgSizing::SizeFixed { size: s, width } => {
+            let _ = write!(
+                out,
+                " width=\"{}\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"background-color: {}; max-width: {s}px; max-height: {s}px;\"{journey_par}",
+                num(width),
                 scene.kind.svg_class(),
                 esc(opt.background)
             );

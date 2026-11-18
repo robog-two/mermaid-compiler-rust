@@ -13,6 +13,9 @@ pub struct Rendered {
     pub theme_css: Option<String>,
     /// mermaid's per-diagram `useMaxWidth`.
     pub use_max_width: bool,
+    /// The `height` attribute of a fixed-size (`useMaxWidth: false`) svg where
+    /// it is not the viewBox's height (a sequence diagram's).
+    pub svg_height: Option<f64>,
 }
 
 impl Rendered {
@@ -145,6 +148,7 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
     let pal = cfg.palette();
     // Text is measured in the face the theme's `fontFamily` names (the redux themes'
     // Recursive Variable, which mmdc loads as a web font; see `text::webfonts`).
+    let mut svg_height = None;
     let (mut scene, use_max_width) =
         crate::text::with_family(&pal.font_family, || -> Result<_> {
             Ok(match kind {
@@ -190,10 +194,9 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
                 }
                 DiagramType::Sequence => {
                     let d = diagram::sequence::parse(&pre.body, pre.title.clone())?;
-                    (
-                        diagram::sequence::render(&d, &cfg.sequence, &pal),
-                        cfg.sequence.use_max_width,
-                    )
+                    let (scene, h) = diagram::sequence::render_sized(&d, &cfg.sequence, &pal);
+                    svg_height = Some(h);
+                    (scene, cfg.sequence.use_max_width)
                 }
                 DiagramType::Pie => {
                     let p = diagram::pie::parse(&pre.body, pre.title.clone())?;
@@ -349,5 +352,6 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
         scene,
         theme_css: cfg.theme_css.clone(),
         use_max_width,
+        svg_height,
     })
 }

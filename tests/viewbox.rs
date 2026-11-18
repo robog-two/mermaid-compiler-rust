@@ -410,3 +410,99 @@ fn journey_root_keeps_its_height() {
     let sized_root = &sized[..sized.find('>').unwrap()];
     assert!(!sized_root.contains("height=\"565\"") && sized_root.contains("xMinYMin meet"));
 }
+
+fn root_of(src: &str, size: Option<u32>) -> String {
+    let r = render::render(src, &MermaidConfig::default()).expect("diagram renders");
+    let svg = output::encode_svg(
+        &r,
+        &EncodeOptions {
+            size,
+            ..EncodeOptions::default()
+        },
+    );
+    svg[..svg.find('>').unwrap()].to_string()
+}
+
+/// sequenceRenderer.ts calls `configureSvgSize(diagram, height, width, useMaxWidth)`
+/// with the drawing's height, before the viewBox grows by the title's 40 and
+/// the neo look's 30: a `useMaxWidth: false` root is 30 (title: 70) shorter
+/// than its viewBox (mmdc 12.2.0: 231 / 381 / 578 for 261 / 451 / 608).
+#[test]
+fn sequence_fixed_height_leaves_out_the_title_and_neo_bands() {
+    let cfg = "---\nconfig:\n  sequence:\n    useMaxWidth: false\n---\n";
+    let plain = format!("{cfg}sequenceDiagram\n A->>B: hi\n");
+    let root = root_of(&plain, None);
+    assert!(root.contains(" width=\"450\""), "{root}");
+    assert!(root.contains(" height=\"231\""), "{root}");
+    assert!(root.contains("viewBox=\"-50 -10 450 261\""), "{root}");
+    let titled = format!(
+        "{cfg}sequenceDiagram\n title Hello\n participant A\n A->>B: hi\n loop x\n B-->>A: yo\n end\n Note over A,B: n\n"
+    );
+    let root = root_of(&titled, None);
+    assert!(root.contains(" height=\"381\""), "{root}");
+    assert!(root.contains("viewBox=\"-50 -50 450 451\""), "{root}");
+    let boxed = format!(
+        "{cfg}sequenceDiagram\n box Aqua G\n participant A\n end\n A->>A: self\n alt a\n A->>A: x\n else b\n A->>A: y\n end\n"
+    );
+    let root = root_of(&boxed, None);
+    assert!(root.contains(" height=\"578\""), "{root}");
+    assert!(root.contains("viewBox=\"-54 -10 270 608\""), "{root}");
+}
+
+/// mmdc `--size` only sets `max-width` / `max-height` and drops `height`: a
+/// `useMaxWidth: false` diagram keeps mermaid's fixed `width` (mmdc 12.2.0:
+/// `width="168"` and a style led by the background colour).
+#[test]
+fn size_keeps_the_fixed_width_without_use_max_width() {
+    let cfg = "---\nconfig:\n  flowchart:\n    useMaxWidth: false\n---\n";
+    let root = root_of(&format!("{cfg}flowchart TD\n A-->B\n"), Some(500));
+    assert!(root.contains(" width=\"168\""), "{root}");
+    assert!(!root.contains(" height="), "{root}");
+    assert!(
+        root.contains("style=\"background-color: white; max-width: 500px; max-height: 500px;\""),
+        "{root}"
+    );
+    let root = root_of("flowchart TD\n A-->B\n", Some(500));
+    assert!(root.contains(" width=\"100%\""), "{root}");
+}
+
+/// A fixed-size journey root: `width="500" height="565"` over viewBox
+/// `0 -25 500 540` with `preserveAspectRatio="xMinYMin meet"` (mmdc 12.2.0);
+/// with `--size` the width stays and the height goes.
+#[test]
+fn journey_fixed_size_root_matches_mmdc() {
+    let cfg = "---\nconfig:\n  journey:\n    useMaxWidth: false\n---\n";
+    let src = format!("{cfg}journey\n title T\n section S\n  Task: 5: Me\n");
+    let root = root_of(&src, None);
+    for want in [
+        " width=\"500\"",
+        " height=\"565\"",
+        "viewBox=\"0 -25 500 540\"",
+        "preserveAspectRatio=\"xMinYMin meet\"",
+    ] {
+        assert!(root.contains(want), "{want} in {root}");
+    }
+    let root = root_of(&src, Some(500));
+    assert!(
+        root.contains(" width=\"500\"") && !root.contains(" height="),
+        "{root}"
+    );
+    assert!(
+        root.contains("preserveAspectRatio=\"xMinYMin meet\""),
+        "{root}"
+    );
+}
+
+/// agentflow's `crossEnd-margin` marker (viewBox 15 in 12, `M 1,1 L 14,14 M 1,14 L 14,1`,
+/// stroke 2.5, refX 17.7) drawn where mmdc 12.2.0 puts it: its two strokes span
+/// the box `[258.765, 444.222, 14.566, 14.566]`.
+#[test]
+fn agentflow_cross_end_marker_matches_mmdc() {
+    let src = "---\nconfig:\n  layout: dagre\n---\nagentflow-beta TB\n  brief[\"Release brief\"]@{ shape: input }\n  flow writer[\"Drafting Agent\"]\n    draft[\"Draft the notes\"]@{ shape: task }\n    lookup[\"changelog_search\"]@{ shape: tool }\n    guide[\"Tone of voice\"]@{ shape: refdoc }\n    draft --> lookup\n    draft -.- guide\n  end\n  flow reviewer[\"Review Agent\"]\n    check[\"Check the claims\"]@{ shape: task }\n    ok[\"Accurate?\"]@{ shape: decision }\n    check --> ok\n  end\n  publish[\"Publish\"]@{ shape: action }\n  brief --> writer\n  writer --> reviewer\n  ok -- yes --> publish\n  ok -- no --x check\n";
+    let r = render::render(src, &MermaidConfig::default()).expect("diagram renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    assert!(
+        svg.contains("d=\"M265.031,458.788L267.066,444.222M273.331,452.522L258.765,450.487\""),
+        "cross marker path"
+    );
+}
