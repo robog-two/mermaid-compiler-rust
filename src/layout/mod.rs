@@ -1509,6 +1509,7 @@ fn finish_rng(
             &gap,
             s,
             ports,
+            elk_raw.as_ref().map(|r| r.start_order.as_slice()),
             &inl,
             &hier.ports,
             (&hier.port_rank, &hier.inl_rank),
@@ -2686,6 +2687,7 @@ fn elk_place(
         start: start.clone(),
         end: end.clone(),
         min: if min.is_finite() { min } else { 0.0 },
+        start_order: out_order,
     };
     if min.is_finite() {
         for p in x.iter_mut().chain(&mut start).chain(&mut end) {
@@ -2703,6 +2705,10 @@ struct ElkRaw {
     start: Vec<f64>,
     end: Vec<f64>,
     min: f64,
+    /// Per edge, where its source port stands in its node's port list (as
+    /// `elk_place` keys it: its position, except on a crammed side or a laid out
+    /// container's), which is the order ELK makes the routing segments in.
+    start_order: Vec<f64>,
 }
 
 /// Where ELK puts a label whose dummy's ports carry the edge through `c`: not quite
@@ -2803,6 +2809,7 @@ fn ortho_plan(
     gap: &dyn Fn(usize, usize) -> f64,
     spacing: OrthoSpacing,
     ports: Option<(Vec<f64>, Vec<f64>)>,
+    start_order: Option<&[f64]>,
     inl: &[InLayer],
     fixed: &[(Option<f64>, Option<f64>)],
     (port_rank, inl_rank): ListRanks,
@@ -3053,9 +3060,15 @@ fn ortho_plan(
                     let (from, to) = fixed.get(ei).copied().unwrap_or((None, None));
                     e.1 == 0 && a < n && if reversed { to } else { from }.is_some()
                 });
+                // A node's ports in its port list's order, which is their
+                // positions' except where a side too short for its insets
+                // crams them in reversed (an anchor's two edges).
+                let listed = start_order
+                    .filter(|_| e.1 == 0 && a < n)
+                    .map_or(at, |o| o[ei]);
                 match rank {
                     Some(r) => (0, x[a], r as f64),
-                    None => (0, if a < n { x[a] } else { at }, at),
+                    None => (0, if a < n { x[a] } else { at }, listed),
                 }
             }
         };

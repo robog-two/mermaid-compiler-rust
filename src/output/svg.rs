@@ -1,7 +1,7 @@
 //! `Scene` → SVG text, shaped like mermaid's output (`<svg id="my-svg" ...>`).
 
 use crate::geom::PathCmd;
-use crate::scene::{Anchor, Element, Geometry, Gradient, Paint, Scene, Shadow, Text};
+use crate::scene::{Anchor, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Shadow, Text};
 use std::fmt::Write as _;
 
 /// How the root `<svg>` element is sized.
@@ -623,20 +623,33 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
     let id = esc(opt.id);
     let mut out = String::with_capacity(4096 + scene.element_count() * 96);
     let _ = write!(out, "<svg id=\"{id}\"");
+    // journeyRenderer.ts sets `preserveAspectRatio="xMinYMin meet"` and a height
+    // 25px over the viewBox's after configureSvgSize (mmdc drops the height only
+    // with `--size`). Not for the rasterisers, which size the image themselves.
+    let journey_height =
+        (scene.kind == DiagramKind::Journey && opt.raster_scale.is_none()).then(|| vb.h + 25.0);
+    let journey_par = if journey_height.is_some() {
+        " preserveAspectRatio=\"xMinYMin meet\""
+    } else {
+        ""
+    };
     match opt.sizing {
         SvgSizing::MaxWidth => {
             let _ = write!(
                 out,
-                " width=\"100%\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"max-width: {}px; background-color: {};\"",
+                " width=\"100%\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"max-width: {}px; background-color: {};\"{journey_par}",
                 scene.kind.svg_class(),
                 num(vb.w),
                 esc(opt.background)
             );
+            if let Some(h) = journey_height {
+                let _ = write!(out, " height=\"{}\"", num(h));
+            }
         }
         SvgSizing::Size(s) => {
             let _ = write!(
                 out,
-                " width=\"100%\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"max-width: {s}px; background-color: {}; max-height: {s}px;\"",
+                " width=\"100%\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"max-width: {s}px; background-color: {}; max-height: {s}px;\"{journey_par}",
                 scene.kind.svg_class(),
                 esc(opt.background)
             );
@@ -644,9 +657,9 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
         SvgSizing::Fixed { width, height } => {
             let _ = write!(
                 out,
-                " width=\"{}\" height=\"{}\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"background-color: {};\"",
+                " width=\"{}\" height=\"{}\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"background-color: {};\"{journey_par}",
                 num(width),
-                num(height),
+                num(journey_height.unwrap_or(height)),
                 scene.kind.svg_class(),
                 esc(opt.background)
             );

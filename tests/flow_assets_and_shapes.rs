@@ -215,4 +215,33 @@ fn anchors_are_two_pixel_dots_without_labels() {
     // ELK spaces the ports past the dot: the edge keeps its port and slants
     // to the dot's outline (mermaid's 252.836, 88.014), less the marker.
     assert!(s.contains("L252.178,84.068"));
+    // The dot's side is too short for its ports' insets, so ELK crams them in
+    // reversed: X->C leaves at y 89 below X->D at 83, though first in the port
+    // list. Its routing segments come in that list's order, and the tie between
+    // the two crossing routes keeps X->D's vertical left (mermaid: X->D bends
+    // at x 274, X->C at 294).
+    let edge = |from: &str, to: &str| {
+        let key = format!("LS-{from} LE-{to}\" d=\"");
+        let i = s.find(&key).expect("edge") + key.len();
+        s[i..i + s[i..].find('"').unwrap()].to_string()
+    };
+    assert!(
+        edge("X", "C").contains("L294.002,46.071"),
+        "{}",
+        edge("X", "C")
+    );
+    assert!(
+        edge("X", "D").contains("L274.002,125.929"),
+        "{}",
+        edge("X", "D")
+    );
+}
+
+/// question.ts draws the diamond half a pixel right of its node, and the
+/// viewBox (the drawing's `getBBox()`) holds it there: mermaid 12.3.0's
+/// `4 4 569.5 187` for a diamond at the right edge.
+#[test]
+fn view_box_holds_the_diamond_where_it_is_drawn() {
+    let s = svg("flowchart LR\n  A[Hello world] --> B(Second node)\n  B --> C{Decide}\n");
+    assert_eq!(view_box(&s), "4 4 569.5 187");
 }
