@@ -916,6 +916,13 @@ fn css_shadow(theme: ThemeName) -> Option<Shadow> {
 }
 
 pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene {
+    render_sized(d, cfg, pal).0
+}
+
+/// The scene and the `height` mermaid writes on the `<svg>` of a
+/// `useMaxWidth: false` diagram: `configureSvgSize` gets the drawing's height,
+/// while the viewBox is taller by the title's 40 and the neo look's 30.
+pub fn render_sized(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> (Scene, f64) {
     let neo = cfg.look == Look::Neo;
     let n = d.participants.len();
     let bm = cfg.box_margin;
@@ -1565,7 +1572,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
         Element::group("body", body),
         Element::group("title", title_el),
     ];
-    Scene {
+    let scene = Scene {
         kind: DiagramKind::Sequence,
         view_box,
         elements,
@@ -1573,7 +1580,8 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
         acc_descr: None,
         font_family: pal.font_family.clone(),
         css: String::new(),
-    }
+    };
+    (scene, height)
 }
 
 /// A message laid out by `boundMessage`, drawn after the top actors.

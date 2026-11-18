@@ -127,11 +127,15 @@ pub(crate) fn fit_meet(vw: f64, vh: f64, w: f64, h: f64) -> (f64, f64, f64) {
 /// SVG document text.
 pub fn encode_svg(r: &Rendered, opt: &EncodeOptions) -> String {
     let sizing = match (opt.size, r.use_max_width) {
-        (Some(s), _) => SvgSizing::Size(s),
+        (Some(s), true) => SvgSizing::Size(s),
+        (Some(size), false) => SvgSizing::SizeFixed {
+            size,
+            width: r.scene.view_box.w,
+        },
         (None, true) => SvgSizing::MaxWidth,
         (None, false) => SvgSizing::Fixed {
             width: r.scene.view_box.w,
-            height: r.scene.view_box.h,
+            height: r.svg_height.unwrap_or(r.scene.view_box.h),
         },
     };
     svg::to_svg(
