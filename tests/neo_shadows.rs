@@ -50,7 +50,7 @@ const FLOW: &str = "flowchart LR\n  A[Start] --> B((Circle))\n  B --> C{Choice}"
 
 /// `drop-shadow(1px 2px 2px rgba(185, 185, 185, 1))`: Chromium blurs with a
 /// standard deviation of 2 (the length itself, not half of it).
-fn css_shadow(opacity: f64) -> Shadow {
+fn css_drop_shadow(opacity: f64) -> DropShadow {
     DropShadow {
         dx: 1.0,
         dy: 2.0,
@@ -58,8 +58,11 @@ fn css_shadow(opacity: f64) -> Shadow {
         color: mmdc::scene::Color::new("#b9b9b9"),
         opacity,
     }
-    .blurred()
-    .expect("blurred")
+}
+
+/// [`css_drop_shadow`] as the blurred filter drawn under a shape.
+fn css_shadow(opacity: f64) -> Shadow {
+    css_drop_shadow(opacity).blurred().expect("blurred")
 }
 
 #[test]
@@ -77,7 +80,10 @@ fn classic_themes_cast_the_css_drop_shadow_under_neo() {
             .collect();
         assert_eq!(nodes.len(), 3, "{theme}");
         for (g, _, p) in &nodes {
-            assert_eq!(p.shadow, Some(css_shadow(opacity)), "{theme} {g}");
+            // Written in SVG as the CSS function itself.
+            let sh = css_drop_shadow(opacity).filter();
+            assert!(sh.css && !sh.linear_rgb);
+            assert_eq!(p.shadow, Some(sh), "{theme} {g}");
         }
     }
     // The classic look has none of it.
@@ -187,15 +193,27 @@ fn redux_state_circles_take_the_small_hard_shadow() {
     // stdDeviation 0, 6% black), in the classic look too.
     let src = "---\nconfig:\n  theme: redux\n  look: classic\n---\nstateDiagram-v2\n  [*] --> A\n  A --> [*]";
     let s = shapes(&scene(src));
-    let copies: Vec<_> = s
+    let shadowed: Vec<_> = s
         .iter()
         .filter(|(g, geom, p)| {
             g.contains("root_")
                 && matches!(geom, Geometry::Circle { r, .. } if *r == 7.0)
-                && p.opacity == Some(0.06)
+                && p.shadow.as_ref().is_some_and(|sh| {
+                    sh.linear_rgb && sh.dx == 2.0 && sh.color.css() == "rgba(0, 0, 0, 0.06)"
+                })
         })
         .collect();
-    assert_eq!(copies.len(), 2);
+    assert_eq!(shadowed.len(), 2);
+    // Written as mermaid's own filter (in linear RGB, which the shape it
+    // draws passes through as well).
+    let svg = mmdc::output::encode_svg(
+        &render::render(src, &MermaidConfig::default()).unwrap(),
+        &EncodeOptions::default(),
+    );
+    assert!(svg.contains(
+        "height=\"150%\" width=\"150%\"><feDropShadow dx=\"2\" dy=\"2\" stdDeviation=\"0\" \
+         flood-opacity=\"0.06\" flood-color=\"#000000\"/>"
+    ));
 }
 
 #[test]
@@ -239,4 +257,34 @@ fn usecase_notes_and_tables_take_the_gradient_and_the_shadow() {
         .filter(|(_, _, p)| p.shadow == Some(css_shadow(1.0)))
         .count();
     assert_eq!(shadows, 5);
+}
+
+#[test]
+fn redux_nodes_pass_through_their_linear_rgb_drop_shadow() {
+    // `[data-look="neo"].node rect { filter: url(#my-svg-drop-shadow) }`:
+    // insertLookDefs' feDropShadow works in linear RGB, so the node itself
+    // is drawn through it (Chromium paints redux-dark's #111113 fill as
+    // #0D0D16), which a filter on the shape reproduces and an offset copy
+    // of its silhouette did not.
+    let src =
+        "---\nconfig:\n  look: neo\n  theme: redux-dark\n---\nflowchart LR\n  A[Start] --> B[End]";
+    let s = scene(src);
+    let nodes: Vec<_> = shapes(&s)
+        .into_iter()
+        .filter(|(g, _, _)| g.starts_with("flowchart-"))
+        .collect();
+    assert!(!nodes.is_empty());
+    for (g, _, p) in &nodes {
+        let sh = p.shadow.as_ref().expect(g);
+        assert!(sh.linear_rgb && sh.dx == 4.0 && sh.std_dev == 0.0, "{g}");
+    }
+    let svg = mmdc::output::encode_svg(
+        &render::render(src, &MermaidConfig::default()).unwrap(),
+        &EncodeOptions::default(),
+    );
+    assert!(svg.contains(
+        "height=\"130%\" width=\"130%\"><feDropShadow dx=\"4\" dy=\"4\" stdDeviation=\"0\" \
+         flood-opacity=\"0.06\" flood-color=\"#FFFFFF\"/>"
+    ));
+    assert!(!svg.contains("class=\"drop-shadow\""));
 }

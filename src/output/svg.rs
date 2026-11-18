@@ -316,11 +316,12 @@ impl Filters<'_> {
                 a: 1.0,
             });
             if sh.linear_rgb && self.raster_scale.is_none() {
-                // As mermaid writes it, its region the default one, 130% wide
-                // and tall.
+                // As mermaid writes it: insertLookDefs' region is 130% wide
+                // and tall for the 4px shadow, 150% for the small 2px one.
+                let size = if sh.dx == 2.0 { 150 } else { 130 };
                 let _ = write!(
                     out,
-                    "<filter id=\"{}-shadow-{k}\" height=\"130%\" width=\"130%\"><feDropShadow dx=\"{}\" dy=\"{}\" stdDeviation=\"{}\" flood-opacity=\"{}\" flood-color=\"#{:02X}{:02X}{:02X}\"/></filter>",
+                    "<filter id=\"{}-shadow-{k}\" height=\"{size}%\" width=\"{size}%\"><feDropShadow dx=\"{}\" dy=\"{}\" stdDeviation=\"{}\" flood-opacity=\"{}\" flood-color=\"#{:02X}{:02X}{:02X}\"/></filter>",
                     self.id,
                     num(sh.dx),
                     num(sh.dy),

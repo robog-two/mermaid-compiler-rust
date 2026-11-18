@@ -713,22 +713,16 @@ fn small_shadow(
 }
 
 /// The neo look's drop shadow cast by `els[0]`: a blurred CSS `drop-shadow()`
-/// as that shape's own filter, a hard one (`stdDeviation="0"`) as an offset copy
-/// of its silhouette drawn before it.
+/// as that shape's own filter; a hard one (`stdDeviation="0"`) the redux
+/// themes' `url(#…-drop-shadow)`, an `feDropShadow` that works in linear RGB,
+/// the shape itself passing through it (a dark fill visibly so: #111113
+/// comes out #0D0D16).
 pub(super) fn cast_shadow(els: &mut Vec<Element>, sh: &DropShadow) {
-    match sh.blurred() {
-        Some(blurred) => {
-            if let Some(Element::Shape { paint, .. }) = els.first_mut()
-                && !(paint.fill.is_none() && paint.stroke.is_none())
-            {
-                paint.shadow = Some(blurred);
-            }
-        }
-        None => {
-            if let Some(s) = els.first().and_then(|e| drop_shadow(e, sh)) {
-                els.insert(0, s);
-            }
-        }
+    let shadow = sh.filter();
+    if let Some(Element::Shape { paint, .. }) = els.first_mut()
+        && !(paint.fill.is_none() && paint.stroke.is_none())
+    {
+        paint.shadow = Some(shadow);
     }
 }
 
