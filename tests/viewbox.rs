@@ -388,3 +388,28 @@ fn elk_state_composites_keep_their_title_band() {
         2e-2,
     );
 }
+
+/// journeyRenderer.ts gives the root a height 25px over its viewBox's and
+/// `preserveAspectRatio="xMinYMin meet"` (mermaid 12.3.0: viewBox
+/// `0 -25 1300 540`, height 565); mmdc drops the height only with `--size`.
+#[test]
+fn journey_root_keeps_its_height() {
+    let src = "journey\n    title My working day\n    section Go to work\n      Make tea: 5: Me\n      Go upstairs: 3: Me\n      Do work: 1: Me, Cat\n    section Go home\n      Go downstairs: 5: Me\n      Sit down: 5: Me\n";
+    let r = render::render(src, &MermaidConfig::default()).expect("diagram renders");
+    let svg = output::encode_svg(&r, &EncodeOptions::default());
+    let root = &svg[..svg.find('>').unwrap()];
+    assert!(root.contains("viewBox=\"0 -25 1300 540\""), "{root}");
+    assert!(
+        root.contains(" preserveAspectRatio=\"xMinYMin meet\" height=\"565\""),
+        "{root}"
+    );
+    let sized = output::encode_svg(
+        &r,
+        &EncodeOptions {
+            size: Some(600),
+            ..EncodeOptions::default()
+        },
+    );
+    let sized_root = &sized[..sized.find('>').unwrap()];
+    assert!(!sized_root.contains("height=\"565\"") && sized_root.contains("xMinYMin meet"));
+}

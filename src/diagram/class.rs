@@ -18,6 +18,9 @@ struct ClassInfo {
     annotations: Vec<String>,
     attributes: Vec<String>,
     methods: Vec<String>,
+    /// Each attribute's and method's classifier (see [`member_classifier`]).
+    attribute_classifiers: Vec<Option<char>>,
+    method_classifiers: Vec<Option<char>>,
     namespace: Option<ClusterId>,
 }
 
@@ -492,6 +495,25 @@ fn method_text(m: &str) -> String {
     text.trim().to_string()
 }
 
+/// ClassMember's classifier: an attribute's last character when `$` or `*`;
+/// a method's character right after its `)` when `$` or `*`, else the last
+/// of its return type when that is one (`+area()$ double`, `+count() int$`).
+fn member_classifier(m: &str, method: bool) -> Option<char> {
+    let is = |c: char| c == '$' || c == '*';
+    if !method {
+        return m.chars().last().filter(|&c| is(c));
+    }
+    let rest = m.strip_prefix(['#', '+', '~', '-']).unwrap_or(m);
+    let open = method_open(rest).or_else(|| method_open(m))?;
+    let rest = if method_open(rest).is_some() { rest } else { m };
+    let close = open + rest[open..].rfind(')')?;
+    let tail = &rest[close + 1..];
+    match tail.chars().next() {
+        Some(c) if is(c) => Some(c),
+        _ => tail.trim().chars().last().filter(|&c| is(c)),
+    }
+}
+
 /// The `(` that `(.+)\((.*)\)` stops at: the last one past the first
 /// character with a `)` after it.
 fn method_open(s: &str) -> Option<usize> {
@@ -704,8 +726,10 @@ impl Builder {
         // classDb.addMember: a `)` past the first character makes a method.
         if m.find(')').is_some_and(|i| i > 0) {
             info.methods.push(method_text(m));
+            info.method_classifiers.push(member_classifier(m, true));
         } else {
             info.attributes.push(attribute_text(m));
+            info.attribute_classifiers.push(member_classifier(m, false));
         }
     }
 
@@ -733,16 +757,19 @@ impl Builder {
                     lines: header,
                     centered: true,
                     bold: true,
+                    classifiers: Vec::new(),
                 },
                 Section {
                     lines: info.attributes.clone(),
                     centered: false,
                     bold: false,
+                    classifiers: info.attribute_classifiers.clone(),
                 },
                 Section {
                     lines: info.methods.clone(),
                     centered: false,
                     bold: false,
+                    classifiers: info.method_classifiers.clone(),
                 },
             ];
             index.insert(name.clone(), nodes.len());
@@ -851,6 +878,14 @@ mod tests {
         assert_eq!(method_text("+makeSound() void"), "+makeSound() : void");
         assert_eq!(method_text("+area()double"), "+area() : double");
         assert_eq!(method_text("+getX()$"), "+getX()");
+        // ClassMember's classifiers (mermaid 12.3.0 underlines `$`, italicises `*`).
+        assert_eq!(member_classifier("+push(int x)$", true), Some('$'));
+        assert_eq!(member_classifier("+pop()* int", true), Some('*'));
+        assert_eq!(member_classifier("+area()$ double", true), Some('$'));
+        assert_eq!(member_classifier("+count() int$", true), Some('$'));
+        assert_eq!(member_classifier("+run() void", true), None);
+        assert_eq!(member_classifier("+List~int~ items$", false), Some('$'));
+        assert_eq!(member_classifier("+count$ int", false), None);
         assert_eq!(method_text("+count() int$"), "+count() : int");
         assert_eq!(
             method_text("-sum( List~int~ xs ) int*"),

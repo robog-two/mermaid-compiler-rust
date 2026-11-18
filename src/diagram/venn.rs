@@ -2232,6 +2232,7 @@ fn translate_element(e: Element, dy: f64) -> Element {
         e @ (Element::OutlinedText { .. }
         | Element::Clipped { .. }
         | Element::Faded { .. }
+        | Element::Brightened { .. }
         | Element::Image { .. }
         | Element::Icon { .. }
         | Element::Translated { .. }) => e.translated(0.0, dy),

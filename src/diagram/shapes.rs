@@ -299,8 +299,13 @@ pub fn size(
             off(tw + px + h / 4.0, h, h / 8.0, 0.0)
         }
         Shape::Diamond => {
+            // Drawn half a pixel right of the node (see `outline`), and the
+            // viewBox holds it there.
             let s = tw + px + th + py;
-            at(s, s)
+            ShapeSize {
+                ink_offset: Point::new(0.5, 0.0),
+                ..at(s, s)
+            }
         }
         Shape::Hexagon => {
             let h = th + py;

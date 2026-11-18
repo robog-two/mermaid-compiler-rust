@@ -373,7 +373,9 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             Point::new(x2 + 4.0, ay),
             Point::new(x2 - 20.0, ay + 8.0),
         ])),
-        Paint::fill(&Color::new("#000000")),
+        // The marker's path has no class: it fills with the svg root's
+        // `fill: textColor`.
+        Paint::fill(&pal.text_color),
         "arrowhead",
     ));
 

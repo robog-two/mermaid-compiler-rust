@@ -238,7 +238,7 @@ struct NodeStyle<'a> {
 
 /// One `drawNode` call at (x, y): `width` wraps the text and the box is
 /// 2·`pad` wider; at least `min_h` tall. `event` selects the event text offset
-/// and brightness. Returns the box.
+/// and the `eventWrapper` group with its brightness filter. Returns the box.
 #[allow(clippy::too_many_arguments)]
 fn draw_node(
     out: &mut Vec<Element>,
@@ -257,9 +257,8 @@ fn draw_node(
     let h = padded_node_height(&lines, font, pad).max(min_h);
     let w = width + 2.0 * pad;
     let r = Rect::new(x, y, w, h);
-    let light = if event { EVENT_BRIGHTNESS } else { 1.0 };
-    out.push(node_box(r, ci, st.pal, light, st.redux));
-    let tfill = brightness(st.pal.scale_text_color(ci), light);
+    let bkg = node_box(r, ci, st.pal, st.redux);
+    let tfill = st.pal.scale_text_color(ci);
     // The text group sits at (w / 2, padding / 2) (redux: further down), the
     // lines `middle`-aligned from 1em, 1.1em apart.
     let ty = y + if st.redux {
@@ -272,13 +271,22 @@ fn draw_node(
         &lines,
         font,
         1.1 * font,
-        &tfill,
+        tfill,
     );
     t.y = ty + font + crate::text::baseline_shift(crate::text::Baseline::Middle, font);
-    out.push(Element::classed_text(
-        t,
-        if event { "eventText" } else { "nodeText" },
-    ));
+    let label = Element::classed_text(t, if event { "eventText" } else { "nodeText" });
+    if event {
+        // timeline/styles.js: `.eventWrapper { filter: brightness(120%) }` on
+        // the event's whole group, its text's antialiased edges included.
+        out.push(Element::Brightened {
+            factor: EVENT_BRIGHTNESS,
+            class: "eventWrapper".into(),
+            children: vec![bkg, label],
+        });
+    } else {
+        out.push(bkg);
+        out.push(label);
+    }
     r
 }
 
@@ -549,16 +557,24 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .fold(0.0, f64::max);
 
     let mut bounds = Bounds::default();
-    let mut back = Vec::new();
+    // In upstream's document order: per period its node, its (empty, filled
+    // later) `lineWrapper`, its events; then the title and the axis on top.
     let mut nodes = Vec::new();
     let line_color = pal.scale_text_color(11).clone();
-    let black = Color::new("#000000");
+    // The arrowhead marker's path has no class: it fills with the svg root's
+    // `fill: textColor`.
+    let arrow_fill = pal.text_color.clone();
 
     let style = NodeStyle { pal, font, redux };
-    let mut node = |x: f64, y: f64, raw: &str, width: f64, min_h: f64, ci: usize, event: bool| {
-        let r = draw_node(
-            &mut nodes, &style, x, y, raw, width, NODE_PAD, min_h, ci, event,
-        );
+    let node = |nodes: &mut Vec<Element>,
+                x: f64,
+                y: f64,
+                raw: &str,
+                width: f64,
+                min_h: f64,
+                ci: usize,
+                event: bool| {
+        let r = draw_node(nodes, &style, x, y, raw, width, NODE_PAD, min_h, ci, event);
         (r.h, r)
     };
 
@@ -570,6 +586,7 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let n = sec.periods.len().max(1) as f64;
         if let Some(name) = sec.name.as_ref().filter(|_| has_sections) {
             let (_, r) = node(
+                &mut nodes,
                 master_x,
                 section_y,
                 name,
@@ -584,22 +601,17 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let mut x = master_x;
         for p in &sec.periods {
             let ci = if has_sections { si } else { color };
-            let (th, r) = node(x, master_y, &p.label, NODE_W, max_task_h, ci, false);
+            let (th, r) = node(
+                &mut nodes, x, master_y, &p.label, NODE_W, max_task_h, ci, false,
+            );
             bounds.add_rect(r);
             let task_h = max_task_h.max(th);
-            if !p.events.is_empty() {
-                let mut ey = master_y + 200.0;
-                for e in &p.events {
-                    let (eh, r) = node(x, ey, e, NODE_W, 50.0, ci, true);
-                    bounds.add_rect(r);
-                    ey += 10.0 + eh;
-                }
-            }
-            // The dashed drop line with its arrowhead (marker scaled by 2).
+            // The dashed drop line with its arrowhead (marker scaled by 2),
+            // under the events.
             let lx = x + 190.0 / 2.0;
             let y1 = master_y + task_h;
             let y2 = y1 + 100.0 + max_event_len + 100.0;
-            back.push(Element::classed_shape(
+            nodes.push(Element::classed_shape(
                 Geometry::Path(vec![
                     PathCmd::MoveTo(Point::new(lx, y1)),
                     PathCmd::LineTo(Point::new(lx, y2)),
@@ -607,15 +619,25 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 Paint::stroke(&line_color, 2.0).dashed(vec![5.0, 5.0]),
                 "eventLine",
             ));
-            back.push(Element::path(
+            // `M 0,0 V 4 L6,2 Z` with refX 5, refY 2, scaled by 2: from 10px
+            // behind the end to 2px past it, 8px wide.
+            nodes.push(Element::path(
                 geom::polygon(&[
-                    Point::new(lx - 4.0, y2 - 8.0),
+                    Point::new(lx - 4.0, y2 - 10.0),
                     Point::new(lx, y2 + 2.0),
-                    Point::new(lx + 4.0, y2 - 8.0),
+                    Point::new(lx + 4.0, y2 - 10.0),
                 ]),
-                Paint::fill(&black),
+                Paint::fill(&arrow_fill),
             ));
             bounds.add_rect(Rect::new(lx - 1.0, y1, 2.0, y2 - y1));
+            if !p.events.is_empty() {
+                let mut ey = master_y + 200.0;
+                for e in &p.events {
+                    let (eh, r) = node(&mut nodes, x, ey, e, NODE_W, 50.0, ci, true);
+                    bounds.add_rect(r);
+                    ey += 10.0 + eh;
+                }
+            }
             x += 200.0;
             if !has_sections && multicolor {
                 color += 1;
@@ -624,33 +646,7 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         master_x += 200.0 * n;
     }
 
-    // The axis: 4px from leftMargin to the drawing's width + 3·leftMargin, its
-    // marker scaled by 4.
     let content = bounds.rect();
-    let depth_y = if has_sections {
-        max_section_h + max_task_h + 150.0
-    } else {
-        max_task_h + 100.0
-    };
-    let x2 = content.w + 3.0 * left_margin;
-    back.push(Element::classed_shape(
-        Geometry::Path(vec![
-            PathCmd::MoveTo(Point::new(left_margin, depth_y)),
-            PathCmd::LineTo(Point::new(x2, depth_y)),
-        ]),
-        Paint::stroke(&line_color, 4.0),
-        "axis",
-    ));
-    back.push(Element::path(
-        geom::polygon(&[
-            Point::new(x2 - 20.0, depth_y - 8.0),
-            Point::new(x2 + 4.0, depth_y),
-            Point::new(x2 - 20.0, depth_y + 8.0),
-        ]),
-        Paint::fill(&black),
-    ));
-    bounds.add_rect(Rect::new(left_margin, depth_y - 2.0, x2 - left_margin, 4.0));
-
     if let Some(t) = tl.title.as_ref().filter(|t| !t.trim().is_empty()) {
         // At (width / 2 - leftMargin, 20).
         let (el, r) = title_text(t, content.w / 2.0 - left_margin, font, pal);
@@ -658,13 +654,41 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         nodes.push(el);
     }
 
+    // The axis, drawn last: 4px from leftMargin to the drawing's width +
+    // 3·leftMargin, its marker scaled by 4.
+    let depth_y = if has_sections {
+        max_section_h + max_task_h + 150.0
+    } else {
+        max_task_h + 100.0
+    };
+    let x2 = content.w + 3.0 * left_margin;
+    let back = vec![
+        Element::classed_shape(
+            Geometry::Path(vec![
+                PathCmd::MoveTo(Point::new(left_margin, depth_y)),
+                PathCmd::LineTo(Point::new(x2, depth_y)),
+            ]),
+            Paint::stroke(&line_color, 4.0),
+            "axis",
+        ),
+        Element::path(
+            geom::polygon(&[
+                Point::new(x2 - 20.0, depth_y - 8.0),
+                Point::new(x2 + 4.0, depth_y),
+                Point::new(x2 - 20.0, depth_y + 8.0),
+            ]),
+            Paint::fill(&arrow_fill),
+        ),
+    ];
+    bounds.add_rect(Rect::new(left_margin, depth_y - 2.0, x2 - left_margin, 4.0));
+
     Scene {
         kind: DiagramKind::Timeline,
         // setupGraphViewbox with `timeline.padding`.
         view_box: bounds.rect().pad(padding),
         elements: vec![
-            Element::group("lines", back),
             Element::group("nodes", nodes),
+            Element::group("lines", back),
         ],
         acc_title: None,
         acc_descr: None,
@@ -685,11 +709,10 @@ fn quad(a: Point, c: Point, b: Point) -> PathCmd {
 
 /// `drawNode`'s background: a box with rounded top corners (square under the
 /// redux themes) and, outside redux, a `cScaleInv` rule along its bottom
-/// (`.section-N path` / `.section-N line`). `light` is a CSS `brightness()`
-/// factor applied to the whole node.
-fn node_box(r: Rect, ci: usize, pal: &Palette, light: f64, redux: bool) -> Element {
-    let fill = brightness(pal.scale_color(ci), light);
-    let edge = brightness(pal.scale_inv_color(ci), light);
+/// (`.section-N path` / `.section-N line`).
+fn node_box(r: Rect, ci: usize, pal: &Palette, redux: bool) -> Element {
+    let fill = pal.scale_color(ci);
+    let edge = pal.scale_inv_color(ci);
     let rr = if redux { 0.0 } else { 5.0 };
     let (x0, y0, x1, y1) = (r.x, r.y, r.right(), r.bottom());
     let mut d = vec![PathCmd::MoveTo(Point::new(x0, y1))];
@@ -713,14 +736,14 @@ fn node_box(r: Rect, ci: usize, pal: &Palette, light: f64, redux: bool) -> Eleme
     d.push(PathCmd::Close);
     let mut els = vec![Element::classed_shape(
         Geometry::Path(d),
-        Paint::fill(&fill),
+        Paint::fill(fill),
         "node-bkg",
     )];
     if !redux {
         els.push(Element::line(
             Point::new(x0, y1),
             Point::new(x1, y1),
-            Paint::stroke(&edge, 3.0),
+            Paint::stroke(edge, 3.0),
         ));
     }
     Element::group("node", els)
@@ -728,28 +751,6 @@ fn node_box(r: Rect, ci: usize, pal: &Palette, light: f64, redux: bool) -> Eleme
 
 /// timeline/styles.js: `.eventWrapper { filter: brightness(120%) }`.
 const EVENT_BRIGHTNESS: f64 = 1.2;
-
-/// CSS `filter: brightness(k)`: every channel scaled by `k`, clamped.
-fn brightness(c: &Color, k: f64) -> Color {
-    if k == 1.0 {
-        return c.clone();
-    }
-    match crate::color::parse(c.css()) {
-        Some(x) => {
-            let ch = |v: u8| (v as f64 * k).round().clamp(0.0, 255.0) as u8;
-            Color::new(
-                crate::color::Rgba {
-                    r: ch(x.r),
-                    g: ch(x.g),
-                    b: ch(x.b),
-                    a: x.a,
-                }
-                .to_hex(),
-            )
-        }
-        None => c.clone(),
-    }
-}
 
 /// Parse and render a `timeline` diagram body (already preprocessed).
 pub fn render(
@@ -848,9 +849,43 @@ mod tests {
     #[test]
     fn events_are_brightened() {
         // `.eventWrapper { filter: brightness(120%) }`: #d7ff86 -> #ffffa1.
-        let c = brightness(&Color::new("#d7ff86"), EVENT_BRIGHTNESS);
+        let c = Color::new("#d7ff86").brightened(EVENT_BRIGHTNESS);
         assert_eq!(c.css(), "#ffffa1");
-        assert_eq!(brightness(&Color::new("#000000"), 1.2).css(), "#000000");
+        assert_eq!(Color::new("#000000").brightened(1.2).css(), "#000000");
+        // Each event is an `eventWrapper` group carrying the filter over its
+        // box and text in their own (unbrightened) section colours.
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let s = render("timeline\n2002 : LinkedIn : Facebook", None, &cfg, &pal).unwrap();
+        let Element::Group { children, .. } = &s.elements[0] else {
+            panic!()
+        };
+        let events: Vec<&Vec<Element>> = children
+            .iter()
+            .filter_map(|e| match e {
+                Element::Brightened {
+                    factor,
+                    class,
+                    children,
+                } if *factor == 1.2 && class == "eventWrapper" => Some(children),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events.len(), 2);
+        let Element::Group { children: bkg, .. } = &events[0][0] else {
+            panic!()
+        };
+        let Element::Shape { paint, .. } = &bkg[0] else {
+            panic!()
+        };
+        assert_eq!(&paint.fill, pal.scale_color(0));
+        let Element::Text { text, class } = &events[0][1] else {
+            panic!()
+        };
+        assert_eq!(class.as_deref(), Some("eventText"));
+        assert_eq!(&text.fill, pal.scale_text_color(0));
+        // The period's node is not brightened.
+        assert!(matches!(&children[0], Element::Group { .. }));
     }
 
     #[test]
@@ -865,7 +900,8 @@ mod tests {
         let v = s.view_box;
         assert_eq!((v.x, v.y, v.w), (100.0, -61.0, 1390.0));
         assert!((v.bottom() - 661.6).abs() < 0.1, "{v:?}");
-        let Element::Group { children, .. } = &s.elements[0] else {
+        // The axis is drawn last, over the drop lines.
+        let Element::Group { children, .. } = s.elements.last().unwrap() else {
             panic!()
         };
         let axis = children
@@ -881,6 +917,67 @@ mod tests {
             .unwrap();
         assert_eq!(axis[0], PathCmd::MoveTo(Point::new(150.0, 283.6)));
         assert_eq!(axis[1], PathCmd::LineTo(Point::new(1440.0, 283.6)));
+    }
+
+    /// mermaid 12.3.0 (a timeline with periods 2002 and 2004): the markers'
+    /// `M 0,0 V 4 L6,2 Z` (refX 5) fill with the root's `fill: #333` (the
+    /// theme's textColor); a drop line's (stroke 2) runs from 10px before its
+    /// end (y 419.415625) to 2px past it, 8px wide; each drop line follows its
+    /// period's node and comes before its events; the axis comes last.
+    #[test]
+    fn arrowheads_and_drawing_order_follow_upstream() {
+        fn walk<'a>(e: &'a [Element], out: &mut Vec<&'a Element>) {
+            for x in e {
+                match x {
+                    Element::Group { children, .. } | Element::Brightened { children, .. } => {
+                        walk(children, out)
+                    }
+                    _ => out.push(x),
+                }
+            }
+        }
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let s = render(
+            "timeline\ntitle History\n2002 : LinkedIn\n2004 : Facebook : Google",
+            None,
+            &cfg,
+            &pal,
+        )
+        .unwrap();
+        let mut flat = Vec::new();
+        walk(&s.elements, &mut flat);
+        let heads: Vec<&Vec<PathCmd>> = flat
+            .iter()
+            .filter_map(|e| match e {
+                Element::Shape {
+                    geom: Geometry::Path(c),
+                    paint,
+                    ..
+                } if paint.fill.css() == pal.text_color.css() => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(heads.len(), 3, "two drop lines and the axis");
+        assert_eq!(pal.text_color.css(), "#333");
+        let y_end = 419.415625;
+        let PathCmd::MoveTo(p) = heads[0][0] else {
+            panic!()
+        };
+        assert_eq!(p.x, 291.0);
+        assert!((p.y - (y_end - 10.0)).abs() < 1e-3, "{p:?}");
+        let PathCmd::LineTo(p) = heads[0][1] else {
+            panic!()
+        };
+        assert!((p.y - (y_end + 2.0)).abs() < 1e-3, "{p:?}");
+        let pos = |pred: &dyn Fn(&Element) -> bool| flat.iter().position(|e| pred(e)).unwrap();
+        let text = |t: &'static str| move |e: &Element| matches!(e, Element::Text { text, .. } if text.lines.iter().any(|l| l == t));
+        let line =
+            |e: &Element| matches!(e, Element::Shape { class: Some(c), .. } if c == "eventLine");
+        assert!(pos(&text("2002")) < pos(&line));
+        assert!(pos(&line) < pos(&text("LinkedIn")));
+        let axis = |e: &Element| matches!(e, Element::Shape { class: Some(c), .. } if c == "axis");
+        assert_eq!(pos(&axis), flat.len() - 2, "the axis and its head last");
     }
 
     fn view_box(src: &str) -> Rect {

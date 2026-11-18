@@ -1044,6 +1044,7 @@ fn translate(e: Element, dx: f64, dy: f64) -> Element {
         e @ (Element::OutlinedText { .. }
         | Element::Clipped { .. }
         | Element::Faded { .. }
+        | Element::Brightened { .. }
         | Element::Image { .. }
         | Element::Icon { .. }
         | Element::Translated { .. }) => e.translated(dx, dy),

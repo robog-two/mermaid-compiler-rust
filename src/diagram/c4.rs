@@ -2715,7 +2715,8 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
                     | Element::Rotated { children, .. }
                     | Element::Translated { children, .. }
                     | Element::Clipped { children, .. }
-                    | Element::Faded { children, .. } => walk(children, out),
+                    | Element::Faded { children, .. }
+                    | Element::Brightened { children, .. } => walk(children, out),
                     Element::Shape { .. } | Element::Image { .. } | Element::Icon { .. } => {}
                 }
             }

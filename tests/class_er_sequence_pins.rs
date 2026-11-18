@@ -9,6 +9,34 @@ fn svg(src: &str) -> String {
     output::encode_svg(&r, &EncodeOptions::default())
 }
 
+/// ClassMember's classifiers (mermaid 12.3.0, pixel-compared in Chromium): a
+/// static (`$`) member is underlined, an abstract (`*`) one italic where its
+/// label is HTML. SVG text paints the underline in the label group's fill
+/// (the theme's textColor), `max(1, size / 10)` thick from one pixel under the
+/// baseline; HTML in the group's `color`, black, its thickness floored.
+#[test]
+fn static_members_are_underlined_and_abstract_ones_italic() {
+    let body = "classDiagram\n  class Queue~int~ {\n    +List~int~ items$\n    +push(int x)$\n    +pop()* int\n    +count$ int\n  }\n";
+    let svg_labels = svg(&format!("---\nconfig:\n  htmlLabels: false\n---\n{body}"));
+    assert!(svg_labels.contains(
+        "<rect class=\"member-underline\" x=\"24\" y=\"79\" width=\"98.438\" height=\"1.4\" fill=\"#28253D\""
+    ));
+    assert!(svg_labels.contains("y=\"138\" width=\"73.534\" height=\"1.4\""));
+    // `count$ int` is an attribute ending in `t`: no classifier.
+    assert_eq!(svg_labels.matches("member-underline").count(), 2);
+    // An SVG label's own `font-style` keeps the abstract member upright.
+    assert!(!svg_labels.contains("italic"));
+    let html = svg(body);
+    assert!(html.contains(
+        "<rect class=\"member-underline\" x=\"24\" y=\"86.5\" width=\"98.438\" height=\"1\" fill=\"#000000\""
+    ));
+    assert!(html.contains("font-style=\"italic\">+pop() : int<"));
+    let big = svg(
+        "---\nconfig:\n  theme: forest\n  themeVariables:\n    fontSize: 20px\n---\nclassDiagram\n  class Shape {\n    +area()$ double\n    -id$\n    +draw()*\n  }\n",
+    );
+    assert!(big.contains("x=\"24\" y=\"98\" width=\"22.234\" height=\"2\" fill=\"#000000\""));
+}
+
 /// classDb's `getData` hands ELK the namespaces first: a namespace with no
 /// relations lies left of the classes declared before it (mermaid: the `Zoo`
 /// frame at x 12, 106.234375 wide; `Animal` right of it).

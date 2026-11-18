@@ -23,6 +23,31 @@ impl Color {
     pub fn is_none(&self) -> bool {
         self.0 == "none" || self.0 == "transparent"
     }
+    /// The colour through CSS `filter: brightness(k)`: each channel scaled by
+    /// `k`, rounded and clamped, alpha kept. Unparsable colours (and `none`)
+    /// are returned as they are.
+    pub fn brightened(&self, k: f64) -> Color {
+        if k == 1.0 || self.is_none() {
+            return self.clone();
+        }
+        match crate::color::parse(self.css()) {
+            Some(x) => {
+                let ch = |v: u8| (v as f64 * k).round().clamp(0.0, 255.0) as u8;
+                let c = crate::color::Rgba {
+                    r: ch(x.r),
+                    g: ch(x.g),
+                    b: ch(x.b),
+                    a: x.a,
+                };
+                if x.a < 1.0 {
+                    Color(format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, x.a))
+                } else {
+                    Color(c.to_hex())
+                }
+            }
+            None => self.clone(),
+        }
+    }
 }
 
 /// Fill and stroke for a shape.
@@ -426,6 +451,18 @@ pub enum Element {
         class: Option<String>,
         children: Vec<Element>,
     },
+    /// Children composited as one layer and drawn through CSS `filter:
+    /// brightness(factor)`: every colour channel of the layer scaled by
+    /// `factor` and clamped, antialiased edges included (timeline's
+    /// `.eventWrapper`). SVG output writes a `<g class>` and a stylesheet
+    /// rule for that class, as mermaid does; PDF output, which has no
+    /// filters, draws the children with their colours scaled instead
+    /// ([`Element::brightened`]).
+    Brightened {
+        factor: f64,
+        class: String,
+        children: Vec<Element>,
+    },
 }
 
 impl Element {
@@ -468,6 +505,109 @@ impl Element {
     pub fn line(a: Point, b: Point, paint: Paint) -> Self {
         Element::path(vec![PathCmd::MoveTo(a), PathCmd::LineTo(b)], paint)
     }
+    /// This element with every colour it paints passed through CSS
+    /// `brightness(k)` ([`Color::brightened`]): what the filter makes of
+    /// flat colours, though not of the antialiased edges where they meet.
+    /// Images are left as they are.
+    pub fn brightened(&self, k: f64) -> Element {
+        let all = |children: &[Element]| children.iter().map(|c| c.brightened(k)).collect();
+        let paint = |p: &Paint| Paint {
+            fill: p.fill.brightened(k),
+            stroke: p.stroke.brightened(k),
+            shadow: p.shadow.as_ref().map(|s| Shadow {
+                color: s.color.brightened(k),
+                ..s.clone()
+            }),
+            stroke_gradient: p.stroke_gradient.as_ref().map(|g| Gradient {
+                from: g.from.brightened(k),
+                to: g.to.brightened(k),
+                ..g.clone()
+            }),
+            ..p.clone()
+        };
+        let text = |t: &Text| Text {
+            fill: t.fill.brightened(k),
+            ..t.clone()
+        };
+        match self {
+            Element::Group {
+                id,
+                class,
+                children,
+            } => Element::Group {
+                id: id.clone(),
+                class: class.clone(),
+                children: all(children),
+            },
+            Element::Shape {
+                geom,
+                paint: p,
+                class,
+            } => Element::Shape {
+                geom: geom.clone(),
+                paint: paint(p),
+                class: class.clone(),
+            },
+            Element::Text { text: t, class } => Element::Text {
+                text: text(t),
+                class: class.clone(),
+            },
+            Element::OutlinedText {
+                text: t,
+                class,
+                color,
+                width,
+            } => Element::OutlinedText {
+                text: text(t),
+                class: class.clone(),
+                color: color.brightened(k),
+                width: *width,
+            },
+            Element::Rotated {
+                deg,
+                about,
+                children,
+            } => Element::Rotated {
+                deg: *deg,
+                about: *about,
+                children: all(children),
+            },
+            Element::Clipped { rect, children } => Element::Clipped {
+                rect: *rect,
+                children: all(children),
+            },
+            Element::Translated { dx, dy, children } => Element::Translated {
+                dx: *dx,
+                dy: *dy,
+                children: all(children),
+            },
+            Element::Image { .. } => self.clone(),
+            Element::Icon { rect, color, svg } => Element::Icon {
+                rect: *rect,
+                color: color.as_ref().map(|c| c.brightened(k)),
+                svg: svg.clone(),
+            },
+            Element::Faded {
+                opacity,
+                class,
+                children,
+            } => Element::Faded {
+                opacity: *opacity,
+                class: class.clone(),
+                children: all(children),
+            },
+            Element::Brightened {
+                factor,
+                class,
+                children,
+            } => Element::Brightened {
+                factor: *factor,
+                class: class.clone(),
+                children: all(children),
+            },
+        }
+    }
+
     /// This element (and its children) moved by `(dx, dy)`.
     pub fn translated(self, dx: f64, dy: f64) -> Self {
         let all =
@@ -492,6 +632,15 @@ impl Element {
                 children,
             } => Element::Faded {
                 opacity,
+                class,
+                children: all(children),
+            },
+            Element::Brightened {
+                factor,
+                class,
+                children,
+            } => Element::Brightened {
+                factor,
                 class,
                 children: all(children),
             },
@@ -706,6 +855,7 @@ impl Scene {
                 .map(|el| match el {
                     Element::Group { children, .. }
                     | Element::Rotated { children, .. }
+                    | Element::Brightened { children, .. }
                     | Element::Translated { children, .. } => 1 + count(children),
                     _ => 1,
                 })

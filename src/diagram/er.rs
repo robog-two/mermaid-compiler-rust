@@ -1027,6 +1027,7 @@ pub fn to_graph(d: &ErDiagram) -> GraphDiagram {
                 ],
                 centered: false,
                 bold: false,
+                classifiers: Vec::new(),
             })
             .collect();
         index.insert(e.name.as_str(), nodes.len());
@@ -1424,7 +1425,8 @@ mod tests {
         match el {
             Element::Group { children, .. }
             | Element::Clipped { children, .. }
-            | Element::Faded { children, .. } => children.iter().for_each(|c| bbox(c, out)),
+            | Element::Faded { children, .. }
+            | Element::Brightened { children, .. } => children.iter().for_each(|c| bbox(c, out)),
             Element::Shape { geom, .. } => match geom {
                 Geometry::Rect { rect, .. } => {
                     add(Point::new(rect.x, rect.y));
