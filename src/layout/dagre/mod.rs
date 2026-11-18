@@ -177,6 +177,9 @@ pub struct Extras {
     /// Per edge: the origin of the graph it is drawn in (mermaid draws a
     /// cluster's own graph in a translated group: its paths' `d` are local).
     pub edge_origins: Vec<Point>,
+    /// Per cluster: the origin of the graph its frame is drawn in (as
+    /// [`Extras::edge_origins`]).
+    pub cluster_origins: Vec<Point>,
 }
 
 /// [`layout`], with its [`Extras`].
@@ -317,6 +320,10 @@ pub fn layout_full(input: &LayoutInput, model: &DagreModel) -> (LayoutOutput, Ex
     for (i, p) in r.origins {
         edge_origins[i] = p;
     }
+    let mut cluster_origins = vec![Point::default(); input.clusters.len()];
+    for (c, p) in r.cluster_origins {
+        cluster_origins[c] = p;
+    }
     let mut node_dirs = vec![None; input.nodes.len()];
     for (i, d) in r.dirs {
         node_dirs[i] = Some(d);
@@ -330,6 +337,7 @@ pub fn layout_full(input: &LayoutInput, model: &DagreModel) -> (LayoutOutput, Ex
             node_dirs,
             extracted,
             edge_origins,
+            cluster_origins,
         },
     )
 }
@@ -604,6 +612,8 @@ struct Rendered {
     dirs: Vec<(usize, Direction)>,
     /// Per edge: its graph's origin (see [`Extras::edge_origins`]).
     origins: Vec<(usize, Point)>,
+    /// Per cluster: its graph's origin (see [`Extras::cluster_origins`]).
+    cluster_origins: Vec<(usize, Point)>,
     /// The `diff` of the last group in the graph (`positionNode`'s offset).
     diff: f64,
 }
@@ -641,6 +651,9 @@ impl Rendered {
         self.dirs.extend(inner.dirs);
         for (i, p) in inner.origins {
             self.origins.push((i, shift(p)));
+        }
+        for (c, p) in inner.cluster_origins {
+            self.cluster_origins.push((c, shift(p)));
         }
         if let Some(b) = inner.bbox {
             self.add_box(Rect::new(b.x + dx, b.y + dy, b.w, b.h));
@@ -786,6 +799,7 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
                 res.add_box(rect);
                 res.clusters.push((*c, rect, sub.dir));
                 res.centres.push((*c, Point::new(n.x, n.y)));
+                res.cluster_origins.push((*c, Point::default()));
                 diffs.push((v.clone(), diff));
             }
             Some(MNode::Leaf { idx }) => {

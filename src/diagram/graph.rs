@@ -1794,7 +1794,17 @@ pub fn render_with(
         let mut children: Vec<Element> = Vec::new();
         if empty_of[ci].is_none() {
             let alt = depth(&g.clusters, ClusterId(ci)) % 2 == 1;
-            let mut shapes = cluster_shapes(c, r, t, alt, pal, &lk, cfg.look, g.kind);
+            // The frame mermaid draws the cluster in, as for the edges below:
+            // the hachure's scan lines are rounded in absolute coordinates.
+            let hand_at = if dagre_engine {
+                let o = extras.cluster_origins.get(ci).copied().unwrap_or_default();
+                Point::new(-o.x, -o.y)
+            } else if elk {
+                Point::new(ELK_ORIGIN, ELK_ORIGIN)
+            } else {
+                Point::new(8.0, 8.0)
+            };
+            let mut shapes = cluster_shapes(c, r, t, alt, pal, &lk, cfg.look, g.kind, hand_at);
             if lk.hand_seed.is_some() {
                 // The rough strokes reach past the frame.
                 for b in shapes.iter().filter_map(element_bbox) {
@@ -2364,14 +2374,17 @@ pub fn render_with(
             // mermaid's ELK routes hold the ports beside the outline points;
             // a straight run through them draws the same, but rough.js
             // draws each of its segments.
-            if let Some(p) = kept[ei][0].filter(|p| pts.len() >= 2 && *p != pts[0] && *p != pts[1]) {
+            if let Some(p) = kept[ei][0].filter(|p| pts.len() >= 2 && *p != pts[0] && *p != pts[1])
+            {
                 pts.insert(1, p);
             }
             let n = pts.len();
-            if let Some(p) =
-                kept[ei][1].filter(|p| n >= 2 && *p != pts[n - 1] && *p != pts[n - 2])
+            if let Some(p) = kept[ei][1].filter(|p| n >= 2 && *p != pts[n - 1] && *p != pts[n - 2])
             {
                 pts.insert(n - 1, p);
+            }
+            if let Some(j) = out.elk_exact.as_ref().and_then(|x| x.joints.get(ei)) {
+                pts = with_joints(&pts, j);
             }
         }
         if !elk {
@@ -3232,7 +3245,8 @@ fn path_end(cmds: &[PathCmd]) -> Option<(Point, Point)> {
             _ => {}
         }
     }
-    out.filter(|(_, d)| d.len() > 0.0).map(|(p, d)| (p, d.norm()))
+    out.filter(|(_, d)| d.len() > 0.0)
+        .map(|(p, d)| (p, d.norm()))
 }
 
 /// A path's first point and the unit direction out of it, pointing back
@@ -3251,7 +3265,11 @@ fn path_start(cmds: &[PathCmd]) -> Option<(Point, Point)> {
 
 /// Marker elements drawn for a path end at `from` (point, direction) moved
 /// rigidly onto `to`.
-fn reoriented(els: &[Element], from: Option<(Point, Point)>, to: Option<(Point, Point)>) -> Vec<Element> {
+fn reoriented(
+    els: &[Element],
+    from: Option<(Point, Point)>,
+    to: Option<(Point, Point)>,
+) -> Vec<Element> {
     let (Some((p0, d0)), Some((p1, d1))) = (from, to) else {
         return els.to_vec();
     };
@@ -3365,7 +3383,9 @@ fn rounded_path_data(points: &[Point], radius: f64) -> String {
             path += &format!("L{},{}", cur.x, cur.y);
             continue;
         }
-        let cut = (radius / (angle / 2.0).sin()).min(len1 / 2.0).min(len2 / 2.0);
+        let cut = (radius / (angle / 2.0).sin())
+            .min(len1 / 2.0)
+            .min(len2 / 2.0);
         let (sx, sy) = (cur.x - nx1 * cut, cur.y - ny1 * cut);
         let (ex, ey) = (cur.x + nx2 * cut, cur.y + ny2 * cut);
         path += &format!("L{sx},{sy}");
@@ -4163,6 +4183,7 @@ fn cluster_shapes(
     lk: &Look,
     look: ConfigLook,
     kind: DiagramKind,
+    hand_at: Point,
 ) -> Vec<Element> {
     let slot = slot_colors(c.color_slot, pal);
     match c.kind {
@@ -4179,9 +4200,14 @@ fn cluster_shapes(
             paint.dash = style.dash.clone();
             vec![Element::rect(r, 10.0, paint)]
         }
-        ClusterKind::Group if lk.hand_seed.is_some() => {
-            hand_cluster(c, r, slot.as_ref(), pal, lk.hand_seed.unwrap_or_default())
-        }
+        ClusterKind::Group if lk.hand_seed.is_some() => hand_cluster(
+            c,
+            r,
+            slot.as_ref(),
+            pal,
+            lk.hand_seed.unwrap_or_default(),
+            hand_at,
+        ),
         ClusterKind::Group => {
             let style = slot_styled(&c.style, slot.as_ref());
             let fill = style
@@ -4278,6 +4304,7 @@ fn hand_cluster(
     slot: Option<&SlotColors>,
     pal: &Palette,
     seed: f64,
+    at: Point,
 ) -> Vec<Element> {
     let o = crate::rough::Options {
         roughness: 0.7,
@@ -4289,11 +4316,16 @@ fn hand_cluster(
         stroke_width: c.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH),
         ..Default::default()
     };
-    let d = crate::rough::path(&hand::rounded_rect_path(r.x, r.y, r.w, r.h, 0.0), o);
-    let slot_fill = slot.and_then(|s| s.fill.clone()).unwrap_or_else(Color::none);
+    let d = crate::rough::path(
+        &hand::rounded_rect_path(r.x + at.x, r.y + at.y, r.w, r.h, 0.0),
+        o,
+    );
+    let slot_fill = slot
+        .and_then(|s| s.fill.clone())
+        .unwrap_or_else(Color::none);
     let mut els = Vec::new();
     for set in d.sets.iter().filter(|s| !s.ops.is_empty()) {
-        let cmds = hand::set_cmds(&set.ops, Point::default());
+        let cmds = hand::set_cmds(&set.ops, Point::new(-at.x, -at.y));
         let paint = match set.kind {
             crate::rough::SetKind::Path => {
                 let stroke = c
@@ -4319,6 +4351,33 @@ fn hand_cluster(
         els.push(Element::shape(Geometry::Path(cmds), paint));
     }
     vec![Element::group("basic label-container", els)]
+}
+
+/// `pts` with the points of `joints` (an ELK route before its collinear points
+/// went, see [`layout::ElkExact::joints`]) that lie inside one of its segments
+/// put back in.
+fn with_joints(pts: &[Point], joints: &[Point]) -> Vec<Point> {
+    let inner = joints
+        .get(1..joints.len().saturating_sub(1))
+        .unwrap_or_default();
+    let mut out: Vec<Point> = Vec::with_capacity(pts.len() + inner.len());
+    for (i, &p) in pts.iter().enumerate() {
+        out.push(p);
+        let Some(&q) = pts.get(i + 1) else { break };
+        let len = p.dist(q);
+        let mut on: Vec<(f64, Point)> = inner
+            .iter()
+            .filter(|j| {
+                let (a, b) = (p.dist(**j), j.dist(q));
+                a > 1e-6 && b > 1e-6 && (a + b - len).abs() < 1e-6
+            })
+            .map(|j| (p.dist(*j), *j))
+            .collect();
+        on.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.extend(on.into_iter().map(|(_, j)| j));
+    }
+    out.dedup_by(|a, b| a.dist(*b) <= 1e-9);
+    out
 }
 
 /// The fill box of an element's shapes (`getBBox()`-like), if any.
@@ -5640,7 +5699,13 @@ fn node_elements(
 /// `stroke-width` styles, else the theme's `mainBkg`, `nodeBorder` and 1.3.
 fn hand_style(n: &Node, pal: &Palette, lk: &Look, seed: f64) -> hand::HandStyle {
     hand::HandStyle {
-        fill: n.style.fill.as_ref().unwrap_or(&pal.main_bkg).css().to_string(),
+        fill: n
+            .style
+            .fill
+            .as_ref()
+            .unwrap_or(&pal.main_bkg)
+            .css()
+            .to_string(),
         stroke: n
             .style
             .stroke

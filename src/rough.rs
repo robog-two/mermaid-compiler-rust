@@ -11,7 +11,10 @@
 //! The one place this cannot follow rough.js is a zero seed: rough.js then
 //! draws from `Math.random()`, so its output differs on every run. A zero seed
 //! here stands for [`FALLBACK_SEED`] instead, which keeps the drawing
-//! deterministic (see [`Random`]).
+//! deterministic: a zero seed draws exactly what seed 1 draws (see [`Random`]
+//! and `clone_alter_seed`). mermaid's `handDrawnSeed` defaults to 0, so its
+//! default hand-drawn output is one of rough.js's random drawings, and ours is
+//! the one rough.js makes with `handDrawnSeed: 1`.
 //!
 //! Random state is shared the way JavaScript objects share it: rough.js keeps
 //! its `Random` on the options object (`o.randomizer`), and `Object.assign`
@@ -200,12 +203,16 @@ fn offset_opt(x: f64, o: &Options, gain: f64) -> f64 {
     offset(-x, x, o, gain)
 }
 
-/// `cloneOptionsAlterSeed`.
+/// `cloneOptionsAlterSeed`. A zero seed alters as [`FALLBACK_SEED`] (where
+/// rough.js keeps drawing from `Math.random()`), so that a zero seed draws
+/// exactly what an explicit [`FALLBACK_SEED`] draws.
 fn clone_alter_seed(o: &Options) -> Options {
     let mut r = o.fresh();
-    if o.seed != 0.0 {
-        r.seed = o.seed + 1.0;
-    }
+    r.seed = if o.seed != 0.0 {
+        o.seed + 1.0
+    } else {
+        f64::from(FALLBACK_SEED) + 1.0
+    };
     r
 }
 
@@ -259,7 +266,11 @@ fn line_ops(x1: f64, y1: f64, x2: f64, y2: f64, o: &Options, mv: bool, overlay: 
         };
         ops.push(Op::Move([a, b]));
     }
-    let r = if overlay { &rh as &dyn Fn() -> f64 } else { &rf };
+    let r = if overlay {
+        &rh as &dyn Fn() -> f64
+    } else {
+        &rf
+    };
     let c0 = mid_x + x1 + (x2 - x1) * diverge + r();
     let c1 = mid_y + y1 + (y2 - y1) * diverge + r();
     let c2 = mid_x + x1 + 2.0 * (x2 - x1) * diverge + r();
@@ -367,7 +378,14 @@ fn linear_path_set(points: &[P], close: bool, o: &Options) -> OpSet {
         }
         ops
     } else if len == 2 {
-        double_line(points[0][0], points[0][1], points[1][0], points[1][1], o, false)
+        double_line(
+            points[0][0],
+            points[0][1],
+            points[1][0],
+            points[1][1],
+            o,
+            false,
+        )
     } else {
         Vec::new()
     };
@@ -812,7 +830,11 @@ fn pattern_fill_polygons(polygons: &mut [Vec<P>], o: &Options) -> OpSet {
             } else {
                 o.dash_offset
             };
-            let gap = if o.dash_gap < 0.0 { fallback } else { o.dash_gap };
+            let gap = if o.dash_gap < 0.0 {
+                fallback
+            } else {
+                o.dash_gap
+            };
             let mut ops = Vec::new();
             for l in &lines {
                 let length = line_length(l);
@@ -1113,7 +1135,11 @@ fn curve_set(lists: &[Vec<P>], o: &Options) -> OpSet {
     let mut o2 = if o.disable_multi_stroke {
         Vec::new()
     } else {
-        curve_with_offset(first, 1.5 * (1.0 + o.roughness * 0.22), &clone_alter_seed(o))
+        curve_with_offset(
+            first,
+            1.5 * (1.0 + o.roughness * 0.22),
+            &clone_alter_seed(o),
+        )
     };
     for points in &lists[1..] {
         if !points.is_empty() {
@@ -1121,7 +1147,11 @@ fn curve_set(lists: &[Vec<P>], o: &Options) -> OpSet {
             let over = if o.disable_multi_stroke {
                 Vec::new()
             } else {
-                curve_with_offset(points, 1.5 * (1.0 + o.roughness * 0.22), &clone_alter_seed(o))
+                curve_with_offset(
+                    points,
+                    1.5 * (1.0 + o.roughness * 0.22),
+                    &clone_alter_seed(o),
+                )
             };
             o1.extend(under.into_iter().filter(|op| !matches!(op, Op::Move(_))));
             o2.extend(over.into_iter().filter(|op| !matches!(op, Op::Move(_))));
@@ -1420,7 +1450,8 @@ fn absolutize(segs: &[RawSeg]) -> Vec<RawSeg> {
     let mut out = Vec::new();
     for s in segs {
         let d = &s.data;
-        let push = |out: &mut Vec<RawSeg>, key: char, data: Vec<f64>| out.push(RawSeg { key, data });
+        let push =
+            |out: &mut Vec<RawSeg>, key: char, data: Vec<f64>| out.push(RawSeg { key, data });
         let rel = |d: &[f64], cx: f64, cy: f64| -> Vec<f64> {
             d.iter()
                 .enumerate()
@@ -1625,7 +1656,9 @@ fn arc_to_cubic(
     sweep: f64,
     rec: Option<[f64; 4]>,
 ) -> Vec<[f64; 6]> {
-    let pts = arc_points(&mut x1, &mut y1, &mut x2, &mut y2, &mut r1, &mut r2, angle, large, sweep, rec);
+    let pts = arc_points(
+        &mut x1, &mut y1, &mut x2, &mut y2, &mut r1, &mut r2, angle, large, sweep, rec,
+    );
     let a = (PI * angle) / 180.0;
     pts.chunks(3)
         .map(|c| {
@@ -2008,7 +2041,10 @@ mod tests {
         assert_eq!(d.sets[0].kind, SetKind::FillSketch);
         assert_eq!(d.sets[0].ops.len(), 204);
         assert_eq!(d.sets[1].ops.len(), 16);
-        close(&data(&d.sets[1].ops[0]), &[-51.39940910618752, -20.87696477789432]);
+        close(
+            &data(&d.sets[1].ops[0]),
+            &[-51.39940910618752, -20.87696477789432],
+        );
         close(
             &data(&d.sets[1].ops[1]),
             &[
@@ -2020,7 +2056,10 @@ mod tests {
                 -20.877556038089097,
             ],
         );
-        close(&data(&d.sets[0].ops[0]), &[-50.19107073324646, -19.780198264928703]);
+        close(
+            &data(&d.sets[0].ops[0]),
+            &[-50.19107073324646, -19.780198264928703],
+        );
     }
 
     #[test]
@@ -2031,7 +2070,10 @@ mod tests {
         );
         assert_eq!(d.sets[0].ops.len(), 212);
         assert_eq!(d.sets[1].ops.len(), 36);
-        close(&data(&d.sets[1].ops[35]), &[-50.0, -20.0, -50.0, -20.0, -50.0, -20.0]);
+        close(
+            &data(&d.sets[1].ops[35]),
+            &[-50.0, -20.0, -50.0, -20.0, -50.0, -20.0],
+        );
     }
 
     #[test]
@@ -2039,7 +2081,10 @@ mod tests {
         let d = circle(0.0, 0.0, 30.0, node_opts(7.0));
         assert_eq!(d.sets[0].ops.len(), 60);
         assert_eq!(d.sets[1].ops.len(), 22);
-        close(&data(&d.sets[1].ops[0]), &[-3.1204928595096475, -14.777440675258463]);
+        close(
+            &data(&d.sets[1].ops[0]),
+            &[-3.1204928595096475, -14.777440675258463],
+        );
         close(
             &data(&d.sets[1].ops[1]),
             &[

@@ -39,7 +39,9 @@ fn pts(j: &Json) -> Vec<[f64; 2]> {
 
 #[test]
 fn battery() {
-    let Ok(dir) = std::env::var("ROUGH_DEV") else { return };
+    let Ok(dir) = std::env::var("ROUGH_DEV") else {
+        return;
+    };
     let src = std::fs::read_to_string(format!("{dir}/battery.json")).unwrap();
     let cases = json::parse(&src).unwrap();
     let Json::Array(cases) = cases else { panic!() };
@@ -61,7 +63,16 @@ fn battery() {
             "polygon" => rough::polygon(&pts(a[0]), o),
             "linearPath" => rough::linear_path(&pts(a[0]), o),
             "curve" => rough::curve(&[pts(a[0])], o),
-            "arc" => rough::arc(n(0), n(1), n(2), n(3), n(4), n(5), a[6].as_bool().unwrap(), o),
+            "arc" => rough::arc(
+                n(0),
+                n(1),
+                n(2),
+                n(3),
+                n(4),
+                n(5),
+                a[6].as_bool().unwrap(),
+                o,
+            ),
             _ => panic!(),
         };
         if ci > 0 {

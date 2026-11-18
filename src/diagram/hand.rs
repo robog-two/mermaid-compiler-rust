@@ -201,7 +201,10 @@ fn stadium_dims(tw: f64, th: f64, p: f64) -> (f64, f64) {
 
 /// util.ts `generateCirclePoints` (negated, as upstream).
 fn circle_points(cx: f64, cy: f64, r: f64, n: usize, a0: f64, a1: f64) -> Vec<Point> {
-    let (s, e) = (a0 * std::f64::consts::PI / 180.0, a1 * std::f64::consts::PI / 180.0);
+    let (s, e) = (
+        a0 * std::f64::consts::PI / 180.0,
+        a1 * std::f64::consts::PI / 180.0,
+    );
     let step = (e - s) / (n - 1) as f64;
     (0..n)
         .map(|i| {
@@ -213,7 +216,10 @@ fn circle_points(cx: f64, cy: f64, r: f64, n: usize, a0: f64, a1: f64) -> Vec<Po
 
 fn stadium_points(w: f64, h: f64) -> Vec<Point> {
     let r = h / 2.0;
-    let mut pts = vec![Point::new(-w / 2.0 + r, -h / 2.0), Point::new(w / 2.0 - r, -h / 2.0)];
+    let mut pts = vec![
+        Point::new(-w / 2.0 + r, -h / 2.0),
+        Point::new(w / 2.0 - r, -h / 2.0),
+    ];
     pts.extend(circle_points(-w / 2.0 + r, 0.0, r, 50, 90.0, 270.0));
     pts.push(Point::new(w / 2.0 - r, h / 2.0));
     pts.extend(circle_points(w / 2.0 - r, 0.0, r, 50, 270.0, 450.0));
@@ -393,7 +399,10 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
             let pts = asym_points(tw, th, p);
             let notch = (-(th + p) / 2.0) / 2.0;
             let d = rough::path(&path_from_points(&pts), o());
-            (vec![piece(d, Point::new(-notch / 2.0, 0.0))], Bound::Polygon)
+            (
+                vec![piece(d, Point::new(-notch / 2.0, 0.0))],
+                Bound::Polygon,
+            )
         }
         Shape::Hexagon => {
             let h = th + p;
@@ -415,7 +424,10 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
                 -h / 2.0
             );
             let d = rough::path(&path, o());
-            (vec![piece(d, Point::new(-w / 2.0, h / 2.0))], Bound::Polygon)
+            (
+                vec![piece(d, Point::new(-w / 2.0, h / 2.0))],
+                Bound::Polygon,
+            )
         }
         Shape::LeanRight | Shape::LeanLeft | Shape::Trapezoid | Shape::InvTrapezoid => {
             let pts = poly(shape, m);
@@ -425,7 +437,10 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
                 (tw + p, th + p)
             };
             let d = rough::path(&path_from_points(&pts), o());
-            (vec![piece(d, Point::new(-w / 2.0, h / 2.0))], Bound::Polygon)
+            (
+                vec![piece(d, Point::new(-w / 2.0, h / 2.0))],
+                Bound::Polygon,
+            )
         }
         // cylinder.ts: the outline without its top's front half, which is a
         // separate unfilled path left where the shape's frame starts (only the
@@ -437,18 +452,7 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
             let h = th + p + ry;
             let outer = format!(
                 "M{},{} M{},{} a{},{} 0,0,0 {},0 l0,{} a{},{} 0,0,0 {},0 l0,{}",
-                0.0,
-                ry,
-                w,
-                ry,
-                rx,
-                ry,
-                -w,
-                h,
-                rx,
-                ry,
-                w,
-                -h
+                0.0, ry, w, ry, rx, ry, -w, h, rx, ry, w, -h
             );
             let inner = format!("M{},{} a{},{} 0,0,0 {},0", -w / 2.0, -h / 2.0, rx, ry, w);
             let io = Options {
@@ -457,7 +461,10 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
             };
             (
                 vec![
-                    piece(rough::path(&outer, o()), Point::new(-w / 2.0, -(h / 2.0 + ry))),
+                    piece(
+                        rough::path(&outer, o()),
+                        Point::new(-w / 2.0, -(h / 2.0 + ry)),
+                    ),
                     Piece {
                         drawable: rough::path(&inner, io),
                         at: origin,

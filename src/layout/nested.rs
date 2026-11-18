@@ -355,6 +355,14 @@ pub(super) fn layout(input: &LayoutInput) -> LayoutOutput {
             l.swap(0, 1);
         }
         x.legs = legs;
+        let mut joints = x.joints.clone();
+        for (j, &k) in x.joints.iter().zip(&order) {
+            joints[k] = j.clone();
+        }
+        for (j, _) in joints.iter_mut().zip(&flags).filter(|(_, f)| **f) {
+            j.reverse();
+        }
+        x.joints = joints;
     }
     let mut out = LayoutOutput { edges, ..laid };
     even_group_frames(input, &mut out);
@@ -1062,6 +1070,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 .map_or([None, None], |r| super::legs_of(&r.points))
         })
         .collect();
+    let mut joints: Vec<Vec<Point>> = vec![Vec::new(); routes.len()];
     // An edge crossing container borders: its segments from its source outwards,
     // then inwards to its target.
     for (ei, mut segs) in pieces.into_iter().enumerate() {
@@ -1076,6 +1085,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
         });
         let mut points = Vec::new();
         let mut label = None;
+        let crossed: Vec<usize> = segs.iter().filter_map(|(s, _)| s.scope).collect();
         for (s, r) in segs {
             points.extend(r.points);
             if s.main {
@@ -1083,6 +1093,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             }
         }
         legs[ei] = super::legs_of(&points);
+        joints[ei] = joined(&points, crossed.iter().map(|&c| clusters[c]));
         routes[ei] = Some(EdgeRoute {
             points: super::ortho::simplify(&points),
             label,
@@ -1111,7 +1122,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     let sizes: Vec<(f64, f64)> = input.nodes.iter().map(|n| (n.width, n.height)).collect();
     let elk_exact = elk_exact
         .and_then(|x| super::checked_exact(x, &nodes, &sizes, &edges))
-        .map(|x| super::ElkExact { legs, ..x });
+        .map(|x| super::ElkExact { legs, joints, ..x });
     LayoutOutput {
         nodes,
         edges,
@@ -1120,6 +1131,47 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
         elk_frame: None,
         elk_exact,
     }
+}
+
+/// ELK's distance from a container's border to the point where the pieces of
+/// an edge crossing it join (`spacing.edgeNodeBetweenLayers`).
+const ELK_JOINT_SPACING: f64 = 10.0;
+
+/// A crossing edge's route as ELK's joined section has it (see
+/// [`super::ElkExact::joints`]): where its pieces meet on a crossed
+/// container's border, ELK's route passes [`ELK_JOINT_SPACING`] outside it.
+fn joined(points: &[Point], crossed: impl Iterator<Item = Rect> + Clone) -> Vec<Point> {
+    let n = points.len();
+    let mut out: Vec<Point> = Vec::with_capacity(n);
+    for (i, &p) in points.iter().enumerate() {
+        let mut q = p;
+        if i > 0 && i + 1 < n {
+            let near = |a: f64, b: f64| (a - b).abs() < 1e-6;
+            for r in crossed.clone() {
+                let (in_x, in_y) = (
+                    p.x >= r.x - 1e-6 && p.x <= r.right() + 1e-6,
+                    p.y >= r.y - 1e-6 && p.y <= r.bottom() + 1e-6,
+                );
+                let d = ELK_JOINT_SPACING;
+                if in_x && near(p.y, r.y) {
+                    q = Point::new(p.x, r.y - d);
+                } else if in_x && near(p.y, r.bottom()) {
+                    q = Point::new(p.x, r.bottom() + d);
+                } else if in_y && near(p.x, r.x) {
+                    q = Point::new(r.x - d, p.y);
+                } else if in_y && near(p.x, r.right()) {
+                    q = Point::new(r.right() + d, p.y);
+                } else {
+                    continue;
+                }
+                break;
+            }
+        }
+        if out.last().is_none_or(|l| l.dist(q) > 1e-9) {
+            out.push(q);
+        }
+    }
+    out
 }
 
 /// mermaid's exact coordinates (see [`super::ElkExact`]) of a hierarchy of
@@ -1323,6 +1375,7 @@ fn compose_elk_exact(
         nodes,
         ends,
         legs: Vec::new(),
+        joints: Vec::new(),
     })
 }
 

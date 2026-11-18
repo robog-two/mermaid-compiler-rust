@@ -206,6 +206,11 @@ pub struct ElkExact {
     /// straight run passes, which the layout's routes leave out), in the
     /// layout's frame.
     pub legs: Vec<[Option<Leg>; 2]>,
+    /// Per edge crossing container borders: its route before the collinear
+    /// points go (ELK's section keeps the points where its pieces join), in
+    /// the layout's frame; empty for the others. Only rough.js, which draws
+    /// every segment of a path on its own, tells them apart.
+    pub joints: Vec<Vec<Point>>,
 }
 
 /// The two points after an edge's port, in from that end (see
@@ -281,6 +286,7 @@ impl ElkExact {
             nodes: frame.pos.iter().map(|p| p.map(at)).collect(),
             ends: frame.anchors.iter().map(|a| a.map(|p| p.map(at))).collect(),
             legs: Vec::new(),
+            joints: Vec::new(),
         }
     }
 }
