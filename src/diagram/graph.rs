@@ -1894,7 +1894,9 @@ pub fn render_with(
     let mut boundaries = Vec::with_capacity(nodes.len());
     for (i, (n, m)) in nodes.iter().zip(&measured).enumerate() {
         let c = out.nodes[i];
-        let slot = slot_colors(n.color_slot, pal);
+        // (classDiagram's slot rules reach no rough.js path.)
+        let slot = slot_colors(n.color_slot, pal)
+            .filter(|_| !(lk.hand_seed.is_some() && g.kind == DiagramKind::Class));
         let painted;
         let n = if slot.is_some() {
             painted = Node {
