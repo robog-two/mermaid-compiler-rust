@@ -948,7 +948,9 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     let mut nodes = vec![Point::new(0.0, 0.0); n];
     let mut routes: Vec<Option<EdgeRoute>> = vec![None; input.edges.len()];
     // Under ELK: per edge, its segments' routes.
-    let mut pieces: Vec<Vec<(Seg, EdgeRoute)>> = vec![Vec::new(); input.edges.len()];
+    let mut pieces: Vec<Vec<(Seg, EdgeRoute, Vec<Point>)>> = vec![Vec::new(); input.edges.len()];
+    // Per edge: its route as ELK's section has it (see `ElkFrame::routes`).
+    let mut raw_routes: Vec<Vec<Point>> = vec![Vec::new(); input.edges.len()];
     let mut clusters = vec![Rect::default(); nc];
     let mut stack: Vec<(Option<usize>, Point)> = vec![(None, Point::new(0.0, 0.0))];
     while let Some((scope, off)) = stack.pop() {
@@ -1020,6 +1022,16 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 points: r.points.iter().map(|p| p.plus(off)).collect(),
                 label: r.label.map(|p| p.plus(off)),
             };
+            let mut raw: Vec<Point> = level
+                .out
+                .elk_frame
+                .as_ref()
+                .and_then(|f| f.routes.get(k))
+                .filter(|r| !r.is_empty())
+                .unwrap_or(&r.points)
+                .iter()
+                .map(|p| p.plus(off))
+                .collect();
             match level.segs.get(k).copied().flatten() {
                 Some(seg) => {
                     // An external port sits on the container's border.
@@ -1043,22 +1055,31 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                         // A segment from a child straight to the border (its
                         // port dummy beside the child's own port) keeps the
                         // child's end: the run between them crosses the padding.
-                        if route.points.len() == 1
-                            && (seg.from == SegEnd::Ext) != (seg.to == SegEnd::Ext)
-                        {
-                            route.points.push(first);
-                        }
-                        if seg.from == SegEnd::Ext {
-                            route.points[0] = snap(first, !seg.against);
-                        }
-                        if seg.to == SegEnd::Ext {
-                            let at = route.points.len() - 1;
-                            route.points[at] = snap(last, seg.against);
+                        let ends = |points: &mut Vec<Point>| {
+                            if points.len() == 1
+                                && (seg.from == SegEnd::Ext) != (seg.to == SegEnd::Ext)
+                            {
+                                points.push(first);
+                            }
+                            if seg.from == SegEnd::Ext {
+                                points[0] = snap(first, !seg.against);
+                            }
+                            if seg.to == SegEnd::Ext {
+                                let at = points.len() - 1;
+                                points[at] = snap(last, seg.against);
+                            }
+                        };
+                        ends(&mut route.points);
+                        if !raw.is_empty() {
+                            ends(&mut raw);
                         }
                     }
-                    pieces[ei].push((seg, route));
+                    pieces[ei].push((seg, route, raw));
                 }
-                None => routes[ei] = Some(route),
+                None => {
+                    routes[ei] = Some(route);
+                    raw_routes[ei] = raw;
+                }
             }
         }
     }
@@ -1070,7 +1091,7 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 .map_or([None, None], |r| super::legs_of(&r.points))
         })
         .collect();
-    let mut joints: Vec<Vec<Point>> = vec![Vec::new(); routes.len()];
+    let mut joints = raw_routes;
     // An edge crossing container borders: its segments from its source outwards,
     // then inwards to its target.
     for (ei, mut segs) in pieces.into_iter().enumerate() {
@@ -1078,22 +1099,24 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
             continue;
         }
         let depth = |s: &Seg| s.scope.map_or(0, |c| tree.chains[c].len()) as i64;
-        segs.sort_by_key(|(s, _)| match (s.main, s.to == SegEnd::Ext) {
+        segs.sort_by_key(|(s, _, _)| match (s.main, s.to == SegEnd::Ext) {
             (true, _) => (1, 0),
             (false, true) => (0, -depth(s)),
             (false, false) => (2, depth(s)),
         });
         let mut points = Vec::new();
         let mut label = None;
-        let crossed: Vec<usize> = segs.iter().filter_map(|(s, _)| s.scope).collect();
-        for (s, r) in segs {
+        let crossed: Vec<usize> = segs.iter().filter_map(|(s, _, _)| s.scope).collect();
+        let mut raw = Vec::new();
+        for (s, r, rr) in segs {
             points.extend(r.points);
+            raw.extend(rr);
             if s.main {
                 label = r.label;
             }
         }
         legs[ei] = super::legs_of(&points);
-        joints[ei] = joined(&points, crossed.iter().map(|&c| clusters[c]));
+        joints[ei] = joined(&raw, crossed.iter().map(|&c| clusters[c]));
         routes[ei] = Some(EdgeRoute {
             points: super::ortho::simplify(&points),
             label,

@@ -189,6 +189,10 @@ pub struct ElkFrame {
     pub pos: Vec<Option<Point>>,
     pub offset: Point,
     pub anchors: Vec<[Option<Point>; 2]>,
+    /// Per edge: its route as ELK's section has it (`unnecessaryBendpoints`:
+    /// a point for every dummy it passes), in the output frame; empty where
+    /// the route is not ELK's orthogonal one.
+    pub routes: Vec<Vec<Point>>,
 }
 
 /// The coordinates mermaid's ELK adapter works with, as the doubles it gets:
@@ -206,10 +210,11 @@ pub struct ElkExact {
     /// straight run passes, which the layout's routes leave out), in the
     /// layout's frame.
     pub legs: Vec<[Option<Leg>; 2]>,
-    /// Per edge crossing container borders: its route before the collinear
-    /// points go (ELK's section keeps the points where its pieces join), in
-    /// the layout's frame; empty for the others. Only rough.js, which draws
-    /// every segment of a path on its own, tells them apart.
+    /// Per edge: its route as ELK's section has it, collinear points kept (a
+    /// point for every dummy it passes, and where the pieces of an edge
+    /// crossing container borders join), in the layout's frame; empty where
+    /// unknown. Only rough.js, which draws every segment of a path on its own,
+    /// tells such a route from the layout's.
     pub joints: Vec<Vec<Point>>,
 }
 
@@ -286,7 +291,7 @@ impl ElkExact {
             nodes: frame.pos.iter().map(|p| p.map(at)).collect(),
             ends: frame.anchors.iter().map(|a| a.map(|p| p.map(at))).collect(),
             legs: Vec::new(),
-            joints: Vec::new(),
+            joints: frame.routes.clone(),
         }
     }
 }
@@ -1787,6 +1792,7 @@ fn finish_rng(
     let pos = |v: usize| to_out(Point::new(x[v], vy[v]));
 
     let nodes: Vec<Point> = (0..n).map(pos).collect();
+    let mut raw_routes: Vec<Vec<Point>> = vec![Vec::new(); input.edges.len()];
     let edges = input
         .edges
         .iter()
@@ -1856,14 +1862,18 @@ fn finish_rng(
                 };
             };
             if let Some(p) = &plan {
-                let mut points: Vec<Point> = p
-                    .route(ei, &verts, &rank_y, &vy, &rank_h, &start_pad, &end_pad)
+                let mut raw: Vec<Point> = p
+                    .route_raw(
+                        ei, &verts, &is_ext, &rank_y, &vy, &rank_h, &start_pad, &end_pad,
+                    )
                     .into_iter()
                     .map(to_out)
                     .collect();
                 if *reversed {
-                    points.reverse();
+                    raw.reverse();
                 }
+                let points = ortho::simplify(&raw);
+                raw_routes[ei] = raw;
                 let label = label_v
                     .map(|v| to_out(Point::new(p.xs[v], rank_y[verts[v].rank])))
                     .map(|c| elk_label_centre(c, e.label, horizontal))
@@ -1892,7 +1902,11 @@ fn finish_rng(
     let elk_frame = match (&elk_raw, &plan) {
         (Some(raw), Some(_)) => elk_frame(
             input, &verts, n, &is_ext, &chains, &inl, raw, &rank_top, extent_y, &nodes,
-        ),
+        )
+        .map(|f| ElkFrame {
+            routes: raw_routes,
+            ..f
+        }),
         _ => None,
     };
     (
@@ -2005,6 +2019,7 @@ fn elk_frame(
         pos,
         offset,
         anchors,
+        routes: Vec::new(),
     })
 }
 
@@ -3081,11 +3096,28 @@ fn ortho_plan(
 impl OrthoPlan {
     /// Edge `ei`'s route in layout space, oriented along the flow: from its source
     /// port on the node's side, through its stops, to its target port.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn route(
         &self,
         ei: usize,
         verts: &[Vertex],
+        rank_y: &[f64],
+        vy: &[f64],
+        rank_h: &[f64],
+        start_pad: &[f64],
+        end_pad: &[f64],
+    ) -> Vec<Point> {
+        ortho::simplify(&self.route_raw(ei, verts, &[], rank_y, vy, rank_h, start_pad, end_pad))
+    }
+
+    /// [`Self::route`] with its collinear points (every dummy's) kept.
+    #[allow(clippy::too_many_arguments)]
+    fn route_raw(
+        &self,
+        ei: usize,
+        verts: &[Vertex],
+        is_ext: &[bool],
         rank_y: &[f64],
         vy: &[f64],
         rank_h: &[f64],
@@ -3123,7 +3155,15 @@ impl OrthoPlan {
                 }
                 cur = bx;
             }
-            if b != w {
+            // (ELK keeps a bend point at every long-edge dummy, not at a
+            // label's, nor at the one beside an external port, which ELK puts
+            // in that layer itself: the straight runs lose them again in
+            // `route`.)
+            let by_port = is_ext.get(a).copied().unwrap_or(false)
+                || stops
+                    .get(k + 2)
+                    .is_some_and(|&(c, _)| c == w && is_ext.get(w).copied().unwrap_or(false));
+            if b != w && !matches!(verts[b].kind, Kind::Dummy { labeled: true }) && !by_port {
                 pts.push(Point::new(cur, vy[b]));
             }
         }
@@ -3170,7 +3210,7 @@ impl OrthoPlan {
                 pts.extend(run);
             }
         }
-        ortho::simplify(&pts)
+        pts
     }
 
     /// The room the channels outside the first and the last layer take.
