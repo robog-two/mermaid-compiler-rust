@@ -2309,14 +2309,12 @@ fn typed_actor(kind: ParticipantKind, t: &TypeCtx) -> (f64, Vec<Element>, Vec<El
             // A zero-length line at the circle's top whose `filled-head-control`
             // marker (refX 11, refY 5.8, `orient="172.5"`, scaled by the line's
             // 2px width) is the arrowhead; it paints in the group's colours with
-            // the marker's `stroke-width: 1.2`.
+            // the marker's `stroke-width: 1.2`. The marker clips to its 20×28
+            // viewport, which cuts off the tip of the miter at (7.2, 0.8).
             let tip = Point::new(cx, cy - r);
-            let (s, c) = 172.5f64.to_radians().sin_cos();
-            let at = |px: f64, py: f64| {
-                let (dx, dy) = (2.0 * (px - 11.0), 2.0 * (py - 5.8));
-                Point::new(tip.x + dx * c - dy * s, tip.y + dx * s + dy * c)
-            };
-            els.push(Element::shape(
+            let at =
+                |px: f64, py: f64| Point::new(tip.x + 2.0 * (px - 11.0), tip.y + 2.0 * (py - 5.8));
+            let head = Element::shape(
                 Geometry::Path(vec![
                     PathCmd::MoveTo(at(14.4, 5.6)),
                     PathCmd::LineTo(at(7.2, 10.4)),
@@ -2325,7 +2323,16 @@ fn typed_actor(kind: ParticipantKind, t: &TypeCtx) -> (f64, Vec<Element>, Vec<El
                     PathCmd::Close,
                 ]),
                 Paint::both(t.bkg, t.border, 2.4),
-            ));
+            );
+            let corner = at(0.0, 0.0);
+            els.push(Element::Rotated {
+                deg: 172.5,
+                about: tip,
+                children: vec![Element::Clipped {
+                    rect: Rect::new(corner.x, corner.y, 40.0, 56.0),
+                    children: vec![head],
+                }],
+            });
             let top = bands
                 .as_ref()
                 .map_or(y + r + if t.footer { 5.0 } else { 12.0 }, |b| {
