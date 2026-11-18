@@ -562,8 +562,8 @@ pub enum IconRef {
     File,
     /// Built-in `mermaid-treeview:folder`.
     Folder,
-    /// Any other iconify reference (`pack:name`). No packs are bundled, so these
-    /// draw mermaid's "unknown icon" placeholder, as mermaid-cli does without packs.
+    /// Any other iconify reference (`pack:name`). One no registered pack has
+    /// draws mermaid's "unknown icon" placeholder.
     External(String),
 }
 

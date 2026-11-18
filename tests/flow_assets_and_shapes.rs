@@ -190,9 +190,10 @@ fn undecodable_images_fail_as_mermaid_does() {
         let err = render::render(&src, &MermaidConfig::default()).expect_err("fails");
         assert_eq!(err.to_string(), "The source image cannot be decoded.");
     }
-    // A remote image sized by `w` and `h` alone needs no decoding here.
+    // mermaid awaits `img.decode()` even for an image `w` and `h` size: a
+    // remote one nobody fetched fails too (the CLI fetches remote images).
     let src = "flowchart LR\n  A@{ img: \"https://example.com/a.png\", w: 60, h: 40 }\n";
-    assert!(render::render(src, &MermaidConfig::default()).is_ok());
+    assert!(render::render(src, &MermaidConfig::default()).is_err());
 }
 
 #[test]

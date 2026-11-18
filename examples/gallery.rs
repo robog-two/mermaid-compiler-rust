@@ -34,6 +34,7 @@ fn main() {
     // plan, so its today line shows (`mmdc` reads the clock or SOURCE_DATE_EPOCH).
     let env = render::RenderEnv {
         now_ms: Some(GALLERY_NOW_MS),
+        ..Default::default()
     };
     let enc = EncodeOptions {
         scale: 1.5,

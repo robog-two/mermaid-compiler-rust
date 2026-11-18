@@ -380,3 +380,102 @@ fn gantt_today_line_reads_source_date_epoch_or_the_clock() {
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("SOURCE_DATE_EPOCH"));
 }
+
+#[test]
+fn icon_packs_load_from_files_urls_and_node_modules() {
+    let d = scratch();
+    let pack = |prefix: &str| {
+        format!(
+            r#"{{"prefix": "{prefix}", "width": 24, "height": 24, "icons": {{"dot": {{"body": "<circle cx=\"12\" cy=\"12\" r=\"6\" fill=\"currentColor\"/>"}}}}}}"#
+        )
+    };
+    std::fs::write(d.join("own.json"), pack("own")).unwrap();
+    let pkg = d.join("node_modules/@icons/set");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("icons.json"), pack("npm")).unwrap();
+    std::fs::write(
+        d.join("in.mmd"),
+        "flowchart LR\n  A@{ icon: \"a:dot\" } --> B@{ icon: \"b:dot\" } --> C@{ icon: \"npm:dot\" } --> D@{ icon: \"gone:dot\" }\n",
+    )
+    .unwrap();
+    let url = format!("a#file://{}", d.join("own.json").display());
+    let out = mmdc(
+        &d,
+        &[
+            "-i",
+            "in.mmd",
+            "-o",
+            "o.svg",
+            "--iconPacks",
+            "@icons/set",
+            "--iconPacksNamesAndUrls",
+            &url,
+            "b#own.json",
+            "gone#missing.json",
+        ],
+        None,
+    );
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    // A pack that cannot be read warns; its icons are unknown (a `?`).
+    assert!(text(&out.stderr).contains("Failed to fetch icon: gone"));
+    let svg = text(&std::fs::read(d.join("o.svg")).unwrap());
+    assert_eq!(
+        svg.matches("<circle cx=\"12\" cy=\"12\" r=\"6\"").count(),
+        3
+    );
+    assert_eq!(svg.matches(">?</text>").count(), 1);
+
+    // mmdc rejects a package it cannot find (here: not installed, and not on
+    // a CDN either), or one without a `prefix`.
+    let out = mmdc(
+        &d,
+        &[
+            "-i",
+            "in.mmd",
+            "-o",
+            "x.svg",
+            "--iconPacks",
+            "@mmdc-test/no-such-pack-0",
+        ],
+        None,
+    );
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr)
+            .contains("Could not find icon pack \"@mmdc-test/no-such-pack-0/icons.json\"")
+    );
+    let bad = d.join("node_modules/bad");
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::write(bad.join("icons.json"), r#"{"icons": {}}"#).unwrap();
+    let out = mmdc(
+        &d,
+        &["-i", "in.mmd", "-o", "x.svg", "--iconPacks", "bad"],
+        None,
+    );
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("Missing or invalid \"prefix\" property."));
+}
+
+#[test]
+fn local_images_are_read_like_remote_ones() {
+    let d = scratch();
+    // A 1 × 1 GIF.
+    let gif: &[u8] = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\x00\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
+    std::fs::write(d.join("dot.gif"), gif).unwrap();
+    let src = format!(
+        "flowchart LR\n  A@{{ img: \"file://{}\", w: 30, h: 20 }}\n",
+        d.join("dot.gif").display()
+    );
+    std::fs::write(d.join("in.mmd"), src).unwrap();
+    let out = mmdc(&d, &["-i", "in.mmd", "-o", "o.svg"], None);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(text(&std::fs::read(d.join("o.svg")).unwrap()).contains("href=\"file://"));
+    std::fs::write(
+        d.join("in2.mmd"),
+        "flowchart LR\n  A@{ img: \"file:///nonexistent/x.png\", w: 30, h: 20 }\n",
+    )
+    .unwrap();
+    let out = mmdc(&d, &["-i", "in2.mmd", "-o", "o2.svg"], None);
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("The source image cannot be decoded."));
+}

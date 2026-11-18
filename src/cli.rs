@@ -568,8 +568,8 @@ Options:
   --pdf-paper-format <format>                     If set, output a PDF with the given paper size, instead of fitting the diagram. (choices: {papers})
   -q, --quiet                                     Suppress log output
   -p --puppeteerConfigFile <puppeteerConfigFile>  JSON configuration file for puppeteer. (accepted for compatibility; no browser is used)
-  --iconPacks <icon-packages...>                  Installed icon packs to use, e.g. @iconify-json/logos. (accepted for compatibility; icons are not rendered)
-  --iconPacksNamesAndUrls <prefix#iconsurl...>    Icon packs to use, e.g. azure#file:///tmp/icons.json. (accepted for compatibility; icons are not rendered)
+  --iconPacks <icon-packages...>                  Installed icon packs to use, e.g. @iconify-json/logos (an Iconify package's icons.json; from unpkg.com via curl when not installed)
+  --iconPacksNamesAndUrls <prefix#iconsurl...>    Icon packs to use, e.g. azure#file:///tmp/icons.json (a file, or an http(s) URL fetched with curl)
   -h, --help                                      display help for command
 "#
     )

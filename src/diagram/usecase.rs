@@ -3516,7 +3516,7 @@ fn draw_node(
                     "usecase-actor-awesome-silhouette",
                 )),
                 ActorType::Icon => {
-                    // Icon packs are not bundled: draw mermaid's unknown-icon fallback.
+                    // An icon no registered pack has: mermaid's unknown-icon fallback.
                     // Both rects are `.node rect`s, which neo strokes in the node
                     // border and gives the drop shadow.
                     let mut frame_paint = paint.clone();

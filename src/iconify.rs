@@ -385,9 +385,9 @@ fn wrap_content(body: &str, start: &str, end: &str) -> String {
     // splitSVGDefs (its `index` is computed once, as in @iconify/utils).
     let mut defs = String::new();
     let mut content = body.to_string();
-    let index = content.find("<defs");
-    if let Some(index) = index {
-        loop {
+    if let Some(index) = content.find("<defs") {
+        // (Bounded: a `</defs` before the `<defs` would loop for ever.)
+        for _ in 0..64 {
             let Some(s) = content
                 .get(index..)
                 .and_then(|c| c.find('>'))
@@ -401,7 +401,7 @@ fn wrap_content(body: &str, start: &str, end: &str) -> String {
             let Some(ee) = content[e..].find('>').map(|i| i + e) else {
                 break;
             };
-            if s + 1 <= e {
+            if s < e {
                 defs.push_str(content[s + 1..e].trim());
             }
             content = format!("{}{}", content[..index].trim(), &content[ee + 1..]);
@@ -484,6 +484,9 @@ enum Node {
     Text(String),
 }
 
+/// An element being parsed: its tag, attributes and children so far.
+type Open = (String, Vec<(String, String)>, Vec<Node>);
+
 /// Elements DOMPurify removes (with their content) from an icon.
 fn forbidden(tag: &str) -> bool {
     matches!(
@@ -540,8 +543,7 @@ fn decode_entities(s: &str) -> String {
 /// processing instructions and doctypes are skipped.
 fn parse(body: &str) -> Vec<Node> {
     // Stack of open elements: (tag, attrs, children).
-    let mut stack: Vec<(String, Vec<(String, String)>, Vec<Node>)> =
-        vec![(String::new(), Vec::new(), Vec::new())];
+    let mut stack: Vec<Open> = vec![(String::new(), Vec::new(), Vec::new())];
     let mut rest = body;
     while !rest.is_empty() {
         let Some(lt) = rest.find('<') else {
@@ -651,7 +653,7 @@ fn parse(body: &str) -> Vec<Node> {
     stack.pop().map(|(_, _, c)| c).unwrap_or_default()
 }
 
-fn push_text(stack: &mut [(String, Vec<(String, String)>, Vec<Node>)], t: &str) {
+fn push_text(stack: &mut [Open], t: &str) {
     if t.is_empty() {
         return;
     }
@@ -660,7 +662,7 @@ fn push_text(stack: &mut [(String, Vec<(String, String)>, Vec<Node>)], t: &str) 
     }
 }
 
-fn close(stack: &mut Vec<(String, Vec<(String, String)>, Vec<Node>)>) {
+fn close(stack: &mut Vec<Open>) {
     if let Some((tag, attrs, children)) = stack.pop() {
         if forbidden(&tag) {
             return;
@@ -1064,10 +1066,7 @@ fn arc(p0: Point, rx: f64, ry: f64, phi: f64, large: bool, sweep: bool, p: Point
     let cy1 = -k * ry * x1 / rx;
     let cx = c * cx1 - s * cy1 + (p0.x + p.x) / 2.0;
     let cy = s * cx1 + c * cy1 + (p0.y + p.y) / 2.0;
-    let angle = |ux: f64, uy: f64, vx: f64, vy: f64| {
-        let a = (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
-        a
-    };
+    let angle = |ux: f64, uy: f64, vx: f64, vy: f64| (ux * vy - uy * vx).atan2(ux * vx + uy * vy);
     let t1 = angle(1.0, 0.0, (x1 - cx1) / rx, (y1 - cy1) / ry);
     let mut dt = angle(
         (x1 - cx1) / rx,

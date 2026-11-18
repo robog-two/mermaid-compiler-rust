@@ -698,7 +698,8 @@ fn arrow(end: Point, dir: Point, color: &Color, icon: f64, bounds: &mut Bounds) 
 /// The icon drawn on a service's (or group's) blue square: mermaid's own SVG
 /// for a built-in name (`database`, `server`, `disk`, `internet`, `cloud`, also
 /// as `mermaid-architecture:<name>`), nothing for `blank`, and `unknownIcon`'s
-/// `?` for any other name (an icon pack mmdc was not given).
+/// `?` for any other name that no registered pack has ([`pack_icon`] draws
+/// the ones a pack has).
 fn icon_glyph(icon: Option<&str>, r: Rect) -> Vec<Element> {
     let Some(icon) = icon else {
         return Vec::new();

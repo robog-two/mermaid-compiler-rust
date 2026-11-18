@@ -2,14 +2,15 @@
 //! `@{ shape: anchor }`): mermaid's icon.ts, iconSquare.ts, iconRounded.ts,
 //! iconCircle.ts, imageSquare.ts and anchor.ts.
 //!
-//! mmdc registers no icon packs unless asked (`--iconPacks`, which fetches
-//! them), so every `icon:` resolves to mermaid's `unknownIcon`: a blue
-//! square with a white `?`, drawn here at the icon's size. An image's
-//! natural size, which sizes the node unless `w`, `h` and no `constraint`
-//! leave it unused, is read from its `data:` URI (PNG, GIF, JPEG, WebP, or
-//! an SVG with a width and height); mermaid's `img.decode()` rejects
-//! anything it cannot decode, and with no network a remote URL too, so
-//! those fail as mmdc does there.
+//! An `icon:` a registered pack has ([`crate::iconify`]) is drawn from it,
+//! its drawn content centred on the icon's square; any other resolves to
+//! mermaid's `unknownIcon`: a blue square with a white `?`, drawn here at
+//! the icon's size. An image's natural size, which sizes the node unless
+//! `w`, `h` and no `constraint` leave it unused, is read from its `data:`
+//! URI, or a remote image's fetched bytes (PNG, GIF, JPEG, WebP, or an SVG
+//! with a width and height); mermaid's `img.decode()` rejects anything it
+//! cannot decode, and a remote image nobody could fetch, so those fail as
+//! mmdc does.
 
 use crate::geom::{Point, Rect};
 use crate::scene::{Color, Element};
