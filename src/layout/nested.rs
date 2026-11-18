@@ -952,7 +952,13 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
     // Per edge: its route as ELK's section has it (see `ElkFrame::routes`).
     let mut raw_routes: Vec<Vec<Point>> = vec![Vec::new(); input.edges.len()];
     let mut clusters = vec![Rect::default(); nc];
-    let mut stack: Vec<(Option<usize>, Point)> = vec![(None, Point::new(0.0, 0.0))];
+    // ELK moves the root graph's content (its nodes with their margins, so a
+    // container's loops too) to start at the graph's padding.
+    let root_off = match levels[slot(None)].as_ref() {
+        Some(l) if elk => Point::new(-l.bbox.x.min(0.0), -l.bbox.y.min(0.0)),
+        _ => Point::new(0.0, 0.0),
+    };
+    let mut stack: Vec<(Option<usize>, Point)> = vec![(None, root_off)];
     while let Some((scope, off)) = stack.pop() {
         let Some(level) = levels[slot(scope)].take() else {
             continue;
@@ -1115,7 +1121,8 @@ fn layout_tree(input: &LayoutInput) -> LayoutOutput {
                 label = r.label;
             }
         }
-        legs[ei] = super::legs_of(&points);
+        // (ELK's sections keep a point for every dummy a straight run passes.)
+        legs[ei] = super::legs_of(if raw.is_empty() { &points } else { &raw });
         joints[ei] = joined(&raw, crossed.iter().map(|&c| clusters[c]));
         routes[ei] = Some(EdgeRoute {
             points: super::ortho::simplify(&points),

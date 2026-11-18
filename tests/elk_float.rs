@@ -129,11 +129,20 @@ fn port_an_ulp_inside_its_node_is_cut_further_on() {
   g1n0 === g4n1
   g0n2 --x|longer edge label text| g4n1
 ";
-    let pts = edge_points(&svg(src), "g4n0", "g0n0");
+    let svg = svg(src);
+    let pts = edge_points(&svg, "g4n0", "g0n0");
     let last = pts[pts.len() - 1];
     // mermaid 12.3.0 with mmdc's fonts (the labels in Recursive Variable)
     // ends the edge at (1222.8503953567624, 85.39776887418328).
     assert!(near(last, 1222.850, 85.398), "{pts:?}");
+    // g0n0 → g3n0 ends at g3n0's east side, 550.3645833333333, an ulp inside
+    // the side mermaid sums (398.3645833333333 + 76): `cutter2` attaches
+    // along the last run, through ELK's dummies at 989.32 and 731.55, and the
+    // edge stays level at 34.667 (4 short for the arrow).
+    let pts = edge_points(&svg, "g0n0", "g3n0");
+    let n = pts.len();
+    assert!(near(pts[n - 1], 554.365, 34.667), "{pts:?}");
+    assert!((pts[n - 2].1 - 34.667).abs() < 0.01, "{pts:?}");
 }
 
 /// A cylinder's east side as ELK and mermaid sum it, in a container in a

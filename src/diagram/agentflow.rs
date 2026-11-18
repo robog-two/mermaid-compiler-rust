@@ -1640,6 +1640,7 @@ pub fn to_graph(af: &Agentflow, opts: &ConvertOptions) -> GraphDiagram {
             || meta_get(&e.metadata, "animation").is_some_and(|v| !v.is_empty())
         {
             g.style.dash = Some(super::flowchart::ANIMATED_DASH.to_vec());
+            g.animated = true;
         }
         edges.push(g);
     }

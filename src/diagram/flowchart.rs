@@ -580,6 +580,7 @@ impl Builder {
         for &i in &self.animated_edges {
             if let Some(e) = self.edges.get_mut(i) {
                 e.style.dash = Some(ANIMATED_DASH.to_vec());
+                e.animated = true;
             }
         }
         // Subgraph ids used as plain nodes would otherwise render as stray boxes.

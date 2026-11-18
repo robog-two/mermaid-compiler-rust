@@ -376,7 +376,12 @@ pub fn size(
         // stateEnd.ts: `updateNodeBounds` measures its rough.js circle, whose
         // curves bulge a hair past the 14px circle on the right
         // (`getBBox()` -7, -7, 14.013293266296387 × 14).
-        Shape::StateEnd => at(STATE_END_BOX_W, 14.0),
+        // The box's centre stays the drawing's origin, the ink reaching
+        // [-7, 7.0133].
+        Shape::StateEnd => ShapeSize {
+            ink_offset: Point::new((STATE_END_BOX_W - 14.0) / 2.0, 0.0),
+            ..at(STATE_END_BOX_W, 14.0)
+        },
         // forkJoin.ts: 70×10, rotated for LR/RL.
         Shape::ForkBar if horizontal => at(10.0, 70.0),
         Shape::ForkBar => at(70.0, 10.0),

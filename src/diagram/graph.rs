@@ -432,6 +432,9 @@ pub struct Edge {
     /// Text drawn near the start / end (class diagram cardinalities).
     pub start_label: Option<String>,
     pub end_label: Option<String>,
+    /// Animated (`animate` / `animation` metadata, or an animating class):
+    /// `insertEdge` draws it without the neo look's `*-margin` markers.
+    pub animated: bool,
 }
 
 impl Edge {
@@ -447,6 +450,7 @@ impl Edge {
             style: StyleOverrides::default(),
             start_label: None,
             end_label: None,
+            animated: false,
         }
     }
 }
@@ -2742,9 +2746,12 @@ pub fn render_with(
         let neo = cfg.look == ConfigLook::Neo;
         let trim = |h: Head| markers::pullback_for(h, neo);
         let (start_trim, end_trim) = (trim(e.start), trim(e.end));
+        // `useMargin = !animatedEdge && look === "neo"`; an animated edge also
+        // keeps its whole line (no `markerOffsets2` dash pattern).
+        let margin = neo && !e.animated;
         let hidden = (
-            markers::hidden_end(e.start, neo),
-            markers::hidden_end(e.end, neo),
+            markers::hidden_end(e.start, margin),
+            markers::hidden_end(e.end, margin),
         );
         if elk {
             hop_edges.push((
@@ -2829,7 +2836,7 @@ pub fn render_with(
             end_dir,
             colors,
             width,
-            neo,
+            margin,
         ));
         let end_heads = heads.len();
         if !degenerate {
@@ -2840,7 +2847,7 @@ pub fn render_with(
                 start_dir,
                 colors,
                 width,
-                neo,
+                margin,
             ));
         }
         let (end_back, start_back) = (end_trim, start_trim);
