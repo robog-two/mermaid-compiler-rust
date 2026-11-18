@@ -511,6 +511,7 @@ fn casts_shadow(kind: DiagramKind, shape: Shape) -> bool {
         (_, Shape::Invisible | Shape::ForkBar)
             | (DiagramKind::State, Shape::Choice)
             | (DiagramKind::Flowchart, Shape::StateStart)
+            | (DiagramKind::Class, Shape::Rect)
     )
 }
 
@@ -1086,6 +1087,8 @@ fn measure_node(
     let node_pad = match (node.shape, kind) {
         (Shape::Note, DiagramKind::Class) => 6.0,
         (Shape::Note, DiagramKind::State) => 15.0,
+        // A lollipop's `interfaceN` node sets no `padding` (squareRect: 0 unless neo).
+        (Shape::Rect, DiagramKind::Class) => 0.0,
         _ => pad,
     };
     let metrics = ShapeMetrics::for_look(node.shape, node_pad, look).with_label(tw, th);
@@ -4885,6 +4888,10 @@ fn node_elements(
         n.style.stroke_width.unwrap_or(default_width),
     );
     paint.dash = n.style.dash.clone();
+    if (kind, n.shape) == (DiagramKind::Class, Shape::Rect) {
+        // classDb's `interfaceN` node: `cssStyles: ['opacity: 0;']`, only its label shows.
+        paint.opacity = Some(0.0);
+    }
     let text_color = n
         .style
         .color
