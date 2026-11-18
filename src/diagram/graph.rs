@@ -5522,7 +5522,13 @@ fn node_elements(
         .filter(|_| m.hand.is_some() && m.nominal.is_none())
         .and_then(|seed| hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)));
     let boundary = if let Some(hn) = hand {
-        els.extend(hand_elements(&hn, c, n.style.dash.as_ref()));
+        let mut drawn = hand_elements(&hn, c, n.style.dash.as_ref());
+        if let Some(o) = paint.opacity {
+            // classDb's `interfaceN` node: `cssStyles: ['opacity: 0;']` on
+            // the rough.js group too.
+            drawn.iter_mut().for_each(|e| set_opacity(e, o));
+        }
+        els.extend(drawn);
         hn.boundary(n.shape, &m.metrics, c, w, h)
     } else if let Some(o) = shapes::outline(
         n.shape,
@@ -6144,6 +6150,15 @@ fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
     if let Some(hn) = hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)) {
         (m.w, m.h) = (hn.bbox.w, hn.bbox.h);
         m.hand = Some(hn.drawn_bbox());
+    }
+}
+
+/// `opacity` on every shape in `e`.
+fn set_opacity(e: &mut Element, o: f64) {
+    match e {
+        Element::Group { children, .. } => children.iter_mut().for_each(|c| set_opacity(c, o)),
+        Element::Shape { paint, .. } => paint.opacity = Some(o),
+        _ => {}
     }
 }
 

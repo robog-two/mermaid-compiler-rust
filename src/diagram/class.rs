@@ -1174,4 +1174,34 @@ mod tests {
         // mermaid: C0 at 55.953125 (in its namespace), C1 at 63.953125.
         assert!((centre("classId-C1-").x - centre("classId-C0-").x - 8.0).abs() < 1e-6);
     }
+
+    /// mermaid 12.3.0 under `look: handDrawn`: an `interfaceN` node is a rough
+    /// rectangle in a group styled `opacity: 0`, as invisible as the classic
+    /// look's rect (only Bar's box and dividers and the two edges show).
+    #[test]
+    fn hand_drawn_interface_nodes_stay_invisible() {
+        use crate::scene::{Element, Geometry};
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 3\n---\nclassDiagram\n  \
+                   Foo ()-- Bar\n  Bar --() Baz";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .expect("renders")
+            .scene;
+        fn walk(els: &[Element], out: &mut Vec<Option<f64>>) {
+            for el in els {
+                match el {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Path(_),
+                        paint,
+                        ..
+                    } => out.push(paint.opacity),
+                    _ => {}
+                }
+            }
+        }
+        let mut opacities = Vec::new();
+        walk(&scene.elements, &mut opacities);
+        let hidden = opacities.iter().filter(|o| **o == Some(0.0)).count();
+        assert_eq!((opacities.len() - hidden, hidden), (6, 4), "{opacities:?}");
+    }
 }
