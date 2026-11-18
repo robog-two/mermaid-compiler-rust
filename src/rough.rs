@@ -91,7 +91,7 @@ pub struct Options {
     /// `fill`: `None` when unset (any string, `"none"` included, is truthy).
     pub fill: Option<String>,
     pub simplification: Option<f64>,
-    randomizer: RefCell<Option<Stream>>,
+    pub(crate) randomizer: RefCell<Option<Stream>>,
 }
 
 impl Default for Options {

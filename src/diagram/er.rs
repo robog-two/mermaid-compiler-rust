@@ -249,6 +249,7 @@ fn graph_config(cfg: &MermaidConfig) -> GraphConfig {
         line_hops: cfg.elk_line_hops(),
         html_labels: true,
         html_edge_labels: true,
+        hand_drawn_seed: cfg.hand_drawn_seed(),
     }
 }
 

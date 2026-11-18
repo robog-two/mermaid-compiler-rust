@@ -15,6 +15,7 @@ pub mod flowchart;
 pub mod gantt;
 pub mod gitgraph;
 pub mod graph;
+pub mod hand;
 pub mod info;
 pub mod ishikawa;
 pub mod journey;

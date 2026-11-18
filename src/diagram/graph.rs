@@ -2,6 +2,7 @@
 //! pure renderer `GraphDiagram -> Scene` (layout → shapes → edges → labels).
 
 use super::elkedges;
+use super::hand;
 use super::markers::{self, End, MarkerColors};
 use super::shapes::{self, Boundary, PartStyle, ShapeMetrics};
 use crate::config::{Curve, GraphConfig, LayoutAlgorithm, Look as ConfigLook};
@@ -427,6 +428,8 @@ struct Look {
     rounded_rx: f64,
     /// Whether the diagram is drawn in the neo look.
     neo: bool,
+    /// The rough.js seed under the handDrawn look (`None` in the other looks).
+    hand_seed: Option<f64>,
 }
 
 fn look(kind: DiagramKind) -> Look {
@@ -448,6 +451,7 @@ fn look(kind: DiagramKind) -> Look {
         node_stroke_width: 1.0,
         rounded_rx: 5.0,
         neo: false,
+        hand_seed: None,
     }
 }
 
@@ -886,6 +890,9 @@ struct Measured {
     metrics: ShapeMetrics,
     w: f64,
     h: f64,
+    /// Under the handDrawn look, the drawn node's `getBBox()` in its own frame
+    /// (`w`×`h` is then its size).
+    hand: Option<Rect>,
 }
 
 fn compartment_layout(
@@ -1160,6 +1167,7 @@ fn measure_node(
         metrics,
         w,
         h,
+        hand: None,
     }
 }
 
@@ -1303,7 +1311,8 @@ pub fn render_with(
     opts: &RenderOptions,
 ) -> Scene {
     let g = &*with_icons(g, cfg);
-    let lk = themed_look(look(g.kind), g.kind, cfg.look, pal);
+    let mut lk = themed_look(look(g.kind), g.kind, cfg.look, pal);
+    lk.hand_seed = (cfg.look == ConfigLook::HandDrawn).then_some(cfg.hand_drawn_seed);
     let shadow = pal
         .drop_shadow
         .as_ref()
@@ -1391,6 +1400,9 @@ pub fn render_with(
             )
         })
         .collect();
+    for (n, m) in nodes.iter().zip(measured.iter_mut()) {
+        measure_hand(n, m, pal, &lk);
+    }
     for (ci, p) in empty_of.iter().enumerate() {
         if let Some(p) = *p {
             if dagre_leaf {
@@ -1858,8 +1870,13 @@ pub fn render_with(
         if lk.neo && !(g.kind == DiagramKind::Class && n.shape == Shape::Note) {
             neo_node_css(&mut els, pal, &n.style, drawn_as_paths(g.kind, n.shape));
         }
-        cylinder_frame(&mut els, shapes::arc_frame(n.shape, c, m.w, m.h));
-        bounds.add_rect(Rect::centered(c, m.w, m.h));
+        if let Some(b) = m.hand {
+            // The drawing's bbox holds the rough strokes where they fell.
+            bounds.add_rect(Rect::new(b.x + c.x, b.y + c.y, b.w, b.h));
+        } else {
+            cylinder_frame(&mut els, shapes::arc_frame(n.shape, c, m.w, m.h));
+            bounds.add_rect(Rect::centered(c, m.w, m.h));
+        }
         boundaries.push(boundary);
         if n.shape != Shape::Invisible {
             let class = std::iter::once("node".to_string())
@@ -4916,7 +4933,14 @@ fn node_elements(
         });
 
     let mut els = Vec::new();
-    let boundary = if let Some(o) = shapes::outline(
+    let hand = lk
+        .hand_seed
+        .filter(|_| m.hand.is_some())
+        .and_then(|seed| hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)));
+    let boundary = if let Some(hn) = hand {
+        els.extend(hand_elements(&hn, c, n.style.dash.as_ref()));
+        hn.boundary(n.shape, &m.metrics, c, w, h)
+    } else if let Some(o) = shapes::outline(
         n.shape,
         c,
         w,
@@ -5316,6 +5340,72 @@ fn node_elements(
         els.push(shifted_lines(t, &m.block.shifts, "nodeLabel"));
     }
     (els, boundary)
+}
+
+/// `userNodeOverrides`' inputs for node `n`: its `fill`, `stroke` and
+/// `stroke-width` styles, else the theme's `mainBkg`, `nodeBorder` and 1.3.
+fn hand_style(n: &Node, pal: &Palette, lk: &Look, seed: f64) -> hand::HandStyle {
+    hand::HandStyle {
+        fill: n.style.fill.as_ref().unwrap_or(&pal.main_bkg).css().to_string(),
+        stroke: n
+            .style
+            .stroke
+            .as_ref()
+            .unwrap_or(&pal.node_border)
+            .css()
+            .to_string(),
+        stroke_width: n.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH),
+        seed,
+        radius: lk.rounded_rx,
+    }
+}
+
+/// Under the handDrawn look, size node `n` by its drawing's box, as
+/// `updateNodeBounds` does.
+fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
+    let Some(seed) = lk.hand_seed else {
+        return;
+    };
+    if let Some(hn) = hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)) {
+        m.w = hn.bbox.w;
+        m.h = hn.bbox.h;
+        m.hand = Some(hn.bbox);
+    }
+}
+
+/// A hand-drawn node's paths centred on `c`, painted as rough.js's SVG
+/// renderer paints them: hachure lines stroked in the fill colour at the fill
+/// weight, outlines stroked in the stroke colour, solid fills filled.
+fn hand_elements(hn: &hand::HandNode, c: Point, dash: Option<&Vec<f64>>) -> Vec<Element> {
+    let mut out = Vec::new();
+    for pc in &hn.pieces {
+        let o = &pc.drawable.options;
+        let at = c.plus(pc.at);
+        let mut kids = Vec::new();
+        for set in &pc.drawable.sets {
+            if set.ops.is_empty() {
+                continue;
+            }
+            let fill = Color::new(o.fill.clone().unwrap_or_default());
+            let paint = match set.kind {
+                crate::rough::SetKind::Path => {
+                    let mut p = Paint::stroke(&Color::new(o.stroke.clone()), o.stroke_width);
+                    p.dash = dash.cloned();
+                    p
+                }
+                crate::rough::SetKind::FillSketch => {
+                    Paint::stroke(&fill, pc.drawable.fill_weight())
+                }
+                crate::rough::SetKind::FillPath => Paint::fill(&fill),
+            };
+            kids.push(Element::shape(
+                Geometry::Path(hand::set_cmds(&set.ops, at)),
+                paint,
+            ));
+        }
+        out.push(Element::group("basic label-container", kids));
+    }
+    out
 }
 
 /// `t` as one text element, or, where a line is drawn off centre (`shifts`,

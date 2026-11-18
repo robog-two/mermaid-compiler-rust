@@ -224,6 +224,11 @@ pub struct GraphConfig {
     /// the top-level `htmlLabels`, else the deprecated `flowchart.htmlLabels` (copied
     /// in by [`MermaidConfig::scoped`]).
     pub html_edge_labels: bool,
+    /// `handDrawnSeed` for rough.js under `look: handDrawn` (copied in by
+    /// [`MermaidConfig::scoped`]). mermaid's default 0 makes rough.js draw from
+    /// `Math.random()`, a different drawing on every run; here 0 stands for
+    /// [`crate::rough::FALLBACK_SEED`] so the output is deterministic.
+    pub hand_drawn_seed: f64,
 }
 
 impl GraphConfig {
@@ -243,6 +248,7 @@ impl GraphConfig {
             line_hops: crate::linejump::LineHops::Arc,
             html_labels: true,
             html_edge_labels: true,
+            hand_drawn_seed: f64::from(crate::rough::FALLBACK_SEED),
         }
     }
     fn state() -> Self {
@@ -496,11 +502,23 @@ impl MermaidConfig {
         self.state.line_hops = hops;
         self.class.line_hops = hops;
         let (html, html_edges) = (self.html_labels(), self.effective_html_labels());
+        let seed = self.hand_drawn_seed();
         for g in [&mut self.flowchart, &mut self.state, &mut self.class] {
             g.html_labels = html;
             g.html_edge_labels = html_edges;
+            g.hand_drawn_seed = seed;
         }
         self
+    }
+
+    /// The top-level `handDrawnSeed` (default 0) with a zero seed replaced by
+    /// [`crate::rough::FALLBACK_SEED`]: rough.js draws a zero seed from
+    /// `Math.random()`, which no fixed output can match.
+    pub fn hand_drawn_seed(&self) -> f64 {
+        match self.top_value("handDrawnSeed").and_then(Json::as_f64) {
+            Some(s) if s != 0.0 && s.is_finite() => s,
+            _ => f64::from(crate::rough::FALLBACK_SEED),
+        }
     }
 
     /// Latest value of the top-level `key` across all layers, `null` included.
