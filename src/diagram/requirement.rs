@@ -543,11 +543,13 @@ pub fn to_graph(d: &RequirementDiagram) -> GraphDiagram {
                     lines: vec![stereo],
                     centered: true,
                     bold: false,
+                    classifiers: Vec::new(),
                 },
                 Section {
                     lines: fields,
                     centered: true,
                     bold: false,
+                    classifiers: Vec::new(),
                 },
             ];
             n
