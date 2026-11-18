@@ -105,7 +105,8 @@ impl ShapeMetrics {
         }
     }
 
-    /// The metrics for `look` (`HandDrawn` sizes like `Classic`).
+    /// The metrics for `look` (`HandDrawn` pads like `Classic`; its nodes then
+    /// take the size of their rough drawing, see `diagram::hand`).
     pub fn for_look(shape: Shape, p: f64, look: Look) -> Self {
         match look {
             Look::Neo => Self::neo(shape, p),

@@ -1,0 +1,15 @@
+---
+config:
+  look: handDrawn
+  handDrawnSeed: 42
+---
+flowchart LR
+  idea([Idea]) --> sketch[Sketch it]
+  sketch --> review{Looks right?}
+  review -->|yes| ship((Ship))
+  review -->|no| sketch
+  subgraph notes [Whiteboard]
+    direction TB
+    a[(Notes)] --> b[[Plan]]
+  end
+  ship --> notes

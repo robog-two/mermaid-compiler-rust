@@ -51,7 +51,9 @@ impl LayoutAlgorithm {
     }
 }
 
-/// mermaid's `look`.`HandDrawn` is accepted but drawn like `Classic` (no rough.js).
+/// mermaid's `look`. `HandDrawn` draws the graph diagrams (flowchart, state,
+/// class) with the rough.js port in [`crate::rough`]; elsewhere it draws like
+/// `Classic`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Look {
     #[default]
