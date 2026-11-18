@@ -1813,4 +1813,40 @@ mod tests {
             )
         );
     }
+
+    /// Every path's data in drawing order.
+    fn all_paths(els: &[Element], out: &mut Vec<String>) {
+        for el in els {
+            match el {
+                Element::Group { children, .. } => all_paths(children, out),
+                Element::Shape {
+                    geom: Geometry::Path(cmds),
+                    ..
+                } => out.push(crate::output::svg::path_data(cmds)),
+                _ => {}
+            }
+        }
+    }
+
+    /// mermaid 12.3.0 under `look: handDrawn` (seed 23, dark): erBox draws a
+    /// classic copy of the entity first, then a rough box, rows and dividers,
+    /// and the layout takes the whole drawing's box (CAR at
+    /// (153.921, 120.777), its fill sketch from (-139.996, -107.122), its
+    /// outline from (-140.363, -107.857)).
+    #[test]
+    fn hand_drawn_entities_match_mermaid() {
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 23\n  theme: dark\n---\n\
+                   erDiagram\n  CAR ||--o{ NAMED-DRIVER : allows\n  CAR {\n    string \
+                   registrationNumber PK\n    string make\n    string model\n    string[] parts\n  \
+                   }\n  PERSON ||--o{ NAMED-DRIVER : is\n  PERSON {\n    string driversLicense PK \
+                   \"The license #\"\n    string(99) firstName \"Only 99 characters\"\n    int age\n  }";
+        let scene = crate::render::render(src, &MermaidConfig::default())
+            .expect("renders")
+            .scene;
+        let mut paths = Vec::new();
+        all_paths(&scene.elements, &mut paths);
+        for start in ["M13.925,13.655C", "M13.558,12.921C"] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
+    }
 }

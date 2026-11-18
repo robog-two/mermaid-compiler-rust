@@ -338,6 +338,129 @@ pub fn class_box(w: f64, h: f64, dividers: &[f64], st: &HandStyle) -> HandNode {
     }
 }
 
+/// An entity's attribute table for [`er_box`]: `header` is the name row's
+/// height (`nameBBox.height`), `rows` the attribute rows' heights, and `cols`
+/// the type, name, keys and comment column widths (a zero keys or comment
+/// width: the column is absent).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ErTable {
+    pub header: f64,
+    pub rows: Vec<f64>,
+    pub cols: [f64; 4],
+    /// `rowOdd` / `rowEven` (the rows' fills, `None` for none).
+    pub row_odd: Option<String>,
+    pub row_even: Option<String>,
+    /// `themeVariables.nodeBorder` (the rows' outlines).
+    pub row_stroke: String,
+}
+
+/// erBox.ts under the handDrawn look: the `w`×`h` box centred on the origin as
+/// a rough rectangle with the node's options, then (with a `table`) one rough
+/// rectangle per attribute row, then the dividers as rough polygons 0.0001
+/// thick. Returns the node and how many of its pieces come before the labels
+/// (the box and the rows; the dividers follow the labels). The box alone is
+/// measured.
+pub fn er_box(w: f64, h: f64, table: Option<&ErTable>, st: &HandStyle) -> (HandNode, usize) {
+    let (x, y) = (-w / 2.0, -h / 2.0);
+    let rect = rough::rectangle(x, y, w, h, node_options(st));
+    let bbox = drawable_bbox(&rect).unwrap_or(Rect::new(x, y, w, h));
+    let mut pieces = vec![piece(rect, Point::default())];
+    let unmeasured = |drawable| Piece {
+        drawable,
+        at: Point::default(),
+        measured: false,
+    };
+    let Some(t) = table else {
+        let hn = HandNode {
+            pieces,
+            bbox,
+            boundary: Bound::Rect,
+        };
+        return (hn, 1);
+    };
+    let mut y_off = 0.0;
+    for (i, rh) in t.rows.iter().enumerate() {
+        let even = (i + 1) % 2 == 0 && y_off != 0.0;
+        let o = Options {
+            fill: if even {
+                t.row_even.clone()
+            } else {
+                t.row_odd.clone()
+            },
+            stroke: t.row_stroke.clone(),
+            ..node_options(st)
+        };
+        let d = rough::rectangle(x, t.header + y + y_off, w, *rh, o);
+        pieces.push(unmeasured(d));
+        y_off += rh;
+    }
+    let body = pieces.len();
+    const THICK: f64 = 0.0001;
+    let across = |yc: f64| {
+        [
+            [x, yc - THICK / 2.0],
+            [x, yc + THICK / 2.0],
+            [w + x, yc + THICK / 2.0],
+            [w + x, yc - THICK / 2.0],
+        ]
+    };
+    let down = |xc: f64| {
+        let (y1, y2) = (t.header + y, h + y);
+        [
+            [xc - THICK / 2.0, y1],
+            [xc + THICK / 2.0, y1],
+            [xc + THICK / 2.0, y2],
+            [xc - THICK / 2.0, y2],
+        ]
+    };
+    let [c0, c1, c2, c3] = t.cols;
+    let mut polys = vec![across(t.header + y), down(c0 + x)];
+    if c2 > 0.0 {
+        polys.push(down(c0 + c1 + x));
+    }
+    if c3 > 0.0 {
+        polys.push(down(c0 + c1 + c2 + x));
+    }
+    // The attribute dividers: the first row's top again (`yOffsets = [0]`).
+    polys.push(across(t.header + y + 0.0));
+    for pts in polys {
+        pieces.push(unmeasured(rough::polygon(&pts, node_options(st))));
+    }
+    let hn = HandNode {
+        pieces,
+        bbox,
+        boundary: Bound::Rect,
+    };
+    (hn, body)
+}
+
+/// The outline erBox's classic copy draws for an attribute row at `y` (from
+/// the centre) `h` high in a `w`-wide box: rough.js at roughness 0, its
+/// sides straight cubics whose control points still follow `seed`.
+pub fn flat_row_outline(w: f64, y: f64, h: f64, seed: f64, at: Point) -> Vec<PathCmd> {
+    let o = Options {
+        roughness: 0.0,
+        fill: None,
+        seed,
+        ..Options::default()
+    };
+    rough::rectangle(-w / 2.0, y, w, h, o)
+        .sets
+        .iter()
+        .filter(|s| s.kind == rough::SetKind::Path)
+        .flat_map(|s| set_cmds(&s.ops, at))
+        .collect()
+}
+
+/// The pieces `range` of `hn` as a node of their own (to draw apart).
+pub fn subset(hn: &HandNode, range: std::ops::Range<usize>) -> HandNode {
+    HandNode {
+        pieces: hn.pieces[range].to_vec(),
+        bbox: hn.bbox,
+        boundary: hn.boundary,
+    }
+}
+
 /// What a cluster's hand-drawn frame depends on besides its rect (its paint
 /// leaves the geometry alone).
 #[derive(Debug, Clone, Copy, PartialEq)]

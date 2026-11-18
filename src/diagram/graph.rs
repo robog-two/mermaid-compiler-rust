@@ -1949,9 +1949,11 @@ pub fn render_with(
     let mut boundaries = Vec::with_capacity(nodes.len());
     for (i, (n, m)) in nodes.iter().zip(&measured).enumerate() {
         let c = out.nodes[i];
-        // (classDiagram's slot rules reach no rough.js path.)
-        let slot = slot_colors(n.color_slot, pal)
-            .filter(|_| !(lk.hand_seed.is_some() && g.kind == DiagramKind::Class));
+        // (classDiagram's slot rules reach no rough.js path; erDiagram's rough
+        // entities are `.rough-node`s, outside its `.node` rules.)
+        let slot = slot_colors(n.color_slot, pal).filter(|_| {
+            !(lk.hand_seed.is_some() && matches!(g.kind, DiagramKind::Class | DiagramKind::Er))
+        });
         let painted;
         let n = if slot.is_some() {
             painted = Node {
@@ -5297,7 +5299,9 @@ fn table_metrics(
         .map(|s| s.lines.len())
         .max()
         .unwrap_or(0);
+    // An HTML label measures in layout units (`getBoundingClientRect`).
     let label = TextBlock::label(&node.label, font);
+    let label = if html { label.html() } else { label };
     let line_h = font * 1.5;
     if node.sections.is_empty() {
         // drawRect with labelPaddingX = PADDING, labelPaddingY = 1.5·PADDING,
@@ -5791,10 +5795,75 @@ fn node_elements(
                             .is_none()
                     }),
                 };
-                return (
-                    entity_table_elements(n, m, r, colors, font),
-                    Boundary::Rect(r),
+                let Some((hn, body)) = lk
+                    .hand_seed
+                    .and_then(|seed| hand_er_box(n, m, pal, lk, seed))
+                else {
+                    return (
+                        entity_table_elements(n, m, r, colors, font),
+                        Boundary::Rect(r),
+                    );
+                };
+                // erBox under the handDrawn look first draws a classic copy of
+                // the entity (`cssStyles: ['stroke: none', 'fill: background']`,
+                // the even rows' fill restyled to it too), then the rough one
+                // over it, labels and all.
+                let redux = matches!(
+                    pal.theme,
+                    ThemeName::Redux
+                        | ThemeName::ReduxDark
+                        | ThemeName::ReduxColor
+                        | ThemeName::ReduxDarkColor
                 );
+                let bg_paint = Paint::fill(&pal.background);
+                let none = Color::none();
+                let bg = TableColors {
+                    paint: &bg_paint,
+                    stroke: &none,
+                    // (no `data-look` on it: no slot rule reaches its rows;
+                    // the redux themes restyle every path's fill)
+                    odd_row: pal
+                        .er_row_odd
+                        .as_ref()
+                        .map(|c| if redux { &pal.background } else { c }),
+                    even_row: pal.er_row_even.as_ref().map(|_| &pal.background),
+                    ..colors
+                };
+                let mut classic = entity_table_elements(n, m, r, bg, font);
+                if redux {
+                    // Each row's outline (the rough.js rectangle's sides, no
+                    // area) filled too.
+                    let t = m.table.as_ref().expect("an entity table");
+                    let seed = lk.hand_seed.unwrap_or_default();
+                    let mut y_off = 0.0;
+                    for _ in &n.sections {
+                        let y = t.header_h + -r.h / 2.0 + y_off;
+                        let cmds = hand::flat_row_outline(r.w, y, t.row_h, seed, c);
+                        classic.push(Element::shape(
+                            Geometry::Path(cmds),
+                            Paint::fill(&pal.background),
+                        ));
+                        y_off += t.row_h;
+                    }
+                }
+                let texts: Vec<Element> = classic
+                    .iter()
+                    .filter(|e| matches!(e, Element::Text { .. }))
+                    .cloned()
+                    .collect();
+                els.extend(classic.into_iter().filter(|e| match e {
+                    Element::Shape { paint, .. } => {
+                        !(paint.fill.is_none() && paint.stroke.is_none())
+                    }
+                    _ => true,
+                }));
+                let dash = n.style.dash.as_ref();
+                let all = hn.pieces.len();
+                els.extend(hand_elements(&hand::subset(&hn, 0..body), c, dash));
+                els.extend(texts);
+                els.extend(hand_elements(&hand::subset(&hn, body..all), c, dash));
+                // `intersect.rect(node)`: the measured box.
+                return (els, Boundary::Rect(Rect::centered(c, m.w, m.h)));
             }
             Shape::Requirement => {
                 let rm = requirement_metrics(n, font);
@@ -6019,6 +6088,35 @@ fn hand_state_box(
     Some(hand::class_box(w, h, &dividers, &st))
 }
 
+/// An entity's hand-drawn box ([`hand::er_box`]) at its nominal size, and
+/// how many of its pieces precede the labels; `None` for other nodes.
+fn hand_er_box(
+    n: &Node,
+    m: &Measured,
+    pal: &Palette,
+    lk: &Look,
+    seed: f64,
+) -> Option<(hand::HandNode, usize)> {
+    if n.shape != Shape::EntityTable {
+        return None;
+    }
+    let t = m.table.as_ref()?;
+    let (w, h) = m.nominal.unwrap_or((m.w, m.h));
+    let st = hand_style(n, pal, lk, seed);
+    let table = (!n.sections.is_empty()).then(|| {
+        let col = |j: usize| t.cols.get(j).copied().unwrap_or(0.0);
+        hand::ErTable {
+            header: t.header_h,
+            rows: vec![t.row_h; n.sections.len()],
+            cols: [col(0), col(1), col(2), col(3)],
+            row_odd: pal.er_row_odd.as_ref().map(|c| c.css().to_string()),
+            row_even: pal.er_row_even.as_ref().map(|c| c.css().to_string()),
+            row_stroke: pal.node_border.css().to_string(),
+        }
+    });
+    Some(hand::er_box(w, h, table.as_ref(), &st))
+}
+
 /// Under the handDrawn look, size node `n` by its drawing's box, as
 /// `updateNodeBounds` does.
 fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
@@ -6030,6 +6128,15 @@ fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
         // A class box reaches the layout at its whole drawing's size, its
         // dividers' strokes included.
         let b = if lk.state { hn.bbox } else { hn.drawn_bbox() };
+        (m.w, m.h) = (b.w, b.h);
+        m.hand = Some(hn.drawn_bbox());
+        return;
+    }
+    if let Some((hn, _)) = hand_er_box(n, m, pal, lk, seed) {
+        // `insertMeasuredNode`: the whole drawing's box (rows and dividers
+        // included; `updateNodeBounds(node, rect)` is overruled).
+        m.nominal = Some((m.w, m.h));
+        let b = hn.drawn_bbox();
         (m.w, m.h) = (b.w, b.h);
         m.hand = Some(hn.drawn_bbox());
         return;
