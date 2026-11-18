@@ -645,8 +645,159 @@ fn arrow(from: Point, to: Point, stroke: f64) -> Vec<PathCmd> {
     ]
 }
 
-/// Draw a laid-out diagram.
-pub fn draw(lay: &Layout, padding: f64, pal: &Palette) -> Scene {
+/// The rough.js drawing of `d` as elements, and its box.
+fn rough_els(d: &crate::rough::Drawable, at: Point) -> (Vec<Element>, Option<Rect>) {
+    let hn = super::hand::measured_node(vec![super::hand::Piece {
+        drawable: d.clone(),
+        at,
+        measured: true,
+    }]);
+    let els = super::graph::hand_elements(&hn, Point::default(), None);
+    let b = super::hand::drawable_bbox(d).map(|b| Rect::new(b.x + at.x, b.y + at.y, b.w, b.h));
+    (els, b)
+}
+
+/// The handDrawn look: every mark drawn by rough.js (mermaid's
+/// `roughContext`), the spine last; and the box of the strokes as drawn.
+fn draw_hand(lay: &Layout, seed: f64, pal: &Palette) -> (Vec<Element>, Bounds) {
+    use crate::rough::{self, Options};
+    let line = pal.line_color.0.clone();
+    let bkg = pal.main_bkg.0.clone();
+    let text = &pal.text_color;
+    let stroke2 = || Options {
+        roughness: 1.5,
+        seed,
+        stroke: line.clone(),
+        stroke_width: 2.0,
+        ..Options::default()
+    };
+    let boxed = || Options {
+        fill: Some(bkg.clone()),
+        fill_style: "hachure".into(),
+        fill_weight: 2.5,
+        hachure_gap: 5.0,
+        ..stroke2()
+    };
+    let mut els = Vec::new();
+    let mut b = Bounds::default();
+    let add =
+        |els: &mut Vec<Element>, b: &mut Bounds, d: rough::Drawable, at: Point, class: &str| {
+            let (e, bb) = rough_els(&d, at);
+            if let Some(bb) = bb {
+                b.add_rect(bb);
+            }
+            els.push(Element::group(class, e));
+        };
+    let mut spine = None;
+    for m in &lay.marks {
+        match m {
+            Mark::Spine { from, to } => spine = Some((*from, *to)),
+            Mark::Head { y, w, h, label } => {
+                let d = format!(
+                    "M 0 {} L 0 {} Q {} 0 0 {} Z",
+                    -h / 2.0,
+                    h / 2.0,
+                    w * 2.4,
+                    -h / 2.0
+                );
+                let mut g = Vec::new();
+                add(
+                    &mut g,
+                    &mut b,
+                    rough::path(&d, boxed()),
+                    Point::new(0.0, *y),
+                    "ishikawa-head",
+                );
+                b.add_rect(label.bbox());
+                g.push(text_el(label, text, "ishikawa-head-label"));
+                els.push(Element::group("ishikawa-head-group", g));
+            }
+            Mark::Bone { kind, from, to } => {
+                let class = match kind {
+                    BoneKind::Branch => "ishikawa-branch",
+                    BoneKind::SubBranch => "ishikawa-sub-branch",
+                };
+                add(
+                    &mut els,
+                    &mut b,
+                    rough::line(from.x, from.y, to.x, to.y, stroke2()),
+                    Point::default(),
+                    class,
+                );
+                // drawArrowMarker: a solid rough triangle (roughness 1) at the
+                // bone's start, pointing away from its end.
+                let (dx, dy) = (from.x - to.x, from.y - to.y);
+                let len = (dx * dx + dy * dy).sqrt();
+                if len != 0.0 {
+                    let (ux, uy, s) = (dx / len, dy / len, 6.0);
+                    let (px, py) = (-uy * s, ux * s);
+                    let (tx, ty) = (from.x, from.y);
+                    let d = format!(
+                        "M {} {} L {} {} L {} {} Z",
+                        tx,
+                        ty,
+                        tx - ux * s * 2.0 + px,
+                        ty - uy * s * 2.0 + py,
+                        tx - ux * s * 2.0 - px,
+                        ty - uy * s * 2.0 - py
+                    );
+                    let o = Options {
+                        roughness: 1.0,
+                        seed,
+                        fill: Some(line.clone()),
+                        fill_style: "solid".into(),
+                        stroke: line.clone(),
+                        stroke_width: 1.0,
+                        ..Options::default()
+                    };
+                    add(&mut els, &mut b, rough::path(&d, o), Point::default(), "");
+                }
+            }
+            Mark::Category { label, rect } => {
+                let mut g = Vec::new();
+                add(
+                    &mut g,
+                    &mut b,
+                    rough::rectangle(rect.x, rect.y, rect.w, rect.h, boxed()),
+                    Point::default(),
+                    "ishikawa-label-box",
+                );
+                b.add_rect(label.bbox());
+                g.push(text_el(label, text, "ishikawa-label cause"));
+                els.push(Element::group("ishikawa-label-group", g));
+            }
+            Mark::SubLabel(l) => {
+                b.add_rect(l.bbox());
+                els.push(text_el(l, text, "ishikawa-label"));
+            }
+        }
+    }
+    if let Some((from, to)) = spine {
+        add(
+            &mut els,
+            &mut b,
+            rough::line(from.x, from.y, to.x, to.y, stroke2()),
+            Point::default(),
+            "ishikawa-spine",
+        );
+    }
+    (els, b)
+}
+
+/// Draw a laid-out diagram (`hand`: the handDrawn look's seed).
+pub fn draw(lay: &Layout, padding: f64, pal: &Palette, hand: Option<f64>) -> Scene {
+    if let (Some(seed), false) = (hand, lay.marks.is_empty()) {
+        let (els, b) = draw_hand(lay, seed, pal);
+        return Scene {
+            kind: DiagramKind::Ishikawa,
+            view_box: b.rect().pad(padding),
+            elements: vec![Element::group("ishikawa", els)],
+            acc_title: None,
+            acc_descr: None,
+            font_family: pal.font_family.clone(),
+            css: String::new(),
+        };
+    }
     let line = &pal.line_color;
     let bkg = &pal.main_bkg;
     let text = &pal.text_color;
@@ -747,7 +898,8 @@ pub fn render(
             bbox: Rect::new(0.0, 0.0, 0.0, 0.0),
         },
     };
-    Ok(draw(&lay, padding, pal))
+    let hand = (cfg.look == crate::config::Look::HandDrawn).then(|| cfg.hand_drawn_seed());
+    Ok(draw(&lay, padding, pal, hand))
 }
 
 #[cfg(test)]
@@ -755,6 +907,34 @@ mod tests {
     use super::*;
 
     const BLURRY: &str = "ishikawa-beta\n    Blurry Photo\n    Process\n        Out of focus\n        Shutter speed too slow\n        Protective film not removed\n        Beautification filter applied\n    User\n        Shaky hands\n    Equipment\n        LENS\n            Inappropriate lens\n            Damaged lens\n            Dirty lens\n        SENSOR\n            Damaged sensor\n            Dirty sensor\n    Environment\n        Subject moved too quickly\n        Too dark\n";
+
+    /// mermaid 12.3.0, `look: handDrawn`, seed 23: the head, bones, arrow
+    /// tips and label boxes are rough.js drawings; the head's outline starts
+    /// at (0.099, 197.086), the "Tools" box's at (-115.39, 579.424).
+    #[test]
+    fn hand_drawn_marks_match_mermaid() {
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 23\n  theme: dark\n---\n\
+                   ishikawa-beta\n    Late delivery\n    People\n        Understaffed\n    \
+                   Process\n        No tracking\n            Manual entry\n    Tools\n";
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        fn walk(els: &[Element], out: &mut Vec<String>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => out.push(crate::output::svg::path_data(cmds)),
+                    _ => {}
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        walk(&r.scene.elements, &mut paths);
+        for start in ["M0.099,197.086C", "M-115.39,579.424C"] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
+    }
 
     fn texts(c: &Cause) -> Vec<&str> {
         c.children.iter().map(|c| c.text.as_str()).collect()
