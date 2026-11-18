@@ -913,6 +913,19 @@ fn ink_em(c: char, bold: bool, italic: bool) -> Option<(f64, f64)> {
     glyph_ink(table, c).map(|(lo, hi)| (f64::from(lo) / 2048.0, f64::from(hi) / 2048.0))
 }
 
+/// A glyph's ink edges (in em) as Skia rounds them out to whole pixels from
+/// the glyph's origin. FreeType first loads the outline in 26.6 fixed point,
+/// so an edge 0.006px past a pixel (Open Sans' `S` at 12px) stays on it;
+/// Arial's edges keep the 0.005px tolerance they were fitted with.
+fn ink_px(lo: f64, hi: f64, size: f64) -> (f64, f64) {
+    if face() == Face::Arial {
+        ((lo * size + 0.005).floor(), (hi * size - 0.005).ceil())
+    } else {
+        let q = |v: f64| (v * size * 64.0).round() / 64.0;
+        (q(lo).floor(), q(hi).ceil())
+    }
+}
+
 /// [`svg_bbox_extent`] for any weight: bold (`font-weight` 600 and up, drawn
 /// with the bold face) takes the bold advances and ink.
 pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bool) -> (f64, f64) {
@@ -926,8 +939,9 @@ pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bo
         }
         if c != ' ' {
             if let Some((lo, hi)) = ink_em(c, bold, italic) {
-                left = left.min(x + (lo * font_size + 0.005).floor());
-                right = right.max(x + (hi * font_size - 0.005).ceil());
+                let (lo, hi) = ink_px(lo, hi, font_size);
+                left = left.min(x + lo);
+                right = right.max(x + hi);
             }
         }
         x += glyph_px(char_width_em_styled(c, bold, italic), font_size);
@@ -1009,8 +1023,9 @@ pub fn svg_word_runs_box(line: &str, font_size: f64, bold: bool) -> (f64, f64, f
         }
         if c != ' ' {
             if let Some((lo, hi)) = ink_em(c, bold, false) {
-                left = left.min(x + run + (lo * size + 0.005).floor());
-                right = right.max(x + run + (hi * size - 0.005).ceil());
+                let (lo, hi) = ink_px(lo, hi, size);
+                left = left.min(x + run + lo);
+                right = right.max(x + run + hi);
             }
         }
         let kern = chars.get(i + 1).map_or(0.0, |&n| kerning_em(c, n, bold));

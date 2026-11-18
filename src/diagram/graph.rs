@@ -6168,9 +6168,11 @@ fn node_elements(
                                 si == 0,
                             ),
                         };
+                        // createText's SVG rows: one tspan per word (each laid
+                        // out in whole layout units), as the box was measured.
                         let mut t = Text::centered(
                             Point::new(c.x + x, c.y),
-                            std::slice::from_ref(&line),
+                            &[crate::text::word_runs(&line)],
                             font,
                             font,
                             &text_color,
