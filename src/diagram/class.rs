@@ -1092,6 +1092,39 @@ mod tests {
         assert!(d.edges[..2].iter().all(|e| e.line == LineKind::Dotted));
     }
 
+    /// classDb.addRelation: a lollipop end opposite a plain end becomes an
+    /// `interfaceN` node (after the classes and notes) labelled with the name
+    /// written there, which is not added as a class; with a head opposite it,
+    /// both ends are classes.
+    #[test]
+    fn lollipop_ends_become_interface_nodes() {
+        let d = parse(
+            "classDiagram\nnamespace N {\nclass B\n}\nnote for B \"n\"\nA ()-- B\nB --() C\nD ()--|> E",
+            None,
+        )
+        .unwrap();
+        let ids: Vec<&str> = d.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["B", "D", "E", "note0", "interface0", "interface1"]);
+        let i0 = &d.nodes[4];
+        assert_eq!(
+            (i0.label.as_str(), i0.shape, i0.cluster),
+            ("A", Shape::Rect, None)
+        );
+        assert_eq!(d.nodes[5].label, "C");
+        let e = &d.edges[1];
+        assert_eq!(
+            (e.from, e.to),
+            (Endpoint::Node(NodeId(4)), Endpoint::Node(NodeId(0)))
+        );
+        assert_eq!((e.start, e.end), (Head::Lollipop, Head::None));
+        let e = &d.edges[2];
+        assert_eq!(
+            (e.from, e.to),
+            (Endpoint::Node(NodeId(0)), Endpoint::Node(NodeId(5)))
+        );
+        assert_eq!(d.nodes[4].model_seq, Some(5));
+    }
+
     /// classDb.addClass: a class already added keeps the type it had.
     #[test]
     fn a_later_generic_declaration_is_ignored() {

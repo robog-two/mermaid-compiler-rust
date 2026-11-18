@@ -1188,15 +1188,16 @@ fn measure_node(
     // labelHelper sets an SVG label at `translate(0, -height / 2)` with no
     // `text-anchor`: it starts at the centre, its glyph box `font − ⌊0.905·font⌉`
     // below its top.
-    let overhang = (svg && kind == DiagramKind::Class && node.shape == Shape::Rect).then(|| {
-        Overhang {
+    let overhang =
+        (svg && kind == DiagramKind::Class && node.shape == Shape::Rect).then(|| Overhang {
             rect_w: w,
             rect_h: h,
             right: (w / 2.0).max(tw),
             bottom: (h / 2.0).max(th / 2.0 + font - (0.905 * font).round()),
-        }
+        });
+    let (w, h) = overhang.map_or((w, h), |o| {
+        (o.rect_w / 2.0 + o.right, o.rect_h / 2.0 + o.bottom)
     });
-    let (w, h) = overhang.map_or((w, h), |o| (o.rect_w / 2.0 + o.right, o.rect_h / 2.0 + o.bottom));
     Measured {
         svg_class,
         block,
@@ -1433,7 +1434,8 @@ pub fn render_with(
                     && crate::text::is_markdown_string(&n.label)
                 {
                     0.0
-                } else if cfg.html_labels && (g.kind, n.shape) == (DiagramKind::Class, Shape::Note) {
+                } else if cfg.html_labels && (g.kind, n.shape) == (DiagramKind::Class, Shape::Note)
+                {
                     // classDb gives a note `white-space: nowrap`.
                     0.0
                 } else {
@@ -1920,8 +1922,14 @@ pub fn render_with(
                 .chain(n.classes.iter().cloned())
                 .collect::<Vec<_>>()
                 .join(" ");
+            // A lollipop's `interfaceN` has no `domId`: its group takes the bare id.
+            let id = if (g.kind, n.shape) == (DiagramKind::Class, Shape::Rect) {
+                n.id.clone()
+            } else {
+                format!("{}-{}-{}", node_prefix(g.kind), n.id, i)
+            };
             node_els.push(Element::Group {
-                id: Some(format!("{}-{}-{}", node_prefix(g.kind), n.id, i)),
+                id: Some(id),
                 class: Some(class),
                 children: els,
             });
