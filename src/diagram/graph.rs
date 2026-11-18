@@ -1476,7 +1476,17 @@ pub(crate) fn with_icons<'a>(
     g: &'a GraphDiagram,
     cfg: &GraphConfig,
 ) -> std::borrow::Cow<'a, GraphDiagram> {
-    use crate::icons::replace_references as icons;
+    with_icons_from(g, cfg, &crate::iconify::IconPacks::default())
+}
+
+/// [`with_icons`] with icon packs registered: a reference a pack has becomes
+/// its icon ([`crate::icons::replace_references_with`]).
+pub fn with_icons_from<'a>(
+    g: &'a GraphDiagram,
+    cfg: &GraphConfig,
+    packs: &crate::iconify::IconPacks,
+) -> std::borrow::Cow<'a, GraphDiagram> {
+    let icons = |l: &str| crate::icons::replace_references_with(l, packs);
     let has = |s: &str| s.contains(":fa-");
     let any = g
         .nodes

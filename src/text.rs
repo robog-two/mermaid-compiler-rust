@@ -201,11 +201,11 @@ pub fn balance_marks(lines: Vec<String>) -> Vec<String> {
 pub fn char_width_em(c: char, bold: bool) -> f64 {
     let table = if bold { &ARIAL_BOLD } else { &ARIAL };
     let code = c as u32;
-    if mark::is_mark(c) {
+    if mark::is_mark(c) || crate::icons::is_tag(c) {
         return 0.0;
     }
     if crate::icons::is_icon(c) {
-        return crate::icons::ADVANCE_EM;
+        return crate::icons::advance_em(c);
     }
     let units = match code {
         0x20..=0x7E => f64::from(table[(code - 0x20) as usize]) * 1000.0 / 2048.0,
@@ -1320,6 +1320,10 @@ fn is_cjk(c: char) -> bool {
 
 /// No line may start with these (closing punctuation, small kana; UAX #14 CL/NS).
 fn no_break_before(c: char) -> bool {
+    // A pack icon's name (tag characters) stays with its icon.
+    if crate::icons::is_tag(c) {
+        return true;
+    }
     matches!(
         c,
         '、' | '。'
@@ -1408,7 +1412,11 @@ fn segments(para: &str, rule: BreakRule) -> Vec<String> {
             n != ' '
         } else if rule == BreakRule::Spaces || n == ' ' {
             false
-        } else if (is_cjk(c) || is_cjk(n) || crate::icons::is_icon(c) || crate::icons::is_icon(n))
+        } else if (is_cjk(c)
+            || is_cjk(n)
+            || crate::icons::is_icon(c)
+            || crate::icons::is_tag(c)
+            || crate::icons::is_icon(n))
             && !no_break_before(n)
             && !no_break_after(c)
         {

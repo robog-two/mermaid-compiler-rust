@@ -256,7 +256,8 @@ mod tests {
         crate::render::render(src, &MermaidConfig::default()).unwrap()
     }
 
-    const TD: &str = "graph TD\n  A[Top] --> B[Middle]\n  B --> C[Bottom]\n  B --> D[Other]\n  C --> E[End]\n";
+    const TD: &str =
+        "graph TD\n  A[Top] --> B[Middle]\n  B --> C[Bottom]\n  B --> D[Other]\n  C --> E[End]\n";
     const WIDE: &str = "graph LR\n  A[Alpha node] --> B[Beta node] --> C[Gamma node] --> D[Delta node] --> E[Epsilon node] --> F[Zeta node] --> G[Eta node] --> H[Theta node]\n";
     const FIXED: &str = "%%{init: {\"flowchart\": {\"useMaxWidth\": false}}}%%\ngraph LR\n  A[Alpha node] --> B[Beta node] --> C[Gamma node] --> D[Delta node] --> E[Epsilon node] --> F[Zeta node] --> G[Eta node] --> H[Theta node]\n";
     const STATE: &str = "stateDiagram-v2\n  [*] --> Still\n  Still --> Moving\n  Moving --> [*]\n";
@@ -319,7 +320,10 @@ mod tests {
         let o = EncodeOptions::default();
         assert_eq!(media_box(&encode_pdf(&rendered(TD), &o)), "0 0 282 249.12");
         assert_eq!(media_box(&encode_pdf(&rendered(WIDE), &o)), "0 0 600 36");
-        assert_eq!(media_box(&encode_pdf(&rendered(FIXED), &o)), "0 0 1146 58.08");
+        assert_eq!(
+            media_box(&encode_pdf(&rendered(FIXED), &o)),
+            "0 0 1146 58.08"
+        );
         let a4 = EncodeOptions {
             paper: Some(Paper::A4),
             ..EncodeOptions::default()
