@@ -105,8 +105,11 @@ fn flowchart_html_labels_only_changes_edge_labels_and_titles() {
     ));
     // labelHelper reads only the top-level key: node labels stay HTML-sized.
     assert_eq!(node_rects(&s), node_rects(&html));
-    // The edge label is SVG text: its box plus 2px all round, half transparent.
-    assert!(s.contains("height=\"20\" fill=\"#cccccc\" stroke=\"none\" opacity=\"0.5\""));
+    // The edge label is SVG text: its box plus 2px all round, half transparent,
+    // on `edgeLabelBackground` (`adjust('#cccccc', { h: -120 })`, khroma's #ccc).
+    assert!(
+        s.contains("height=\"20\" fill=\"hsl(-120, 0%, 80%)\" stroke=\"none\" opacity=\"0.5\"")
+    );
     assert!(!html.contains("opacity=\"0.5\""));
 }
 

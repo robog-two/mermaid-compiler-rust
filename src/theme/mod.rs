@@ -858,6 +858,15 @@ pub fn palette(theme: ThemeName, vars: &[(String, String)]) -> Palette {
                 *f = c(v);
             }
         }
+        // The classic themes' `gradientStart` / `gradientStop` (their constructors',
+        // base's `updateColors`').
+        if let (Some(g), Some(a), Some(b)) = (
+            p.node_gradient.as_mut(),
+            tv.get("gradientStart"),
+            tv.get("gradientStop"),
+        ) {
+            *g = (c(a), c(b));
+        }
         if theme == ThemeName::Base
             && let Some(v) = tv.get("nodeTextColor")
         {

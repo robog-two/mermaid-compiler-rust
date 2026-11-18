@@ -203,6 +203,8 @@ classText ||= textColor
 pieTitleTextColor ||= taskTextDarkColor
 pieSectionTextColor ||= textColor
 pieLegendTextColor ||= taskTextDarkColor
+gradientStart = primaryBorderColor
+gradientStop = secondaryBorderColor
 "##;
 
 const DEFAULT_CONSTRUCTOR: &str = r##"
@@ -234,6 +236,8 @@ activationBorderColor = "#666"
 activationBkgColor = "#f4f4f4"
 sequenceNumberColor = "white"
 taskTextDarkColor = "black"
+gradientStart = primaryBorderColor
+gradientStop = secondaryBorderColor
 "##;
 
 const DEFAULT_UPDATE: &str = r##"
@@ -283,6 +287,8 @@ textColor = "#ccc"
 titleColor = "#F9FFFE"
 noteBkgColor = "#fff5ad"
 sequenceNumberColor = "black"
+gradientStart = primaryBorderColor
+gradientStop = secondaryBorderColor
 "##;
 
 const DARK_UPDATE: &str = r##"
@@ -345,6 +351,8 @@ activationBorderColor = "#666"
 activationBkgColor = "#f4f4f4"
 sequenceNumberColor = "white"
 taskTextDarkColor = "black"
+gradientStart = primaryBorderColor
+gradientStop = secondaryBorderColor
 "##;
 
 const FOREST_UPDATE: &str = r##"
@@ -390,6 +398,8 @@ edgeLabelBackground = "white"
 activationBorderColor = "#666"
 activationBkgColor = "#f4f4f4"
 sequenceNumberColor = "white"
+gradientStart = primaryBorderColor
+gradientStop = secondaryBorderColor
 "##;
 
 const NEUTRAL_UPDATE: &str = r##"
