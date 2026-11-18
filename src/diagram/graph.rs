@@ -1433,6 +1433,9 @@ pub fn render_with(
                     && crate::text::is_markdown_string(&n.label)
                 {
                     0.0
+                } else if cfg.html_labels && (g.kind, n.shape) == (DiagramKind::Class, Shape::Note) {
+                    // classDb gives a note `white-space: nowrap`.
+                    0.0
                 } else {
                     opts.node_wrap.unwrap_or(cfg.wrapping_width)
                 },
@@ -5376,6 +5379,10 @@ fn node_elements(
         }
         t.bold = m.block.bold;
         els.push(shifted_lines(t, &m.block.shifts, "nodeLabel"));
+    }
+    if m.overhang.is_some() {
+        // `intersect.rect` reads the node's measured (DOM box) size.
+        return (els, Boundary::Rect(Rect::centered(c, m.w, m.h)));
     }
     (els, boundary)
 }
