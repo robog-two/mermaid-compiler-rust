@@ -48,9 +48,64 @@ pub struct Layout {
     pub image: Option<Rect>,
     /// The label box (`bbox`), empty for no label.
     pub label: Rect,
-    /// `intersect.polygon`'s points (from the centre, `node.height` = `h`),
-    /// or `None` for `intersect.rect`.
-    pub clip: Option<Vec<Point>>,
+    /// What `intersect.polygon`'s points are made of, or `None` for
+    /// `intersect.rect` (an unlabelled node, a circle).
+    clip: Option<ClipSpec>,
+}
+
+/// The label and frame sizes the T-shaped intersect polygon is made of.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClipSpec {
+    top: bool,
+    bw: f64,
+    bh: f64,
+    lp: f64,
+    fw: f64,
+    fh: f64,
+}
+
+impl Layout {
+    /// `intersect.polygon`'s points from the node's centre, for a node laid
+    /// out `node_h` tall (the measured height, which handDrawn's strokes
+    /// stretch); `None` for `intersect.rect`.
+    pub fn clip(&self, node_h: f64) -> Option<Vec<Point>> {
+        let ClipSpec {
+            top,
+            bw,
+            bh,
+            lp,
+            fw,
+            fh,
+        } = self.clip?;
+        let p = Point::new;
+        let (fw, half) = (fw / 2.0, node_h / 2.0);
+        Some(if top {
+            let mid = -half + bh + lp;
+            vec![
+                p(-bw / 2.0, -half),
+                p(bw / 2.0, -half),
+                p(bw / 2.0, mid),
+                p(fw, mid),
+                p(fw, half),
+                p(-fw, half),
+                p(-fw, mid),
+                p(-bw / 2.0, mid),
+            ]
+        } else {
+            let mid = -half + fh;
+            vec![
+                p(-fw, -half),
+                p(fw, -half),
+                p(fw, mid),
+                p(bw / 2.0, mid),
+                // (sic: a quarter of the label's width)
+                p(bw / 2.0 / 2.0, half),
+                p(-bw / 2.0, half),
+                p(-bw / 2.0, mid),
+                p(-fw, mid),
+            ]
+        })
+    }
 }
 
 /// The size an icon node is given before its label is measured
@@ -147,35 +202,13 @@ pub fn layout(shape: Shape, a: &Asset, bw: f64, bh: f64, pad: f64, wrapping: f64
         let y = if top { h / 2.0 - frame_h } else { -h / 2.0 };
         Rect::new(-frame_w / 2.0, y, frame_w, frame_h)
     });
-    let clip = (labelled && shape != Shape::IconCircle).then(|| {
-        let p = Point::new;
-        let (fw, half) = (frame_w / 2.0, h / 2.0);
-        if top {
-            let mid = -half + bh + lp;
-            vec![
-                p(-bw / 2.0, -half),
-                p(bw / 2.0, -half),
-                p(bw / 2.0, mid),
-                p(fw, mid),
-                p(fw, half),
-                p(-fw, half),
-                p(-fw, mid),
-                p(-bw / 2.0, mid),
-            ]
-        } else {
-            let mid = -half + frame_h;
-            vec![
-                p(-fw, -half),
-                p(fw, -half),
-                p(fw, mid),
-                p(bw / 2.0, mid),
-                // (sic: a quarter of the label's width)
-                p(bw / 2.0 / 2.0, half),
-                p(-bw / 2.0, half),
-                p(-bw / 2.0, mid),
-                p(-fw, mid),
-            ]
-        }
+    let clip = (labelled && shape != Shape::IconCircle).then_some(ClipSpec {
+        top,
+        bw,
+        bh,
+        lp,
+        fw: frame_w,
+        fh: frame_h,
     });
     Layout {
         w,
@@ -360,7 +393,7 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert!(l.clip.is_none());
+        assert!(l.clip(l.h).is_none());
     }
 
     #[test]

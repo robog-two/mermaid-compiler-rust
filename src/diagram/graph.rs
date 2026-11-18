@@ -2468,6 +2468,30 @@ pub fn render_with(
                 }
                 if by_centre {
                     keep_ports_off_the_line(&mut pts, &mut kept[ei]);
+                } else {
+                    // A port ELK spaced off its node's sides (a node smaller
+                    // than its port spacing, an anchor's dot): `cutter2`
+                    // keeps it and slants the last leg to the outline.
+                    let mut odd = kept[ei];
+                    for (k, end) in [(0, e.from), (1, e.to)] {
+                        let beside = match end {
+                            Endpoint::Node(NodeId(i)) => {
+                                let r = Rect::centered(out.nodes[i], measured[i].w, measured[i].h);
+                                odd[k].is_some_and(|p| !on_border(r, p, 1.0))
+                            }
+                            Endpoint::Cluster(_) => false,
+                        };
+                        if !beside {
+                            odd[k] = None;
+                        }
+                    }
+                    let before = odd;
+                    keep_ports_off_the_line(&mut pts, &mut odd);
+                    for k in 0..2 {
+                        if before[k].is_some() && odd[k].is_none() {
+                            kept[ei][k] = None;
+                        }
+                    }
                 }
                 // A port mermaid finds inside its node's bounds (ELK's anchor
                 // an ulp short of the side): `cutter2` and its kin cut the
@@ -4039,13 +4063,10 @@ pub(crate) fn kept_port(
         }
         None => port,
     };
-    let tol = 1.0;
-    let on_border = (port.x - bounds.x).abs() <= tol
-        || (port.x - bounds.right()).abs() <= tol
-        || (port.y - bounds.y).abs() <= tol
-        || (port.y - bounds.bottom()).abs() <= tol;
+    // `onBorder(bounds, port, 1)`: on a side, within the other axis' span (a
+    // port ELK spaced beyond a node smaller than its port spacing is not).
     let short = port.dist(clip) < ELK_MIN_MARKER_SEGMENT.max(2.0 * offset);
-    (!(offset > 0.0 && short && on_border)).then_some(port)
+    (!(offset > 0.0 && short && on_border(bounds, port, 1.0))).then_some(port)
 }
 
 /// Puts the ports [`kept_port`] keeps into the route where the outline point
@@ -4360,8 +4381,14 @@ pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
             let qb = 2.0 * (px * vx + py * vy);
             let qc = px * px + py * py - 1.0;
             let disc = qb * qb - 4.0 * qa * qc;
-            if qa < 1e-12 || disc < 0.0 {
+            if qa < 1e-12 {
                 return port;
+            }
+            // A line that misses the ellipse (a port ELK set beside a node
+            // smaller than its port spacing): `outlineAttachPoint` finds no
+            // inside and mermaid takes the centre ray's crossing.
+            if disc < 0.0 {
+                return geom::clip_ellipse(*c, *rx, *ry, port);
             }
             (-qb + disc.sqrt()) / (2.0 * qa)
         }
@@ -5834,13 +5861,15 @@ fn node_elements(
     } else if n.shape == Shape::Anchor {
         let dot = anchor_dot(lk.hand_seed);
         let mut drawn = hand_elements(&hand::measured_node_of(dot), c, None);
-        if lk.neo {
-            // `[data-look="neo"].node path` strokes it.
-            for_each_shape(&mut drawn, &mut |p: &mut Paint| {
+        // `.root .anchor path { fill: lineColor !important; stroke-width: 0 }`;
+        // under neo the later `[data-look="neo"].node path` strokes it.
+        for_each_shape(&mut drawn, &mut |p: &mut Paint| {
+            p.fill = pal.line_color.clone();
+            if lk.neo {
                 p.stroke = pal.node_border.clone();
                 p.stroke_width = lk.node_stroke_width;
-            });
-        }
+            }
+        });
         els.extend(drawn);
         // `intersect.circle(node, 1)`.
         Boundary::Ellipse(c, 1.0, 1.0)
@@ -6642,6 +6671,24 @@ fn measure_hand(
     let Some(seed) = lk.hand_seed else {
         return;
     };
+    if n.shape == Shape::Anchor {
+        let b = hand::measured_node_of(anchor_dot(Some(seed))).bbox;
+        (m.w, m.h) = (b.w, b.h);
+        m.hand = Some(b);
+        return;
+    }
+    if let Some(l) = m.asset.as_ref() {
+        // The layout takes the whole drawing's box: the rough frame and
+        // outer box where their strokes fell, the label, icon and image.
+        let hn = hand_asset(n, l, pal, seed);
+        let mut b = hn.bbox.union(&l.label);
+        for r in [l.icon, l.image].into_iter().flatten() {
+            b = b.union(&r);
+        }
+        (m.w, m.h) = (b.w, b.h);
+        m.hand = Some(b);
+        return;
+    }
     if let Some(hn) = hand_collapsed_group(n, m, pal, lk, seed, kind) {
         // `updateNodeBounds(node, rect)`: the rough box alone; the separator,
         // dots and label stay where the nominal box puts them.
@@ -6682,6 +6729,92 @@ fn measure_hand(
     }
 }
 
+/// An icon or image node's rough.js drawings under handDrawn: its frame
+/// (moved to the frame's centre) and the outer box (hachured in
+/// `transparent` / `none`, unstroked), both measured.
+fn hand_asset(n: &Node, l: &super::asset::Layout, pal: &Palette, seed: f64) -> hand::HandNode {
+    use super::asset::Frame;
+    let fill = n
+        .style
+        .fill
+        .as_ref()
+        .unwrap_or(&pal.main_bkg)
+        .css()
+        .to_string();
+    let base = crate::rough::Options {
+        roughness: 0.7,
+        fill: Some(fill.clone()),
+        fill_style: "hachure".into(),
+        fill_weight: 1.5,
+        hachure_gap: 1.5,
+        stroke: n
+            .style
+            .stroke
+            .as_ref()
+            .unwrap_or(&pal.node_border)
+            .css()
+            .to_string(),
+        seed,
+        stroke_width: n.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH),
+        ..crate::rough::Options::default()
+    };
+    // iconSquare / iconRounded / iconCircle: `options.stroke = fill ?? mainBkg`.
+    let icon_opts = || crate::rough::Options {
+        stroke: fill.clone(),
+        ..base.clone()
+    };
+    let (frame, at) = match &l.frame {
+        Frame::Bare(r) => (
+            crate::rough::rectangle(
+                -r.w / 2.0,
+                -r.h / 2.0,
+                r.w,
+                r.h,
+                crate::rough::Options {
+                    stroke: "none".into(),
+                    fill: Some("none".into()),
+                    ..base.clone()
+                },
+            ),
+            r.center(),
+        ),
+        Frame::Square(r, rx) => (
+            crate::rough::path(
+                &hand::rounded_rect_path(-r.w / 2.0, -r.h / 2.0, r.w, r.h, *rx),
+                icon_opts(),
+            ),
+            r.center(),
+        ),
+        Frame::Circle(p, r) => (crate::rough::circle(0.0, 0.0, 2.0 * r, icon_opts()), *p),
+        Frame::Image(r) => (
+            crate::rough::rectangle(-r.w / 2.0, -r.h / 2.0, r.w, r.h, base.clone()),
+            r.center(),
+        ),
+    };
+    let outer_fill = if matches!(l.frame, Frame::Image(_)) {
+        "none"
+    } else {
+        "transparent"
+    };
+    let outer = crate::rough::rectangle(
+        -l.w / 2.0,
+        -l.h / 2.0,
+        l.w,
+        l.h,
+        crate::rough::Options {
+            fill: Some(outer_fill.into()),
+            stroke: "none".into(),
+            ..base.clone()
+        },
+    );
+    let piece = |drawable, at| hand::Piece {
+        drawable,
+        at,
+        measured: true,
+    };
+    hand::measured_node(vec![piece(frame, at), piece(outer, Point::default())])
+}
+
 /// An icon or image node's frame, label background, icon or image, laid
 /// out by [`super::asset::layout`], and its edge boundary.
 fn asset_elements(
@@ -6695,6 +6828,10 @@ fn asset_elements(
 ) -> Boundary {
     use super::asset::Frame;
     let at = |r: Rect| Rect::new(r.x + c.x, r.y + c.y, r.w, r.h);
+    let hand = lk.hand_seed.map(|seed| hand_asset(n, l, pal, seed));
+    if let Some(hn) = &hand {
+        els.extend(hand_elements(hn, c, None));
+    }
     let fill = n.style.fill.clone().unwrap_or_else(|| pal.main_bkg.clone());
     let width = n.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH);
     // iconSquare / iconRounded / iconCircle stroke their frame in its fill;
@@ -6704,6 +6841,7 @@ fn asset_elements(
         ..Paint::fill(&fill)
     };
     match &l.frame {
+        _ if hand.is_some() => {}
         Frame::Bare(_) => {}
         Frame::Square(r, rx) => els.push(Element::shape(
             Geometry::Rect {
@@ -6743,13 +6881,7 @@ fn asset_elements(
         // `p`'s own `edgeLabelBackground`.
         let bg = &pal.edge_label_background;
         if let Some(rgba) = crate::color::parse(bg.css()).filter(|c| c.a < 1.0) {
-            let faded = Color::new(format!(
-                "rgba({}, {}, {}, {})",
-                rgba.r,
-                rgba.g,
-                rgba.b,
-                (rgba.a - 0.5).max(0.0)
-            ));
+            let faded = Color::new(format!("rgba({}, {}, {}, 0.5)", rgba.r, rgba.g, rgba.b));
             els.push(Element::rect(at(l.label), 0.0, Paint::fill(&faded)));
         }
         els.push(Element::rect(at(l.label), 0.0, Paint::fill(bg)));
@@ -6767,9 +6899,8 @@ fn asset_elements(
     if let (Some(r), Some(href)) = (l.image, n.asset.as_ref().and_then(|a| a.img.clone())) {
         els.push(Element::Image { rect: at(r), href });
     }
-    let _ = lk;
-    match &l.clip {
-        Some(pts) => Boundary::Outline(c, hand::in_box(c, m.w, m.h, pts.clone())),
+    match l.clip(m.h) {
+        Some(pts) => Boundary::Outline(c, hand::in_box(c, m.w, m.h, pts)),
         None => Boundary::Rect(Rect::centered(c, m.w, m.h)),
     }
 }
