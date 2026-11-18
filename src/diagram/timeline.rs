@@ -238,7 +238,7 @@ struct NodeStyle<'a> {
 
 /// One `drawNode` call at (x, y): `width` wraps the text and the box is
 /// 2·`pad` wider; at least `min_h` tall. `event` selects the event text offset
-/// and brightness. Returns the box.
+/// and the `eventWrapper` group with its brightness filter. Returns the box.
 #[allow(clippy::too_many_arguments)]
 fn draw_node(
     out: &mut Vec<Element>,
@@ -257,9 +257,8 @@ fn draw_node(
     let h = padded_node_height(&lines, font, pad).max(min_h);
     let w = width + 2.0 * pad;
     let r = Rect::new(x, y, w, h);
-    let light = if event { EVENT_BRIGHTNESS } else { 1.0 };
-    out.push(node_box(r, ci, st.pal, light, st.redux));
-    let tfill = brightness(st.pal.scale_text_color(ci), light);
+    let bkg = node_box(r, ci, st.pal, st.redux);
+    let tfill = st.pal.scale_text_color(ci);
     // The text group sits at (w / 2, padding / 2) (redux: further down), the
     // lines `middle`-aligned from 1em, 1.1em apart.
     let ty = y + if st.redux {
@@ -272,13 +271,22 @@ fn draw_node(
         &lines,
         font,
         1.1 * font,
-        &tfill,
+        tfill,
     );
     t.y = ty + font + crate::text::baseline_shift(crate::text::Baseline::Middle, font);
-    out.push(Element::classed_text(
-        t,
-        if event { "eventText" } else { "nodeText" },
-    ));
+    let label = Element::classed_text(t, if event { "eventText" } else { "nodeText" });
+    if event {
+        // timeline/styles.js: `.eventWrapper { filter: brightness(120%) }` on
+        // the event's whole group, its text's antialiased edges included.
+        out.push(Element::Brightened {
+            factor: EVENT_BRIGHTNESS,
+            class: "eventWrapper".into(),
+            children: vec![bkg, label],
+        });
+    } else {
+        out.push(bkg);
+        out.push(label);
+    }
     r
 }
 
@@ -701,11 +709,10 @@ fn quad(a: Point, c: Point, b: Point) -> PathCmd {
 
 /// `drawNode`'s background: a box with rounded top corners (square under the
 /// redux themes) and, outside redux, a `cScaleInv` rule along its bottom
-/// (`.section-N path` / `.section-N line`). `light` is a CSS `brightness()`
-/// factor applied to the whole node.
-fn node_box(r: Rect, ci: usize, pal: &Palette, light: f64, redux: bool) -> Element {
-    let fill = brightness(pal.scale_color(ci), light);
-    let edge = brightness(pal.scale_inv_color(ci), light);
+/// (`.section-N path` / `.section-N line`).
+fn node_box(r: Rect, ci: usize, pal: &Palette, redux: bool) -> Element {
+    let fill = pal.scale_color(ci);
+    let edge = pal.scale_inv_color(ci);
     let rr = if redux { 0.0 } else { 5.0 };
     let (x0, y0, x1, y1) = (r.x, r.y, r.right(), r.bottom());
     let mut d = vec![PathCmd::MoveTo(Point::new(x0, y1))];
@@ -729,14 +736,14 @@ fn node_box(r: Rect, ci: usize, pal: &Palette, light: f64, redux: bool) -> Eleme
     d.push(PathCmd::Close);
     let mut els = vec![Element::classed_shape(
         Geometry::Path(d),
-        Paint::fill(&fill),
+        Paint::fill(fill),
         "node-bkg",
     )];
     if !redux {
         els.push(Element::line(
             Point::new(x0, y1),
             Point::new(x1, y1),
-            Paint::stroke(&edge, 3.0),
+            Paint::stroke(edge, 3.0),
         ));
     }
     Element::group("node", els)
@@ -744,28 +751,6 @@ fn node_box(r: Rect, ci: usize, pal: &Palette, light: f64, redux: bool) -> Eleme
 
 /// timeline/styles.js: `.eventWrapper { filter: brightness(120%) }`.
 const EVENT_BRIGHTNESS: f64 = 1.2;
-
-/// CSS `filter: brightness(k)`: every channel scaled by `k`, clamped.
-fn brightness(c: &Color, k: f64) -> Color {
-    if k == 1.0 {
-        return c.clone();
-    }
-    match crate::color::parse(c.css()) {
-        Some(x) => {
-            let ch = |v: u8| (v as f64 * k).round().clamp(0.0, 255.0) as u8;
-            Color::new(
-                crate::color::Rgba {
-                    r: ch(x.r),
-                    g: ch(x.g),
-                    b: ch(x.b),
-                    a: x.a,
-                }
-                .to_hex(),
-            )
-        }
-        None => c.clone(),
-    }
-}
 
 /// Parse and render a `timeline` diagram body (already preprocessed).
 pub fn render(
@@ -864,9 +849,43 @@ mod tests {
     #[test]
     fn events_are_brightened() {
         // `.eventWrapper { filter: brightness(120%) }`: #d7ff86 -> #ffffa1.
-        let c = brightness(&Color::new("#d7ff86"), EVENT_BRIGHTNESS);
+        let c = Color::new("#d7ff86").brightened(EVENT_BRIGHTNESS);
         assert_eq!(c.css(), "#ffffa1");
-        assert_eq!(brightness(&Color::new("#000000"), 1.2).css(), "#000000");
+        assert_eq!(Color::new("#000000").brightened(1.2).css(), "#000000");
+        // Each event is an `eventWrapper` group carrying the filter over its
+        // box and text in their own (unbrightened) section colours.
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let s = render("timeline\n2002 : LinkedIn : Facebook", None, &cfg, &pal).unwrap();
+        let Element::Group { children, .. } = &s.elements[0] else {
+            panic!()
+        };
+        let events: Vec<&Vec<Element>> = children
+            .iter()
+            .filter_map(|e| match e {
+                Element::Brightened {
+                    factor,
+                    class,
+                    children,
+                } if *factor == 1.2 && class == "eventWrapper" => Some(children),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events.len(), 2);
+        let Element::Group { children: bkg, .. } = &events[0][0] else {
+            panic!()
+        };
+        let Element::Shape { paint, .. } = &bkg[0] else {
+            panic!()
+        };
+        assert_eq!(&paint.fill, pal.scale_color(0));
+        let Element::Text { text, class } = &events[0][1] else {
+            panic!()
+        };
+        assert_eq!(class.as_deref(), Some("eventText"));
+        assert_eq!(&text.fill, pal.scale_text_color(0));
+        // The period's node is not brightened.
+        assert!(matches!(&children[0], Element::Group { .. }));
     }
 
     #[test]
@@ -910,7 +929,9 @@ mod tests {
         fn walk<'a>(e: &'a [Element], out: &mut Vec<&'a Element>) {
             for x in e {
                 match x {
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Brightened { children, .. } => {
+                        walk(children, out)
+                    }
                     _ => out.push(x),
                 }
             }

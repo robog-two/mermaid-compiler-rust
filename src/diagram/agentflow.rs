@@ -2166,7 +2166,8 @@ linkStyle 0 stroke:#00f");
         match el {
             Element::Group { children, .. }
             | Element::Clipped { children, .. }
-            | Element::Faded { children, .. } => children.iter().for_each(|c| bbox(c, out)),
+            | Element::Faded { children, .. }
+            | Element::Brightened { children, .. } => children.iter().for_each(|c| bbox(c, out)),
             Element::Shape { geom, .. } => match geom {
                 Geometry::Rect { rect, .. } => {
                     add(crate::geom::Point::new(rect.x, rect.y));

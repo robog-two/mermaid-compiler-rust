@@ -5167,7 +5167,8 @@ mod tests {
                     | Element::Rotated { children, .. }
                     | Element::Translated { children, .. }
                     | Element::Clipped { children, .. }
-                    | Element::Faded { children, .. } => dashes(children, out),
+                    | Element::Faded { children, .. }
+                    | Element::Brightened { children, .. } => dashes(children, out),
                     Element::Text { .. }
                     | Element::OutlinedText { .. }
                     | Element::Image { .. }

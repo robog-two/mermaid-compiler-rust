@@ -117,6 +117,9 @@ pub fn path_data(cmds: &[PathCmd]) -> String {
     d
 }
 
+/// Half an 8-bit step (0.5 / 255) as a transfer function's intercept.
+const HALF_STEP: &str = "0.0019607843";
+
 /// The drop-shadow filters and stroke gradients of a document: its id, the
 /// distinct shadows (`filter` ids `{id}-shadow-{index}`) and gradients
 /// (`{id}-gradient-{index}`).
@@ -127,6 +130,9 @@ struct Filters<'a> {
     region: crate::geom::Rect,
     shadows: Vec<Shadow>,
     gradients: Vec<Gradient>,
+    /// The classes of [`Element::Brightened`] groups and their factors, each
+    /// written as one stylesheet rule.
+    brightness: Vec<(String, f64)>,
     /// [`SvgOptions::raster_scale`].
     raster_scale: Option<f64>,
 }
@@ -140,6 +146,17 @@ impl Filters<'_> {
                 | Element::Translated { children, .. }
                 | Element::Faded { children, .. }
                 | Element::Clipped { children, .. } => {
+                    self.collect(children);
+                }
+                Element::Brightened {
+                    factor,
+                    class,
+                    children,
+                } => {
+                    let rule = (class.clone(), *factor);
+                    if !self.brightness.contains(&rule) {
+                        self.brightness.push(rule);
+                    }
                     self.collect(children);
                 }
                 Element::Shape { paint, .. } => {
@@ -178,13 +195,72 @@ impl Filters<'_> {
             .unwrap_or_default()
     }
 
+    /// mermaid's rule for each brightened class (timeline/styles.js
+    /// `.eventWrapper { filter: brightness(120%) }`), scoped to the document.
+    /// None when rasterising: the groups then refer to [`Filters::defs`]'
+    /// equivalent `<filter>` instead.
+    fn css(&self) -> String {
+        if self.raster_scale.is_some() {
+            return String::new();
+        }
+        self.brightness
+            .iter()
+            .map(|(class, k)| {
+                format!(
+                    "#{} .{}{{filter:brightness({}%);}}",
+                    self.id,
+                    esc(class),
+                    num(k * 100.0)
+                )
+            })
+            .collect()
+    }
+
+    /// The `filter` a brightened group carries when rasterising.
+    fn brightness_attr(&self, class: &str, factor: f64) -> String {
+        if self.raster_scale.is_none() {
+            return String::new();
+        }
+        self.brightness
+            .iter()
+            .position(|(c, k)| c == class && *k == factor)
+            .map(|k| format!(" filter=\"url(#{}-brightness-{k})\"", self.id))
+            .unwrap_or_default()
+    }
+
     /// `<defs>` with a `feDropShadow` per shadow (the flood split into an
     /// opaque colour and its opacity, which every renderer reads).
     fn defs(&self) -> String {
-        if self.shadows.is_empty() && self.gradients.is_empty() {
+        let brightness = if self.raster_scale.is_some() {
+            &self.brightness[..]
+        } else {
+            &[]
+        };
+        if self.shadows.is_empty() && self.gradients.is_empty() && brightness.is_empty() {
             return String::new();
         }
         let mut out = String::from("<defs>");
+        // CSS `brightness(k)` as the filter element it stands for (Filter
+        // Effects 1): a linear transfer of slope k on each colour channel, in
+        // sRGB. resvg truncates the result to 8 bits where Chromium rounds
+        // it, so the intercept adds the half step.
+        for (k, (_, factor)) in brightness.iter().enumerate() {
+            let f = |c: char| {
+                format!(
+                    "<feFunc{c} type=\"linear\" slope=\"{}\" intercept=\"{}\"/>",
+                    num(*factor),
+                    HALF_STEP
+                )
+            };
+            let _ = write!(
+                out,
+                "<filter id=\"{}-brightness-{k}\" color-interpolation-filters=\"sRGB\"><feComponentTransfer>{}{}{}</feComponentTransfer></filter>",
+                self.id,
+                f('R'),
+                f('G'),
+                f('B'),
+            );
+        }
         for (k, g) in self.gradients.iter().enumerate() {
             let (units, x1, x2) = if g.bbox {
                 (
@@ -566,6 +642,25 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 num(rect.y)
             );
         }
+        Element::Brightened {
+            factor,
+            class,
+            children,
+        } => {
+            if children.is_empty() {
+                return;
+            }
+            let _ = write!(
+                out,
+                "<g class=\"{}\"{}>",
+                esc(class),
+                fx.brightness_attr(class, *factor)
+            );
+            for c in children {
+                write_element(out, c, fx);
+            }
+            out.push_str("</g>");
+        }
         Element::Faded {
             opacity,
             class,
@@ -707,22 +802,24 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
     if let Some(d) = &scene.acc_descr {
         let _ = write!(out, "<desc id=\"chart-desc-{id}\">{}</desc>", esc(d));
     }
-    let _ = write!(
-        out,
-        "<style>#{id}{{font-family:{};font-size:16px;}}#{id} text{{font-family:{};}}{}{}</style>",
-        esc(&scene.font_family),
-        esc(&scene.font_family),
-        esc(&scene.css),
-        opt.theme_css.map(esc).unwrap_or_default()
-    );
     let mut fx = Filters {
         id: &id,
         region: scene.view_box,
         shadows: Vec::new(),
         gradients: Vec::new(),
+        brightness: Vec::new(),
         raster_scale: opt.raster_scale,
     };
     fx.collect(&scene.elements);
+    let _ = write!(
+        out,
+        "<style>#{id}{{font-family:{};font-size:16px;}}#{id} text{{font-family:{};}}{}{}{}</style>",
+        esc(&scene.font_family),
+        esc(&scene.font_family),
+        esc(&scene.css),
+        fx.css(),
+        opt.theme_css.map(esc).unwrap_or_default()
+    );
     out.push_str(&fx.defs());
     out.push_str("<g>");
     for el in &scene.elements {
@@ -838,6 +935,7 @@ mod tests {
             region: Rect::new(0.0, 0.0, 30.0, 10.0),
             shadows: Vec::new(),
             gradients: Vec::new(),
+            brightness: Vec::new(),
             raster_scale: None,
         };
         fx.collect(&els);
@@ -853,5 +951,126 @@ mod tests {
              0 0 0 0.5 0\"/><feGaussianBlur stdDeviation=\"1\"/><feOffset dx=\"1\" dy=\"2\"/>\
              <feMerge><feMergeNode/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter></defs>"
         );
+    }
+
+    /// A scene with one timeline-style event: a box and its text in a group
+    /// brightened by 120%.
+    fn brightened_scene(fill: &str) -> Scene {
+        use crate::geom::{Point, Rect};
+        use crate::scene::Color;
+        let text = Text::centered(
+            Point::new(20.0, 14.0),
+            &["Hi".to_string()],
+            16.0,
+            17.6,
+            &Color::new("#ffffff"),
+        );
+        Scene {
+            kind: DiagramKind::Timeline,
+            view_box: Rect::new(0.0, 0.0, 40.0, 20.0),
+            elements: vec![Element::Brightened {
+                factor: 1.2,
+                class: "eventWrapper".into(),
+                children: vec![
+                    Element::rect(
+                        Rect::new(0.0, 0.0, 40.0, 20.0),
+                        0.0,
+                        Paint::fill(&Color::new(fill)),
+                    ),
+                    Element::classed_text(text, "eventText"),
+                ],
+            }],
+            acc_title: None,
+            acc_descr: None,
+            font_family: "sans-serif".into(),
+            css: String::new(),
+        }
+    }
+
+    fn opts(raster_scale: Option<f64>) -> SvgOptions<'static> {
+        SvgOptions {
+            id: "my-svg",
+            background: "white",
+            sizing: SvgSizing::Fixed {
+                width: 40.0,
+                height: 20.0,
+            },
+            theme_css: None,
+            raster_scale,
+        }
+    }
+
+    #[test]
+    fn a_brightened_group_is_mermaids_class_and_stylesheet_rule() {
+        // timeline/styles.js: `.eventWrapper { filter: brightness(120%) }`, the
+        // colours inside as they are.
+        let out = to_svg(&brightened_scene("#868686"), &opts(None));
+        assert!(
+            out.contains("#my-svg .eventWrapper{filter:brightness(120%);}</style>"),
+            "{out}"
+        );
+        assert!(
+            out.contains("<g><g class=\"eventWrapper\"><rect x=\"0\" y=\"0\" width=\"40\" height=\"20\" fill=\"#868686\""),
+            "{out}"
+        );
+        assert!(!out.contains("<filter"), "{out}");
+    }
+
+    #[test]
+    fn a_rasterised_brightened_group_refers_to_an_srgb_transfer_filter() {
+        // For resvg: the filter element CSS `brightness()` stands for, in sRGB,
+        // with the half step that makes resvg round as Chromium does; no rule.
+        let out = to_svg(&brightened_scene("#868686"), &opts(Some(1.0)));
+        assert!(!out.contains("brightness("), "{out}");
+        assert!(
+            out.contains(
+                "<defs><filter id=\"my-svg-brightness-0\" color-interpolation-filters=\"sRGB\">\
+                 <feComponentTransfer><feFuncR type=\"linear\" slope=\"1.2\" intercept=\"0.0019607843\"/>\
+                 <feFuncG type=\"linear\" slope=\"1.2\" intercept=\"0.0019607843\"/>\
+                 <feFuncB type=\"linear\" slope=\"1.2\" intercept=\"0.0019607843\"/>\
+                 </feComponentTransfer></filter></defs>"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("<g class=\"eventWrapper\" filter=\"url(#my-svg-brightness-0)\">"),
+            "{out}"
+        );
+    }
+
+    /// Chromium's `brightness(120%)` is `min(255, round(1.2 · v))` on every
+    /// pixel of the group's layer, antialiased text edges included (measured
+    /// on mermaid's timelines). resvg's own filter truncates instead; with the
+    /// half-step intercept it rounds: here #868686 (134) becomes 161, not 160.
+    #[cfg(feature = "png")]
+    #[test]
+    fn rasterised_brightness_rounds_each_pixel_of_the_layer_as_chromium_does() {
+        use resvg::tiny_skia::Pixmap;
+        let rast = crate::output::png::Rasterizer::bundled_only();
+        let draw = |scene: &Scene| {
+            let svg = to_svg(scene, &opts(Some(1.0)));
+            let png = rast
+                .png_scaled(&svg, 40, 20, Some(1.0), Some(crate::color::Rgba::WHITE))
+                .unwrap();
+            Pixmap::decode_png(&png).unwrap().data().to_vec()
+        };
+        let filtered = brightened_scene("#868686");
+        let Element::Brightened { children, .. } = &filtered.elements[0] else {
+            panic!()
+        };
+        let plain = Scene {
+            elements: vec![Element::group("eventWrapper", children.clone())],
+            ..filtered.clone()
+        };
+        let (got, under) = (draw(&filtered), draw(&plain));
+        assert_eq!(&got[..4], &[161, 161, 161, 255]);
+        for (k, (g, u)) in got.iter().zip(&under).enumerate() {
+            let want = if k % 4 == 3 {
+                *u
+            } else {
+                (*u as f64 * 1.2).round().min(255.0) as u8
+            };
+            assert_eq!(*g, want, "byte {k}");
+        }
     }
 }

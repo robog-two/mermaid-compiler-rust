@@ -496,6 +496,15 @@ impl Ctx {
                 }
                 let _ = writeln!(self.out, "/L{idx} Do\nQ");
             }
+            // No filters in PDF: the children drawn with their colours
+            // through the filter. Exact for flat colours; where an
+            // antialiased edge blends two of them, the filter scales (and
+            // clamps) the blend instead.
+            Element::Brightened {
+                factor, children, ..
+            } => children
+                .iter()
+                .for_each(|c| self.element(&c.brightened(*factor))),
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
             Element::Image { rect, href, inline } => {
                 let src = inline.as_deref().unwrap_or(href);
@@ -1145,6 +1154,60 @@ mod tests {
             },
         );
         assert!(svg.contains("<text class=\"sankey-label-bg\""), "{svg}");
+    }
+
+    /// PDF has no filters: a brightened group draws its children with their
+    /// colours through `brightness()`, exactly what the baked colours draw.
+    #[test]
+    fn a_brightened_group_draws_its_colours_brightened() {
+        use crate::scene::DiagramKind;
+        let label = |fill: &str| {
+            Element::text(Text::centered(
+                Point::new(20.0, 14.0),
+                &["Hi".to_string()],
+                16.0,
+                17.6,
+                &Color::new(fill),
+            ))
+        };
+        let node = |bkg: &str, edge: &str, ink: &str| {
+            vec![
+                Element::rect(
+                    Rect::new(0.0, 0.0, 40.0, 20.0),
+                    0.0,
+                    Paint::fill(&Color::new(bkg)),
+                ),
+                Element::line(
+                    Point::new(0.0, 20.0),
+                    Point::new(40.0, 20.0),
+                    Paint::stroke(&Color::new(edge), 3.0),
+                ),
+                label(ink),
+            ]
+        };
+        let scene = |elements| Scene {
+            kind: DiagramKind::Timeline,
+            view_box: Rect::new(0.0, 0.0, 40.0, 20.0),
+            elements,
+            acc_title: None,
+            acc_descr: None,
+            font_family: "sans-serif".into(),
+            css: String::new(),
+        };
+        let opt = PdfOptions {
+            background: "white".into(),
+            width: 40.0,
+            height: 20.0,
+            paper: None,
+        };
+        let filtered = scene(vec![Element::Brightened {
+            factor: 1.2,
+            class: "eventWrapper".into(),
+            children: node("hsl(240, 100%, 76.2745098039%)", "#d7ff86", "#ffffff"),
+        }]);
+        // #8686ff → #a1a1ff, #d7ff86 → #ffffa1; white stays white.
+        let baked = scene(node("#a1a1ff", "#ffffa1", "#ffffff"));
+        assert_eq!(to_pdf(&filtered, &opt), to_pdf(&baked, &opt));
     }
 
     #[test]
