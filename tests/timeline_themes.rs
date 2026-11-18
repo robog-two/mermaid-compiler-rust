@@ -74,9 +74,9 @@ fn redux_layouts_take_the_configs_font_size_for_the_half_line() {
     // `conf.fontSize` is 16 while the redux stylesheet sets 14px.
     for theme in ["redux", "redux-dark", "redux-color", "redux-dark-color"] {
         let s = svg(&with(&format!("  theme: '{theme}'"), HORIZONTAL));
-        assert_eq!(view_box(&s), "100 -57 1190 636.2000122070312", "{theme}");
+        assert_eq!(view_box(&s), "100 -58 1190 641.2000122070312", "{theme}");
         let s = svg(&with(&format!("  theme: '{theme}'"), VERTICAL));
-        assert_eq!(view_box(&s), "95 -57 745 414", "{theme}");
+        assert_eq!(view_box(&s), "95 -58 745 420", "{theme}");
     }
     // A top-level `fontSize` sizes only that half line (and the vertical
     // axis' ends); the stylesheet keeps the theme's 16px.
@@ -89,7 +89,7 @@ fn redux_layouts_take_the_configs_font_size_for_the_half_line() {
         "  fontSize: 20\n  theme: redux",
         "timeline\n    title T\n    2002 : LinkedIn",
     ));
-    assert_eq!(view_box(&s), "-105 -57 795 471");
+    assert_eq!(view_box(&s), "-105 -58 795 474");
 }
 
 #[test]
@@ -138,13 +138,13 @@ fn node_text_is_written_as_wraps_dy_tspans() {
     // `<g transform="translate(95, 13)"><text dy="1em" … dominant-baseline=
     // "middle"><tspan x="0" dy="1em">…</tspan><tspan x="0" dy="1.1em">…`.
     let s = svg(&with("  theme: redux", HORIZONTAL));
-    assert!(s.contains("<g transform=\"translate(600, 364.8)\">"), "{s}");
+    assert!(s.contains("<g transform=\"translate(600, 365.8)\">"), "{s}");
     assert!(s.contains(
         "<g transform=\"translate(95, 13)\"><text class=\"eventText\" x=\"0\" y=\"0\" dy=\"1em\" \
          alignment-baseline=\"middle\" dominant-baseline=\"middle\" text-anchor=\"middle\" \
          font-size=\"14\" fill=\"#28253D\" font-weight=\"600\"><tspan x=\"0\" dy=\"1em\">YouTube \
-         with a much</tspan><tspan x=\"0\" dy=\"1.1em\">longer event label that</tspan><tspan \
-         x=\"0\" dy=\"1.1em\">wraps</tspan></text></g>"
+         with a much</tspan><tspan x=\"0\" dy=\"1.1em\">longer event label</tspan><tspan \
+         x=\"0\" dy=\"1.1em\">that wraps</tspan></text></g>"
     ));
     // Section and period labels sit `padding` down, events `padding / 2 + 3`.
     assert!(s.contains("<g transform=\"translate(195, 20)\"><text class=\"nodeText\""));

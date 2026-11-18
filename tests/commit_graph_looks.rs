@@ -61,13 +61,13 @@ fn branch_labels_take_the_root_font_of_the_theme() {
     let (r, _) = main_label_box(&scene(&source("classic", "neo")));
     assert_eq!((r.w, r.h), (48.359375, 20.0));
     let (r, _) = main_label_box(&scene(&source("classic", "redux")));
-    assert_eq!((r.w, r.h), (66.6875, 32.0));
+    assert_eq!((r.w, r.h), (67.46875, 33.0));
     let (r, _) = main_label_box(&scene(&source("neo", "default")));
     assert_eq!((r.w, r.h), (52.6875, 21.0));
-    // viewBox `-93.6875 -27.7 351.6875 161.357`: the redux commit labels
+    // viewBox `-94.46875 -28.7 352.46875 163.078`: the redux commit labels
     // are measured at weight 600 too.
     let v = scene(&source("classic", "redux")).view_box;
-    assert_eq!((v.x, v.w), (-93.6875, 351.6875));
+    assert_eq!((v.x, v.w), (-94.46875, 352.46875));
 }
 
 #[test]

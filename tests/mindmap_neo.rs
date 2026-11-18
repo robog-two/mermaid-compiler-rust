@@ -67,7 +67,7 @@ fn neo_sizes_follow_the_neo_shapes() {
     );
     let v = scene(&with("  look: neo\n  theme: redux", x)).view_box;
     assert!(
-        close(v.w, 779.1390380859375) && close(v.h, 472.86688232421875),
+        close(v.w, 792.8262913262729) && close(v.h, 472.91898438767737),
         "{v:?}"
     );
 }
@@ -75,9 +75,9 @@ fn neo_sizes_follow_the_neo_shapes() {
 #[test]
 fn redux_default_nodes_are_rounded_rects_of_the_theme_radius() {
     // getShapeFromType: `rounded` for a default node under a redux theme,
-    // `rx` the theme's 12; viewBox `5 4.999998 355.5708 76.27486` (classic).
+    // `rx` the theme's 12; viewBox `5 5 354.733 78.328` (mmdc's Recursive Variable).
     let s = scene(&with("  theme: redux", SMALL));
-    assert!(close(s.view_box.w, 355.57080078125), "{:?}", s.view_box);
+    assert!(close(s.view_box.w, 354.7328914585107), "{:?}", s.view_box);
     let rects: Vec<_> = shapes(&s)
         .into_iter()
         .filter_map(|(g, _, _)| match g {
@@ -87,7 +87,7 @@ fn redux_default_nodes_are_rounded_rects_of_the_theme_radius() {
         .collect();
     assert_eq!(rects.len(), 3);
     assert!(rects.iter().all(|&(_, h, rx)| h == 51.0 && rx == 12.0));
-    assert!(close(rects[0].0, 39.34375));
+    assert!(close(rects[0].0, 39.109375));
 }
 
 #[test]
