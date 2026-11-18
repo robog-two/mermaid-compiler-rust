@@ -1795,6 +1795,12 @@ pub fn render_with(
         if empty_of[ci].is_none() {
             let alt = depth(&g.clusters, ClusterId(ci)) % 2 == 1;
             let mut shapes = cluster_shapes(c, r, t, alt, pal, &lk, cfg.look, g.kind);
+            if lk.hand_seed.is_some() {
+                // The rough strokes reach past the frame.
+                for b in shapes.iter().filter_map(element_bbox) {
+                    bounds.add_rect(b);
+                }
+            }
             if let Some(sh) = shadow {
                 cast_shadow(&mut shapes, sh);
             }
@@ -4173,6 +4179,9 @@ fn cluster_shapes(
             paint.dash = style.dash.clone();
             vec![Element::rect(r, 10.0, paint)]
         }
+        ClusterKind::Group if lk.hand_seed.is_some() => {
+            hand_cluster(c, r, slot.as_ref(), pal, lk.hand_seed.unwrap_or_default())
+        }
         ClusterKind::Group => {
             let style = slot_styled(&c.style, slot.as_ref());
             let fill = style
@@ -4255,6 +4264,72 @@ fn cluster_shapes(
             paint.dash = Some(vec![10.0, 10.0]);
             vec![Element::rect(r, 0.0, paint)]
         }
+    }
+}
+
+/// clusters.js `rect` under the handDrawn look: the frame as a rough.js path
+/// (hachure of `clusterBkg` at weight 3, outline of `clusterBorder`). A
+/// palette slot's `[data-look="handDrawn"] ... .cluster path` rule then fills
+/// and strokes both paths; the node's own fill restrokes the hachure and its
+/// border styles the outline (inline styles).
+fn hand_cluster(
+    c: &Cluster,
+    r: Rect,
+    slot: Option<&SlotColors>,
+    pal: &Palette,
+    seed: f64,
+) -> Vec<Element> {
+    let o = crate::rough::Options {
+        roughness: 0.7,
+        fill: Some(pal.cluster_bkg.css().to_string()),
+        fill_weight: 3.0,
+        hachure_gap: 1.5,
+        stroke: pal.cluster_border.css().to_string(),
+        seed,
+        stroke_width: c.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH),
+        ..Default::default()
+    };
+    let d = crate::rough::path(&hand::rounded_rect_path(r.x, r.y, r.w, r.h, 0.0), o);
+    let slot_fill = slot.and_then(|s| s.fill.clone()).unwrap_or_else(Color::none);
+    let mut els = Vec::new();
+    for set in d.sets.iter().filter(|s| !s.ops.is_empty()) {
+        let cmds = hand::set_cmds(&set.ops, Point::default());
+        let paint = match set.kind {
+            crate::rough::SetKind::Path => {
+                let stroke = c
+                    .style
+                    .stroke
+                    .clone()
+                    .or_else(|| slot.map(|s| s.border.clone()))
+                    .unwrap_or_else(|| pal.cluster_border.clone());
+                let mut p = Paint::both(&slot_fill, &stroke, d.options.stroke_width);
+                p.dash = c.style.dash.clone();
+                p
+            }
+            _ => {
+                let stroke = c
+                    .style
+                    .fill
+                    .clone()
+                    .or_else(|| slot.map(|s| s.border.clone()))
+                    .unwrap_or_else(|| pal.cluster_bkg.clone());
+                Paint::both(&slot_fill, &stroke, d.fill_weight())
+            }
+        };
+        els.push(Element::shape(Geometry::Path(cmds), paint));
+    }
+    vec![Element::group("basic label-container", els)]
+}
+
+/// The fill box of an element's shapes (`getBBox()`-like), if any.
+fn element_bbox(e: &Element) -> Option<Rect> {
+    match e {
+        Element::Shape { geom, .. } => geom.bbox(),
+        Element::Group { children, .. } => children
+            .iter()
+            .filter_map(element_bbox)
+            .reduce(|a, b| a.union(&b)),
+        _ => None,
     }
 }
 
