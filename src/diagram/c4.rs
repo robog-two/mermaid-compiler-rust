@@ -862,6 +862,12 @@ pub struct C4Conf {
     looks: Vec<ElementLook>,
     /// Under `look: handDrawn`: the seed and `themeVariables.radius`.
     pub hand: Option<C4Hand>,
+    /// `look: neo`: cylinder.ts and tiltedCylinder.ts pad their labels by
+    /// fixed amounts (24 and 12) instead of the shape padding.
+    pub neo: bool,
+    /// The title's font size: the root's, the theme's `fontSize` (14px in the
+    /// neo and redux themes).
+    pub root_font: f64,
 }
 
 /// What the handDrawn look draws the cards with besides their colours.
@@ -888,6 +894,8 @@ impl Default for C4Conf {
                 })
                 .collect(),
             hand: None,
+            neo: false,
+            root_font: 16.0,
         }
     }
 }
@@ -1155,10 +1163,13 @@ struct CardLayout {
 fn measure_shape(s: &Shape, conf: &C4Conf) -> CardLayout {
     let shape = resolve_shape(s);
     let p = conf.padding;
+    // cylinder.ts' labelPaddingX / Y and tiltedCylinder.ts' labelPadding.
+    let cyl_pad = if conf.neo { 24.0 } else { p };
+    let tilted_pad = if conf.neo { 12.0 } else { p / 2.0 };
     // Some shapes shrink `node.width` before the label is measured.
     let node_w = match shape {
-        NodeShape::Cylinder => (conf.width - p).max(8.0),
-        NodeShape::HorizontalCylinder => (conf.width - p / 2.0).max(10.0),
+        NodeShape::Cylinder => (conf.width - cyl_pad).max(8.0),
+        NodeShape::HorizontalCylinder => (conf.width - tilted_pad).max(10.0),
         _ => conf.width,
     };
     let wrap_w = if conf.wrap {
@@ -1222,19 +1233,19 @@ fn measure_shape(s: &Shape, conf: &C4Conf) -> CardLayout {
             (w, total, geom, 0.0, dy)
         }
         NodeShape::Cylinder => {
-            let w = node_w.max(bw) + p;
+            let w = node_w.max(bw) + cyl_pad;
             let rx = w / 2.0;
             let ry = rx / (2.5 + w / 50.0);
-            let h = bh + p + ry;
+            let h = bh + cyl_pad + ry;
             // `updateNodeBounds`: the browser's box of the drawn path.
             let (bw, bh) = super::svgbbox::cylinder_box(w, h, rx, ry);
             (bw, bh, CardGeom::Cylinder { rx, ry, h }, 0.0, p / 1.5)
         }
         NodeShape::HorizontalCylinder => {
-            let h = bh + p / 2.0;
+            let h = bh + tilted_pad;
             let ry = h / 2.0;
             let rx = ry / (2.5 + h / 50.0);
-            let w = node_w.max(bw) + rx + p / 2.0;
+            let w = node_w.max(bw) + rx + tilted_pad;
             let (bw, bh) = super::svgbbox::tilted_cylinder_box(w, h, rx, ry);
             (bw, bh, CardGeom::HorizontalCylinder { rx, ry, w }, -rx, 0.0)
         }
@@ -2205,8 +2216,8 @@ pub fn draw(
                 x: box_w / 2.0 - 4.0 * mx,
                 y: my + my,
                 lines: vec![t.to_string()],
-                line_height: 16.0,
-                font_size: 16.0,
+                line_height: conf.root_font,
+                font_size: conf.root_font,
                 bold: false,
                 weight: None,
                 anchor: Anchor::Start,
@@ -2243,6 +2254,8 @@ pub fn render(
     // mermaid's db starts from 4 and 2 whatever the `c4` config says.
     let d = parse(body, title)?;
     let mut conf = C4Conf::from_config(cfg);
+    conf.neo = cfg.look == crate::config::Look::Neo;
+    conf.root_font = cfg.stylesheet_font_size();
     conf.hand = (cfg.look == crate::config::Look::HandDrawn).then(|| C4Hand {
         seed: cfg.hand_drawn_seed(),
         radius: pal.radius.unwrap_or(5.0),
