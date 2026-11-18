@@ -883,6 +883,31 @@ impl DiagramKind {
             DiagramKind::Usecase => "usecase",
         }
     }
+    /// The root `<svg>` start tag's shape, per mermaid diagram type: the
+    /// class it carries (many types carry none), whether `viewBox` comes
+    /// before `style`, and whether the class follows `style`.
+    pub fn root_layout(self) -> (Option<&'static str>, bool, bool) {
+        use DiagramKind::*;
+        match self {
+            Gantt | Packet | Pie | TreeView | Venn => (None, true, false),
+            Treemap => (Some("flowchart"), true, true),
+            Usecase => (Some("usecaseDiagram"), false, false),
+            Mindmap => (Some("mindmapDiagram"), false, false),
+            Flowchart | Swimlane | Class | Er | State | Requirement | Agentflow | Railroad
+            | RailroadEbnf | RailroadAbnf | RailroadPeg => (Some(self.svg_class()), false, false),
+            _ => (None, false, false),
+        }
+    }
+    /// Custom properties a type's renderer puts in the root `style`, after
+    /// `max-width`.
+    pub fn root_style_vars(self) -> &'static str {
+        match self {
+            DiagramKind::Usecase => {
+                " --mermaid-usecase-actor-font-size: 14px; --mermaid-usecase-actor-font-family: &quot;Open Sans&quot;, sans-serif; --mermaid-usecase-actor-font-weight: normal; --mermaid-usecase-font-size: 12px; --mermaid-usecase-font-family: &quot;Open Sans&quot;, sans-serif; --mermaid-usecase-font-weight: normal;"
+            }
+            _ => "",
+        }
+    }
     /// CSS class mermaid puts on the root `<svg>`.
     pub fn svg_class(self) -> &'static str {
         match self {

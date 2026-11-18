@@ -38,6 +38,13 @@ pub fn num(v: f64) -> String {
     if s == "-0" { "0".into() } else { s.to_string() }
 }
 
+/// The root `max-width` as mmdc writes it: the drawing's width to six
+/// significant digits (`Number(w.toPrecision(6))`), shortest form.
+fn max_width(w: f64) -> String {
+    let six = format!("{w:.5e}").parse::<f64>().unwrap_or(w);
+    crate::diagram::xychart::js_num(six)
+}
+
 /// XML-escape text content and attribute values.
 pub fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -922,70 +929,91 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
     // with `--size`). Not for the rasterisers, which size the image themselves.
     let journey_height =
         (scene.kind == DiagramKind::Journey && opt.raster_scale.is_none()).then_some(vb.h + 25.0);
-    let journey_par = if journey_height.is_some() {
+    let kind = scene.kind;
+    let xlink = " xmlns:xlink=\"http://www.w3.org/1999/xlink\"";
+    let class_attr = |c: Option<&str>| c.map(|c| format!(" class=\"{c}\"")).unwrap_or_default();
+    // The viewBox as mermaid writes it: the drawing's bounding box in full.
+    // The rasterisers keep the compact form.
+    let vb_num = |v: f64| match opt.sizing {
+        SvgSizing::Fixed { .. } if kind != DiagramKind::Timeline => num(v),
+        SvgSizing::Fixed { .. } => crate::diagram::xychart::js_num(v),
+        _ => crate::diagram::xychart::js_num(f64::from(v as f32)),
+    };
+    let viewbox = format!(
+        " viewBox=\"{} {} {} {}\"",
+        vb_num(vb.x),
+        vb_num(vb.y),
+        vb_num(vb.w),
+        vb_num(vb.h)
+    );
+    // Attributes mermaid's renderers set after the viewBox, before the role.
+    let par = if journey_height.is_some() {
         " preserveAspectRatio=\"xMinYMin meet\""
     } else {
         ""
     };
-    match opt.sizing {
-        SvgSizing::MaxWidth => {
-            let _ = write!(
-                out,
-                " width=\"100%\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"max-width: {}px; background-color: {};\"{journey_par}",
-                scene.kind.svg_class(),
-                num(vb.w),
-                esc(opt.background)
-            );
-            if let Some(h) = journey_height {
-                let _ = write!(out, " height=\"{}\"", num(h));
-            }
+    let mut tail = String::new();
+    if opt.sizing == SvgSizing::MaxWidth {
+        tail.push_str(par);
+        if let Some(h) = journey_height {
+            let _ = write!(tail, " height=\"{}\"", num(h));
         }
-        SvgSizing::Size(s) => {
-            let _ = write!(
-                out,
-                " width=\"100%\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"max-width: {s}px; background-color: {}; max-height: {s}px;\"{journey_par}",
-                scene.kind.svg_class(),
-                esc(opt.background)
-            );
+    }
+    if kind == DiagramKind::Radar {
+        tail.push_str(" overflow=\"visible\"");
+    }
+    let vars = kind.root_style_vars();
+    let bg = esc(opt.background);
+    match opt.sizing {
+        SvgSizing::MaxWidth | SvgSizing::Size(_) => {
+            let style = match opt.sizing {
+                SvgSizing::Size(s) => format!(
+                    " style=\"max-width: {s}px;{vars} background-color: {bg}; max-height: {s}px;\"{par}"
+                ),
+                _ => format!(
+                    " style=\"max-width: {}px;{vars} background-color: {bg};\"",
+                    max_width(vb.w)
+                ),
+            };
+            let (class, vb_first, class_last) = kind.root_layout();
+            out.push_str(" width=\"100%\" xmlns=\"http://www.w3.org/2000/svg\"");
+            out.push_str(xlink);
+            if !class_last {
+                out.push_str(&class_attr(class));
+            }
+            if vb_first {
+                out.push_str(&viewbox);
+                out.push_str(&style);
+            } else {
+                out.push_str(&style);
+                out.push_str(&viewbox);
+            }
+            if class_last {
+                out.push_str(&class_attr(class));
+            }
+            out.push_str(&tail);
         }
         SvgSizing::SizeFixed { size: s, width } => {
             let _ = write!(
                 out,
-                " width=\"{}\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"background-color: {}; max-width: {s}px; max-height: {s}px;\"{journey_par}",
+                " width=\"{}\" xmlns=\"http://www.w3.org/2000/svg\"{xlink}{} style=\"{}background-color: {bg}; max-width: {s}px; max-height: {s}px;\"{par}{viewbox}{tail}",
                 num(width),
-                scene.kind.svg_class(),
-                esc(opt.background)
+                class_attr(kind.root_layout().0),
+                vars.trim_start().to_owned() + if vars.is_empty() { "" } else { " " },
             );
         }
         SvgSizing::Fixed { width, height } => {
             let _ = write!(
                 out,
-                " width=\"{}\" height=\"{}\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"background-color: {};\"{journey_par}",
+                " width=\"{}\" height=\"{}\" xmlns=\"http://www.w3.org/2000/svg\" class=\"{}\" style=\"background-color: {bg};\"{par}{viewbox}",
                 num(width),
                 num(journey_height.unwrap_or(height)),
-                scene.kind.svg_class(),
-                esc(opt.background)
+                kind.svg_class(),
             );
         }
     }
-    // A timeline's in full, as mermaid writes it (a browser sizes the
-    // drawing from it).
-    let vb_num = |v: f64| {
-        if scene.kind == DiagramKind::Timeline {
-            crate::diagram::xychart::js_num(v)
-        } else {
-            num(v)
-        }
-    };
-    let _ = write!(
-        out,
-        " viewBox=\"{} {} {} {}\" role=\"graphics-document document\" aria-roledescription=\"{}\"",
-        vb_num(vb.x),
-        vb_num(vb.y),
-        vb_num(vb.w),
-        vb_num(vb.h),
-        scene.kind.role()
-    );
+    out.push_str(" role=\"graphics-document document\"");
+    let _ = write!(out, " aria-roledescription=\"{}\"", kind.role());
     if scene.acc_title.is_some() {
         let _ = write!(out, " aria-labelledby=\"chart-title-{id}\"");
     }

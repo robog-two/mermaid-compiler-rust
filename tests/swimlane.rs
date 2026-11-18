@@ -58,7 +58,7 @@ const SUPPORT: &str = r#"swimlane-beta LR
 #[test]
 fn lr_lanes_and_routes() {
     let s = svg(SUPPORT);
-    assert_eq!(view_box(&s), "-94 -66.5 818.34 817.5");
+    assert_eq!(view_box(&s), "-94 -66.5 818.3399047851562 817.5");
     assert_eq!(edge(&s, "request", "triage").0, "M36,22.5L36,225.5");
     assert_eq!(edge(&s, "triage", "answer").0, "M112,252L550.34,252");
     assert_eq!(edge(&s, "fix", "answer").0, "M630.34,651.5L630.34,278.5");

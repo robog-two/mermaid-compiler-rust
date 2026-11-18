@@ -125,7 +125,10 @@ fn icon_content_sizes_circles_and_node_boxes() {
   C@{ icon: "tst:box", form: "circle" }
   A --> B --> C
 "#);
-    assert_eq!(view_box(&s), "4.027 4 336.12 150.094");
+    assert_eq!(
+        view_box(&s),
+        "4.027026653289795 3.9999992847442627 336.1195068359375 150.09402465820312"
+    );
     assert_eq!(
         icons(&s),
         pairs(&[
@@ -147,7 +150,10 @@ fn architecture_icons_from_packs_have_no_background() {
     b:R -- L:c
 "#);
     // The viewBox takes in what the icons draw, not their squares.
-    assert_eq!(view_box(&s), "-276.33 -65.5 628.659 262");
+    assert_eq!(
+        view_box(&s),
+        "-276.3297119140625 -65.5 628.659423828125 262"
+    );
     assert_eq!(
         icons(&s),
         pairs(&[

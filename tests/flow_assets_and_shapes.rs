@@ -64,14 +64,14 @@ fn classic_delay_is_its_fifty_point_polygon_wide() {
     // so the node is a hair narrower than its nominal width.
     assert_eq!(
         view_box(&svg(&with("classic", "default", HX01))),
-        "4 4 576.606 439"
+        "4 4 576.6056518554688 439"
     );
 }
 
 #[test]
 fn classic_braces_are_filled_and_sized_by_their_hit_polygon() {
     let s = svg(&with("classic", "default", HX04));
-    assert_eq!(view_box(&s), "4 4 560.25 686.907");
+    assert_eq!(view_box(&s), "4 4 560.25 686.9073486328125");
 }
 
 #[test]
@@ -80,14 +80,14 @@ fn bucket_drawing_sits_below_its_layout_box() {
     // viewBox holds the drawing, not the (centred) layout box.
     assert_eq!(
         view_box(&svg(&with("classic", "default", HX05))),
-        "4 10 356 241.685"
+        "4 10 356 241.68499755859375"
     );
 }
 
 #[test]
 fn neo_shadows_fall_on_each_rect_and_circle_of_a_browser_and_person() {
     let s = svg(&with("neo", "redux-color", HX05));
-    assert_eq!(view_box(&s), "4 10 356 235.685");
+    assert_eq!(view_box(&s), "4 10 356 235.68499755859375");
     // Bucket none; console its rect; browser its rect, three dots and the
     // address bar; person its rect and head.
     // Each through the redux themes' feDropShadow, as a filter of its own.
@@ -108,7 +108,10 @@ fn hand_drawn_brace_edges_reach_the_outline_elk_bisects_to() {
     let s = svg(&src);
     assert!(s.contains("L419.057,48.006L"), "b --> c marker");
     assert!(s.contains("L235.166,148.729L"), "d --> e marker");
-    assert_eq!(view_box(&s), "4.371 4.142 565.145 685.958");
+    assert_eq!(
+        view_box(&s),
+        "4.3706512451171875 4.141897201538086 565.1453857421875 685.9578247070312"
+    );
 }
 
 #[test]
@@ -133,7 +136,10 @@ flowchart LR
   two@{ view: collapsed }
 "#;
     let s = svg(src);
-    assert_eq!(view_box(&s), "4.098 3.864 722.78 111.054");
+    assert_eq!(
+        view_box(&s),
+        "4.098236083984375 3.864215850830078 722.7797241210938 111.054443359375"
+    );
     // The rough-node misses `.node .collapsed-separator`: 1px, not 0.75.
     assert!(!s.contains("stroke-width=\"0.75\""));
 }
@@ -149,7 +155,10 @@ const FORMS: &str = r#"flowchart LR
 #[test]
 fn icon_nodes_draw_mermaid_s_unknown_icon() {
     let s = svg(&with("classic", "redux-color", FORMS));
-    assert_eq!(view_box(&s), "4 4 417.94 156.882");
+    assert_eq!(
+        view_box(&s),
+        "4 3.9999985694885254 417.93994140625 156.8822479248047"
+    );
     assert_eq!(s.matches("style=\"font-family:ArialMT, Arial\"").count(), 4);
     assert_eq!(s.matches("fill=\"#087ebf\"").count(), 4);
 }
@@ -157,7 +166,10 @@ fn icon_nodes_draw_mermaid_s_unknown_icon() {
 #[test]
 fn hand_drawn_icon_nodes_are_measured_by_their_strokes() {
     let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 4\n---\n".to_string() + FORMS;
-    assert_eq!(view_box(&svg(&src)), "3.932 4.275 431.375 160.126");
+    assert_eq!(
+        view_box(&svg(&src)),
+        "3.9316940307617188 4.274894714355469 431.37506103515625 160.1261749267578"
+    );
 }
 
 const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAJElEQVR4nGM4YWMzIIhh1OJRi0ctHrV41OJRi0ctHrV45FgMAGQL6C7l1KfNAAAAAElFTkSuQmCC";
@@ -213,7 +225,7 @@ fn anchors_are_two_pixel_dots_without_labels() {
         "flowchart LR\n  A[One] --> X@{ shape: anchor }\n  B[Two] --> X\n  X --> C[Three]\n  X --> D[Four]\n",
     );
     let s = svg(&dark);
-    assert_eq!(view_box(&s), "4 4 498.002 164");
+    assert_eq!(view_box(&s), "4 4 498.00189208984375 164");
     // ELK spaces the ports past the dot: the edge keeps its port and slants
     // to the dot's outline (mermaid's 252.836, 88.014), less the marker.
     assert!(s.contains("L252.178,84.068"));

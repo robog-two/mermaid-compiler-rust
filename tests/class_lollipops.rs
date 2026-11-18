@@ -21,7 +21,7 @@ fn svg(src: &str) -> String {
 fn neo_interface_is_an_invisible_padded_rect() {
     let s =
         svg("classDiagram\n  class Animal {\n    +int age\n    +eat()\n  }\n  Animal ()-- Dog\n");
-    assert!(s.contains("viewBox=\"4 4 240.891 272\""), "{s}");
+    assert!(s.contains("viewBox=\"4 4 240.890625 272\""), "{s}");
     assert!(s.contains(
         "<g id=\"interface0\" class=\"node default\"><rect class=\"basic label-container\" \
          x=\"157.141\" y=\"102\" width=\"79.75\" height=\"45\""
@@ -44,7 +44,7 @@ fn classic_interface_has_no_padding_and_a_hollow_marker() {
         "---\nconfig:\n  look: classic\n---\nclassDiagram\n  class Animal {\n    +int age\n    \
          +eat()\n  }\n  Animal ()-- Dog\n  Dog --() Pet\n",
     );
-    assert!(s.contains("viewBox=\"4 4 209.969 333\""), "{s}");
+    assert!(s.contains("viewBox=\"4 4 209.96875 333\""), "{s}");
     assert!(s.contains("x=\"157.141\" y=\"126\" width=\"47.75\" height=\"21\""));
     assert!(
         s.contains("<circle class=\"marker\" cx=\"181.016\" cy=\"154.5\" r=\"6\" fill=\"none\"")
@@ -69,7 +69,10 @@ fn svg_interface_label_overhangs_into_the_layout() {
         "---\nconfig:\n  look: classic\n  htmlLabels: false\n---\nclassDiagram\n  Animal ()-- Dog\n  \
          Cat --() Pet\n  Dog --() LongInterfaceName\n",
     );
-    assert!(s.contains("viewBox=\"4 4 255.614 283.9\""), "{s}");
+    assert!(
+        s.contains("viewBox=\"4 4 255.61436462402344 283.8999938964844\""),
+        "{s}"
+    );
     assert!(s.contains("x=\"111.351\" y=\"71.5\" width=\"47.84\" height=\"17\""));
     assert!(s.contains("x=\"135.271\" y=\"85.5\" text-anchor=\"start\""));
     assert!(s.contains("<circle class=\"marker\" cx=\"135.271\" cy=\"96.5\" r=\"6\""));
@@ -85,7 +88,7 @@ fn svg_interface_clips_edges_at_its_dom_box() {
         "---\nconfig:\n  look: neo\n  htmlLabels: false\n  theme: forest\n---\nclassDiagram\n  \
          direction LR\n  IRunnable ()-- Worker\n  Worker --() IStoppable\n",
     );
-    assert!(s.contains("viewBox=\"14.262 4 432.219 93\""), "{s}");
+    assert!(s.contains("viewBox=\"14.26171875 4 432.21875 93\""), "{s}");
     assert!(s.contains("<circle class=\"marker\" cx=\"145.07\" cy=\"50.5\" r=\"6\""));
     assert!(s.contains("<circle class=\"marker\" cx=\"288.914\" cy=\"50.5\" r=\"6\""));
 }
@@ -98,7 +101,7 @@ fn html_interface_label_wraps_at_120() {
          VeryLongInterfaceNameForTestingWrap ()-- Impl\n  \
          Impl --() `Some Long Interface Name With Spaces`\n",
     );
-    assert!(s.contains("viewBox=\"4 4 549.828 97\""), "{s}");
+    assert!(s.contains("viewBox=\"4 4 549.828125 97\""), "{s}");
     assert!(s.contains("x=\"425.828\" y=\"21\" width=\"120\""));
 }
 

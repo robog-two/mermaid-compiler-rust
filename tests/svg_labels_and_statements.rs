@@ -55,7 +55,7 @@ fn class_annotation_ink_and_member_rows() {
     let s = svg(
         "---\nconfig:\n  htmlLabels: false\n---\nclassDiagram\n  class A {\n    <<iface>>\n    +int x\n    +int y\n    +foo()\n  }\n",
     );
-    assert!(s.contains("viewBox=\"4 4 107.289 176\""), "{s}");
+    assert!(s.contains("viewBox=\"4 4 107.2890625 176\""), "{s}");
     assert!(s.contains(
         "x=\"24\" y=\"95.5\" text-anchor=\"start\" font-size=\"14\" fill=\"#28253D\"><tspan>+int</tspan><tspan> x</tspan></text>"
     ));

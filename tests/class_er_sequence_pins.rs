@@ -87,7 +87,7 @@ fn er_cells_are_measured_in_layout_units() {
     let s = svg(
         "---\nconfig:\n  theme: neo\n---\nerDiagram\n  ORDER {\n    int id PK \"a comment here\"\n  }\n",
     );
-    assert!(s.contains("viewBox=\"4 4 261.562 95.5\""), "{s}");
+    assert!(s.contains("viewBox=\"4 4 261.5625 95.5\""), "{s}");
 }
 
 /// A typed participant's group shadow is one layer at 6%: overlapping parts

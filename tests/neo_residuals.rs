@@ -55,7 +55,7 @@ fn regions_cast_no_shadow() {
     assert!(group(&s, "cluster-A").contains("filter=\"url(#"));
     // stateEnd's rough.js circle measures 14.0133 wide: the end state sits
     // at x 345.0066 and the view box is 356.01995849609375 wide.
-    assert_eq!(view_box(&s), "4 4 356.02 404");
+    assert_eq!(view_box(&s), "4 4 356.0199279785156 404");
 }
 
 /// A subgraph nested in a lane is a `.cluster rect` and casts the shadow;
@@ -183,5 +183,5 @@ fn container_loops_count_in_the_root_offset() {
         "flowchart BT\n  subgraph C0\n    c0n0\n    c0n1\n    c0n0 --> c0n1\n  end\n  \
          x0\n  C0 --> c0n0\n  C0 --> C0\n  C0 -->|lab1| C0\n  C0 --> C0\n",
     );
-    assert_eq!(view_box(&s), "4 4 497.969 282");
+    assert_eq!(view_box(&s), "4 4 497.96875 282");
 }
