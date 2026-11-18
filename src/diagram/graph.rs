@@ -907,6 +907,8 @@ struct Measured {
     /// node's ink from its centre. The layout (`w`, `h`) takes the node's DOM
     /// box (`insertMeasuredNode`), the rect's left / top half plus that extent.
     overhang: Option<Overhang>,
+    /// [`shapes::ShapeSize::ink_offset`].
+    ink_offset: Point,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -933,7 +935,7 @@ impl Measured {
                 o.rect_w / 2.0 + o.right,
                 o.rect_h / 2.0 + o.bottom,
             ),
-            None => Rect::centered(c, self.w, self.h),
+            None => Rect::centered(c.plus(self.ink_offset), self.w, self.h),
         }
     }
 }
@@ -1146,9 +1148,11 @@ fn measure_node(
     let mut compartments = None;
     let mut table = None;
     let mut label_offset = Point::default();
+    let mut ink_offset = Point::default();
     let (w, h) = match shapes::size(node.shape, tw, th, &metrics, horizontal) {
         Some(s) => {
             label_offset = s.label_offset;
+            ink_offset = s.ink_offset;
             (s.w, s.h)
         }
         None => match node.shape {
@@ -1228,6 +1232,7 @@ fn measure_node(
         hand: None,
         nominal: None,
         overhang,
+        ink_offset,
     }
 }
 
@@ -5692,6 +5697,18 @@ fn node_elements(
                     Paint::stroke(&stroke, paint.stroke_width),
                 )),
                 PartStyle::Hidden => {}
+                PartStyle::FilledLine => els.push(Element::shape(part.geom, paint.clone())),
+                PartStyle::DashedBody => {
+                    let dash = match part.geom {
+                        Geometry::Rect { rect, .. } => Some(vec![rect.w, rect.h]),
+                        _ => None,
+                    };
+                    let paint = Paint {
+                        dash,
+                        ..paint.clone()
+                    };
+                    els.push(Element::classed_shape(part.geom, paint, "basic label-container"));
+                }
                 PartStyle::Fill => els.push(Element::classed_shape(
                     part.geom,
                     Paint::fill(&fill),

@@ -189,6 +189,10 @@ pub struct ShapeSize {
     pub w: f64,
     pub h: f64,
     pub label_offset: Point,
+    /// The centre of the drawing's box from the node's centre: a shape sized
+    /// from its drawn bounding box need not be centred in it (bucket.ts's rim
+    /// bulges below), and the viewBox holds the drawing where it is.
+    pub ink_offset: Point,
 }
 
 /// Cylinder end-cap radius `ry = rx / (2.5 + w / 50)` (`cylinder.ts`).
@@ -221,11 +225,13 @@ pub fn size(
         w,
         h,
         label_offset: Point::default(),
+        ink_offset: Point::default(),
     };
     let off = |w: f64, h: f64, dx: f64, dy: f64| ShapeSize {
         w,
         h,
         label_offset: Point::new(dx, dy),
+        ink_offset: Point::default(),
     };
     Some(match shape {
         Shape::Rect
@@ -235,6 +241,7 @@ pub fn size(
         | Shape::Text
         | Shape::Datastore => at(tw + px, th + py),
         Shape::Folder
+        | Shape::Delay
         | Shape::Bucket
         | Shape::Console
         | Shape::Browser
@@ -253,7 +260,10 @@ pub fn size(
         | Shape::Document => {
             let l = local(shape, tw, th, m)?;
             let b = l.bounds();
-            off(b.w, b.h, l.label.x, l.label.y)
+            ShapeSize {
+                ink_offset: b.center(),
+                ..off(b.w, b.h, l.label.x, l.label.y)
+            }
         }
         Shape::Stadium => {
             // stadium.ts stadiumDimensions (50-point arcs).
@@ -302,12 +312,6 @@ pub fn size(
         }
         Shape::Card => at(tw + px + NOTCH, th + py),
         Shape::LinedRect => off(tw + px + 2.0 * FRAME, th + py, FRAME / 2.0, 0.0),
-        Shape::Delay => {
-            let h = th.max(10.0) + py;
-            let r = h / 2.0;
-            let cap = r - (r * r - (th / 2.0).powi(2)).max(0.0).sqrt();
-            at(tw.max(15.0) + 2.0 * cap + px, h)
-        }
         Shape::Triangle | Shape::FlippedTriangle => {
             let h = tw + px + th;
             let dy = h / 2.0 - m.node_padding / 2.0 - th / 2.0;
@@ -498,6 +502,11 @@ pub enum PartStyle {
     Hidden,
     /// The node's fill without a stroke.
     Fill,
+    /// The node's fill and stroke, unclassed (a rough.js path the stylesheet fills).
+    FilledLine,
+    /// [`PartStyle::Body`] with `stroke-dasharray: w h` (datastore.ts: of a
+    /// rectangle's sides only the top and bottom are stroked).
+    DashedBody,
     /// A 1px stroke in `themeVariables.nodeBorder` (decorations of console/browser/bucket).
     AccentLine,
     /// Like [`PartStyle::AccentLine`] at 60% opacity.
@@ -548,6 +557,65 @@ fn seg(a: Point, b: Point) -> Vec<PathCmd> {
     vec![PathCmd::MoveTo(a), PathCmd::LineTo(b)]
 }
 
+/// A rectangle mermaid draws as one rough.js path (roughness 0) with its
+/// rules: the fill alone, then the outline and the rules in one stroke.
+fn ruled_rect(r: Rect, rules: &[(Point, Point)]) -> Outline {
+    let mut d = format!(
+        "M{},{} L{},{} L{},{} L{},{} Z",
+        r.x,
+        r.y,
+        r.right(),
+        r.y,
+        r.right(),
+        r.bottom(),
+        r.x,
+        r.bottom()
+    );
+    for (a, b) in rules {
+        d.push_str(&format!(" M{},{} L{},{}", a.x, a.y, b.x, b.y));
+    }
+    Outline {
+        parts: vec![
+            part(Geometry::Rect { rect: r, rx: 0.0 }, PartStyle::Fill),
+            line(rough_stroke(&d)),
+        ],
+        boundary: Boundary::Rect(r),
+        glyphs: Vec::new(),
+    }
+}
+
+/// rough.js's options for the classic and neo looks: roughness 0, solid fill.
+fn flat_rough() -> crate::rough::Options {
+    crate::rough::Options {
+        roughness: 0.0,
+        fill_style: "solid".into(),
+        ..crate::rough::Options::default()
+    }
+}
+
+/// The stroke rough.js draws for the SVG path `d` at roughness 0: each
+/// segment as (twice) the straight cubic, so the outline keeps its curves.
+fn rough_stroke(d: &str) -> Vec<PathCmd> {
+    let drawn = crate::rough::path(d, flat_rough());
+    drawn
+        .sets
+        .iter()
+        .filter(|s| s.kind == crate::rough::SetKind::Path)
+        .flat_map(|s| super::hand::set_cmds(&s.ops, Point::default()))
+        .collect()
+}
+
+/// The outline rough.js's `circle` draws at roughness 0 (its fitted curve
+/// overshoots the radius a little), centred on `c`.
+fn rough_circle(c: Point, r: f64) -> Vec<PathCmd> {
+    let d = crate::rough::circle(0.0, 0.0, r * 2.0, flat_rough());
+    d.sets
+        .iter()
+        .find(|s| s.kind == crate::rough::SetKind::Path)
+        .map(|s| super::hand::set_cmds(&s.ops, c))
+        .unwrap_or_default()
+}
+
 fn poly_outline(c: Point, pts: Vec<Point>) -> Outline {
     Outline {
         parts: vec![body(Geometry::Path(geom::polygon(&pts)))],
@@ -596,14 +664,10 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
         Shape::Rect | Shape::Note => rect(0.0),
         // datastore.ts: `stroke-dasharray: w h` leaves only the top and bottom rules.
         Shape::Datastore => Outline {
-            parts: vec![
-                Part {
-                    geom: Geometry::Rect { rect: r, rx: 0.0 },
-                    style: PartStyle::Fill,
-                },
-                line(seg(p(x0, y0), p(x1, y0))),
-                line(seg(p(x0, y1), p(x1, y1))),
-            ],
+            parts: vec![Part {
+                geom: Geometry::Rect { rect: r, rx: 0.0 },
+                style: PartStyle::DashedBody,
+            }],
             boundary: Boundary::Rect(r),
             glyphs: Vec::new(),
         },
@@ -666,13 +730,8 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             boundary: Boundary::Rect(r),
             glyphs: Vec::new(),
         },
-        Shape::LinedRect => {
-            let mut o = rect(0.0);
-            // shadedProcess.ts: a single line on the left.
-            o.parts
-                .push(line(seg(p(x0 + FRAME, y0), p(x0 + FRAME, y1))));
-            o
-        }
+        // shadedProcess.ts: a single line on the left.
+        Shape::LinedRect => ruled_rect(r, &[(p(x0 + FRAME, y0), p(x0 + FRAME, y1))]),
         Shape::Cylinder | Shape::LinedCylinder => {
             let rx = w / 2.0;
             let ry = cyl_ry(w);
@@ -756,11 +815,23 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
         Shape::CrossedCircle => {
             let rad = w / 2.0;
             let d = rad * (PI / 4.0).cos();
+            // crossedCircle.ts: rough.js's circle (roughness 0), and the
+            // cross as one path the stylesheet's `.node path` rule fills.
+            let cross = rough_stroke(&format!(
+                "M {},{} L {},{} M {},{} L {},{}",
+                c.x - d,
+                c.y + d,
+                c.x + d,
+                c.y - d,
+                c.x + d,
+                c.y + d,
+                c.x - d,
+                c.y - d
+            ));
             Outline {
                 parts: vec![
-                    body(Geometry::Circle { c, r: rad }),
-                    line(seg(p(c.x - d, c.y + d), p(c.x + d, c.y - d))),
-                    line(seg(p(c.x + d, c.y + d), p(c.x - d, c.y - d))),
+                    body(Geometry::Path(rough_circle(c, rad))),
+                    part(Geometry::Path(cross), PartStyle::FilledLine),
                 ],
                 boundary: Boundary::Ellipse(c, rad, rad),
                 glyphs: Vec::new(),
@@ -824,23 +895,6 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
                 p(x0, y0 + NOTCH),
             ],
         ),
-        Shape::Delay => {
-            let rad = h / 2.0;
-            let mut cmds = vec![PathCmd::MoveTo(p(x0, y0)), PathCmd::LineTo(p(x1 - rad, y0))];
-            cmds.extend(geom::arc_cubics(p(x1 - rad, c.y), rad, -PI / 2.0, PI / 2.0));
-            cmds.push(PathCmd::LineTo(p(x0, y1)));
-            cmds.push(PathCmd::Close);
-            // halfRoundedRectangle.ts's `intersect` polygon (a 50-point arc).
-            let mut local = vec![p(-w / 2.0, -h / 2.0), p(w / 2.0 - rad, -h / 2.0)];
-            local.extend(circle_points(-w / 2.0 + rad, 0.0, rad, 50, 90.0, 270.0));
-            local.push(p(w / 2.0 - rad, h / 2.0));
-            local.push(p(-w / 2.0, h / 2.0));
-            Outline {
-                parts: vec![body(Geometry::Path(cmds))],
-                boundary: Boundary::Polygon(c, polygon_in_box(c, w, h, local)),
-                glyphs: Vec::new(),
-            }
-        }
         Shape::Triangle => poly_outline(c, vec![p(x0, y1), p(x1, y1), p(c.x, y0)]),
         Shape::FlippedTriangle => poly_outline(c, vec![p(x0, y0), p(x1, y0), p(c.x, y1)]),
         // hourglass.ts: (0,0) (w,0) (0,h) (w,h).
@@ -857,19 +911,15 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             let top_left = y0 + h / 3.0;
             poly_outline(c, vec![p(x0, top_left), p(x0, y1), p(x1, y1), p(x1, y0)])
         }
-        Shape::WindowPane => {
-            let mut o = rect(0.0);
-            o.parts.push(line(seg(p(x0, y0 + PANE), p(x1, y0 + PANE))));
-            o.parts.push(line(seg(p(x0 + PANE, y0), p(x0 + PANE, y1))));
-            o
-        }
+        Shape::WindowPane => ruled_rect(
+            r,
+            &[
+                (p(x0, y0 + PANE), p(x1, y0 + PANE)),
+                (p(x0 + PANE, y0), p(x0 + PANE, y1)),
+            ],
+        ),
         // dividedRect.ts: a header band of 0.2 × the body height.
-        Shape::DividedRect => {
-            let mut o = rect(0.0);
-            let band = h / 6.0;
-            o.parts.push(line(seg(p(x0, y0 + band), p(x1, y0 + band))));
-            o
-        }
+        Shape::DividedRect => ruled_rect(r, &[(p(x0, y0 + h / 6.0), p(x1, y0 + h / 6.0))]),
         Shape::NotchedPentagon => poly_outline(
             c,
             vec![
@@ -959,6 +1009,7 @@ fn is_bbox_sized(shape: Shape) -> bool {
     matches!(
         shape,
         Shape::Folder
+            | Shape::Delay
             | Shape::Bucket
             | Shape::Console
             | Shape::Browser
@@ -1435,6 +1486,20 @@ fn local(shape: Shape, tw: f64, th: f64, m: &ShapeMetrics) -> Option<Local> {
         label: Point::default(),
     };
     match shape {
+        // halfRoundedRectangle.ts: the round end a 50-point polygon, which
+        // falls short of the box by a hair (no point lies on the axis).
+        Shape::Delay => {
+            let h = th.max(10.0) + m.pad.y;
+            let r = h / 2.0;
+            let cap = r - (r * r - (th / 2.0).powi(2)).max(0.0).sqrt();
+            let w = tw.max(15.0) + 2.0 * cap + m.pad.x;
+            let mut pts = vec![pt(-w / 2.0, -h / 2.0), pt(w / 2.0 - r, -h / 2.0)];
+            pts.extend(circle_points(-w / 2.0 + r, 0.0, r, 50, 90.0, 270.0));
+            pts.push(pt(w / 2.0 - r, h / 2.0));
+            pts.push(pt(-w / 2.0, h / 2.0));
+            l.parts.push(body_poly(&pts));
+            l.clip = pts;
+        }
         // folder.ts
         Shape::Folder => {
             let w = (tw + 2.0 * p).max(90.0);
@@ -1669,13 +1734,19 @@ fn local(shape: Shape, tw: f64, th: f64, m: &ShapeMetrics) -> Option<Local> {
                     (vec![left(), right], rect, r - r / 4.0)
                 }
             };
+            // Inserted first-child each: the braces (right before left), then
+            // the hit polygon (`stroke-opacity: 0`). The stylesheet's `.node
+            // path` rule fills all of them, the open braces as if closed.
+            for b in braces.iter().rev() {
+                l.parts.push(part(
+                    Geometry::Path(geom::polyline(&shifted(b, dx, 0.0))),
+                    PartStyle::FilledLine,
+                ));
+            }
             l.parts.push(part(
                 Geometry::Path(geom::polygon(&shifted(&rect, dx, 0.0))),
-                PartStyle::Hidden,
+                PartStyle::Fill,
             ));
-            for b in &braces {
-                l.parts.push(line(geom::polyline(&shifted(b, dx, 0.0))));
-            }
             l.clip = rect;
         }
         // lightningBolt.ts: 35×70, no label.
