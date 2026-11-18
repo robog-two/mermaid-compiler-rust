@@ -515,37 +515,67 @@ fn slot_styled(style: &StyleOverrides, slot: Option<&SlotColors>) -> StyleOverri
 /// a `polygon` nor an `.outer-path`).
 /// The same holds for `forkJoin.ts`' bar and the flowchart's `f-circ`
 /// (`filledCircle.ts`), both rough.js paths in a plain group.
+/// Nor is it one of the flowchart's shapes drawn as plain paths outside an
+/// `.outer-path`: folder, bucket, flag, bang, cloud and the braces.
 fn casts_shadow(kind: DiagramKind, shape: Shape) -> bool {
     !matches!(
         (kind, shape),
         (_, Shape::Invisible | Shape::ForkBar)
             | (DiagramKind::State, Shape::Choice)
-            | (DiagramKind::Flowchart, Shape::StateStart)
+            | (
+                DiagramKind::Flowchart,
+                Shape::StateStart
+                    | Shape::Folder
+                    | Shape::Bucket
+                    | Shape::PaperTape
+                    | Shape::Bang
+                    | Shape::Cloud
+                    | Shape::BraceLeft
+                    | Shape::BraceRight
+                    | Shape::Braces
+            )
             | (DiagramKind::Class, Shape::Rect)
     )
 }
 
 /// The neo look's shadow on every `circle` of the node (`.node circle` casts
 /// one each): the two rings of a `dbl-circ`.
+/// browser.ts and person.ts draw `rect`s and `circle`s, each casting its
+/// own (the browser's dots and unfilled address bar too).
 fn cast_shadows(els: &mut Vec<Element>, sh: &DropShadow, shape: Shape) {
-    if shape != Shape::DoubleCircle {
-        cast_shadow(els, sh);
-        return;
-    }
+    let each = match shape {
+        Shape::DoubleCircle => |g: &Geometry| matches!(g, Geometry::Circle { .. }),
+        Shape::Browser | Shape::Person => {
+            |g: &Geometry| matches!(g, Geometry::Circle { .. } | Geometry::Rect { .. })
+        }
+        _ => {
+            cast_shadow(els, sh);
+            return;
+        }
+    };
     let mut out = Vec::with_capacity(els.len() + 2);
     for el in els.drain(..) {
-        if matches!(
-            &el,
-            Element::Shape {
-                geom: Geometry::Circle { .. },
-                ..
+        match &el {
+            Element::Shape { geom, paint, .. } if each(geom) => {
+                if paint.fill.is_none() && sh.blurred().is_none() {
+                    // An unfilled source casts its stroke's shadow.
+                    let copy = Element::classed_shape(
+                        geom.translated(sh.dx, sh.dy),
+                        Paint {
+                            opacity: Some(sh.opacity * paint.opacity.unwrap_or(1.0)),
+                            ..Paint::stroke(&sh.color, paint.stroke_width)
+                        },
+                        "drop-shadow",
+                    );
+                    out.push(copy);
+                    out.push(el);
+                } else {
+                    let mut one = vec![el];
+                    cast_shadow(&mut one, sh);
+                    out.extend(one);
+                }
             }
-        ) {
-            let mut one = vec![el];
-            cast_shadow(&mut one, sh);
-            out.extend(one);
-        } else {
-            out.push(el);
+            _ => out.push(el),
         }
     }
     *els = out;
@@ -1977,14 +2007,47 @@ pub fn render_with(
             n
         };
         let (mut els, boundary) = node_elements(n, m, c, pal, &lk, font, g.kind);
+        // bucket.ts / browser.ts / console.ts style their decorations inline,
+        // which wins over the neo rules: only the body takes them.
+        let inline_accents = matches!(n.shape, Shape::Bucket | Shape::Browser | Shape::Console);
+        if lk.neo && inline_accents {
+            neo_node_css(&mut els[..1], pal, &n.style, false);
+        }
         let small = small_shadow(g.kind, n.shape, m.w, cfg.look, pal);
         if let Some(sh) = small
             .as_ref()
             .or(shadow.filter(|_| casts_shadow(g.kind, n.shape)))
         {
             cast_shadows(&mut els, sh, n.shape);
+            // text.ts' `rect.text` (unfilled, unstroked) casts nothing to see,
+            // though the filter is there.
+            if lk.neo && g.kind == DiagramKind::Flowchart && n.shape == Shape::Text {
+                let (w, h) = m.drawn_size();
+                let at = |dx: f64, dy: f64| Geometry::Rect {
+                    rect: Rect::centered(Point::new(c.x + dx, c.y + dy), w, h),
+                    rx: 0.0,
+                };
+                let el = match sh.blurred() {
+                    Some(blurred) => Element::shape(
+                        at(0.0, 0.0),
+                        Paint {
+                            shadow: Some(blurred),
+                            ..Paint::stroke(&pal.node_border, 0.0)
+                        },
+                    ),
+                    None => Element::classed_shape(
+                        at(sh.dx, sh.dy),
+                        Paint {
+                            opacity: Some(sh.opacity),
+                            ..Paint::stroke(&sh.color, 0.0)
+                        },
+                        "drop-shadow",
+                    ),
+                };
+                els.insert(0, el);
+            }
         }
-        if lk.neo && !(g.kind == DiagramKind::Class && n.shape == Shape::Note) {
+        if lk.neo && !inline_accents && !(g.kind == DiagramKind::Class && n.shape == Shape::Note) {
             neo_node_css(&mut els, pal, &n.style, drawn_as_paths(g.kind, n.shape));
         }
         if let Some(b) = m.hand {
@@ -4268,6 +4331,11 @@ pub fn draw_node(
         ..n.clone()
     };
     let (mut els, boundary) = node_elements(&painted, &m, c, pal, &lk, font, kind);
+    // As in [`render`]: decorations styled inline keep their own strokes.
+    let inline_accents = matches!(n.shape, Shape::Bucket | Shape::Browser | Shape::Console);
+    if cfg.look == ConfigLook::Neo && inline_accents {
+        neo_node_css(&mut els[..1], pal, &n.style, false);
+    }
     let shadow = pal
         .drop_shadow
         .as_ref()
@@ -4279,7 +4347,7 @@ pub fn draw_node(
     {
         cast_shadows(&mut els, sh, n.shape);
     }
-    if cfg.look == ConfigLook::Neo {
+    if cfg.look == ConfigLook::Neo && !inline_accents {
         neo_node_css(&mut els, pal, &n.style, drawn_as_paths(kind, n.shape));
     }
     cylinder_frame(&mut els, shapes::arc_frame(n.shape, c, m.w, m.h));
@@ -5707,7 +5775,11 @@ fn node_elements(
                         dash,
                         ..paint.clone()
                     };
-                    els.push(Element::classed_shape(part.geom, paint, "basic label-container"));
+                    els.push(Element::classed_shape(
+                        part.geom,
+                        paint,
+                        "basic label-container",
+                    ));
                 }
                 PartStyle::Fill => els.push(Element::classed_shape(
                     part.geom,

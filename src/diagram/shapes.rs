@@ -320,14 +320,16 @@ pub fn size(
         }
         Shape::Hourglass => at(30.0, 30.0),
         Shape::CrossedCircle => at(60.0, 60.0),
+        // The label is placed by `node.padding` (`np`), the box by the look's
+        // paddings (neo's differ).
         Shape::SlopedRect => {
-            let h = th + py;
-            off(tw + px, 1.5 * h, 0.0, h / 4.0)
+            let (h, np) = (th + py, m.node_padding);
+            off(tw + px, 1.5 * h, np - px / 2.0, h / 4.0 + np - py / 2.0)
         }
         Shape::WindowPane => off(tw + px + PANE, th + py + PANE, PANE / 2.0, PANE / 2.0),
         Shape::DividedRect => {
-            let h = th + py;
-            off(tw + px, 1.2 * h, 0.0, 0.1 * h)
+            let (h, np) = (th + py, m.node_padding);
+            off(tw + px, 1.2 * h, (np - px) / 2.0, 0.1 * h + (np - py) / 2.0)
         }
         Shape::NotchedPentagon => at(tw + px, th + py),
         Shape::StackedRect => {
