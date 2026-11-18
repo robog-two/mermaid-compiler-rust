@@ -51,8 +51,8 @@ fn regions_cast_no_shadow() {
     );
     let g = group(&s, "cluster-divider-id-1");
     let first = &g[..g.find("</g>").expect("end")];
-    assert!(!first.contains("drop-shadow"), "{first}");
-    assert!(group(&s, "cluster-A").contains("drop-shadow"));
+    assert!(!first.contains("filter="), "{first}");
+    assert!(group(&s, "cluster-A").contains("filter=\"url(#"));
     // stateEnd's rough.js circle measures 14.0133 wide: the end state sits
     // at x 345.0066 and the view box is 356.01995849609375 wide.
     assert_eq!(view_box(&s), "4 4 356.02 404");
@@ -115,7 +115,8 @@ fn groups_in_lanes_cast_the_shadow() {
   class s00 hot
 "#);
     assert!(
-        group(&s, "S0").starts_with("<g id=\"S0\" class=\"cluster\"><rect class=\"drop-shadow\""),
+        group(&s, "S0").starts_with("<g id=\"S0\" class=\"cluster\"><rect ")
+            && group(&s, "S0").contains("filter=\"url(#"),
         "{}",
         group(&s, "S0")
     );
@@ -134,7 +135,7 @@ fn an_empty_subgraph_under_elk_is_a_flat_frame() {
         g.contains("<rect x=\"196.688\" y=\"165.8\" width=\"82.625\" height=\"0\" fill=\"#f96\""),
         "{g}"
     );
-    assert!(g.contains("class=\"drop-shadow\""), "{g}");
+    assert!(g.contains("filter=\"url(#"), "{g}");
 }
 
 /// An animated edge leaves the neo look's `*-margin` markers out
