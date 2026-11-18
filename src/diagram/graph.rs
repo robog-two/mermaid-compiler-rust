@@ -1361,7 +1361,8 @@ pub fn render_with(
             if cfg.html_edge_labels {
                 t.html()
             } else {
-                TextBlock::svg(t.lines, font, false)
+                // Its box is the text's `getBBox()`.
+                svg_bbox_wide(TextBlock::svg(t.lines, font, false))
             }
         })
         .collect();
@@ -1815,10 +1816,13 @@ pub fn render_with(
                 // The title is all there is of it to see.
                 bounds.add_rect(Rect::centered(center, t.width, t.height));
             }
-            children.push(Element::classed_text(
-                t.centered_text(center, &color),
-                "cluster-label",
-            ));
+            let mut text = t.centered_text(center, &color);
+            if t.svg && g.kind == DiagramKind::Class {
+                // A namespace's SVG title starts at its box's left (no
+                // `text-anchor: middle` reaches it).
+                text = text.anchored(Anchor::Start, center.x - t.width / 2.0);
+            }
+            children.push(Element::classed_text(text, "cluster-label"));
         }
         cluster_els.push(Element::Group {
             id: Some(format!("cluster-{}", c.id)),
@@ -2737,9 +2741,13 @@ pub fn render_with(
         ]
     };
     elements.extend(title_els);
-    let view_box = bounds
-        .rect()
-        .pad(opts.view_padding.unwrap_or(cfg.diagram_padding));
+    // An empty diagram's bounding box is the origin's empty box.
+    let content = if g.nodes.is_empty() && g.clusters.is_empty() && title.is_none() {
+        Rect::default()
+    } else {
+        bounds.rect()
+    };
+    let view_box = content.pad(opts.view_padding.unwrap_or(cfg.diagram_padding));
     Scene {
         kind: g.kind,
         view_box,

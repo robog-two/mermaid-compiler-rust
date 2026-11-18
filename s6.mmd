@@ -1,0 +1,20 @@
+---
+config:
+  theme: dark
+  look: classic
+  htmlLabels: false
+---
+classDiagram
+  class Shape {
+    <<abstract>>
+    +area()* double
+    +name$ String
+  }
+  class Empty
+  class Ann {
+    <<enumeration>>
+  }
+  Shape <|-- Circle : is a
+  Shape "1..*" *-- "many" Ann : has many
+  Empty ..> Shape
+  note for Circle "round\nthing"
