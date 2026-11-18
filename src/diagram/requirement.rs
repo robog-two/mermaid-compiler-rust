@@ -755,8 +755,8 @@ mod tests {
         // wide (each run rounded up to 1/64 px), the box 20 more.
         let src = "requirementDiagram\n\nrequirement \"__test_req__\" {\n    id: 1\n    text: \"*italicized text* **bold text**\"\n    risk: high\n    verifymethod: test\n}\n";
         let (vb, w) = boxes(src);
-        assert_eq!(w, [195.859375]);
-        assert_eq!(vb.w, 211.859375);
+        assert_eq!(w, [229.46875]);
+        assert_eq!(vb.w, 245.46875);
     }
 
     /// mermaid 12.3.0 draws the name as `<strong>` inside the bold label div:
@@ -781,11 +781,11 @@ mod tests {
 
     #[test]
     fn bold_class_reaches_every_label() {
-        // mermaid 12.3.0: viewBox width 386.46875 with `classDef important
-        // font-weight:bold` on both boxes.
+        // mermaid 12.3.0 with mmdc's fonts: viewBox width 403.59375 with
+        // `classDef important font-weight:bold` on both boxes.
         let src = "requirementDiagram\n\nrequirement test_req:::important {\n    id: 1\n    text: \"class styling example\"\n    risk: low\n    verifymethod: test\n}\n\nelement test_entity {\n    type: simulation\n}\n\nclassDef important font-weight:bold\n\nclass test_entity important\nstyle test_entity fill:#f9f,stroke:#333\n";
         let (vb, _) = boxes(src);
-        assert!((vb.w - 386.46875).abs() < 0.01, "{vb:?}");
+        assert!((vb.w - 403.59375).abs() < 0.01, "{vb:?}");
     }
 
     #[test]
@@ -859,7 +859,7 @@ mod tests {
         );
         let (mut paths, mut fills) = (Vec::new(), Vec::new());
         collect(&scene.elements, &mut paths, &mut fills);
-        for start in ["M13.525,221.167C", "M14.532,220.15C"] {
+        for start in ["M13.26,221.168C", "M14.224,220.193C"] {
             assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
         }
     }

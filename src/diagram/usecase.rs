@@ -5344,12 +5344,16 @@ mod tests {
         let first = t.iter().find(|t| t.lines == ["Missing icon"]).unwrap();
         let second = t.iter().find(|t| t.lines == ["fallback"]).unwrap();
         let shift = second.x - first.x;
-        assert!((shift - crate::text::break_space_shift("Missing icon", 14.0, false)).abs() < 1e-9);
-        assert!((shift - 1.945).abs() < 0.01, "{shift}");
+        // Actor labels are Open Sans (`actorFontFamily`).
+        let space = crate::text::with_face(crate::text::Face::OpenSans, || {
+            crate::text::break_space_shift("Missing icon", 14.0, false)
+        });
+        assert!((shift - space).abs() < 1e-9);
+        assert!((shift - 1.818).abs() < 0.01, "{shift}");
         // The actors' column is as wide as the 140px wrapped actor: mermaid
-        // centres "Normal actor" at x 101.93 (glyphs from 61.859).
+        // 12.3.0 with mmdc's fonts centres "Normal actor" at x 98.89.
         let normal = t.iter().find(|t| t.lines == ["Normal actor"]).unwrap();
-        assert!((normal.x - 101.9297).abs() < 0.01, "{}", normal.x);
+        assert!((normal.x - 98.891).abs() < 0.01, "{}", normal.x);
     }
 
     /// Path data of every shape in `src`'s scene.
@@ -5399,7 +5403,7 @@ mod tests {
                    SalesAgent --> Quote\nBroker --> Priced\nQuote ..> : include Priced\n";
         let paths = drawn_paths(src);
         assert!(
-            paths.iter().any(|d| d.starts_with("M156.509,69.567C")),
+            paths.iter().any(|d| d.starts_with("M156.556,69.567C")),
             "{paths:?}"
         );
     }

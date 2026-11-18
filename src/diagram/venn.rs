@@ -2865,7 +2865,8 @@ mod tests {
     }
 
     /// Text nodes sit where Chromium lays out their flex `foreignObject`
-    /// (mermaid 12.3.0: "Design" at x 217.266, its line box at y 232.984).
+    /// (mermaid 12.3.0 with mmdc's fonts: "Design" at x 214.906, its line box
+    /// at y 232.984).
     #[test]
     fn text_nodes_snap_like_their_foreign_object() {
         let r = crate::render::render(
@@ -2877,11 +2878,11 @@ mod tests {
         texts(&r.scene.elements, &mut all);
         let design = all.iter().find(|t| t.lines == ["Design"]).unwrap();
         assert_eq!(design.anchor, Anchor::Start);
-        assert!((design.x - 217.265625).abs() < 1e-9, "{}", design.x);
+        assert!((design.x - 214.90625).abs() < 1e-9, "{}", design.x);
         let top = design.y - crate::scene::first_baseline(20.0, 23.0);
         assert!((top - 232.984375).abs() < 1e-9, "{top}");
         let systems = all.iter().find(|t| t.lines == ["Systems"]).unwrap();
-        assert!((systems.x - 210.0625).abs() < 1e-9, "{}", systems.x);
+        assert!((systems.x - 206.297).abs() < 1e-3, "{}", systems.x);
     }
 
     #[test]

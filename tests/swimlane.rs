@@ -1,5 +1,6 @@
 //! `swimlane-beta` under its own layout engine, pinned to what mermaid 12.3.0
-//! renders for these diagrams (headless Chromium): coordinates as mermaid
+//! renders for these diagrams (headless Chromium, with the fonts mmdc loads):
+//! coordinates as mermaid
 //! writes them, to its 3 decimals.
 
 use mmdc::config::MermaidConfig;
@@ -57,14 +58,11 @@ const SUPPORT: &str = r#"swimlane-beta LR
 #[test]
 fn lr_lanes_and_routes() {
     let s = svg(SUPPORT);
-    assert_eq!(view_box(&s), "-94 -66.5 848.813 807");
+    assert_eq!(view_box(&s), "-94 -66.5 818.34 817.5");
     assert_eq!(edge(&s, "request", "triage").0, "M36,22.5L36,225.5");
-    assert_eq!(edge(&s, "triage", "answer").0, "M112,252L580.813,252");
-    assert_eq!(edge(&s, "fix", "answer").0, "M660.813,651.5L660.813,278.5");
-    assert_eq!(
-        edge(&s, "answer", "receive").0,
-        "M660.813,229.5L660.813,26.5"
-    );
+    assert_eq!(edge(&s, "triage", "answer").0, "M112,252L550.34,252");
+    assert_eq!(edge(&s, "fix", "answer").0, "M630.34,651.5L630.34,278.5");
+    assert_eq!(edge(&s, "answer", "receive").0, "M630.34,229.5L630.34,26.5");
 }
 
 /// Under BT the lane titles get no strip (height 0), and their labels stand
@@ -185,8 +183,8 @@ fn an_arrow_end_moves_back_past_a_short_last_segment() {
   class s00 hot
 "#);
     let (d, _) = edge(&s, "n32", "n11");
-    assert!(d.starts_with("M293.582,200.774L293.791,201.474C"), "{d}");
-    assert!(d.ends_with("L-444.344,148.661L-444.344,150.161"), "{d}");
+    assert!(d.starts_with("M294.444,202.372L294.644,203.057C"), "{d}");
+    assert!(d.ends_with("L-455.875,149.446L-455.875,150.946"), "{d}");
 }
 
 /// A nearly level edge (from a label's anchor) hops the vertical edge it
@@ -281,11 +279,12 @@ fn a_hop_is_drawn_from_its_rounded_numbers() {
 "#);
     let (d, dash) = edge(&s, "a10", "a00");
     assert!(
-        d.contains("L513.418,508.569C513.457,505.83,515.688,503.631,518.427,503.631C521.165,503.631,523.396,505.83,523.435,508.569L525.435,508.569"),
+        d.contains("L511.163,525.386C511.163,522.675,513.36,520.478,516.071,520.478C518.782,520.478,520.979,522.675,520.979,525.386L522.979,525.386"),
         "{d}"
     );
-    // Chromium measures 219.44081 (its float path measure).
-    assert_eq!(dash.as_deref(), Some("0 0 219.443 12.5"));
+    // Chromium measures 221.93884 (its float path measure; mermaid 12.3.0 with
+    // mmdc's fonts).
+    assert_eq!(dash.as_deref(), Some("0 0 221.938 12.5"));
 }
 
 /// Neo heads hide the line's end under them by an inline pattern: 12.5px for a
@@ -333,7 +332,6 @@ fn under_dagre_the_lanes_are_subgraphs() {
                  decide -->|Needs changes| apply\n");
     assert_eq!(
         edge(&s, "screen", "decide").0,
-        "M537.297,128.5L541.464,128.5C545.63,128.5,553.964,128.5,561.63,128.5\
-         C569.297,128.5,576.297,128.5,579.797,128.5L583.297,128.5"
+        "M554.391,128.5L558.557,128.5C562.724,128.5,571.057,128.5,578.724,128.5C586.391,128.5,593.391,128.5,596.891,128.5L600.391,128.5"
     );
 }

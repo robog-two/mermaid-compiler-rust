@@ -1062,7 +1062,11 @@ fn a_containers_port_without_edges_outside_holds_its_ports_in_their_made_order()
   c0n0 --> C0
   c0n0 -->|yes| x0
 ",
-        &[("c0n0", 0.0, 0.0), ("x0", 393.469, 6.0), ("x1", 585.469, 6.0)],
+        &[
+            ("c0n0", 0.0, 0.0),
+            ("x0", 393.469, 6.0),
+            ("x1", 585.469, 6.0),
+        ],
     );
 }
 

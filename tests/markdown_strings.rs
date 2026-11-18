@@ -28,7 +28,8 @@ flowchart LR
     Line 3`\"]
     markdown --> newLines
 ");
-    assert!(s.contains("This <tspan font-weight=\"bold\">is</tspan> "));
+    // In Recursive the first label wraps after "is" (mermaid 12.3.0 with mmdc's fonts).
+    assert!(s.contains("This <tspan font-weight=\"bold\">is</tspan></tspan>"));
     assert!(s.contains("<tspan font-style=\"italic\">Markdown</tspan>"));
     for l in ["Line1", "Line 2", "Line 3"] {
         assert!(s.contains(&format!(">{l}</tspan>")), "{l}");
@@ -111,7 +112,8 @@ fn block_17_block_arrows_with_direction_lists() {
 #[test]
 fn pdf_draws_emphasis_with_the_bold_and_oblique_helveticas() {
     let r = render::render(
-        "flowchart LR\n  a[\"`**b** *i* ***bi***`\"]",
+        // The classic theme's Arial-measured text is drawn in Helvetica.
+        "---\nconfig:\n  theme: default\n---\nflowchart LR\n  a[\"`**b** *i* ***bi***`\"]",
         &MermaidConfig::default(),
     )
     .unwrap();

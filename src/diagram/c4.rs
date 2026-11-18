@@ -2667,10 +2667,10 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
                    Rel(web, q, \"Publishes\")\n  Rel(q, comp, \"Feeds\")\n";
         let paths = drawn_paths(src);
         for start in [
-            "M157.134,270.95C",
-            "M470.752,169.865C",
-            "M152.115,457.324C",
-            "M152.44,661.935C",
+            "M157.673,277.327C",
+            "M474.159,175.738C",
+            "M152.115,470.085C",
+            "M156.204,680.176C",
         ] {
             assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
         }
@@ -2762,7 +2762,8 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
 
     /// A boundary's `$sprite` reserves 48px above its label (nothing is drawn); a
     /// named attribute in the type slot leaves the type unset, a positional
-    /// sprite is dropped. View boxes from mermaid 12.3.0.
+    /// sprite is dropped. View boxes from mermaid 12.3.0 (with mmdc's fonts:
+    /// the cards in Open Sans).
     #[test]
     fn boundary_sprites_reserve_room_above_the_label() {
         let vb = |src: &str| scene(src).view_box;
@@ -2774,33 +2775,33 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         let system =
             "C4Context\nSystem_Boundary(b, \"Bound\", $sprite=\"users\") {\n  System(a, \"A\")\n}";
         assert!(
-            close(vb(system), (0.0, -10.0, 616.0, 503.0)),
+            close(vb(system), (0.0, -10.0, 616.0, 522.0)),
             "{:?}",
             vb(system)
         );
         let plain = "C4Context\nSystem_Boundary(b, \"Bound\") {\n  System(a, \"A\")\n}";
-        assert!(close(vb(plain), (0.0, -10.0, 616.0, 455.0)));
+        assert!(close(vb(plain), (0.0, -10.0, 616.0, 474.0)));
         let positional = node("n, \"Node\", \"Ubuntu\", \"desc\", \"ubuntu\"");
         assert!(
-            close(positional, (0.0, -10.0, 616.0, 489.0)),
+            close(positional, (0.0, -10.0, 616.0, 511.0)),
             "{positional:?}"
         );
         let in_type_slot = node("n, \"Node\", $sprite=\"ubuntu\"");
         assert!(
-            close(in_type_slot, (0.0, -10.0, 616.0, 482.0)),
+            close(in_type_slot, (0.0, -10.0, 616.0, 498.0)),
             "{in_type_slot:?}"
         );
         let typed = node("n, \"Node\", \"Ubuntu\", $sprite=\"ubuntu\"");
-        assert!(close(typed, (0.0, -10.0, 616.0, 503.0)), "{typed:?}");
+        assert!(close(typed, (0.0, -10.0, 616.0, 522.0)), "{typed:?}");
         let empty_type = vb("C4Context\nBoundary(b, \"Bound\", \"\") {\n  System(a, \"A\")\n}");
         assert!(
-            close(empty_type, (0.0, -10.0, 616.0, 434.0)),
+            close(empty_type, (0.0, -10.0, 616.0, 450.0)),
             "{empty_type:?}"
         );
         let updated = vb(
             "C4Context\nBoundary(b, \"Bound\") {\n  System(a, \"A\")\n}\nUpdateElementStyle(b, $sprite=\"x\")",
         );
-        assert!(close(updated, (0.0, -10.0, 616.0, 503.0)), "{updated:?}");
+        assert!(close(updated, (0.0, -10.0, 616.0, 522.0)), "{updated:?}");
     }
 
     #[test]
@@ -2808,20 +2809,20 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         // mermaid 12.3 in mmdc's 800px-wide headless screen.
         let s = scene(include_str!("../../examples/diagrams/c4-container.mmd"));
         assert!(
-            close(s.view_box, (0.0, -70.0, 955.489, 1546.478)),
+            close(s.view_box, (0.0, -70.0, 957.39682, 1620.505736)),
             "{:?}",
             s.view_box
         );
         let s = scene(include_str!("../../examples/diagrams/c4.mmd"));
         assert!(
-            close(s.view_box, (0.0, -70.0, 1032.0, 2801.359)),
+            close(s.view_box, (0.0, -70.0, 1032.0, 2914.615474)),
             "{:?}",
             s.view_box
         );
         // Without a title there is no 60px band.
         let s = scene("C4Context\nSystem(a, \"A\")");
         assert!(
-            close(s.view_box, (0.0, -10.0, 516.0, 349.0)),
+            close(s.view_box, (0.0, -10.0, 516.0, 360.0)),
             "{:?}",
             s.view_box
         );
@@ -2840,7 +2841,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
             .iter()
             .find(|t| t.lines.iter().map(|l| text::plain(l)).eq(["[HHHH]"]))
             .unwrap();
-        assert_eq!((label.y, techn.y), (294.5, 311.5));
+        assert_eq!((label.y, techn.y), (306.5, 323.5));
         // The technology is italic.
         assert_eq!(
             text::styled_runs(&techn.lines[0], false),
@@ -2856,7 +2857,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         let t = texts(&s);
         let label = t.iter().find(|t| t.lines == ["HHHH"]).unwrap();
         let kind = t.iter().find(|t| t.lines == ["[HHHH]"]).unwrap();
-        assert_eq!((label.y, kind.y), (138.0, 159.5));
+        assert_eq!((label.y, kind.y), (154.5, 180.5));
         assert!(label.bold && (label.x - 308.0).abs() < 1e-9);
     }
 

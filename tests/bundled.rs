@@ -74,8 +74,9 @@ fn icons_reach_the_pdf_as_filled_outlines() {
         "---\nconfig:\n  theme: default\n---\nflowchart LR\n A[fa:fa-car Car]",
     ))
     .into_owned();
-    // One transformed outline (scale 14/512) filled in the text colour.
-    assert!(p.contains("q 0.0273438 0 0 0.0273438 "), "{p}");
+    // One transformed outline (the classic theme's 16px: scale 16/512) filled
+    // in the text colour.
+    assert!(p.contains("q 0.0312500 0 0 0.0312500 "), "{p}");
     assert!(p.contains("/F1 1 Tf ( Car) Tj"));
 }
 
@@ -84,7 +85,9 @@ fn icons_reach_the_pdf_as_filled_outlines() {
 fn pdf_embeds_the_bundled_font_only_for_text_helvetica_lacks() {
     // The classic theme's labels are Arial-measured, drawn in Helvetica.
     let classic = "---\nconfig:\n  theme: default\n---\n";
-    let latin = pdf(&format!("{classic}flowchart LR\n A[Café] --> B[“quoted” – ok]"));
+    let latin = pdf(&format!(
+        "{classic}flowchart LR\n A[Café] --> B[“quoted” – ok]"
+    ));
     assert!(latin.starts_with(b"%PDF-1.4"));
     assert!(!latin.windows(9).any(|w| w == b"FontFile3"));
 
@@ -130,10 +133,8 @@ fn pdf_embeds_the_web_fonts_for_their_text() {
     }
     // Everything Recursive draws is drawn in it: no Helvetica text.
     assert!(!text.contains("/F1 1 Tf ("), "{text}");
-    let c4 = String::from_utf8_lossy(&pdf(
-        "C4Context\n Person(a, \"Customer\", \"A customer\")",
-    ))
-    .into_owned();
+    let c4 = String::from_utf8_lossy(&pdf("C4Context\n Person(a, \"Customer\", \"A customer\")"))
+        .into_owned();
     assert!(c4.contains("/BaseFont /OpenSans-Bold"));
     assert!(c4.contains("/BaseFont /OpenSans-Regular"));
 }
@@ -141,6 +142,9 @@ fn pdf_embeds_the_web_fonts_for_their_text() {
 #[cfg(not(feature = "fonts"))]
 #[test]
 fn without_bundled_fonts_pdf_text_outside_windows_1252_is_replaced() {
-    let text = String::from_utf8_lossy(&pdf("---\nconfig:\n  theme: default\n---\nflowchart LR\n A[Łódź]")).into_owned();
+    let text = String::from_utf8_lossy(&pdf(
+        "---\nconfig:\n  theme: default\n---\nflowchart LR\n A[Łódź]",
+    ))
+    .into_owned();
     assert!(text.contains("(?\\363d?)"));
 }

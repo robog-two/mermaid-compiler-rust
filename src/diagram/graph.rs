@@ -7364,7 +7364,7 @@ mod tests {
             _ => None,
         });
         assert!(
-            d.as_deref().unwrap_or("").starts_with("M480.89,323.683C"),
+            d.as_deref().unwrap_or("").starts_with("M480.89,323.504C"),
             "{d:?}"
         );
     }
@@ -7437,7 +7437,7 @@ mod tests {
             }),
             _ => None,
         });
-        assert_eq!(d.as_deref(), Some("M385.374,92.5L428.039,155.193"));
+        assert_eq!(d.as_deref(), Some("M385.553,92.5L428.641,155.203"));
     }
 
     /// mermaid 12.3.0: a stadium is as wide as its drawn polygon, whose
@@ -7472,7 +7472,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let at = Point::new(987.4221854345703, 434.0);
+        let at = Point::new(993.7346854345703, 434.0);
         assert!(centres.iter().any(|c| c.dist(at) < 1e-3), "{centres:?}");
     }
 
@@ -8007,7 +8007,9 @@ mod tests {
     #[test]
     fn elk_separate_container_holds_its_title_label() {
         let long = "A really very much longer title for this subgraph here";
-        let title = TextBlock::label(long, 14.0).html();
+        let title = crate::text::with_face(crate::text::Face::Recursive, || {
+            TextBlock::label(long, 14.0).html()
+        });
         let scene = render_cli(&format!(
             "flowchart TD\nsubgraph S[{long}]\ndirection LR\na\nend\nb --> S"
         ));
@@ -8069,7 +8071,9 @@ mod tests {
                 _ => None,
             })
             .expect("the title as the node's label");
-        let title = TextBlock::label("Inner title", label.font_size).html();
+        let title = crate::text::with_face(crate::text::Face::Recursive, || {
+            TextBlock::label("Inner title", label.font_size).html()
+        });
         assert!((inner.0.w - (title.width + 32.0)).abs() < 1e-6, "{inner:?}");
         assert!(
             (inner.0.h - (title.height + 24.0)).abs() < 1e-6,

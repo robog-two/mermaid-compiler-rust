@@ -224,7 +224,7 @@ fn fa_references_draw_a_pack_named_fa() {
     assert_eq!(found.len(), 3, "{found:?}");
     assert_eq!(
         found[0],
-        ("204.006,26.25".into(), "0 0 24 24".into()),
+        ("205.178,26.25".into(), "0 0 24 24".into()),
         "edge"
     );
     assert_eq!(found[1].1, "0 0 24 24");
