@@ -75,6 +75,17 @@ enum Bound {
 }
 
 impl HandNode {
+    /// The box of everything drawn, measured or not (what the viewBox holds).
+    pub fn drawn_bbox(&self) -> Rect {
+        self.pieces
+            .iter()
+            .filter_map(|pc| {
+                drawable_bbox(&pc.drawable)
+                    .map(|b| Rect::new(b.x + pc.at.x, b.y + pc.at.y, b.w, b.h))
+            })
+            .fold(self.bbox, |a, b| a.union(&b))
+    }
+
     /// The edge-clipping boundary of the node centred on `c` with measured
     /// size `w`×`h`.
     pub fn boundary(&self, shape: Shape, m: &ShapeMetrics, c: Point, w: f64, h: f64) -> Boundary {

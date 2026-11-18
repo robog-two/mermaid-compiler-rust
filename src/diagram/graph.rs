@@ -896,8 +896,8 @@ struct Measured {
     metrics: ShapeMetrics,
     w: f64,
     h: f64,
-    /// Under the handDrawn look, the drawn node's `getBBox()` in its own frame
-    /// (`w`×`h` is then its size).
+    /// Under the handDrawn look, the box of the drawn node in its own frame
+    /// (`w`×`h` is then its measured `getBBox()` size).
     hand: Option<Rect>,
     /// A hand-drawn described state's box before it was measured.
     nominal: Option<(f64, f64)>,
@@ -5948,13 +5948,16 @@ fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
     };
     if let Some(hn) = hand_state_box(n, m, pal, lk, seed) {
         m.nominal = Some((m.w, m.h));
-        (m.w, m.h) = (hn.bbox.w, hn.bbox.h);
-        m.hand = Some(hn.bbox);
+        // A class box reaches the layout at its whole drawing's size, its
+        // dividers' strokes included.
+        let b = if lk.state { hn.bbox } else { hn.drawn_bbox() };
+        (m.w, m.h) = (b.w, b.h);
+        m.hand = Some(hn.drawn_bbox());
         return;
     }
     if let Some(hn) = hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)) {
         (m.w, m.h) = (hn.bbox.w, hn.bbox.h);
-        m.hand = Some(hn.bbox);
+        m.hand = Some(hn.drawn_bbox());
     }
 }
 
