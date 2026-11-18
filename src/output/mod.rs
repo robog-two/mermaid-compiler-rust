@@ -296,7 +296,8 @@ mod tests {
         assert_eq!(r.scene.view_box.w, 1512.0);
         let l = png_layout(&r, &opts(1.0, None));
         assert_eq!((l.width, l.height), (784, 32));
-        assert!((l.scale - 776.0 / 1512.0).abs() < 1e-4);
+        // (31.296875 / 61 is the smaller scale: `meet` centres it 0.13px in.)
+        assert!((l.scale - 31.296875 / 61.0).abs() < 1e-9 && (l.dx - 0.13).abs() < 0.01);
         // useMaxWidth false: fixed size, nothing reflows.
         let l = png_layout(&rendered(FIXED), &opts(1.0, None));
         assert_eq!((l.width, l.height), (1512, 61));
