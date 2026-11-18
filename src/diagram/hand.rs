@@ -303,6 +303,30 @@ pub fn state_box(w: f64, h: f64, rx: f64, div: f64, st: &HandStyle) -> HandNode 
     }
 }
 
+/// classBox.ts under the handDrawn look: the `w`×`h` box centred on the
+/// origin as a rough rectangle, and a rough line across the rectangle's
+/// measured box at each of `dividers` (heights from the origin, the line's
+/// far end 0.001 lower), all with the node's options. The box alone is
+/// measured.
+pub fn class_box(w: f64, h: f64, dividers: &[f64], st: &HandStyle) -> HandNode {
+    let (x, y) = (-w / 2.0, -h / 2.0);
+    let rect = rough::rectangle(x, y, w, h, node_options(st));
+    let bbox = drawable_bbox(&rect).unwrap_or(Rect::new(x, y, w, h));
+    let mut pieces = vec![piece(rect, Point::default())];
+    for &dy in dividers {
+        pieces.push(Piece {
+            drawable: rough::line(bbox.x, dy, bbox.right(), dy + 0.001, node_options(st)),
+            at: Point::default(),
+            measured: false,
+        });
+    }
+    HandNode {
+        pieces,
+        bbox,
+        boundary: Bound::Rect,
+    }
+}
+
 /// What a cluster's hand-drawn frame depends on besides its rect (its paint
 /// leaves the geometry alone).
 #[derive(Debug, Clone, Copy, PartialEq)]

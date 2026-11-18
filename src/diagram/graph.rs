@@ -5907,8 +5907,9 @@ fn hand_style(n: &Node, pal: &Palette, lk: &Look, seed: f64) -> hand::HandStyle 
     }
 }
 
-/// A described state's hand-drawn box ([`hand::state_box`]) at its nominal
-/// size (`m.nominal`, else `m.w`×`m.h`), or `None` for other nodes.
+/// A hand-drawn box with compartments (a described state's
+/// [`hand::state_box`], a class's [`hand::class_box`]) at its nominal size
+/// (`m.nominal`, else `m.w`×`m.h`), or `None` for other nodes.
 fn hand_state_box(
     n: &Node,
     m: &Measured,
@@ -5917,19 +5918,26 @@ fn hand_state_box(
     seed: f64,
 ) -> Option<hand::HandNode> {
     let layout = m.compartments.as_ref()?;
-    if !(lk.state && n.shape == Shape::Compartments && m.svg_class.is_none()) {
+    if !(n.shape == Shape::Compartments && m.svg_class.is_none()) {
         return None;
     }
     let (w, h) = m.nominal.unwrap_or((m.w, m.h));
-    let div = layout.heights.first().copied().unwrap_or(0.0);
-    // dataFetcher gives every state `rx: 10`.
-    Some(hand::state_box(
-        w,
-        h,
-        10.0,
-        div,
-        &hand_style(n, pal, lk, seed),
-    ))
+    let st = hand_style(n, pal, lk, seed);
+    if lk.state {
+        let div = layout.heights.first().copied().unwrap_or(0.0);
+        // dataFetcher gives every state `rx: 10`.
+        return Some(hand::state_box(w, h, 10.0, div, &st));
+    }
+    // The dividers between the compartments, from the box's centre.
+    let mut y = -h / 2.0;
+    let mut dividers = Vec::new();
+    for (i, sh) in layout.heights.iter().enumerate() {
+        if i > 0 {
+            dividers.push(y);
+        }
+        y += sh;
+    }
+    Some(hand::class_box(w, h, &dividers, &st))
 }
 
 /// Under the handDrawn look, size node `n` by its drawing's box, as
