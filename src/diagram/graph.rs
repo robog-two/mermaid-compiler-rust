@@ -617,8 +617,10 @@ fn drawn_as_paths(kind: DiagramKind, shape: Shape) -> bool {
 fn neo_node_css(els: &mut [Element], pal: &Palette, style: &StyleOverrides, paths: bool) {
     for el in els {
         match el {
+            // (The neo rules reach rects, polygons, paths and circles: no `<line>`.)
             Element::Shape { geom, paint, class }
                 if !paint.stroke.is_none()
+                    && !matches!(geom, Geometry::Line { .. })
                     && !matches!(
                         class.as_deref(),
                         Some("drop-shadow" | "collapsed-separator")
@@ -637,6 +639,31 @@ fn neo_node_css(els: &mut [Element], pal: &Palette, style: &StyleOverrides, path
             }
             Element::Group { children, .. } => neo_node_css(children, pal, style, paths),
             _ => {}
+        }
+    }
+}
+
+/// The cylinders draw their path about a corner and move it into place
+/// (cylinder.ts: `translate(-w / 2, -(h / 2 + ry))`); the
+/// browser resolves the arcs in that frame, in single precision (at the
+/// node's own coordinates an arc's endpoints lie a hair nearer than its
+/// diameter and its centre moves off the chord: up to 0.03px of height).
+/// Every arc-drawn outline of the node (its body, a hard shadow's copy) goes
+/// into that frame ([`shapes::arc_frame`]).
+fn cylinder_frame(els: &mut [Element], origin: Option<Point>) {
+    let Some(o) = origin else {
+        return;
+    };
+    for el in els.iter_mut() {
+        let arcs = matches!(el, Element::Shape { geom: Geometry::Path(cmds), .. }
+            if cmds.iter().any(|c| matches!(c, PathCmd::ArcTo { .. })));
+        if arcs {
+            let local = std::mem::replace(el, Element::group("", Vec::new()));
+            *el = Element::Translated {
+                dx: o.x,
+                dy: o.y,
+                children: vec![local.translated(-o.x, -o.y)],
+            };
         }
     }
 }
@@ -690,13 +717,14 @@ fn compartment_layout(
     let max_w = blocks.iter().map(|b| b.width).fold(0.0, f64::max);
     if kind == DiagramKind::State {
         // rectWithTitle.ts: box = labels + padding; title 3px below the top,
-        // divider `title + padding/2` down, description 5px below it.
+        // divider `title + padding/2` down, the description `title +
+        // padding/2 + 5` below the title's top: 3 + 5 below the divider.
         let hp = pad / 2.0;
         let title = blocks.first().map(content).unwrap_or(0.0);
         let rest: f64 = blocks.iter().skip(1).map(content).sum();
         let layout = CompartmentLayout {
             heights: vec![title + hp, rest + 5.0 + pad],
-            text_top: vec![3.0, hp + 5.0 + 3.0],
+            text_top: vec![3.0, 3.0 + 5.0],
             inset: hp,
             rx: 5.0,
         };
@@ -1553,11 +1581,14 @@ pub fn render_with(
             && c.kind != ClusterKind::NoteGroup
             && !(dagre_leaf && empty_of[ci].is_some())
         {
-            let color = c
-                .style
-                .color
-                .clone()
-                .unwrap_or_else(|| pal.title_color.clone());
+            // A composite state's title is a `.cluster-label` (`stateLabelColor`).
+            let color = c.style.color.clone().unwrap_or_else(|| {
+                if g.kind == DiagramKind::State {
+                    pal.state_label.clone()
+                } else {
+                    pal.title_color.clone()
+                }
+            });
             // Flush with the top edge (`translate(x, y + subGraphTitleTopMargin)`);
             // a composite's label sits 1px lower (`roundedWithTitle`).
             let top = match (empty_of[ci], c.kind) {
@@ -1610,6 +1641,7 @@ pub fn render_with(
         if lk.neo && !(g.kind == DiagramKind::Class && n.shape == Shape::Note) {
             neo_node_css(&mut els, pal, &n.style, drawn_as_paths(g.kind, n.shape));
         }
+        cylinder_frame(&mut els, shapes::arc_frame(n.shape, c, m.w, m.h));
         bounds.add_rect(Rect::centered(c, m.w, m.h));
         boundaries.push(boundary);
         if n.shape != Shape::Invisible {
@@ -2070,11 +2102,13 @@ pub fn render_with(
         if e.line == LineKind::Invisible {
             continue;
         }
-        let stroke = e
-            .style
-            .stroke
-            .clone()
-            .unwrap_or_else(|| pal.line_color.clone());
+        let stroke = e.style.stroke.clone().unwrap_or_else(|| {
+            if g.kind == DiagramKind::State {
+                pal.transition.clone()
+            } else {
+                pal.line_color.clone()
+            }
+        });
         let width = e
             .style
             .stroke_width
@@ -2220,13 +2254,12 @@ pub fn render_with(
             children,
         });
 
-        let text_color = e.style.color.clone().unwrap_or_else(|| {
-            if g.kind == DiagramKind::Class {
-                // classDiagram's `.edgeLabel { color: classText }`.
-                pal.class_text.clone()
-            } else {
-                pal.text_color.clone()
-            }
+        // The flowchart stylesheet's `.label text, span` reaches edge labels too;
+        // the class stylesheet's `.edgeLabel { color: classText }`.
+        let text_color = e.style.color.clone().unwrap_or_else(|| match g.kind {
+            DiagramKind::Flowchart => pal.flow_text.clone(),
+            DiagramKind::Class => pal.class_text.clone(),
+            _ => pal.text_color.clone(),
         });
         let (mt, mb) = opts.subgraph_title_margin;
         let label_at = label_at.map(|p| Point::new(p.x, p.y + (mt + mb) / 2.0));
@@ -2265,12 +2298,26 @@ pub fn render_with(
             } else {
                 Rect::centered(at, block.width + 4.0, block.height)
             });
+            // A flowchart's HTML label sits in a `div.labelBkg`, painted
+            // `fade(edgeLabelBackground, 0.5)` under the `<p>`: through a
+            // translucent background it shows.
+            let under = (g.kind == DiagramKind::Flowchart && !block.svg)
+                .then(|| crate::color::parse(edge_label_bg.css()))
+                .flatten()
+                .filter(|c| c.a < 1.0)
+                .map(|c| {
+                    let faded = Color::new(format!("rgba({}, {}, {}, 0.5)", c.r, c.g, c.b));
+                    Element::rect(r, 0.0, Paint::fill(&faded))
+                });
             label_els.push(Element::group(
                 "edgeLabel",
-                vec![
-                    Element::rect(r, 0.0, bg),
-                    Element::text(block.centered_text(at, &text_color)),
-                ],
+                under
+                    .into_iter()
+                    .chain([
+                        Element::rect(r, 0.0, bg),
+                        Element::text(block.centered_text(at, &text_color)),
+                    ])
+                    .collect(),
             ));
         }
         if elk {
@@ -3062,6 +3109,10 @@ fn align_degenerate_nodes(centers: &mut [Point], sizes: &[(f64, f64)], anchors: 
     }
 }
 
+/// Half the width `updateNodeBounds` gives a state end: the getBBox of its
+/// rough.js circle of diameter 14 (single precision), a hair over 14.
+const STATE_END_R: f64 = 14.013293266296387 / 2.0;
+
 fn clip_end(b: &Boundary, pts: &[Point], elk: bool) -> Point {
     if elk {
         clip_along(b, pts[0], pts[1])
@@ -3129,21 +3180,28 @@ pub(crate) fn kept_port(
 /// Puts the ports [`kept_port`] keeps into the route where the outline point
 /// beside one is off the line of its leg (an end cut on the line from the
 /// node's centre): mermaid draws the edge through it, its last leg slanted.
+/// An outline point past the port (a state end's circle, a hair wider than
+/// its box) turns the leg back on itself, the end's marker with it.
 fn keep_ports_off_the_line(pts: &mut Vec<Point>, kept: &mut [Option<Point>; 2]) {
     let n = pts.len();
     if n < 2 {
         return;
     }
+    // Whether the route, from `a` through `b`, turns off or back at `c`.
+    let turns = |a: Point, b: Point, c: Point| {
+        let (u, v) = (b.minus(a), c.minus(b));
+        !collinear(a, b, c) || u.x * v.x + u.y * v.y < 0.0
+    };
     if let Some(p) = kept[1]
         && p.dist(pts[n - 1]) > 1e-3
-        && !collinear(pts[n - 2], p, pts[n - 1])
+        && turns(pts[n - 2], p, pts[n - 1])
     {
         pts.insert(n - 1, p);
         kept[1] = None;
     }
     if let Some(p) = kept[0]
         && p.dist(pts[0]) > 1e-3
-        && !collinear(pts[0], p, pts[1])
+        && turns(pts[1], p, pts[0])
     {
         pts.insert(1, p);
         kept[0] = None;
@@ -3508,6 +3566,7 @@ pub fn draw_node(
     if cfg.look == ConfigLook::Neo {
         neo_node_css(&mut els, pal, &n.style, drawn_as_paths(kind, n.shape));
     }
+    cylinder_frame(&mut els, shapes::arc_frame(n.shape, c, m.w, m.h));
     let class = ["node", "default"]
         .into_iter()
         .map(str::to_string)
@@ -3645,6 +3704,9 @@ fn cluster_shapes(
                 .stroke
                 .clone()
                 .or_else(|| slot.as_ref().map(|s| s.border.clone()))
+                // `.statediagram-cluster rect { stroke: stateBorder || nodeBorder }`,
+                // which the neo look's rules outrank.
+                .or_else(|| pal.state_border.clone().filter(|_| look != ConfigLook::Neo))
                 .unwrap_or_else(|| pal.node_border.clone());
             let title_bkg = c
                 .style
@@ -4513,17 +4575,32 @@ fn node_elements(
     let flow_width = pal.stroke_width.unwrap_or(1.0);
     let r = Rect::centered(c, w, h);
     let (x0, y0, x1) = (r.x, r.y, r.right());
+    let state = kind == DiagramKind::State;
     let default_fill = match n.shape {
         Shape::Note => &pal.note_bkg,
         Shape::StateStart if flow_css => &pal.node_border,
         Shape::ForkBar if flow_css => &pal.main_bkg,
+        // forkJoin.ts: a rough.js rectangle filled and stroked `lineColor`.
+        Shape::ForkBar if state => &pal.line_color,
+        // `.node rect { fill: stateBkg || mainBkg }`.
+        Shape::Rounded | Shape::Compartments if state => {
+            pal.state_bkg.as_ref().unwrap_or(&pal.main_bkg)
+        }
         Shape::StateStart | Shape::ForkBar => &pal.special_state,
         _ => &pal.main_bkg,
     };
     let default_stroke = match n.shape {
         Shape::Note => &pal.note_border,
         Shape::StateStart | Shape::StateEnd | Shape::ForkBar if flow_css => &pal.node_border,
+        // stateEnd.ts strokes its rough.js circle `lineColor` (the neo look's
+        // `.node path` rule outranks that), forkJoin.ts its rectangle.
+        Shape::StateEnd | Shape::ForkBar if state => &pal.line_color,
         Shape::StateStart | Shape::StateEnd | Shape::ForkBar => &pal.special_state,
+        // The state stylesheet's `.node rect, .node polygon { stroke: stateBorder
+        // || nodeBorder }` (the neo look's own rules outrank it).
+        Shape::Rounded | Shape::Compartments if state && !lk.neo => {
+            pal.state_border.as_ref().unwrap_or(&pal.node_border)
+        }
         _ => &pal.node_border,
     };
     let fill = n.style.fill.clone().unwrap_or_else(|| default_fill.clone());
@@ -4551,29 +4628,32 @@ fn node_elements(
         n.style.stroke_width.unwrap_or(default_width),
     );
     paint.dash = n.style.dash.clone();
-    let text_color = n.style.color.clone().unwrap_or_else(|| {
-        if n.shape == Shape::Note {
-            pal.note_text.clone()
-        } else if kind == DiagramKind::Class {
+    let text_color = n
+        .style
+        .color
+        .clone()
+        .unwrap_or_else(|| match (kind, n.shape) {
+            (_, Shape::Note) => pal.note_text.clone(),
+            (DiagramKind::Flowchart, _) => pal.flow_text.clone(),
+            (DiagramKind::State, _) => pal.state_label.clone(),
             // classDiagram's `.nodeLabel { color: classText }`.
-            pal.class_text.clone()
-        } else if kind == DiagramKind::Er
-            && matches!(
-                pal.theme,
-                ThemeName::Default
-                    | ThemeName::Null
-                    | ThemeName::Dark
-                    | ThemeName::Forest
-                    | ThemeName::Neutral
-            )
-        {
+            (DiagramKind::Class, _) => pal.class_text.clone(),
             // erDiagram's `.label { color: nodeTextColor || textColor }`: the
             // classic themes define no `nodeTextColor`.
-            pal.text_color.clone()
-        } else {
-            pal.node_text.clone()
-        }
-    });
+            (DiagramKind::Er, _)
+                if matches!(
+                    pal.theme,
+                    ThemeName::Default
+                        | ThemeName::Null
+                        | ThemeName::Dark
+                        | ThemeName::Forest
+                        | ThemeName::Neutral
+                ) =>
+            {
+                pal.text_color.clone()
+            }
+            _ => pal.node_text.clone(),
+        });
 
     let mut els = Vec::new();
     let boundary = if let Some(o) = shapes::outline(
@@ -4590,7 +4670,14 @@ fn node_elements(
             match part.style {
                 PartStyle::Body => {
                     let class = match part.geom {
-                        Geometry::Path(_) if n.shape != Shape::Cylinder => "label-container",
+                        Geometry::Path(_)
+                            if !matches!(
+                                n.shape,
+                                Shape::Cylinder | Shape::LinedCylinder | Shape::HorizontalCylinder
+                            ) =>
+                        {
+                            "label-container"
+                        }
                         _ => "basic label-container",
                     };
                     els.push(Element::classed_shape(part.geom, paint.clone(), class));
@@ -4682,12 +4769,23 @@ fn node_elements(
                     Geometry::Circle { c, r: 2.5 },
                     Paint::both(inner, inner_stroke, width),
                 ));
-                Boundary::Ellipse(c, 7.0, 7.0)
+                // Its `intersect` is a circle of half the width
+                // `updateNodeBounds` measured on the rough.js outline, a hair
+                // over 7: an edge whose port lies on the 14px box steps back
+                // out to it (ELK keeps the port, then the outline point).
+                Boundary::Ellipse(c, STATE_END_R, STATE_END_R)
             }
             Shape::ForkBar => {
+                // The state diagram's is a rough.js path: `strokeWidth` falls
+                // back to rough's 1.3 (`neo_node_css` sets the neo look's).
+                let width = match kind {
+                    _ if flow_css => flow_width,
+                    DiagramKind::State => ROUGH_STROKE_WIDTH,
+                    _ => 1.0,
+                };
                 els.push(Element::shape(
                     Geometry::Rect { rect: r, rx: 0.0 },
-                    Paint::both(&fill, &stroke, if flow_css { flow_width } else { 1.0 }),
+                    Paint::both(&fill, &stroke, width),
                 ));
                 Boundary::Rect(r)
             }
@@ -4706,7 +4804,20 @@ fn node_elements(
                 let mut y = y0;
                 for (i, (sec, block)) in n.sections.iter().zip(&m.sections).enumerate() {
                     let sh = layout.heights.get(i).copied().unwrap_or(0.0);
-                    if i > 0 {
+                    if i > 0 && state {
+                        // rectWithTitle.ts: a `<line class="divider">`, which
+                        // no neo rule reaches: `.statediagram-state .divider
+                        // { stroke: stateBorder || nodeBorder }`.
+                        let border = pal.state_border.as_ref().unwrap_or(&pal.node_border);
+                        els.push(Element::classed_shape(
+                            Geometry::Line {
+                                a: Point::new(x0, y),
+                                b: Point::new(x1, y),
+                            },
+                            Paint::stroke(border, 1.0),
+                            "divider",
+                        ));
+                    } else if i > 0 {
                         els.push(Element::classed_shape(
                             Geometry::Path(vec![
                                 PathCmd::MoveTo(Point::new(x0, y)),

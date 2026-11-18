@@ -2,6 +2,8 @@
 //! `-t theme` → `--configFile` (shallow-assigned over it) → `--cssFile` (themeCSS)
 //! → diagram front-matter `config:` → `%%{init: ...}%%` directives.
 
+mod keys;
+
 use crate::json::Json;
 use crate::theme::{self, Palette, ThemeName};
 
@@ -576,6 +578,13 @@ impl MermaidConfig {
         self.refresh_global_appearance();
         if let Some(vars) = j.get("themeVariables").and_then(Json::as_object) {
             for (k, v) in vars {
+                // `sanitizeDirective` deletes a directive's key that no default
+                // configuration has (`configKeys`): `nodeTextColor`,
+                // `stateBorder`, `nodeShadow`, ... only reach a theme from the
+                // site configuration.
+                if directive && !keys::known(k) {
+                    continue;
+                }
                 if let Some(mut s) = v.to_scalar_string() {
                     // `sanitizeDirective` empties a directive's string theme variable
                     // with any character outside `[\d "#%(),.;A-Za-z]`, so a

@@ -195,6 +195,18 @@ fn cyl_ry(w: f64) -> f64 {
     w / 2.0 / (2.5 + w / 50.0)
 }
 
+/// Where the cylinders' shape code puts the origin of the frame it draws its
+/// path in (then moved into place by a `translate`), for a `w`×`h` node centred
+/// on `c`: cylinder.ts and linedCylinder.ts the box's top-left corner,
+/// tiltedCylinder.ts the bottom end of its left cap's chord.
+pub fn arc_frame(shape: Shape, c: Point, w: f64, h: f64) -> Option<Point> {
+    match shape {
+        Shape::Cylinder | Shape::LinedCylinder => Some(Point::new(c.x - w / 2.0, c.y - h / 2.0)),
+        Shape::HorizontalCylinder => Some(Point::new(c.x - w / 2.0 + cyl_ry(h), c.y + h / 2.0)),
+        _ => None,
+    }
+}
+
 /// Size of `shape` around a `tw`×`th` label.
 pub fn size(
     shape: Shape,
@@ -236,7 +248,8 @@ pub fn size(
         | Shape::BowTieRect
         | Shape::TaggedDocument
         | Shape::PaperTape
-        | Shape::LinedDocument => {
+        | Shape::LinedDocument
+        | Shape::Document => {
             let l = local(shape, tw, th, m)?;
             let b = l.bounds();
             off(b.w, b.h, l.label.x, l.label.y)
@@ -319,11 +332,6 @@ pub fn size(
         Shape::TaggedRect => {
             let h = th + py;
             at(tw + px + TAG_RATIO * h, h)
-        }
-        Shape::Document => {
-            let h = th + py;
-            let amp = h * m.wave_ratio;
-            off(tw + px, h + 2.0 * amp, 0.0, -amp)
         }
         // collapsedGroup.ts: padding 8 around the title, an 8px gap and a 20px row of
         // dots below it, at least 80 wide; the title sits above the centre.
@@ -618,30 +626,33 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
         Shape::Cylinder | Shape::LinedCylinder => {
             let rx = w / 2.0;
             let ry = cyl_ry(w);
-            let top_c = p(c.x, y0 + ry);
-            let bot_c = p(c.x, y1 - ry);
+            // createCylinderPathD: one path, filled and stroked. The top
+            // ellipse (front half, then back), down the left side, the bottom's
+            // front half, up the right side; linedCylinder.ts adds its second
+            // rim, `outerOffset = 0.1 * h` below the top one, as a subpath.
+            let arc = |to: Point| PathCmd::ArcTo {
+                rx,
+                ry,
+                large: false,
+                sweep: false,
+                to,
+                rel: false,
+            };
             let mut cmds = vec![
                 PathCmd::MoveTo(p(x0, y0 + ry)),
+                arc(p(x1, y0 + ry)),
+                arc(p(x0, y0 + ry)),
                 PathCmd::LineTo(p(x0, y1 - ry)),
+                arc(p(x1, y1 - ry)),
+                PathCmd::LineTo(p(x1, y0 + ry)),
             ];
-            cmds.extend(geom::elliptic_arc_cubics(bot_c, rx, ry, PI, 0.0));
-            cmds.push(PathCmd::LineTo(p(x1, y0 + ry)));
-            cmds.extend(geom::elliptic_arc_cubics(top_c, rx, ry, 0.0, -PI));
-            cmds.push(PathCmd::Close);
-            let mut parts = vec![body(Geometry::Path(cmds))];
-            let mut front = vec![PathCmd::MoveTo(p(x0, y0 + ry))];
-            front.extend(geom::elliptic_arc_cubics(top_c, rx, ry, PI, 0.0));
-            parts.push(line(front));
             if shape == Shape::LinedCylinder {
-                // linedCylinder.ts: second rim `outerOffset = 0.1 * h` below the top one.
                 let off = 0.1 * (h - 2.0 * ry);
-                let lc = p(c.x, y0 + ry + off);
-                let mut rim = vec![PathCmd::MoveTo(p(x0, y0 + ry + off))];
-                rim.extend(geom::elliptic_arc_cubics(lc, rx, ry, PI, 0.0));
-                parts.push(line(rim));
+                cmds.push(PathCmd::MoveTo(p(x0, y0 + ry + off)));
+                cmds.push(arc(p(x1, y0 + ry + off)));
             }
             Outline {
-                parts,
+                parts: vec![body(Geometry::Path(cmds))],
                 boundary: Boundary::Cylinder(r, ry),
                 glyphs: Vec::new(),
             }
@@ -650,33 +661,28 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             let ry = h / 2.0;
             let rx = cyl_ry(h);
             let (l, rr) = (x0 + rx, x1 - rx);
-            let mut cmds = vec![PathCmd::MoveTo(p(l, y1))];
-            cmds.extend(geom::elliptic_arc_cubics(
-                p(l, c.y),
+            // tiltedCylinder.ts's createCylinderPathD: one path. The left cap,
+            // the top, the right cap's outer half; then that cap's inner half
+            // as a subpath, and the bottom back.
+            let arc = |sweep: bool, to: Point| PathCmd::ArcTo {
                 rx,
                 ry,
-                PI / 2.0,
-                1.5 * PI,
-            ));
-            cmds.push(PathCmd::LineTo(p(rr, y0)));
-            cmds.extend(geom::elliptic_arc_cubics(
-                p(rr, c.y),
-                rx,
-                ry,
-                -PI / 2.0,
-                PI / 2.0,
-            ));
-            cmds.push(PathCmd::Close);
-            let mut inner = vec![PathCmd::MoveTo(p(rr, y0))];
-            inner.extend(geom::elliptic_arc_cubics(
-                p(rr, c.y),
-                rx,
-                ry,
-                -PI / 2.0,
-                -1.5 * PI,
-            ));
+                large: false,
+                sweep,
+                to,
+                rel: false,
+            };
+            let cmds = vec![
+                PathCmd::MoveTo(p(l, y1)),
+                arc(true, p(l, y0)),
+                PathCmd::LineTo(p(rr, y0)),
+                arc(true, p(rr, y1)),
+                PathCmd::MoveTo(p(rr, y0)),
+                arc(false, p(rr, y1)),
+                PathCmd::LineTo(p(l, y1)),
+            ];
             Outline {
-                parts: vec![body(Geometry::Path(cmds)), line(inner)],
+                parts: vec![body(Geometry::Path(cmds))],
                 boundary: Boundary::Rect(r),
                 glyphs: Vec::new(),
             }
@@ -871,17 +877,6 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             ]))));
             o
         }
-        Shape::Document => {
-            // waveEdgedRectangle.ts: 0.8 sine cycles of amplitude `amp` along the bottom.
-            let amp = h / (1.0 / m.wave_ratio + 2.0);
-            let base = y1 - amp;
-            let mut pts = vec![p(x0, y0), p(x1, y0)];
-            pts.extend((0..=50).rev().map(|i| {
-                let x = x0 + w * i as f64 / 50.0;
-                p(x, base + amp * (2.0 * PI * 0.8 * (x - x0) / w).sin())
-            }));
-            poly_outline(c, pts)
-        }
         // collapsedGroup.ts: rounded box (rx 10, the expanded flow container's radius);
         // the separator and the dots are drawn by the caller.
         Shape::CollapsedGroup => rect(10.0),
@@ -929,6 +924,7 @@ fn is_bbox_sized(shape: Shape) -> bool {
             | Shape::TaggedDocument
             | Shape::PaperTape
             | Shape::LinedDocument
+            | Shape::Document
     )
 }
 
@@ -1735,6 +1731,31 @@ fn local(shape: Shape, tw: f64, th: f64, m: &ShapeMetrics) -> Option<Local> {
             ));
             l.parts.push(body_poly(&pts));
             l.clip = pts;
+        }
+        // waveEdgedRectangle.ts: 0.8 sine cycles of amplitude `amp` along the
+        // bottom, drawn `amp / 2` up; the node is the sampled wave's bounding
+        // box, which the drawing does not quite centre. The label sits
+        // `padding` in from the corner, not its own label padding (neo: 16 /
+        // 12 per side), and the amplitude up.
+        Shape::Document => {
+            let (lpx, lpy) = if neo { (16.0, 12.0) } else { (p, p) };
+            let (w, h) = (tw + 2.0 * lpx, th + 2.0 * lpy);
+            let amp = if neo { h / 4.0 } else { h / 8.0 };
+            let fh = h + amp;
+            let ext = ((14.0 - w) / 2.0).max(0.0);
+            let mut pts = vec![pt(-w / 2.0 - ext, fh / 2.0)];
+            pts.extend(sine_wave(
+                -w / 2.0 - ext,
+                fh / 2.0,
+                w / 2.0 + ext,
+                fh / 2.0,
+                amp,
+                0.8,
+            ));
+            pts.extend([pt(w / 2.0 + ext, -fh / 2.0), pt(-w / 2.0 - ext, -fh / 2.0)]);
+            l.parts.push(body_poly(&shifted(&pts, 0.0, -amp / 2.0)));
+            l.clip = pts;
+            l.label = pt(-w / 2.0 + p + tw / 2.0, -h / 2.0 + p - amp + th / 2.0);
         }
         // linedWaveEdgedRect.ts: the frame line is part of the outline polygon.
         Shape::LinedDocument => {
