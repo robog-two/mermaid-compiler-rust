@@ -4975,6 +4975,7 @@ fn node_elements(
                 weight: None,
                 anchor: Anchor::Start,
                 fill: pal.node_border.clone(),
+                tspan_central: false,
             };
             els.push(Element::classed_text(text, "console-glyph"));
         }

@@ -933,6 +933,17 @@ pub fn baseline_shift(b: Baseline, font_size: f64) -> f64 {
     }
 }
 
+/// Where Chromium paints, on a 1:1 device pixel grid, the alphabetic
+/// baseline of text written as `<text y="y" dominant-baseline="central">
+/// <tspan dy="0">`: it snaps the tspan's position to a whole pixel and then
+/// the shifted baseline, halves rounding up (measured for 12-24px at whole
+/// and half pixel positions, and with the `dy` of further lines). Its
+/// `getBBox()` (and our `y`) keeps `y` + the central shift unsnapped.
+pub fn painted_tspan_central(y: f64, font_size: f64) -> f64 {
+    let up = |v: f64| (v + 0.5).floor();
+    up(up(y) + baseline_shift(Baseline::Central, font_size))
+}
+
 /// An HTML line box's `line-height: normal` in mermaid's font (Liberation
 /// Sans): its ascent, descent and line gap (67/2048em), each rounded to
 /// whole pixels (18px at 16px).

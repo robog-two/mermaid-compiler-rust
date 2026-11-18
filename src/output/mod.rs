@@ -98,6 +98,7 @@ pub fn encode_svg(r: &Rendered, opt: &EncodeOptions) -> String {
             background: &opt.background,
             sizing,
             theme_css: r.theme_css.as_deref(),
+            raster_scale: None,
         },
     )
 }
@@ -133,6 +134,14 @@ pub fn encode_png(
     rast: &png::Rasterizer,
 ) -> Result<Vec<u8>, String> {
     let vb = r.scene.view_box;
+    // Device pixels per SVG unit: the CSS size over the natural one (the svg is
+    // fitted, aspect kept), times the device scale factor.
+    let (cw, ch) = css_size(vb.w, vb.h, opt.size);
+    let fit = if vb.w > 0.0 && vb.h > 0.0 {
+        (cw / vb.w).min(ch / vb.h)
+    } else {
+        1.0
+    };
     let svg_text = svg::to_svg(
         &r.scene,
         &SvgOptions {
@@ -143,17 +152,10 @@ pub fn encode_png(
                 height: vb.h,
             },
             theme_css: r.theme_css.as_deref(),
+            raster_scale: Some(fit * opt.scale),
         },
     );
     let (w, h) = png_dimensions(r, opt);
-    // Device pixels per SVG unit: the CSS size over the natural one (the svg is
-    // fitted, aspect kept), times the device scale factor.
-    let (cw, ch) = css_size(vb.w, vb.h, opt.size);
-    let fit = if vb.w > 0.0 && vb.h > 0.0 {
-        (cw / vb.w).min(ch / vb.h)
-    } else {
-        1.0
-    };
     // Puppeteer paints the page white unless the background is transparent.
     let bg = if opt.background.trim() == "transparent" {
         None

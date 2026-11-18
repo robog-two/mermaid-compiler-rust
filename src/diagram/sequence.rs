@@ -568,6 +568,7 @@ fn line_text(x: f64, y: f64, shift: Baseline, line: &str, font_size: f64, fill: 
         weight: None,
         anchor: Anchor::Middle,
         fill: fill.clone(),
+        tspan_central: false,
     }
 }
 
@@ -607,7 +608,10 @@ fn tspan_lines(cx: f64, cy: f64, lines: &[String], font_size: f64, fill: &Color)
         .enumerate()
         .map(|(i, l)| {
             let dy = i as f64 * font_size - font_size * (n - 1.0) / 2.0;
-            line_text(cx, cy + dy, BASELINE_CENTRAL, l, font_size, fill)
+            Text {
+                tspan_central: true,
+                ..line_text(cx, cy + dy, BASELINE_CENTRAL, l, font_size, fill)
+            }
         })
         .collect()
 }
@@ -1540,6 +1544,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
             weight: None,
             anchor: Anchor::Start,
             fill: pal.text_color.clone(),
+            tspan_central: false,
         }));
     }
 
@@ -1775,6 +1780,7 @@ fn message_elements(pm: &Pending, pal: &Palette, cfg: &SequenceConfig) -> Elemen
                 weight: None,
                 anchor: Anchor::Middle,
                 fill: pal.sequence_number.clone(),
+                tspan_central: false,
             },
             "sequenceNumber",
         ));

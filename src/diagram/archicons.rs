@@ -35,6 +35,7 @@ pub fn unknown(r: Rect) -> Element {
         weight: None,
         anchor: Anchor::Start,
         fill: Color::new("#ffffff"),
+        tspan_central: false,
     })
 }
 

@@ -959,6 +959,7 @@ mod tests {
             weight: None,
             anchor: Anchor::Start,
             fill: Color::new("#333"),
+            tspan_central: false,
         };
         let scene = Scene {
             kind: DiagramKind::Sankey,
@@ -1004,6 +1005,7 @@ mod tests {
                     height: 400.0,
                 },
                 theme_css: None,
+                raster_scale: None,
             },
         );
         assert!(svg.contains("<text class=\"sankey-label-bg\""), "{svg}");

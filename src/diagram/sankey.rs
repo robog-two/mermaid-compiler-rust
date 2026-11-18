@@ -747,6 +747,7 @@ pub fn render(
                 weight: None,
                 anchor,
                 fill: pal.text_color.clone(),
+                tspan_central: false,
             };
             bounds.add_rect(label_box(&t));
             label_els.push(if *class == "sankey-label-bg" {

@@ -612,6 +612,7 @@ fn edge_label(
         weight: None,
         anchor: Anchor::Middle,
         fill: fill.clone(),
+        tspan_central: false,
     };
     // Corners of the text box placed with its origin at `o`, turned by `deg`
     // about `about`.
@@ -844,6 +845,7 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                         weight: None,
                         anchor: Anchor::Start,
                         fill: pal.text_color.clone(),
+                        tspan_central: false,
                     },
                     "architecture-group-label",
                 ));
@@ -951,6 +953,7 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                                 weight: None,
                                 anchor: Anchor::Middle,
                                 fill: pal.text_color.clone(),
+                                tspan_central: false,
                             },
                             "architecture-service-label",
                         ));

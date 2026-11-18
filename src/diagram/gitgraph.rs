@@ -1180,6 +1180,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 weight: None,
                 anchor: Anchor::Start,
                 fill: st.branch_label(k),
+                tspan_central: false,
             };
             branch_els.push(Element::classed_text(
                 if st.redux { text.bold() } else { text },
@@ -1404,6 +1405,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 weight: None,
                 anchor: Anchor::Middle,
                 fill: pal.text_color.clone(),
+                tspan_central: false,
             },
             "gitTitleText",
         ));
@@ -1483,6 +1485,7 @@ fn commit_label(
             } else {
                 pal.commit_label_color.clone()
             },
+            tspan_central: false,
         },
         "commit-label",
     );
@@ -1559,6 +1562,7 @@ fn commit_tags(
         weight: None,
         anchor: Anchor::Start,
         fill: pal.tag_label_color.clone(),
+        tspan_central: false,
     };
     for (k, t) in c.tags.iter().rev().enumerate() {
         let y_off = k as f64 * 20.0;

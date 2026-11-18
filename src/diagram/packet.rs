@@ -320,6 +320,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                         Anchor::Start
                     },
                     fill: ink.clone(),
+                    tspan_central: false,
                 };
                 g.push(Element::classed_text(start, "packetByte start"));
                 if !single {
@@ -333,6 +334,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                         weight: None,
                         anchor: Anchor::End,
                         fill: ink.clone(),
+                        tspan_central: false,
                     };
                     g.push(Element::classed_text(end, "packetByte end"));
                 }

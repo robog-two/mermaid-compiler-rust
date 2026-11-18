@@ -2098,6 +2098,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 weight: None,
                 anchor: Anchor::Middle,
                 fill: text_fill,
+                tspan_central: false,
             }));
         }
         let class = if d.sets.len() == 1 {

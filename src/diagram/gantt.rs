@@ -1678,6 +1678,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                     weight: None,
                     anchor: Anchor::Middle,
                     fill: c.text.clone(),
+                    tspan_central: false,
                 },
                 "tick-label",
             ));
@@ -1804,6 +1805,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                 weight: None,
                 anchor,
                 fill: fill_text,
+                tspan_central: false,
             },
             if inside {
                 "taskText"
@@ -1843,6 +1845,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
             weight: None,
             anchor: Anchor::Start,
             fill: c.title.clone(),
+            tspan_central: false,
         };
         labels.push(Element::classed_text(t, "sectionTitle"));
     }
@@ -1878,6 +1881,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                 weight: None,
                 anchor: Anchor::Middle,
                 fill: c.vert.clone(),
+                tspan_central: false,
             },
             "vertText",
         ));
@@ -1921,6 +1925,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                 weight: None,
                 anchor: Anchor::Middle,
                 fill: c.title.clone(),
+                tspan_central: false,
             },
             "titleText",
         ));
@@ -2329,6 +2334,7 @@ mod tests {
             background: "white",
             sizing: crate::output::svg::SvgSizing::MaxWidth,
             theme_css: None,
+            raster_scale: None,
         };
         let svg = crate::output::svg::to_svg(&r.scene, &opt);
         assert!(

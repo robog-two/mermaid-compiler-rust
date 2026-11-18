@@ -881,6 +881,7 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
                     weight: None,
                     anchor: Anchor::Start,
                     fill: pal.text_color.clone(),
+                    tspan_central: false,
                 }),
             ],
         ));
@@ -932,6 +933,7 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
             weight: None,
             anchor: Anchor::Middle,
             fill: c.box_text.clone(),
+            tspan_central: false,
         };
         if b.name_lines.len() == 1 {
             children.push(Element::text(name(0, b.name_lines.clone())));
@@ -952,6 +954,7 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
                     weight: None,
                     anchor: Anchor::Start,
                     fill: c.box_text.clone(),
+                    tspan_central: false,
                 },
                 "em-data",
             ));

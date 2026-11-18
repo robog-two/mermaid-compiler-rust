@@ -1302,6 +1302,7 @@ fn text(
         weight: None,
         anchor,
         fill: fill.clone(),
+        tspan_central: false,
     }
 }
 /// `dominant-baseline: middle`.

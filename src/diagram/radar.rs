@@ -490,6 +490,7 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             weight: None,
             anchor: Anchor::Middle,
             fill: text_c.clone(),
+            tspan_central: false,
         };
         els.push(Element::classed_text(txt, "radarTitle"));
     }

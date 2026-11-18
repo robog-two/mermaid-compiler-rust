@@ -268,6 +268,13 @@ pub struct Text {
     pub weight: Option<u16>,
     pub anchor: Anchor,
     pub fill: Color,
+    /// mermaid writes this one-line text as sequence's `byTspan` does: at its
+    /// `dominant-baseline: central` (`y` less [`crate::text::baseline_shift`])
+    /// with the words in a `<tspan dy="0">`. `y` is still the alphabetic
+    /// baseline that its `getBBox()` implies; Chromium paints it elsewhere
+    /// (see [`crate::text::painted_tspan_central`]), so SVG output writes
+    /// mermaid's markup and a raster drawn from it the painted baseline.
+    pub tspan_central: bool,
 }
 
 /// The first line's baseline below the top of a block of `line_height`
@@ -307,6 +314,7 @@ impl Text {
             weight: None,
             anchor: Anchor::Middle,
             fill: fill.clone(),
+            tspan_central: false,
         }
     }
     /// One line of SVG text centred on `center` with `dominant-baseline:
@@ -322,6 +330,7 @@ impl Text {
             weight: None,
             anchor: Anchor::Middle,
             fill: fill.clone(),
+            tspan_central: false,
         }
     }
     pub fn bold(mut self) -> Self {

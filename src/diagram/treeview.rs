@@ -945,6 +945,7 @@ fn icon_elements(icon: &IconRef, x: f64, y: f64, color: &Color) -> Vec<Element> 
                         weight: None,
                         anchor: Anchor::Start,
                         fill: Color::new("#fff"),
+                        tspan_central: false,
                     }),
                 ],
             )]
@@ -965,6 +966,7 @@ pub fn draw(lay: &Layout, cfg: &LayoutConfig, colors: &Colors, pal: &Palette) ->
         weight: None,
         anchor: Anchor::Start,
         fill: fill.clone(),
+        tspan_central: false,
     };
     let line_paint = Paint::stroke(&colors.line, cfg.line_thickness);
     let mut els = Vec::new();

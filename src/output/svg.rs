@@ -22,6 +22,10 @@ pub struct SvgOptions<'a> {
     pub sizing: SvgSizing,
     /// Raw CSS appended to the generated `<style>` (mermaid `themeCSS`).
     pub theme_css: Option<&'a str>,
+    /// Device pixels per user unit when the SVG is only drawn to a raster
+    /// (PNG): text Chromium paints off its layout position is written where
+    /// it paints at that scale, rather than in mermaid's markup.
+    pub raster_scale: Option<f64>,
 }
 
 /// Compact, deterministic number formatting.
@@ -123,6 +127,8 @@ struct Filters<'a> {
     region: crate::geom::Rect,
     shadows: Vec<Shadow>,
     gradients: Vec<Gradient>,
+    /// [`SvgOptions::raster_scale`].
+    raster_scale: Option<f64>,
 }
 
 impl Filters<'_> {
@@ -258,7 +264,7 @@ fn class_attr(c: &Option<String>) -> String {
         .unwrap_or_default()
 }
 
-fn write_text(out: &mut String, t: &Text, class: &Option<String>) {
+fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option<f64>) {
     if t.lines.iter().any(|l| crate::icons::has_icons(l)) {
         return write_text_with_icons(out, t, class);
     }
@@ -267,6 +273,52 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>) {
         Anchor::Middle => "middle",
         Anchor::End => "end",
     };
+    if t.tspan_central && t.lines.len() == 1 {
+        let central =
+            t.y - crate::text::baseline_shift(crate::text::Baseline::Central, t.font_size);
+        match raster {
+            // At other scales Chromium's snapping is not modelled: the layout's.
+            Some(k) if (k - 1.0).abs() < 1e-9 => {
+                let y = crate::text::painted_tspan_central(central, t.font_size);
+                return write_text(
+                    out,
+                    &Text {
+                        y,
+                        tspan_central: false,
+                        ..t.clone()
+                    },
+                    class,
+                    None,
+                );
+            }
+            Some(_) => {
+                return write_text(
+                    out,
+                    &Text {
+                        tspan_central: false,
+                        ..t.clone()
+                    },
+                    class,
+                    None,
+                );
+            }
+            None => {}
+        }
+        let _ = write!(
+            out,
+            "<text{} x=\"{}\" y=\"{}\" dominant-baseline=\"central\" alignment-baseline=\"central\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}><tspan x=\"{}\" dy=\"0\">",
+            class_attr(class),
+            num(t.x),
+            num(central),
+            num(t.font_size),
+            esc(t.fill.css()),
+            weight_attr(t),
+            num(t.x),
+        );
+        write_line(out, &t.lines[0], t);
+        out.push_str("</tspan></text>");
+        return;
+    }
     let _ = write!(
         out,
         "<text{} x=\"{}\" y=\"{}\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}>",
@@ -469,7 +521,7 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
             }
         }
         Element::Text { text, class } | Element::OutlinedText { text, class, .. } => {
-            write_text(out, text, class)
+            write_text(out, text, class, fx.raster_scale)
         }
         Element::Faded {
             opacity,
@@ -612,6 +664,7 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
         region: scene.view_box,
         shadows: Vec::new(),
         gradients: Vec::new(),
+        raster_scale: opt.raster_scale,
     };
     fx.collect(&scene.elements);
     out.push_str(&fx.defs());
@@ -694,6 +747,7 @@ mod tests {
             region: Rect::new(0.0, 0.0, 30.0, 10.0),
             shadows: Vec::new(),
             gradients: Vec::new(),
+            raster_scale: None,
         };
         fx.collect(&els);
         for e in &els {

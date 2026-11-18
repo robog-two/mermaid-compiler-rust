@@ -123,6 +123,7 @@ pub(crate) fn text_at(
         weight: None,
         anchor,
         fill: fill.clone(),
+        tspan_central: false,
     }
 }
 
