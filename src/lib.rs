@@ -33,6 +33,7 @@ pub mod markdown;
 pub mod output;
 pub mod plan;
 pub mod render;
+pub mod rough;
 pub mod scene;
 pub mod text;
 pub mod theme;
