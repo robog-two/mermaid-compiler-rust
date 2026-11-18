@@ -2134,6 +2134,11 @@ pub fn render_with(
         // A cluster's node as mermaid cuts against it: dagre's centre, the
         // frame's size.
         let frame = |c: usize| {
+            // A cluster laid out in a graph of its own: its node there (the
+            // inner drawing's `getBBox()`, an `SVGRect` of floats).
+            if let Some((centre, w, h)) = extras.cluster_boxes.get(c).copied().flatten() {
+                return (centre, geom::chromium_f32(w), geom::chromium_f32(h));
+            }
             let r = cluster_rects[c];
             let centre = extras
                 .cluster_centres
@@ -6400,6 +6405,42 @@ mod tests {
         if let Element::Group { children, .. } = e {
             children.iter().for_each(|c| walk(c, out));
         }
+    }
+
+    /// mermaid 12.3.0 (`look: handDrawn`, dagre): a composite laid out in a
+    /// graph of its own is a `clusterNode` as big as its drawing's
+    /// `getBBox()`, rough frame and all; a route from it starts on that box
+    /// (s2 → s3 at y 323.565, drawn from (480.89, 323.683)), not on the
+    /// nominal frame 3.04px higher.
+    #[test]
+    fn hand_drawn_cluster_nodes_cut_routes_at_their_drawn_box() {
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 31\n  layout: dagre\n---\n\
+                   stateDiagram-v2\n  s1 : This is a state description\n  s1 : with two lines\n  \
+                   [*] --> s1\n  s1 --> s2\n  state s2 {\n    direction LR\n    a --> b\n  }\n  \
+                   s2 --> s3\n  note left of s3 : left note\n  s3 --> [*]";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .unwrap()
+            .scene;
+        let mut all = Vec::new();
+        scene.elements.iter().for_each(|e| walk(e, &mut all));
+        let d = all.iter().find_map(|e| match e {
+            Element::Group {
+                id: Some(i),
+                children,
+                ..
+            } if i.starts_with("L-s2-s3-") => children.iter().find_map(|c| match c {
+                Element::Shape {
+                    geom: Geometry::Path(cmds),
+                    ..
+                } => Some(crate::output::svg::path_data(cmds)),
+                _ => None,
+            }),
+            _ => None,
+        });
+        assert!(
+            d.as_deref().unwrap_or("").starts_with("M480.89,323.683C"),
+            "{d:?}"
+        );
     }
 
     /// mermaid 12.3.0: a route's points on a frame's border fall inside or

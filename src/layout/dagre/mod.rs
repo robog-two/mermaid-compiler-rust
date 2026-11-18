@@ -178,6 +178,10 @@ pub struct Extras {
     /// no `intersect`: mermaid then clips neither end of an edge from or to it
     /// at a node, leaving dagre's ends on the boxes).
     pub extracted: Vec<bool>,
+    /// Per extracted cluster: its node's box in the graph that laid it out
+    /// (dagre's centre, the inner drawing's `getBBox()` size), the
+    /// `clusterDb` node mermaid cuts routes from or to it against.
+    pub cluster_boxes: Vec<Option<(Point, f64, f64)>>,
     /// Per edge: the origin of the graph it is drawn in (mermaid draws a
     /// cluster's own graph in a translated group: its paths' `d` are local).
     pub edge_origins: Vec<Point>,
@@ -328,6 +332,10 @@ pub fn layout_full(input: &LayoutInput, model: &DagreModel) -> (LayoutOutput, Ex
     for (c, p) in r.cluster_origins {
         cluster_origins[c] = p;
     }
+    let mut cluster_boxes = vec![None; input.clusters.len()];
+    for (c, b) in r.boxes {
+        cluster_boxes[c] = Some(b);
+    }
     let mut node_dirs = vec![None; input.nodes.len()];
     for (i, d) in r.dirs {
         node_dirs[i] = Some(d);
@@ -340,6 +348,7 @@ pub fn layout_full(input: &LayoutInput, model: &DagreModel) -> (LayoutOutput, Ex
             cluster_centres,
             node_dirs,
             extracted,
+            cluster_boxes,
             edge_origins,
             cluster_origins,
         },
@@ -612,6 +621,8 @@ struct Rendered {
     raw: Vec<(usize, Vec<Point>)>,
     /// Per cluster: dagre's centre (see [`Extras::cluster_centres`]).
     centres: Vec<(usize, Point)>,
+    /// Per extracted cluster: its node's box (see [`Extras::cluster_boxes`]).
+    boxes: Vec<(usize, (Point, f64, f64))>,
     /// Per node: its graph's direction (see [`Extras::node_dirs`]).
     dirs: Vec<(usize, Direction)>,
     /// Per edge: its graph's origin (see [`Extras::edge_origins`]).
@@ -651,6 +662,9 @@ impl Rendered {
         }
         for (c, p) in inner.centres {
             self.centres.push((c, shift(p)));
+        }
+        for (c, (p, w, h)) in inner.boxes {
+            self.boxes.push((c, (shift(p), w, h)));
         }
         self.dirs.extend(inner.dirs);
         for (i, p) in inner.origins {
@@ -785,6 +799,9 @@ fn render(ctx: &mut Ctx, gi: usize, parent: Option<usize>) -> Rendered {
                 let dx = n.x + r.diff - w / 2.0;
                 let dy = n.y - h / 2.0 - MARGIN;
                 res.absorb(r, dx, dy);
+                if let Some(MNode::ClusterNode { c, .. }) = g.node(&v) {
+                    res.boxes.push((*c, (Point::new(n.x, n.y), w, h)));
+                }
             }
             Some(MNode::Cluster { c }) if g.has_children(&v) => {
                 let pad = ctx
