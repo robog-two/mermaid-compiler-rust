@@ -1068,6 +1068,34 @@ fn geometry_points(g: &Geometry, out: &mut Vec<Point>) {
 }
 
 /// `generateFullSineWavePoints` (util.ts): 51 points.
+/// linedWaveEdgedRect.ts's polygon (classic padding `p` round a `tw`×`th`
+/// label) about the centre, and its wave amplitude (the polygon is drawn
+/// moved up by half of it).
+pub fn lined_document_points(tw: f64, th: f64, p: f64) -> (Vec<Point>, f64) {
+    let pt = Point::new;
+    let (w, h) = (tw + 2.0 * p, th + 2.0 * p);
+    let amp = h / 8.0;
+    let fh = h + amp;
+    let ext = w / 2.0 * 0.1;
+    let mut pts = vec![pt(-w / 2.0 - ext, -fh / 2.0), pt(-w / 2.0 - ext, fh / 2.0)];
+    pts.extend(sine_wave(
+        -w / 2.0 - ext,
+        fh / 2.0,
+        w / 2.0 + ext,
+        fh / 2.0,
+        amp,
+        0.8,
+    ));
+    pts.extend([
+        pt(w / 2.0 + ext, -fh / 2.0),
+        pt(-w / 2.0 - ext, -fh / 2.0),
+        pt(-w / 2.0, -fh / 2.0),
+        pt(-w / 2.0, fh / 2.0 * 1.1),
+        pt(-w / 2.0, -fh / 2.0),
+    ]);
+    (pts, amp)
+}
+
 fn sine_wave(x1: f64, y1: f64, x2: f64, y2: f64, amp: f64, cycles: f64) -> Vec<Point> {
     let (dx, dy) = (x2 - x1, y2 - y1);
     let freq = 2.0 * PI / (dx / cycles);

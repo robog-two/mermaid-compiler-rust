@@ -68,6 +68,9 @@ enum Bound {
     MeasuredCircle,
     /// `intersect.polygon(node, points)` with points given in [`HandNode::poly`].
     Polygon,
+    /// The same of a polygon that doubles back (subroutine's frame): of its
+    /// crossings, the one nearest the far point.
+    Outline,
     /// question.ts: a diamond as wide as the measured box.
     Diamond,
     /// cylinder.ts: the box's crossing moved by the nominal caps.
@@ -104,6 +107,7 @@ impl HandNode {
                 Boundary::Polygon(c, in_box(c, w, h, local))
             }
             Bound::Polygon => Boundary::Polygon(c, in_box(c, w, h, poly(shape, m))),
+            Bound::Outline => Boundary::Outline(c, in_box(c, w, h, poly(shape, m))),
             Bound::Cylinder(rx, ry) => Boundary::Cylinder(Rect::centered(c, w, h), rx, ry),
         }
     }
@@ -196,6 +200,7 @@ fn poly(shape: Shape, m: &ShapeMetrics) -> Vec<Point> {
             stadium_points(w, h)
         }
         Shape::Choice => vec![pt(0.0, 14.0), pt(14.0, 0.0), pt(0.0, -14.0), pt(-14.0, 0.0)],
+        Shape::LinedDocument => super::shapes::lined_document_points(tw, th, p).0,
         _ => Vec::new(),
     }
 }
@@ -877,7 +882,7 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
                         measured: false,
                     },
                 ],
-                Bound::Polygon,
+                Bound::Outline,
             )
         }
         // rectLeftInvArrow.ts: always rough, moved by (-notch/2, 0).
@@ -1024,6 +1029,14 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
                 Point::new(-14.0, 0.0),
             ]);
             (vec![piece(rough::path(&path, o()), origin)], Bound::Polygon)
+        }
+        // linedWaveEdgedRect.ts: `rc.polygon` of its points, moved up by half
+        // the wave's amplitude.
+        Shape::LinedDocument => {
+            let (pts, amp) = super::shapes::lined_document_points(tw, th, p);
+            let raw: Vec<[f64; 2]> = pts.iter().map(|q| [q.x, q.y]).collect();
+            let d = rough::polygon(&raw, o());
+            (vec![piece(d, Point::new(0.0, -amp / 2.0))], Bound::Polygon)
         }
         // bang.ts / cloud.ts: the outline as a rough path, moved by
         // (-w/2, -h/2).

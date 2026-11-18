@@ -1955,7 +1955,10 @@ pub fn render_with(
             !(lk.hand_seed.is_some()
                 && matches!(
                     g.kind,
-                    DiagramKind::Class | DiagramKind::Er | DiagramKind::Requirement
+                    DiagramKind::Class
+                        | DiagramKind::Er
+                        | DiagramKind::Requirement
+                        | DiagramKind::Agentflow
                 ))
         });
         let painted;
@@ -4320,7 +4323,45 @@ fn cluster_shapes(
                 .unwrap_or_else(|| pal.cluster_border.clone());
             let mut paint = Paint::both(&fill, &stroke, style.stroke_width.unwrap_or(0.75));
             paint.dash = style.dash.clone();
-            vec![Element::rect(r, 10.0, paint)]
+            let Some(seed) = lk.hand_seed else {
+                return vec![Element::rect(r, 10.0, paint)];
+            };
+            // createContainerGroup under the handDrawn look: a rough path of
+            // the rounded rectangle, unfilled (in the frame mermaid draws it in),
+            // stroked `flowContainerStroke` (the stylesheet's rule is for
+            // `rect`s, its palette slot's for any shape).
+            let stroke = style
+                .stroke
+                .clone()
+                .unwrap_or_else(|| pal.flow_container_stroke.clone());
+            paint.stroke = stroke.clone();
+            let o = crate::rough::Options {
+                roughness: 0.7,
+                fill: None,
+                fill_weight: 0.0,
+                hachure_gap: 1.5,
+                stroke: stroke.css().to_string(),
+                stroke_width: 0.75,
+                seed,
+                ..Default::default()
+            };
+            let at = hand_at;
+            let d = crate::rough::path(
+                &hand::rounded_rect_path(r.x + at.x, r.y + at.y, r.w, r.h, 10.0),
+                o,
+            );
+            let kids = d
+                .sets
+                .iter()
+                .filter(|s| !s.ops.is_empty())
+                .map(|s| {
+                    Element::shape(
+                        Geometry::Path(hand::set_cmds(&s.ops, Point::new(-at.x, -at.y))),
+                        paint.clone(),
+                    )
+                })
+                .collect();
+            vec![Element::group("basic label-container", kids)]
         }
         ClusterKind::Group if lk.hand_seed.is_some() => hand_cluster(
             c,

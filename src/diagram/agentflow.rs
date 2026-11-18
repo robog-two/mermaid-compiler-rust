@@ -2452,4 +2452,53 @@ linkStyle 0 stroke:#00f");
         assert!((end.x - guide.x).abs() < 1e-3, "{end:?} {guide:?}");
         assert!((guide.w - 4.0 - 167.2).abs() < 1e-3, "{guide:?}");
     }
+
+    /// mermaid 12.3.0 under `look: handDrawn` (seed 59, dark): a flow is a
+    /// rough rounded frame stroked `flowContainerStroke` at 0.75 (from
+    /// (21.454, 94.116)), a refdoc a rough lined-document polygon (its
+    /// outline from (251.486, 263.713)), and no palette slot reaches the
+    /// rough nodes.
+    #[test]
+    fn hand_drawn_flows_and_shapes_match_mermaid() {
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 59\n  theme: dark\n---\n\
+                   agentflow-beta TB\n  brief[\"Release brief\"]@{ shape: input }\n  \
+                   flow writer[\"Drafting Agent\"]\n    draft[\"Draft the notes\"]@{ shape: task }\n    \
+                   lookup[\"changelog_search\"]@{ shape: tool }\n    \
+                   guide[\"Tone of voice\"]@{ shape: refdoc }\n    draft --> lookup\n    \
+                   draft -.- guide\n  end\n  ok[\"Accurate?\"]@{ shape: decision }\n  \
+                   publish[\"Publish\"]@{ shape: action }\n  brief --> writer\n  \
+                   writer --> ok\n  ok --> publish\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .unwrap()
+            .scene;
+        fn walk(els: &[Element], out: &mut Vec<(String, String, f64)>) {
+            for el in els {
+                match el {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: crate::scene::Geometry::Path(cmds),
+                        paint,
+                        ..
+                    } => out.push((
+                        crate::output::svg::path_data(cmds),
+                        paint.stroke.css().to_string(),
+                        paint.stroke_width,
+                    )),
+                    _ => {}
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        walk(&scene.elements, &mut paths);
+        let frame = paths.iter().find(|p| p.0.starts_with("M21.454,94.116C"));
+        assert_eq!(
+            frame.map(|p| (p.1.as_str(), p.2)),
+            Some(("hsl(180, 0%, 18.3529411765%)", 0.75))
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|p| p.0.starts_with("M251.486,263.713C") && p.1 == "#ccc")
+        );
+    }
 }
