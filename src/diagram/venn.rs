@@ -2036,6 +2036,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
 
     let label_font = 48.0 * scale;
+    let hand = (cfg.look == crate::config::Look::HandDrawn).then(|| cfg.hand_drawn_seed());
     let mut areas_els = Vec::new();
     let mut circle_index = 0;
     for (k, d) in data.iter().enumerate() {
@@ -2060,14 +2061,41 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             let stroke_w = style_get(&styles, &key, "stroke-width")
                 .and_then(parse_num)
                 .unwrap_or(5.0 * scale);
-            // One path, filled and stroked, as venn.js draws it.
-            let mut paint = Paint::fill(&with_alpha(&base, fill_opacity));
-            paint.stroke = with_alpha(&stroke, 0.95);
-            paint.stroke_width = stroke_w;
-            group.push(Element::shape(
-                Geometry::Path(circle_path(&circles[0])),
-                paint,
-            ));
+            match (hand, text_layout.circle_of(&d.sets[0])) {
+                // Under handDrawn: a rough circle where `venn.layout` (with
+                // mermaid's padding) puts the set, its base colour at 30%
+                // hachured at an angle per set.
+                (Some(seed), Some(c)) => {
+                    let o = crate::rough::Options {
+                        roughness: 0.7,
+                        seed,
+                        fill: Some(with_alpha(&base, 0.3).0),
+                        fill_style: "hachure".into(),
+                        fill_weight: 2.0,
+                        hachure_gap: 8.0,
+                        hachure_angle: -41.0 + i as f64 * 60.0,
+                        stroke: stroke.0.clone(),
+                        stroke_width: stroke_w,
+                        ..crate::rough::Options::default()
+                    };
+                    group.extend(rough_elements(&crate::rough::circle(
+                        c.x,
+                        c.y,
+                        c.radius * 2.0,
+                        o,
+                    )));
+                }
+                _ => {
+                    // One path, filled and stroked, as venn.js draws it.
+                    let mut paint = Paint::fill(&with_alpha(&base, fill_opacity));
+                    paint.stroke = with_alpha(&stroke, 0.95);
+                    paint.stroke_width = stroke_w;
+                    group.push(Element::shape(
+                        Geometry::Path(circle_path(&circles[0])),
+                        paint,
+                    ));
+                }
+            }
             style_get(&styles, &key, "color").map_or_else(
                 || shift_lightness(&base, if pal.dark { 30.0 } else { -30.0 }),
                 Color::new,
@@ -2075,8 +2103,30 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         } else {
             if let Some(fill) = style_get(&styles, &key, "fill") {
                 let path = intersection_path(&circles);
-                if !path.is_empty() {
-                    group.push(Element::path(path, Paint::fill(&Color::new(fill))));
+                match hand {
+                    // Under handDrawn: venn.js's path data redrawn by rough.js,
+                    // cross-hatched in the fill at 70%, unstroked.
+                    Some(seed) if !path.is_empty() => {
+                        let o = crate::rough::Options {
+                            roughness: 0.7,
+                            seed,
+                            fill: Some(with_alpha(&Color::new(fill), 0.7).0),
+                            fill_style: "cross-hatch".into(),
+                            fill_weight: 2.0,
+                            hachure_gap: 6.0,
+                            hachure_angle: 60.0,
+                            stroke: "none".into(),
+                            ..crate::rough::Options::default()
+                        };
+                        group.extend(rough_elements(&crate::rough::path(
+                            &venn_path_data(&path),
+                            o,
+                        )));
+                    }
+                    _ if !path.is_empty() => {
+                        group.push(Element::path(path, Paint::fill(&Color::new(fill))))
+                    }
+                    _ => {}
                 }
             }
             style_get(&styles, &key, "color").map_or_else(|| set_text.clone(), Color::new)
@@ -2127,6 +2177,50 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         font_family: pal.font_family.clone(),
         css: String::new(),
     }
+}
+
+/// A rough.js drawing as elements (its paths with rough.js's attributes).
+fn rough_elements(d: &crate::rough::Drawable) -> Vec<Element> {
+    let hn = super::hand::measured_node(vec![super::hand::Piece {
+        drawable: d.clone(),
+        at: Point::default(),
+        measured: true,
+    }]);
+    super::graph::hand_elements(&hn, Point::default(), None)
+}
+
+/// venn.js's path data for `cmds` (numbers in full).
+fn venn_path_data(cmds: &[PathCmd]) -> String {
+    let mut out = Vec::new();
+    for c in cmds {
+        match *c {
+            PathCmd::MoveTo(p) => out.push(format!("M {} {}", p.x, p.y)),
+            PathCmd::MoveBy(p) => out.push(format!("m {} {}", p.x, p.y)),
+            PathCmd::LineTo(p) => out.push(format!("L {} {}", p.x, p.y)),
+            PathCmd::ArcTo {
+                rx,
+                ry,
+                large,
+                sweep,
+                to,
+                rel,
+            } => out.push(format!(
+                "{} {} {} 0 {} {} {} {}",
+                if rel { 'a' } else { 'A' },
+                rx,
+                ry,
+                u8::from(large),
+                u8::from(sweep),
+                to.x,
+                to.y
+            )),
+            PathCmd::CubicTo(a, b, e) => {
+                out.push(format!("C {} {} {} {} {} {}", a.x, a.y, b.x, b.y, e.x, e.y))
+            }
+            PathCmd::Close => out.push("Z".into()),
+        }
+    }
+    out.join(" ")
 }
 
 fn translate_element(e: Element, dy: f64) -> Element {
@@ -2352,6 +2446,44 @@ fn draw_text_nodes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mermaid 12.3.0, `look: handDrawn`, seed 31: each set is a rough circle
+    /// (hachured per set) at venn.layout's position, each styled overlap
+    /// venn.js's path redrawn cross-hatched; their first paths start here.
+    #[test]
+    fn hand_drawn_sets_match_mermaid() {
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 31\n---\nvenn-beta\n  \
+                   title Styled overlaps\n  set A[\"Alpha\"]:20\n    text T1[\"Long label that \
+                   wraps around\"]\n  set B[\"Beta\"]:12\n  set C[\"Gamma\"]:9\n  union A,B[\"AB\"]:4\n  \
+                   union B,C[\"BC\"]:3\n  union A,C:2\n  style A,B fill:#fca5a5\n  \
+                   style B,C fill:#93c5fd\n";
+        let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
+        fn walk(els: &[Element], out: &mut Vec<String>) {
+            for e in els {
+                match e {
+                    Element::Group { children, .. } | Element::Translated { children, .. } => {
+                        walk(children, out)
+                    }
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => out.push(crate::output::svg::path_data(cmds)),
+                    _ => {}
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        walk(&r.scene.elements, &mut paths);
+        for start in [
+            "M207.774,172.815C",
+            "M389.093,303.554C",
+            "M462.325,250.243C",
+            "M445.793,383.863C",
+            "M421.487,235.964C",
+        ] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
+    }
 
     fn subsets(v: &Venn) -> Vec<(Vec<&str>, f64, Option<&str>)> {
         v.subsets
