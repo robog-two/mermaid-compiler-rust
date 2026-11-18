@@ -493,11 +493,13 @@ impl Builder {
                         lines: vec![all[0].clone()],
                         centered: true,
                         bold: false,
+                        classifiers: Vec::new(),
                     },
                     Section {
                         lines: all[1..].to_vec(),
                         centered: true,
                         bold: false,
+                        classifiers: Vec::new(),
                     },
                 ];
             }

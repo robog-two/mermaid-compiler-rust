@@ -1027,6 +1027,7 @@ pub fn to_graph(d: &ErDiagram) -> GraphDiagram {
                 ],
                 centered: false,
                 bold: false,
+                classifiers: Vec::new(),
             })
             .collect();
         index.insert(e.name.as_str(), nodes.len());

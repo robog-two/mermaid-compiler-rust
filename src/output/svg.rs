@@ -627,7 +627,7 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
     // 25px over the viewBox's after configureSvgSize (mmdc drops the height only
     // with `--size`). Not for the rasterisers, which size the image themselves.
     let journey_height =
-        (scene.kind == DiagramKind::Journey && opt.raster_scale.is_none()).then(|| vb.h + 25.0);
+        (scene.kind == DiagramKind::Journey && opt.raster_scale.is_none()).then_some(vb.h + 25.0);
     let journey_par = if journey_height.is_some() {
         " preserveAspectRatio=\"xMinYMin meet\""
     } else {

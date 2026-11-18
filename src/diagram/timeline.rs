@@ -654,23 +654,24 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         max_task_h + 100.0
     };
     let x2 = content.w + 3.0 * left_margin;
-    let mut back = Vec::new();
-    back.push(Element::classed_shape(
-        Geometry::Path(vec![
-            PathCmd::MoveTo(Point::new(left_margin, depth_y)),
-            PathCmd::LineTo(Point::new(x2, depth_y)),
-        ]),
-        Paint::stroke(&line_color, 4.0),
-        "axis",
-    ));
-    back.push(Element::path(
-        geom::polygon(&[
-            Point::new(x2 - 20.0, depth_y - 8.0),
-            Point::new(x2 + 4.0, depth_y),
-            Point::new(x2 - 20.0, depth_y + 8.0),
-        ]),
-        Paint::fill(&arrow_fill),
-    ));
+    let back = vec![
+        Element::classed_shape(
+            Geometry::Path(vec![
+                PathCmd::MoveTo(Point::new(left_margin, depth_y)),
+                PathCmd::LineTo(Point::new(x2, depth_y)),
+            ]),
+            Paint::stroke(&line_color, 4.0),
+            "axis",
+        ),
+        Element::path(
+            geom::polygon(&[
+                Point::new(x2 - 20.0, depth_y - 8.0),
+                Point::new(x2 + 4.0, depth_y),
+                Point::new(x2 - 20.0, depth_y + 8.0),
+            ]),
+            Paint::fill(&arrow_fill),
+        ),
+    ];
     bounds.add_rect(Rect::new(left_margin, depth_y - 2.0, x2 - left_margin, 4.0));
 
     Scene {

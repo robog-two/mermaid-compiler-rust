@@ -234,12 +234,45 @@ fn split_style(s: &str) -> Vec<&str> {
     out
 }
 
+/// A static class member's underline (`text-decoration: underline` on its
+/// label), as Chromium draws it under the text from `x` with baseline
+/// `baseline`, `w` long: `max(1, font / 10)` thick, starting
+/// `max(1, ceil(thickness / 2))` below the baseline. SVG text paints it in the
+/// decorating group's fill, unsnapped; HTML text in that group's `color`, its
+/// thickness floored to whole pixels (mermaid 12.3.0 at 16px and 20px).
+fn member_underline(
+    x: f64,
+    baseline: f64,
+    w: f64,
+    font: f64,
+    html: bool,
+    color: &Color,
+) -> Element {
+    let thick = (font / 10.0).max(1.0);
+    let top = baseline + (thick / 2.0).ceil().max(1.0);
+    let thick = if html { thick.floor() } else { thick };
+    // A filled box, as Chromium paints it (a stroked line's coverage comes out
+    // quantised); not a shape the node's neo rules restyle.
+    Element::classed_shape(
+        Geometry::Rect {
+            rect: Rect::new(x, top, w, thick),
+            rx: 0.0,
+        },
+        Paint::fill(color),
+        "member-underline",
+    )
+}
+
 /// One compartment of a `Shape::Compartments` node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Section {
     pub lines: Vec<String>,
     pub centered: bool,
     pub bold: bool,
+    /// Per line, a class member's classifier (`ClassMember.parseClassifier`):
+    /// `$` (static) underlines it, `*` (abstract) makes it italic. Empty for
+    /// sections without members.
+    pub classifiers: Vec<Option<char>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -736,7 +769,7 @@ fn neo_node_css(els: &mut [Element], pal: &Palette, style: &StyleOverrides, path
                     && !matches!(geom, Geometry::Line { .. })
                     && !matches!(
                         class.as_deref(),
-                        Some("drop-shadow" | "collapsed-separator")
+                        Some("drop-shadow" | "collapsed-separator" | "member-underline")
                     ) =>
             {
                 if style.stroke.is_none() {
@@ -6129,7 +6162,25 @@ fn node_elements(
                         .anchored(Anchor::Start, c.x + x);
                         t.y = c.y + base;
                         t.bold = bold;
+                        let (x0, baseline) = (t.x, t.y);
                         els.push(Element::classed_text(t, "label"));
+                        let classifier = n
+                            .sections
+                            .get(si)
+                            .and_then(|s| s.classifiers.get(li))
+                            .copied()
+                            .flatten();
+                        if classifier == Some('$') {
+                            let w = crate::text::line_width(&line, font, bold);
+                            els.push(member_underline(
+                                x0,
+                                baseline,
+                                w,
+                                font,
+                                false,
+                                &pal.text_color,
+                            ));
+                        }
                     }
                     return (els, Boundary::Rect(r));
                 }
@@ -6190,7 +6241,45 @@ fn node_elements(
                         if !sec.centered {
                             t = t.anchored(Anchor::Start, x0 + layout.inset);
                         }
-                        els.push(Element::classed_text(t, "label"));
+                        if sec.classifiers.iter().any(Option::is_some) && !block.svg {
+                            // Each member is a label of its own, styled by its
+                            // classifier (`ClassMember.parseClassifier`) on the
+                            // `<g class="label">` around its foreignObject: the
+                            // italic reaches the HTML text; the underline is
+                            // drawn in the group's `color`, black.
+                            for (k, line) in t.lines.iter().enumerate() {
+                                let baseline = t.y + k as f64 * t.line_height;
+                                let cls = sec.classifiers.get(k).copied().flatten();
+                                let shown = if cls == Some('*') {
+                                    format!(
+                                        "{}{line}{}",
+                                        crate::text::mark::ITALIC_ON,
+                                        crate::text::mark::ITALIC_OFF
+                                    )
+                                } else {
+                                    line.clone()
+                                };
+                                let one = Text {
+                                    y: baseline,
+                                    lines: vec![shown],
+                                    ..t.clone()
+                                };
+                                els.push(Element::classed_text(one, "label"));
+                                if cls == Some('$') {
+                                    let w = crate::text::html_line_width(line, font, t.bold);
+                                    els.push(member_underline(
+                                        t.x,
+                                        baseline,
+                                        w,
+                                        font,
+                                        true,
+                                        &Color::new("#000000"),
+                                    ));
+                                }
+                            }
+                        } else {
+                            els.push(Element::classed_text(t, "label"));
+                        }
                     }
                     y += sh;
                 }
