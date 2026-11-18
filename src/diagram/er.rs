@@ -1448,6 +1448,7 @@ mod tests {
             },
             Element::Text { .. }
             | Element::OutlinedText { .. }
+            | Element::Image { .. }
             | Element::Rotated { .. }
             | Element::Translated { .. } => {}
         }
