@@ -19,7 +19,7 @@ use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
 use crate::layout::force::cose;
-use crate::scene::{Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
+use crate::scene::{Color, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Shadow, Text};
 use crate::text::{BreakRule, TextBlock, line_width};
 use crate::theme::Palette;
 
@@ -340,7 +340,7 @@ pub struct Widths {
 
 /// A node's label lines, nominal size, drawn bounding box (around the centre)
 /// and, for bang and cloud nodes, outline.
-fn measure(n: &Node, font: f64, padding: f64, widths: Widths) -> Placed {
+fn measure(n: &Node, font: f64, padding: f64, widths: Widths, neo: bool) -> Placed {
     // mindmapRenderer (12.3) zeroes `width` of rect, rounded and hexagon nodes, so
     // labelHelper wraps those at `flowchart.wrappingWidth`; the rest at maxNodeWidth.
     let width = match n.shape {
@@ -356,16 +356,24 @@ fn measure(n: &Node, font: f64, padding: f64, widths: Widths) -> Placed {
         NodeShape::Default => (tw + 4.0 * padding, th + padding),
         // mindmapRenderer (12.3) sets the padding of rect nodes to 10 and of rounded
         // ones to 15; `rect` is tw + 4p × th + 2p, `rounded` tw + 2p × th + 2p.
+        // squareRect.ts under the neo look: 16 and 12 a side instead.
+        NodeShape::Square if neo => (tw + 32.0, th + 24.0),
         NodeShape::Square => (tw + 40.0, th + 20.0),
         NodeShape::Rounded => (tw + 30.0, th + 30.0),
+        // hexagon.ts under the neo look: h = th + 70, m = h / 3.5, w = tw + 2m + 32.
+        NodeShape::Hexagon if neo => {
+            let h = th + 70.0;
+            (tw + 2.0 * h / 3.5 + 32.0, h)
+        }
         // mindmapDb doubles the hexagon's padding: h = th + p', w = tw + p' + h/2.
         NodeShape::Hexagon => {
             let h = th + 2.0 * padding;
             (tw + 2.0 * padding + h / 2.0, h)
         }
-        // mindmapCircle → circle.ts with options.padding: r = hypot(tw, th)/2 + p.
+        // mindmapCircle → circle.ts with options.padding: r = hypot(tw, th)/2 + p
+        // (under the neo look + 16, whatever the padding).
         NodeShape::Circle => {
-            let d = tw.hypot(th) + 2.0 * padding;
+            let d = tw.hypot(th) + 2.0 * if neo { 16.0 } else { padding };
             (d, d)
         }
         NodeShape::Cloud => (tw + padding, th + padding),
@@ -399,7 +407,7 @@ fn measure(n: &Node, font: f64, padding: f64, widths: Widths) -> Placed {
 /// one `Placed` per node (same indices as `mm.nodes`), centred in cytoscape's
 /// coordinates.
 pub fn layout(mm: &Mindmap, font: f64, padding: f64, widths: Widths) -> Vec<Placed> {
-    layout_with(mm, font, padding, widths, None)
+    layout_with(mm, font, padding, widths, None, false)
 }
 
 /// [`layout`], under the handDrawn look with `hand`'s rough.js options: a
@@ -410,11 +418,12 @@ fn layout_with(
     padding: f64,
     widths: Widths,
     hand: Option<&HandStyle>,
+    neo: bool,
 ) -> Vec<Placed> {
     let mut placed: Vec<Placed> = mm
         .nodes
         .iter()
-        .map(|nd| measure(nd, font, padding, widths))
+        .map(|nd| measure(nd, font, padding, widths, neo))
         .collect();
     if let Some(st) = hand {
         for (nd, p) in mm.nodes.iter().zip(placed.iter_mut()) {
@@ -540,7 +549,17 @@ pub fn render(
     cfg: &MermaidConfig,
     pal: &Palette,
 ) -> Result<Scene> {
-    let mm = parse(body, title)?;
+    let mut mm = parse(body, title)?;
+    // mindmapDb's getShapeFromType: a default node is `rounded` under any
+    // theme whose name has "redux" in it.
+    if pal.theme.name().contains("redux") {
+        for n in &mut mm.nodes {
+            if n.shape == NodeShape::Default {
+                n.shape = NodeShape::Rounded;
+            }
+        }
+    }
+    let neo = (cfg.look == crate::config::Look::Neo).then(|| Neo::new(pal));
     let padding = cfg.section_f64("mindmap", "padding", 10.0);
     let widths = Widths {
         max_node: cfg.section_f64("mindmap", "maxNodeWidth", 200.0),
@@ -559,7 +578,14 @@ pub fn render(
         horizontal: false,
         state: false,
     });
-    let mut placed = layout_with(&mm, pal.font_size, padding, widths, hand.as_ref());
+    let mut placed = layout_with(
+        &mm,
+        pal.font_size,
+        padding,
+        widths,
+        hand.as_ref(),
+        neo.is_some(),
+    );
     if cfg
         .section("mindmap", "colorBy")
         .and_then(|j| j.as_str())
@@ -574,7 +600,130 @@ pub fn render(
         padding,
         underlines(cfg, pal),
         hand.as_ref(),
+        neo.as_ref(),
     ))
+}
+
+/// The neo look's rules (mindmap/styles.ts `[data-look="neo"]`): outlined
+/// nodes, other fills and label colours for some themes, thinner and (on
+/// some themes) uniformly coloured edges, the theme's drop shadow on every
+/// node, and with `useGradient` the gradient outline over a `mainBkg` fill.
+pub struct Neo {
+    /// `theme === 'redux' || theme === 'redux-dark'`.
+    redux_mono: bool,
+    /// `theme?.includes('redux')`.
+    redux: bool,
+    neutral: bool,
+    /// `theme?.includes('redux') || theme === 'neo-dark'`: edges in `nodeBorder`.
+    edge_border: bool,
+    stroke_width: f64,
+    shadow: Option<Shadow>,
+    gradient: Option<Gradient>,
+}
+
+impl Neo {
+    pub fn new(pal: &Palette) -> Self {
+        use crate::theme::ThemeName as T;
+        let name = pal.theme.name();
+        // `[data-look="neo"].mindmap-node { filter: dropShadow }`: the redux
+        // themes' `url(#drop-shadow)` is insertLookDefs' feDropShadow.
+        let shadow = pal.drop_shadow.as_ref().map(|d| {
+            let c = crate::color::parse(d.color.css()).unwrap_or(crate::color::Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 1.0,
+            });
+            Shadow {
+                dx: d.dx,
+                dy: d.dy,
+                std_dev: d.std_dev,
+                color: Color::new(format!(
+                    "rgba({}, {}, {}, {})",
+                    c.r,
+                    c.g,
+                    c.b,
+                    crate::output::svg::num(c.a * d.opacity)
+                )),
+                linear_rgb: d.std_dev == 0.0,
+                css: d.std_dev > 0.0,
+            }
+        });
+        Neo {
+            redux_mono: matches!(pal.theme, T::Redux | T::ReduxDark),
+            redux: name.contains("redux"),
+            neutral: pal.theme == T::Neutral,
+            edge_border: name.contains("redux") || pal.theme == T::NeoDark,
+            // `strokeWidth ?? 2`: every theme sets it, the classic ones to 1.
+            stroke_width: pal.stroke_width.unwrap_or(1.0),
+            shadow,
+            gradient: pal
+                .node_gradient
+                .as_ref()
+                .map(|(a, b)| Gradient::across_bbox(a, b)),
+        }
+    }
+
+    /// Fill, outline and label colour of a node of `section` (`None`: the root).
+    fn node(&self, pal: &Palette, section: Option<usize>) -> (Color, Color, Color) {
+        let i = section.map_or(0, |s| s + 1);
+        let fill = match section {
+            _ if self.gradient.is_some() => pal.main_bkg.clone(),
+            None if self.redux => pal.main_bkg.clone(),
+            None => pal
+                .git
+                .first()
+                .unwrap_or_else(|| pal.scale_color(0))
+                .clone(),
+            Some(_) if self.redux_mono || self.neutral => pal.main_bkg.clone(),
+            Some(_) => pal.scale_color(i).clone(),
+        };
+        let stroke = if self.redux_mono {
+            pal.node_border.clone()
+        } else {
+            pal.scale_color(i).clone()
+        };
+        let label_i = if self.neutral { 1 } else { i };
+        let label = match section {
+            None if self.redux => pal.node_border.clone(),
+            Some(_) if self.redux_mono => pal.node_border.clone(),
+            _ => pal.scale_text_color(label_i).clone(),
+        };
+        (fill, stroke, label)
+    }
+
+    /// Outline and gradient on every shape of a node but its underline;
+    /// with `own_shadow` (a `rect`, `circle` or `polygon`, which the shared
+    /// `[data-look="neo"].node rect, polygon, circle` rules filter too) the
+    /// shadow on the shape as well as on the node's group.
+    fn outline(&self, els: &mut [Element], stroke: &Color, own_shadow: bool) {
+        for e in els {
+            match e {
+                Element::Shape { geom, paint, .. } => {
+                    if !matches!(geom, Geometry::Line { .. }) {
+                        paint.stroke = stroke.clone();
+                        paint.stroke_width = self.stroke_width;
+                        paint.stroke_gradient = self.gradient.clone();
+                        if own_shadow {
+                            paint.shadow = self.shadow.clone();
+                        }
+                    }
+                }
+                Element::Group { children, .. } => self.outline(children, stroke, own_shadow),
+                _ => {}
+            }
+        }
+    }
+
+    /// `.edge-depth-N` under the neo look: `max(10 - 2N, 2)` for the 12
+    /// theme colours, `.edge`'s 3 past them.
+    fn edge_width(depth: usize) -> f64 {
+        if depth + 1 < 12 {
+            (10.0 - 2.0 * depth as f64).max(2.0)
+        } else {
+            3.0
+        }
+    }
 }
 
 /// `(fill, text, underline)` of a node: section `s` is `.section-s` (`cScale(s+1)`,
@@ -608,6 +757,7 @@ pub fn draw(
     padding: f64,
     underline: bool,
     hand: Option<&HandStyle>,
+    neo: Option<&Neo>,
 ) -> Scene {
     let font = pal.font_size;
     let mut bounds = Bounds::default();
@@ -641,16 +791,28 @@ pub fn draw(
                     bounds.add_rect(b);
                 }
             }
+            let paint = match neo {
+                Some(n) => Paint::stroke(
+                    if n.edge_border { &pal.node_border } else { &c },
+                    Neo::edge_width(depth),
+                ),
+                None => Paint::stroke(&c, edge_width(depth)),
+            };
             edges.push(Element::classed_shape(
                 Geometry::Path(cmds),
-                Paint::stroke(&c, edge_width(depth)),
+                paint,
                 format!(
                     "edge section-edge-{} edge-depth-{depth}",
                     p.section.unwrap_or(0)
                 ),
             ));
         }
-        let (fill, text_color, line) = section_colors(pal, p.section);
+        let (mut fill, mut text_color, line) = section_colors(pal, p.section);
+        let mut stroke = None;
+        if let Some(n) = neo {
+            let (f, s, t) = n.node(pal, p.section);
+            (fill, text_color, stroke) = (f, t, Some(s));
+        }
         let r = p.rect();
         let b = p.bbox;
         bounds.add_rect(Rect::new(p.center.x + b.x, p.center.y + b.y, b.w, b.h));
@@ -666,8 +828,22 @@ pub fn draw(
                 Geometry::Path(cmds.clone()).translated(p.center.x, p.center.y),
                 Paint::fill(&fill),
             )],
-            None => shape_elements(nd.shape, r, &fill, underline.then_some(&line)),
+            None => shape_elements(
+                nd.shape,
+                r,
+                &fill,
+                underline.then_some(&line),
+                pal.radius.unwrap_or(5.0),
+                neo.is_some(),
+            ),
         };
+        if let (Some(n), Some(stroke)) = (neo, &stroke) {
+            let own_shadow = matches!(
+                nd.shape,
+                NodeShape::Square | NodeShape::Rounded | NodeShape::Circle | NodeShape::Hexagon
+            );
+            n.outline(&mut els, stroke, own_shadow);
+        }
         let block = Text::centered(r.center(), &p.lines, font, font * 1.5, &text_color);
         if p.shifts.iter().all(|&s| s == 0.0) {
             els.push(Element::text(block));
@@ -691,6 +867,13 @@ pub fn draw(
         for c in &nd.classes {
             class.push(' ');
             class.push_str(c);
+        }
+        // The neo look's shadow: a filter on the node's whole group.
+        if let Some(shadow) = neo.and_then(|n| n.shadow.clone()) {
+            els = vec![Element::Shadowed {
+                shadow,
+                children: els,
+            }];
         }
         nodes.push(Element::group(class, els));
     }
@@ -761,32 +944,52 @@ fn edge_width(depth: usize) -> f64 {
     if i < 12 && w > 0.0 { w } else { 3.0 }
 }
 
-fn shape_elements(shape: NodeShape, r: Rect, fill: &Color, line: Option<&Color>) -> Vec<Element> {
+/// A quadratic Bézier from `a` via `c` to `b` as a cubic.
+fn quad(a: Point, c: Point, b: Point) -> PathCmd {
+    let k = 2.0 / 3.0;
+    PathCmd::CubicTo(
+        Point::new(a.x + k * (c.x - a.x), a.y + k * (c.y - a.y)),
+        Point::new(b.x + k * (c.x - b.x), b.y + k * (c.y - b.y)),
+        b,
+    )
+}
+
+/// A node's shapes in `r`: `radius` is a rounded node's corner
+/// (`themeVariables.radius ?? 5`).
+fn shape_elements(
+    shape: NodeShape,
+    r: Rect,
+    fill: &Color,
+    line: Option<&Color>,
+    radius: f64,
+    neo: bool,
+) -> Vec<Element> {
     let c = r.center();
     let paint = Paint::fill(fill);
     match shape {
         NodeShape::Default => {
+            // defaultMindmapNode.ts: corners rounded by quadratic curves of 5,
+            // the bottom ones square under the neo look.
             let rr = 5.0;
             let (x0, y0, x1, y1) = (r.x, r.y, r.right(), r.bottom());
-            let pi = std::f64::consts::PI;
+            let p = Point::new;
             let mut cmds = vec![
-                PathCmd::MoveTo(Point::new(x0, y1)),
-                PathCmd::LineTo(Point::new(x0, y0 + rr)),
+                PathCmd::MoveTo(p(x0, y1 - rr)),
+                PathCmd::LineTo(p(x0, y0 + rr)),
+                quad(p(x0, y0 + rr), p(x0, y0), p(x0 + rr, y0)),
+                PathCmd::LineTo(p(x1 - rr, y0)),
+                quad(p(x1 - rr, y0), p(x1, y0), p(x1, y0 + rr)),
             ];
-            cmds.extend(geom::arc_cubics(
-                Point::new(x0 + rr, y0 + rr),
-                rr,
-                pi,
-                1.5 * pi,
-            ));
-            cmds.push(PathCmd::LineTo(Point::new(x1 - rr, y0)));
-            cmds.extend(geom::arc_cubics(
-                Point::new(x1 - rr, y0 + rr),
-                rr,
-                1.5 * pi,
-                2.0 * pi,
-            ));
-            cmds.push(PathCmd::LineTo(Point::new(x1, y1)));
+            if neo {
+                cmds.extend([PathCmd::LineTo(p(x1, y1)), PathCmd::LineTo(p(x0, y1))]);
+            } else {
+                cmds.extend([
+                    PathCmd::LineTo(p(x1, y1 - rr)),
+                    quad(p(x1, y1 - rr), p(x1, y1), p(x1 - rr, y1)),
+                    PathCmd::LineTo(p(x0 + rr, y1)),
+                    quad(p(x0 + rr, y1), p(x0, y1), p(x0, y1 - rr)),
+                ]);
+            }
             cmds.push(PathCmd::Close);
             let mut els = vec![Element::classed_shape(
                 Geometry::Path(cmds),
@@ -794,9 +997,11 @@ fn shape_elements(shape: NodeShape, r: Rect, fill: &Color, line: Option<&Color>)
                 "node-bkg node-no-border",
             )];
             if let Some(line) = line {
-                els.push(Element::line(
-                    Point::new(x0, y1),
-                    Point::new(x1, y1),
+                els.push(Element::shape(
+                    Geometry::Line {
+                        a: Point::new(x0, y1),
+                        b: Point::new(x1, y1),
+                    },
                     Paint::stroke(line, 3.0),
                 ));
             }
@@ -806,10 +1011,10 @@ fn shape_elements(shape: NodeShape, r: Rect, fill: &Color, line: Option<&Color>)
         NodeShape::Square | NodeShape::Bang | NodeShape::Cloud => {
             vec![Element::rect(r, 0.0, paint)]
         }
-        NodeShape::Rounded => vec![Element::rect(r, 5.0, paint)],
+        NodeShape::Rounded => vec![Element::rect(r, radius, paint)],
         NodeShape::Circle => vec![Element::shape(Geometry::Circle { c, r: r.w / 2.0 }, paint)],
         NodeShape::Hexagon => {
-            let m = r.h / 4.0;
+            let m = r.h / if neo { 3.5 } else { 4.0 };
             let pts = [
                 Point::new(r.x + m, r.y),
                 Point::new(r.right() - m, r.y),
@@ -1148,10 +1353,10 @@ line\"(";
                 .map(|e| match e {
                     Element::Group { children, .. } => lines(children),
                     Element::Shape {
-                        geom: Geometry::Path(c),
+                        geom: Geometry::Line { .. },
                         class: None,
                         ..
-                    } if c.len() == 2 => 1,
+                    } => 1,
                     _ => 0,
                 })
                 .sum()

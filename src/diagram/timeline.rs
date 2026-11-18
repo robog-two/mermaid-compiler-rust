@@ -410,6 +410,7 @@ fn node_style<'a>(cfg: &MermaidConfig, pal: &'a Palette, vertical: bool) -> Node
                 "rgba(0, 0, 0, 0.06)"
             }),
             linear_rgb: true,
+            css: false,
         }),
     });
     let gradient = pal

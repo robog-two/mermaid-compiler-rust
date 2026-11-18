@@ -125,6 +125,24 @@ pub struct Shadow {
     /// filter function: it works in `linearRGB`, the shape it draws
     /// (`SourceGraphic`) quantised through that space as well.
     pub linear_rgb: bool,
+    /// Written, in SVG output, as the CSS `filter: drop-shadow()` mermaid's
+    /// stylesheet gives it, which a browser draws as it draws mermaid's
+    /// (rasterisers get the equivalent `<filter>`).
+    pub css: bool,
+}
+
+impl Shadow {
+    /// The CSS `drop-shadow(dx dy blur color)` function.
+    pub fn css_function(&self) -> String {
+        use crate::output::svg::num;
+        format!(
+            "drop-shadow({}px {}px {}px {})",
+            num(self.dx),
+            num(self.dy),
+            num(self.std_dev),
+            self.color.css()
+        )
+    }
 }
 
 impl Paint {
@@ -481,6 +499,15 @@ pub enum Element {
         class: Option<String>,
         children: Vec<Element>,
     },
+    /// Children composited as one layer and drawn through a drop shadow
+    /// filter: the layer's silhouette offset (and blurred) under it, as a
+    /// filter on a whole group casts it (mindmap's neo nodes). PDF output,
+    /// which has no filters, casts each shape's own shadow instead
+    /// ([`Element::with_shape_shadows`]).
+    Shadowed {
+        shadow: Shadow,
+        children: Vec<Element>,
+    },
     /// Children composited as one layer and drawn through CSS `filter:
     /// brightness(factor)`: every colour channel of the layer scaled by
     /// `factor` and clamped, antialiased edges included (timeline's
@@ -539,6 +566,33 @@ impl Element {
     /// `brightness(k)` ([`Color::brightened`]): what the filter makes of
     /// flat colours, though not of the antialiased edges where they meet.
     /// Images are left as they are.
+    /// This element with `shadow` cast by each of its shapes that casts
+    /// none of its own.
+    pub fn with_shape_shadows(&self, shadow: &Shadow) -> Element {
+        let mut e = self.clone();
+        fn walk(e: &mut Element, sh: &Shadow) {
+            match e {
+                Element::Shape { paint, .. } => {
+                    if paint.shadow.is_none() {
+                        paint.shadow = Some(sh.clone());
+                    }
+                }
+                Element::Group { children, .. }
+                | Element::Rotated { children, .. }
+                | Element::Clipped { children, .. }
+                | Element::Translated { children, .. }
+                | Element::Faded { children, .. }
+                | Element::Shadowed { children, .. }
+                | Element::Brightened { children, .. } => {
+                    children.iter_mut().for_each(|c| walk(c, sh))
+                }
+                _ => {}
+            }
+        }
+        walk(&mut e, shadow);
+        e
+    }
+
     pub fn brightened(&self, k: f64) -> Element {
         let all = |children: &[Element]| children.iter().map(|c| c.brightened(k)).collect();
         let paint = |p: &Paint| Paint {
@@ -635,6 +689,13 @@ impl Element {
                 class: class.clone(),
                 children: all(children),
             },
+            Element::Shadowed { shadow, children } => Element::Shadowed {
+                shadow: Shadow {
+                    color: shadow.color.brightened(k),
+                    ..shadow.clone()
+                },
+                children: all(children),
+            },
         }
     }
 
@@ -672,6 +733,10 @@ impl Element {
             } => Element::Brightened {
                 factor,
                 class,
+                children: all(children),
+            },
+            Element::Shadowed { shadow, children } => Element::Shadowed {
+                shadow,
                 children: all(children),
             },
             Element::Image { rect, href, inline } => Element::Image {
@@ -886,6 +951,7 @@ impl Scene {
                     Element::Group { children, .. }
                     | Element::Rotated { children, .. }
                     | Element::Brightened { children, .. }
+                    | Element::Shadowed { children, .. }
                     | Element::Translated { children, .. } => 1 + count(children),
                     _ => 1,
                 })

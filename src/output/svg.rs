@@ -148,6 +148,12 @@ impl Filters<'_> {
                 | Element::Clipped { children, .. } => {
                     self.collect(children);
                 }
+                Element::Shadowed { shadow, children } => {
+                    if !self.shadows.contains(shadow) {
+                        self.shadows.push(shadow.clone());
+                    }
+                    self.collect(children);
+                }
                 Element::Brightened {
                     factor,
                     class,
@@ -190,7 +196,19 @@ impl Filters<'_> {
     fn attr(&self, p: &Paint) -> String {
         p.shadow
             .as_ref()
-            .and_then(|sh| self.shadows.iter().position(|s| s == sh))
+            .map(|sh| self.filter_attr(sh))
+            .unwrap_or_default()
+    }
+
+    /// The attribute that casts `sh`: its `<filter>`, or, for a CSS shadow in
+    /// SVG output, the CSS function itself.
+    fn filter_attr(&self, sh: &Shadow) -> String {
+        if sh.css && self.raster_scale.is_none() {
+            return format!(" style=\"filter:{}\"", esc(&sh.css_function()));
+        }
+        self.shadows
+            .iter()
+            .position(|s| s == sh)
             .map(|k| format!(" filter=\"url(#{}-shadow-{k})\"", self.id))
             .unwrap_or_default()
     }
@@ -236,7 +254,9 @@ impl Filters<'_> {
         } else {
             &[]
         };
-        if self.shadows.is_empty() && self.gradients.is_empty() && brightness.is_empty() {
+        // A CSS shadow is written in SVG output as the function itself.
+        let svg_css = |sh: &Shadow| sh.css && self.raster_scale.is_none();
+        if self.shadows.iter().all(svg_css) && self.gradients.is_empty() && brightness.is_empty() {
             return String::new();
         }
         let mut out = String::from("<defs>");
@@ -286,6 +306,9 @@ impl Filters<'_> {
         let r = self.region;
         let m = r.w.max(r.h);
         for (k, sh) in self.shadows.iter().enumerate() {
+            if svg_css(sh) {
+                continue;
+            }
             let c = crate::color::parse(sh.color.css()).unwrap_or(crate::color::Rgba {
                 r: 0,
                 g: 0,
@@ -738,6 +761,13 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
             }
             out.push_str("</g>");
         }
+        Element::Shadowed { shadow, children } => {
+            let _ = write!(out, "<g{}>", fx.filter_attr(shadow));
+            for c in children {
+                write_element(out, c, fx);
+            }
+            out.push_str("</g>");
+        }
         Element::Faded {
             opacity,
             class,
@@ -1011,6 +1041,7 @@ mod tests {
             std_dev: 1.0,
             color: Color::new("rgba(185, 185, 185, 0.5)"),
             linear_rgb: false,
+            css: false,
         };
         let paint = Paint::fill(&Color::new("#fff")).with_shadow(Some(sh));
         let els = vec![

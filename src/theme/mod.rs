@@ -354,6 +354,7 @@ impl DropShadow {
                 None => self.color.clone(),
             },
             linear_rgb: false,
+            css: false,
         })
     }
 }

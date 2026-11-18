@@ -895,6 +895,7 @@ fn css_shadow(theme: ThemeName) -> Option<Shadow> {
         std_dev: 2.0,
         color: Color::new(color),
         linear_rgb: false,
+        css: false,
     };
     match theme {
         ThemeName::Default | ThemeName::Base | ThemeName::Dark | ThemeName::Neutral => {
@@ -2701,6 +2702,7 @@ mod tests {
             std_dev: 2.0,
             color: Color::new("rgba(185, 185, 185, 1)"),
             linear_rgb: false,
+            css: false,
         });
         let shadows = |look: Look| -> Vec<(String, Option<Shadow>)> {
             let s = draw(src, look);
