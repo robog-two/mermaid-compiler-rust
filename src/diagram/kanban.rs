@@ -284,6 +284,7 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .is_some_and(|(_, v)| v.trim() == "true");
     let card_text = pal.text_color.clone();
     let top = -col_w * 3.0 / 2.0 + max_label_h;
+    let hand_seed = (cfg.look == crate::config::Look::HandDrawn).then(|| cfg.hand_drawn_seed());
     for (ci, col) in k.columns.iter().enumerate() {
         let cnt = (ci + 1) as f64;
         let cx = col_w * cnt + (cnt - 1.0) * padding / 2.0;
@@ -368,8 +369,12 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         // coloured by `.cluster-label, .label { color: textColor }`, at the top centre.
         let height = (y - top + 3.0 * padding).max(50.0) + (max_label_h - 25.0);
         let cr = Rect::new(cx - col_w / 2.0, -col_w * 3.0 / 2.0, col_w, height);
-        bounds.add_rect(cr);
         let fill = shade(pal.scale_color(ci + 2), !dark_mode, 10.0);
+        let frame = hand_seed.map(|seed| hand_section(cx, col_w, seed, pal, &fill));
+        match &frame {
+            Some((_, b)) => bounds.add_rect(*b),
+            None => bounds.add_rect(cr),
+        }
         let title_h = col_titles[ci].len() as f64 * lh;
         g.insert(
             0,
@@ -384,14 +389,15 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 "kanban-section-title",
             ),
         );
-        g.insert(
-            0,
-            Element::classed_shape(
+        let section = match frame {
+            Some((el, _)) => el,
+            None => Element::classed_shape(
                 Geometry::Rect { rect: cr, rx: 5.0 },
                 Paint::both(&fill, &fill, 1.0),
                 "kanban-section",
             ),
-        );
+        };
+        g.insert(0, section);
         els.push(Element::group("kanban-column", g));
     }
     // setupGraphViewbox with the (mindmap) padding, 10.
@@ -405,6 +411,46 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         font_family: pal.font_family.clone(),
         css: String::new(),
     }
+}
+
+/// clusters.js `kanbanSection` under the handDrawn look: the section as a
+/// rough path of its rounded rectangle (`rx` 5) at its first size,
+/// `sectionWidth` × 3·`sectionWidth` round (cx, 0) (kanbanRenderer then
+/// looks for a `rect` to shorten and finds none), hachured at `fillWeight`
+/// 4; the section stylesheet fills and strokes both paths in its colour.
+/// Returns the element and the drawing's box.
+fn hand_section(cx: f64, w: f64, seed: f64, pal: &Palette, fill: &Color) -> (Element, Rect) {
+    let h = w * 3.0;
+    let (x, y) = (cx - w / 2.0, 0.0 - h / 2.0);
+    let o = crate::rough::Options {
+        roughness: 0.7,
+        fill: Some(pal.cluster_bkg.css().to_string()),
+        fill_style: "hachure".into(),
+        fill_weight: 4.0,
+        hachure_gap: 1.5,
+        stroke: pal.cluster_border.css().to_string(),
+        seed,
+        stroke_width: 1.3,
+        ..Default::default()
+    };
+    let d = crate::rough::path(&super::hand::rounded_rect_path(x, y, w, h, 5.0), o);
+    let mut kids = Vec::new();
+    let mut paths = Vec::new();
+    for set in d.sets.iter().filter(|s| !s.ops.is_empty()) {
+        let cmds = super::hand::set_cmds(&set.ops, Point::default());
+        let width = match set.kind {
+            crate::rough::SetKind::FillSketch => d.fill_weight(),
+            _ => d.options.stroke_width,
+        };
+        paths.push(cmds.clone());
+        kids.push(Element::shape(
+            Geometry::Path(cmds),
+            Paint::both(fill, fill, width),
+        ));
+    }
+    let b = super::svgbbox::cubic_group_box(&paths)
+        .map_or(Rect::new(x, y, w, h), |[x, y, w, h]| Rect::new(x, y, w, h));
+    (Element::group("kanban-section", kids), b)
 }
 
 /// Parse and render a `kanban` diagram body (already preprocessed).
@@ -568,5 +614,36 @@ mod tests {
         };
         assert_eq!(a.y, ticket.y + 1.5);
         assert_eq!(underline.1.stroke.css(), "#000000");
+    }
+
+    /// mermaid 12.3.0 under `look: handDrawn` (seed 17): each section is a
+    /// rough path 600px tall (kanbanRenderer finds no `rect` to shorten),
+    /// its fill sketch from (101.547, -298.630) and outline from
+    /// (104.001, -299.730) for the first, filled and stroked in the section
+    /// colour; the cards stay classic.
+    #[test]
+    fn hand_drawn_sections_match_mermaid() {
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 17\n---\nkanban\n  \
+                   todo[Todo]\n    id1[Write the spec]\n    id2[Review it]@{ ticket: MC-1, \
+                   assigned: 'ann', priority: 'High' }\n  doing[Doing]\n    id3[Build]\n";
+        let (scene, flat) = flat(src);
+        let paths: Vec<String> = flat
+            .iter()
+            .filter_map(|e| match e {
+                crate::scene::Element::Shape {
+                    geom: crate::scene::Geometry::Path(cmds),
+                    ..
+                } => Some(crate::output::svg::path_data(cmds)),
+                _ => None,
+            })
+            .collect();
+        for start in [
+            "M101.547,-298.63C",
+            "M104.001,-299.73C",
+            "M306.224,-298.259C",
+        ] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
+        assert!(scene.view_box.h > 600.0, "{:?}", scene.view_box);
     }
 }
