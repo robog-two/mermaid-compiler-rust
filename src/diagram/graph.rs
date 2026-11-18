@@ -1625,19 +1625,31 @@ pub fn render_with(
         }
     }
 
+    let title_block = |title: &str, html: bool| {
+        let t = TextBlock::label(title, font);
+        if html {
+            t.html()
+        } else {
+            // Its box is the text's `getBBox()`.
+            svg_bbox_wide(TextBlock::svg(t.lines, font, false))
+        }
+    };
+    // Painted as `flowchart.htmlLabels` says (`createText` in the cluster shapes).
     let mut cluster_titles: Vec<TextBlock> = g
         .clusters
         .iter()
-        .map(|c| {
-            let t = TextBlock::label(&c.title, font);
-            if cfg.html_edge_labels {
-                t.html()
-            } else {
-                // Its box is the text's `getBBox()`.
-                svg_bbox_wide(TextBlock::svg(t.lines, font, false))
-            }
-        })
+        .map(|c| title_block(&c.title, cfg.html_edge_labels))
         .collect();
+    // mermaid's ELK adapter measures a group's title with `labelHelper`
+    // (`measureGroupLabel`), which reads the root `htmlLabels` as node labels do.
+    // (`None`: measured as painted.)
+    let layout_titles: Option<Vec<TextBlock>> = (elk && cfg.html_labels != cfg.html_edge_labels)
+        .then(|| {
+            g.clusters
+                .iter()
+                .map(|c| title_block(&c.title, cfg.html_labels))
+                .collect()
+        });
     let mut measured: Vec<Measured> = nodes
         .iter()
         .map(|n| {
@@ -1691,7 +1703,8 @@ pub fn render_with(
                 measured[p].w = 0.0;
                 measured[p].h = 0.0;
             } else {
-                let t = &cluster_titles[ci];
+                let t = layout_titles.as_ref().unwrap_or(&cluster_titles);
+                let t = &t[ci];
                 measured[p].w = t.width + CLUSTER_TITLE_PAD;
                 measured[p].h = t.height;
             }
@@ -1880,7 +1893,7 @@ pub fn render_with(
         clusters: g
             .clusters
             .iter()
-            .zip(&cluster_titles)
+            .zip(layout_titles.as_ref().unwrap_or(&cluster_titles))
             .map(|(c, t)| LayoutCluster {
                 parent: c.parent.map(|p| p.0),
                 title_height: cluster_title_height(c.kind, t, elk),
@@ -2326,7 +2339,7 @@ pub fn render_with(
             let lw = edge_labels[ei].as_ref().map(|b| b.width + 8.0);
             let title_h = cluster_title_height(
                 g.clusters[ne.cluster.0].kind,
-                &cluster_titles[ne.cluster.0],
+                &layout_titles.as_ref().unwrap_or(&cluster_titles)[ne.cluster.0],
                 elk,
             );
             // The flow direction inside the cluster, as the layout used it (a cluster's
@@ -9155,5 +9168,24 @@ mod tests {
         let far = [Point::new(6.0, -7.0), Point::new(6.0, -40.0)];
         let p = clip_target_end(&circle, &far, true);
         assert!(p.dist(Point::new(6.0, -13f64.sqrt())) < 1e-9, "{p:?}");
+    }
+
+    /// mermaid 12.3.0 with `flowchart.htmlLabels: false`: the ELK adapter
+    /// measures a subgraph's title with `labelHelper`, which reads the root
+    /// `htmlLabels` (an HTML line, 21px), while the cluster draws it as SVG
+    /// text; the frame is 117 high (viewBox "4 4 408 285"), not 113.
+    #[test]
+    fn elk_group_titles_are_measured_as_node_labels() {
+        let scene = render_cli(
+            "---\nconfig:\n  flowchart:\n    htmlLabels: false\n---\nflowchart TD\n    \
+             A[Christmas] -->|Get money| B(Go shopping)\n    subgraph S [Sub title]\n      \
+             K[Inside]\n    end\n",
+        );
+        assert_eq!(
+            (scene.view_box.w, scene.view_box.h),
+            (408.0, 285.0),
+            "{:?}",
+            scene.view_box
+        );
     }
 }
