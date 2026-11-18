@@ -681,6 +681,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tspan_central_text_as_mermaid_writes_it_and_as_chromium_paints_it() {
+        let t = Text {
+            x: 278.0,
+            // Central at 36.5, 5.5 above the alphabetic baseline at 16px.
+            y: 42.0,
+            lines: vec!["Bob".into()],
+            line_height: 16.0,
+            font_size: 16.0,
+            bold: false,
+            weight: None,
+            anchor: Anchor::Middle,
+            fill: crate::scene::Color::new("#28253D"),
+            tspan_central: true,
+        };
+        let mut out = String::new();
+        write_text(&mut out, &t, &None, None);
+        assert_eq!(
+            out,
+            "<text x=\"278\" y=\"36.5\" dominant-baseline=\"central\" alignment-baseline=\"central\" text-anchor=\"middle\" font-size=\"16\" fill=\"#28253D\"><tspan x=\"278\" dy=\"0\">Bob</tspan></text>"
+        );
+        // Drawn 1:1 to a raster: where Chromium paints it (mermaid 12.3.0, d09).
+        let mut out = String::new();
+        write_text(&mut out, &t, &None, Some(1.0));
+        assert_eq!(
+            out,
+            "<text x=\"278\" y=\"43\" text-anchor=\"middle\" font-size=\"16\" fill=\"#28253D\">Bob</text>"
+        );
+        // At another scale, the layout's baseline.
+        let mut out = String::new();
+        write_text(&mut out, &t, &None, Some(2.0));
+        assert!(out.contains(" y=\"42\" "), "{out}");
+    }
+
+    #[test]
     fn number_formatting() {
         assert_eq!(num(1.0), "1");
         assert_eq!(num(1.23456), "1.235");

@@ -1820,6 +1820,34 @@ mod tests {
     }
 
     #[test]
+    fn tspan_central_paints_where_chromium_does() {
+        // Chromium (1:1), `<text dominant-baseline=central><tspan dy=0>`: the
+        // whole-pixel alphabetic baseline it paints, for y and font size.
+        for (y, size, painted) in [
+            (36.5, 16.0, 43.0),
+            (50.0, 16.0, 56.0),
+            (50.5, 16.0, 57.0),
+            (50.0, 12.0, 54.0),
+            (50.5, 12.0, 55.0),
+            (50.5, 14.0, 56.0),
+            (50.5, 18.0, 57.0),
+            (50.5, 20.0, 58.0),
+            (50.0, 24.0, 59.0),
+            (50.5, 24.0, 60.0),
+            (42.5, 16.0, 49.0),
+        ] {
+            assert_eq!(painted_tspan_central(y, size), painted, "{y} {size}");
+        }
+    }
+
+    #[test]
+    fn guillemets_reach_past_their_advance() {
+        // mermaid 12.3.0: `«iface»` at 14px, translate(-22.6792) (half its box).
+        let (l, r) = svg_bbox_extent("«iface»", 14.0, false);
+        assert!((r - l - 45.358_398_437_5).abs() < 0.02, "{}", r - l);
+    }
+
+    #[test]
     fn svg_line_box_follows_chromium_get_bbox() {
         assert_eq!(svg_line_box(14.0, "Christmas"), 16.0);
         assert_eq!(svg_line_box(14.0, "ggg"), 16.0);
