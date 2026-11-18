@@ -397,9 +397,9 @@ pub enum Boundary {
     /// A possibly concave outline clipped like `intersect.polygon`: of the crossings
     /// between the centre and the outer point, the one nearest the outer point.
     Outline(Point, Vec<Point>),
-    /// A cylinder: its bounding box and end-cap radius `ry`, clipped as
+    /// A cylinder: its bounding box and end-cap radii `rx`, `ry`, clipped as
     /// `cylinder.ts`'s `intersect` does (the box's crossing, moved by the cap).
-    Cylinder(Rect, f64),
+    Cylinder(Rect, f64, f64),
 }
 
 impl Boundary {
@@ -409,17 +409,16 @@ impl Boundary {
             Boundary::Ellipse(c, rx, ry) => geom::clip_ellipse(*c, *rx, *ry, toward),
             Boundary::Polygon(c, pts) => geom::clip_polygon(*c, pts, toward),
             Boundary::Outline(c, pts) => outline_clip(*c, pts, toward),
-            Boundary::Cylinder(r, ry) => cylinder_clip(r, *ry, toward),
+            Boundary::Cylinder(r, rx, ry) => cylinder_clip(r, *rx, *ry, toward),
         }
     }
 }
 
 /// `cylinder.ts`'s `intersect`: the bounding box's crossing, moved along y by
 /// what the end cap's ellipse (`rx` = half the width) leaves of `ry` there.
-fn cylinder_clip(r: &Rect, ry: f64, toward: Point) -> Point {
+fn cylinder_clip(r: &Rect, rx: f64, ry: f64, toward: Point) -> Point {
     let c = r.center();
     let mut pos = geom::intersect_rect(r, toward);
-    let rx = r.w / 2.0;
     let x = pos.x - c.x;
     if rx != 0.0
         && (x.abs() < r.w / 2.0 || (x.abs() == r.w / 2.0 && (pos.y - c.y).abs() > r.h / 2.0 - ry))
@@ -653,7 +652,7 @@ pub fn outline(shape: Shape, c: Point, w: f64, h: f64, m: &ShapeMetrics) -> Opti
             }
             Outline {
                 parts: vec![body(Geometry::Path(cmds))],
-                boundary: Boundary::Cylinder(r, ry),
+                boundary: Boundary::Cylinder(r, r.w / 2.0, ry),
                 glyphs: Vec::new(),
             }
         }
@@ -1805,7 +1804,7 @@ mod tests {
             144.0,
             85.14869888475836,
         );
-        let b = Boundary::Cylinder(r, 13.382899628252789);
+        let b = Boundary::Cylinder(r, r.w / 2.0, 13.382899628252789);
         let p = b.clip(Point::new(503.0, 148.29));
         assert!((p.x - 442.0).abs() < 1e-9, "{p:?}");
         assert!((p.y - 191.155).abs() < 2e-2, "{p:?}");

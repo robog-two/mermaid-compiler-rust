@@ -651,6 +651,84 @@ fn span(lo: f32, hi: f32) -> f32 {
     }
 }
 
+/// `SkFindCubicExtrema` along one axis.
+fn cubic_extrema(a: f32, b: f32, c: f32, d: f32) -> Vec<f32> {
+    let aa = d - a + 3.0 * (b - c);
+    let bb = 2.0 * (a - b - b + c);
+    let cc = b - a;
+    unit_quad_roots(aa, bb, cc)
+}
+
+/// `SkCubicCoeff::eval` along one axis.
+fn cubic_eval(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let a = p3 + 3.0 * (p1 - p2) - p0;
+    let b = 3.0 * (p2 - 2.0 * p1 + p0);
+    let c = 3.0 * (p1 - p0);
+    ((a * t + b) * t + c) * t + p0
+}
+
+/// `getBBox()` of a group of paths made of moves, lines and cubics (as
+/// rough.js writes them, every number in JavaScript's shortest form): each
+/// path's `SkPath::computeTightBounds()` in single precision, joined the way
+/// `gfx::RectF::Union` joins them. Empty paths are passed over. Returns
+/// `[x, y, width, height]`.
+pub fn cubic_group_box(paths: &[Vec<crate::geom::PathCmd>]) -> Option<[f64; 4]> {
+    use crate::geom::PathCmd;
+    let mut acc: Option<(f32, f32, f32, f32)> = None;
+    for cmds in paths {
+        let f = |p: crate::geom::Point| (js_f32(p.x), js_f32(p.y));
+        let mut lo: Option<(f32, f32)> = None;
+        let mut hi = (0.0f32, 0.0f32);
+        let mut cur = (0.0f32, 0.0f32);
+        let mut add = |p: (f32, f32), lo: &mut Option<(f32, f32)>| match lo {
+            None => {
+                *lo = Some(p);
+                hi = p;
+            }
+            Some(l) => {
+                *l = (l.0.min(p.0), l.1.min(p.1));
+                hi = (hi.0.max(p.0), hi.1.max(p.1));
+            }
+        };
+        for c in cmds {
+            match *c {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => {
+                    cur = f(p);
+                    add(cur, &mut lo);
+                }
+                PathCmd::CubicTo(p1, p2, p3) => {
+                    let (a, b, d) = (f(p1), f(p2), f(p3));
+                    let mut ts = cubic_extrema(cur.0, a.0, b.0, d.0);
+                    ts.extend(cubic_extrema(cur.1, a.1, b.1, d.1));
+                    for t in ts {
+                        add(
+                            (
+                                cubic_eval(cur.0, a.0, b.0, d.0, t),
+                                cubic_eval(cur.1, a.1, b.1, d.1, t),
+                            ),
+                            &mut lo,
+                        );
+                    }
+                    add(d, &mut lo);
+                    cur = d;
+                }
+                _ => {}
+            }
+        }
+        let Some(lo) = lo else { continue };
+        let b = (lo.0, lo.1, span(lo.0, hi.0), span(lo.1, hi.1));
+        acc = Some(match acc {
+            None => b,
+            Some(a) => {
+                let (x, y) = (a.0.min(b.0), a.1.min(b.1));
+                let (r, bt) = ((a.0 + a.2).max(b.0 + b.2), (a.1 + a.3).max(b.1 + b.3));
+                (x, y, span(x, r), span(y, bt))
+            }
+        });
+    }
+    acc.map(|(x, y, w, h)| [f64::from(x), f64::from(y), f64::from(w), f64::from(h)])
+}
+
 /// `getBBox()` of a node group holding mermaid's `M0 0 <arcs> H0 V0 Z` path
 /// under `translate(tx, ty)` and a `label_w`×`label_h` label centred on the
 /// origin, as `(x, y, width, height)`.

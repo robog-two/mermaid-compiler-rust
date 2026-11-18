@@ -2354,6 +2354,20 @@ pub fn render_with(
             } else {
                 lk.edge_width
             });
+        if elk && lk.hand_seed.is_some() {
+            // mermaid's ELK routes hold the ports beside the outline points;
+            // a straight run through them draws the same, but rough.js
+            // draws each of its segments.
+            if let Some(p) = kept[ei][0].filter(|p| pts.len() >= 2 && *p != pts[0] && *p != pts[1]) {
+                pts.insert(1, p);
+            }
+            let n = pts.len();
+            if let Some(p) =
+                kept[ei][1].filter(|p| n >= 2 && *p != pts[n - 1] && *p != pts[n - 2])
+            {
+                pts.insert(n - 1, p);
+            }
+        }
         if !elk {
             pts = geom::fix_corners(&pts);
         }
@@ -2435,6 +2449,45 @@ pub fn render_with(
             Curve::Linear => geom::polyline(&pts),
             Curve::Step => geom::polyline(&step_points(&pts, horizontal)),
         };
+        // Under the handDrawn look `insertEdge` hands the path data it would
+        // have drawn to rough.js (`roughness: 0.3`), in the frame it draws in.
+        let mut rough_d = None;
+        let cmds = match lk.hand_seed {
+            Some(seed) => {
+                let shift = if dagre_engine {
+                    let o = extras.edge_origins.get(ei).copied().unwrap_or_default();
+                    Point::new(-o.x, -o.y)
+                } else if elk {
+                    Point::new(ELK_ORIGIN, ELK_ORIGIN)
+                } else {
+                    Point::new(8.0, 8.0)
+                };
+                let d = if elk && !degenerate {
+                    let local: Vec<Point> = pts.iter().map(|p| p.plus(shift)).collect();
+                    rounded_path_data(&local, EDGE_CORNER_RADIUS)
+                } else {
+                    d3_path_data(&Geometry::Path(cmds.clone()).translated(shift.x, shift.y))
+                };
+                let o = crate::rough::Options {
+                    roughness: 0.3,
+                    seed,
+                    ..Default::default()
+                };
+                let drawn = crate::rough::path(&d, o);
+                let ops: Vec<_> = drawn.sets.into_iter().flat_map(|s| s.ops).collect();
+                rough_d = Some(crate::rough::ops_to_path(&ops));
+                let drawn = hand::set_cmds(&ops, Point::new(-shift.x, -shift.y));
+                if !degenerate {
+                    // The markers sit on the drawn path's ends, along its ends.
+                    let (end, start) = heads.split_at(end_heads.min(heads.len()));
+                    let mut moved = reoriented(end, path_end(&cmds), path_end(&drawn));
+                    moved.extend(reoriented(start, path_start(&cmds), path_start(&drawn)));
+                    heads = moved;
+                }
+                drawn
+            }
+            None => cmds,
+        };
         if dagre_engine {
             // The drawing's bbox holds the curve itself, not its control points.
             if let Some(r) = geom::path_bbox(&cmds) {
@@ -2452,7 +2505,11 @@ pub fn render_with(
                 let to_frame =
                     matches!(e.from, Endpoint::Cluster(_)) || matches!(e.to, Endpoint::Cluster(_));
                 let origin = extras.edge_origins.get(ei).copied().unwrap_or_default();
-                to_frame || !label_coordinate_in_path(cut[cut.len() / 2], &cmds, origin)
+                to_frame
+                    || !match &rough_d {
+                        Some(d) => label_coordinate_in_data(cut[cut.len() / 2].minus(origin), d),
+                        None => label_coordinate_in_path(cut[cut.len() / 2], &cmds, origin),
+                    }
             }
             _ => false,
         };
@@ -3149,6 +3206,168 @@ fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> 
     d.contains(&js_round(p.x)) || d.contains(&js_round(p.y))
 }
 
+/// A path's last point and the unit direction it ends in (a marker's `auto`
+/// orientation there).
+fn path_end(cmds: &[PathCmd]) -> Option<(Point, Point)> {
+    let mut prev = Point::default();
+    let mut out = None;
+    for c in cmds {
+        match *c {
+            PathCmd::MoveTo(p) => prev = p,
+            PathCmd::LineTo(p) => {
+                out = Some((p, p.minus(prev)));
+                prev = p;
+            }
+            // Blink's in-slope of a cubic: from its last control point.
+            PathCmd::CubicTo(_, b, p) => {
+                out = Some((p, p.minus(b)));
+                prev = p;
+            }
+            _ => {}
+        }
+    }
+    out.filter(|(_, d)| d.len() > 0.0).map(|(p, d)| (p, d.norm()))
+}
+
+/// A path's first point and the unit direction out of it, pointing back
+/// along the path (as a start marker's `auto` orientation is drawn).
+fn path_start(cmds: &[PathCmd]) -> Option<(Point, Point)> {
+    let PathCmd::MoveTo(s) = *cmds.first()? else {
+        return None;
+    };
+    let d = match *cmds.get(1)? {
+        PathCmd::LineTo(p) => p.minus(s),
+        PathCmd::CubicTo(a, ..) => a.minus(s),
+        _ => return None,
+    };
+    (d.len() > 0.0).then(|| (s, d.norm().scale(-1.0)))
+}
+
+/// Marker elements drawn for a path end at `from` (point, direction) moved
+/// rigidly onto `to`.
+fn reoriented(els: &[Element], from: Option<(Point, Point)>, to: Option<(Point, Point)>) -> Vec<Element> {
+    let (Some((p0, d0)), Some((p1, d1))) = (from, to) else {
+        return els.to_vec();
+    };
+    let moved: Vec<Element> = els
+        .iter()
+        .map(|e| e.clone().translated(p1.x - p0.x, p1.y - p0.y))
+        .collect();
+    let deg = (d1.y.atan2(d1.x) - d0.y.atan2(d0.x)).to_degrees();
+    if moved.is_empty() || deg == 0.0 {
+        return moved;
+    }
+    vec![Element::Rotated {
+        deg,
+        about: p1,
+        children: moved,
+    }]
+}
+
+/// `isLabelCoordinateInPath` on path data `d` as written: every decimal in it
+/// rounded, then searched for either rounded coordinate of `p`.
+fn label_coordinate_in_data(p: Point, d: &str) -> bool {
+    let js_round = |v: f64| crate::rough::js_round(v).to_string();
+    let b = d.as_bytes();
+    let mut out = String::with_capacity(d.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            let s = i;
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i + 1 < b.len() && b[i] == b'.' && b[i + 1].is_ascii_digit() {
+                i += 1;
+                while i < b.len() && b[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let v: f64 = d[s..i].parse().unwrap_or(0.0);
+                out += &js_round(v);
+            } else {
+                out += &d[s..i];
+            }
+        } else {
+            out.push(b[i] as char);
+            i += 1;
+        }
+    }
+    out.contains(&js_round(p.x)) || out.contains(&js_round(p.y))
+}
+
+/// The path data d3's `line` writes for `g` (d3-shape 3 rounds every
+/// coordinate to 3 decimals, `Math.round(v * 1000) / 1000`).
+fn d3_path_data(g: &Geometry) -> String {
+    let Geometry::Path(cmds) = g else {
+        return String::new();
+    };
+    let n = |v: f64| crate::rough::js_round(v * 1000.0) / 1000.0;
+    let mut d = String::new();
+    for c in cmds {
+        match *c {
+            PathCmd::MoveTo(a) => d += &format!("M{},{}", n(a.x), n(a.y)),
+            PathCmd::LineTo(a) => d += &format!("L{},{}", n(a.x), n(a.y)),
+            PathCmd::CubicTo(a, b, e) => {
+                d += &format!(
+                    "C{},{},{},{},{},{}",
+                    n(a.x),
+                    n(a.y),
+                    n(b.x),
+                    n(b.y),
+                    n(e.x),
+                    n(e.y)
+                )
+            }
+            PathCmd::Close => d += "Z",
+            PathCmd::MoveBy(_) | PathCmd::ArcTo { .. } => {}
+        }
+    }
+    d
+}
+
+/// The path data mermaid's `generateRoundedPath` writes for `points`.
+fn rounded_path_data(points: &[Point], radius: f64) -> String {
+    const EPS: f64 = 1e-5;
+    let mut path = String::new();
+    if points.len() < 2 {
+        return path;
+    }
+    let size = points.len();
+    for i in 0..size {
+        let cur = points[i];
+        if i == 0 {
+            path += &format!("M{},{}", cur.x, cur.y);
+            continue;
+        }
+        if i == size - 1 {
+            path += &format!("L{},{}", cur.x, cur.y);
+            continue;
+        }
+        let (prev, next) = (points[i - 1], points[i + 1]);
+        let (dx1, dy1) = (cur.x - prev.x, cur.y - prev.y);
+        let (dx2, dy2) = (next.x - cur.x, next.y - cur.y);
+        let len1 = dx1.hypot(dy1);
+        let len2 = dx2.hypot(dy2);
+        if len1 < EPS || len2 < EPS {
+            path += &format!("L{},{}", cur.x, cur.y);
+            continue;
+        }
+        let (nx1, ny1, nx2, ny2) = (dx1 / len1, dy1 / len1, dx2 / len2, dy2 / len2);
+        let dot = nx1 * nx2 + ny1 * ny2;
+        let angle = (-1f64).max(1f64.min(dot)).acos();
+        if angle < EPS || (std::f64::consts::PI - angle).abs() < EPS {
+            path += &format!("L{},{}", cur.x, cur.y);
+            continue;
+        }
+        let cut = (radius / (angle / 2.0).sin()).min(len1 / 2.0).min(len2 / 2.0);
+        let (sx, sy) = (cur.x - nx1 * cut, cur.y - ny1 * cut);
+        let (ex, ey) = (cur.x + nx2 * cut, cur.y + ny2 * cut);
+        path += &format!("L{sx},{sy}");
+        path += &format!("Q{},{} {ex},{ey}", cur.x, cur.y);
+    }
+    path
+}
+
 /// The order subgraphs close in (flowDb pushes a subgraph at its `end`): a
 /// post-order walk of the subgraph forest, siblings in declaration order.
 pub(crate) fn closing_order(clusters: &[Cluster]) -> Vec<usize> {
@@ -3685,7 +3904,7 @@ pub(crate) fn without_kept_ports(
 /// first segment). `port` if the line misses the outline.
 pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
     let center = match b {
-        Boundary::Rect(r) | Boundary::Cylinder(r, _) => r.center(),
+        Boundary::Rect(r) | Boundary::Cylinder(r, ..) => r.center(),
         Boundary::Ellipse(c, _, _) | Boundary::Polygon(c, _) | Boundary::Outline(c, _) => *c,
     };
     let inward = port.minus(next);
@@ -3728,7 +3947,7 @@ pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
         return inner.plus(out.scale(lo));
     }
     let t = match b {
-        Boundary::Rect(r) | Boundary::Cylinder(r, _) => {
+        Boundary::Rect(r) | Boundary::Cylinder(r, ..) => {
             let exit = |p: f64, v: f64, lo: f64, hi: f64| {
                 if v > 1e-12 {
                     (hi - p) / v
@@ -7299,7 +7518,7 @@ mod tests {
         // with its `intersect` (the box's crossing moved by the cap) as the
         // inside test, which lands inside the box, where the ray through the
         // point meets that `intersect` (mermaid 12.3.0: 1.1px in).
-        let cyl = Boundary::Cylinder(Rect::new(-50.0, -40.0, 100.0, 80.0), 10.0);
+        let cyl = Boundary::Cylinder(Rect::new(-50.0, -40.0, 100.0, 80.0), 50.0, 10.0);
         let p = clip_along(&cyl, Point::new(30.0, 40.0), Point::new(30.0, 80.0));
         assert!(p.x == 30.0 && p.y < 40.0 && p.y > 30.0, "{p:?}");
         let on = cyl.clip(p).minus(c).len() - p.minus(c).len();

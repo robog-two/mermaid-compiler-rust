@@ -10,7 +10,7 @@
 
 use super::graph::Shape;
 use super::shapes::{Boundary, ShapeMetrics};
-use crate::geom::{self, PathCmd, Point, Rect};
+use crate::geom::{PathCmd, Point, Rect};
 use crate::rough::{self, Drawable, Op, Options};
 
 /// What `userNodeOverrides` reads from the node and the config.
@@ -57,6 +57,8 @@ enum Bound {
     Polygon,
     /// question.ts: a diamond as wide as the measured box.
     Diamond,
+    /// cylinder.ts: the box's crossing moved by the nominal caps.
+    Cylinder(f64, f64),
 }
 
 impl HandNode {
@@ -77,6 +79,7 @@ impl HandNode {
                 Boundary::Polygon(c, in_box(c, w, h, local))
             }
             Bound::Polygon => Boundary::Polygon(c, in_box(c, w, h, poly(shape, m))),
+            Bound::Cylinder(rx, ry) => Boundary::Cylinder(Rect::centered(c, w, h), rx, ry),
         }
     }
 }
@@ -287,23 +290,6 @@ pub fn set_cmds(ops: &[Op], at: Point) -> Vec<PathCmd> {
         .collect()
 }
 
-/// `getBBox()` of a rough.js group: the union of its non-empty paths.
-pub fn drawable_bbox(d: &Drawable, at: Point) -> Option<Rect> {
-    let mut out: Option<Rect> = None;
-    for s in &d.sets {
-        if s.ops.is_empty() {
-            continue;
-        }
-        if let Some(b) = geom::path_bbox(&set_cmds(&s.ops, at)) {
-            out = Some(match out {
-                None => b,
-                Some(o) => o.union(&b),
-            });
-        }
-    }
-    out
-}
-
 /// The hand-drawn `shape` around a label of `m.label`, or `None` for shapes
 /// not drawn here.
 pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> {
@@ -441,13 +427,60 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
             let d = rough::path(&path_from_points(&pts), o());
             (vec![piece(d, Point::new(-w / 2.0, h / 2.0))], Bound::Polygon)
         }
+        // cylinder.ts: the outline without its top's front half, which is a
+        // separate unfilled path left where the shape's frame starts (only the
+        // outline is moved, and measured).
+        Shape::Cylinder => {
+            let w = tw + p;
+            let rx = w / 2.0;
+            let ry = rx / (2.5 + w / 50.0);
+            let h = th + p + ry;
+            let outer = format!(
+                "M{},{} M{},{} a{},{} 0,0,0 {},0 l0,{} a{},{} 0,0,0 {},0 l0,{}",
+                0.0,
+                ry,
+                w,
+                ry,
+                rx,
+                ry,
+                -w,
+                h,
+                rx,
+                ry,
+                w,
+                -h
+            );
+            let inner = format!("M{},{} a{},{} 0,0,0 {},0", -w / 2.0, -h / 2.0, rx, ry, w);
+            let io = Options {
+                fill: Some("none".into()),
+                ..o()
+            };
+            (
+                vec![
+                    piece(rough::path(&outer, o()), Point::new(-w / 2.0, -(h / 2.0 + ry))),
+                    Piece {
+                        drawable: rough::path(&inner, io),
+                        at: origin,
+                        measured: false,
+                    },
+                ],
+                Bound::Cylinder(rx, ry),
+            )
+        }
         _ => return None,
     };
-    let bbox = pieces
+    // The measured pieces share one frame (one group, or two groups side by
+    // side in doubleCircle's).
+    let at = pieces.iter().find(|pc| pc.measured)?.at;
+    let paths: Vec<Vec<PathCmd>> = pieces
         .iter()
         .filter(|pc| pc.measured)
-        .filter_map(|pc| drawable_bbox(&pc.drawable, pc.at))
-        .reduce(|a, b| a.union(&b))?;
+        .flat_map(|pc| &pc.drawable.sets)
+        .filter(|s| !s.ops.is_empty())
+        .map(|s| set_cmds(&s.ops, Point::default()))
+        .collect();
+    let [x, y, w, h] = super::svgbbox::cubic_group_box(&paths)?;
+    let bbox = Rect::new(x + at.x, y + at.y, w, h);
     Some(HandNode {
         pieces,
         bbox,
