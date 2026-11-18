@@ -117,12 +117,10 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
             };
             let g = diagram::class::parse_with(&pre.body, pre.title.clone(), opts)?;
             let mut options = graph_options(&cfg);
-            if !cfg.class.html_labels {
-                // A note's SVG label is wrapped at labelHelper's fallback width,
-                // `flowchart.wrappingWidth` (an HTML one keeps `white-space:
-                // nowrap`; class boxes size their text themselves).
-                options.node_wrap = Some(cfg.flowchart.wrapping_width);
-            }
+            // Notes and lollipop interfaces wrap at labelHelper's fallback width,
+            // `flowchart.wrappingWidth` (an HTML note keeps `white-space: nowrap`;
+            // class boxes size their text themselves).
+            options.node_wrap = Some(cfg.flowchart.wrapping_width);
             (
                 diagram::graph::render_with(&g, &cfg.class, &pal, &options),
                 cfg.class.use_max_width,

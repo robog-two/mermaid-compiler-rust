@@ -521,6 +521,7 @@ fn casts_shadow(kind: DiagramKind, shape: Shape) -> bool {
         (_, Shape::Invisible | Shape::ForkBar)
             | (DiagramKind::State, Shape::Choice)
             | (DiagramKind::Flowchart, Shape::StateStart)
+            | (DiagramKind::Class, Shape::Rect)
     )
 }
 
@@ -901,6 +902,40 @@ struct Measured {
     hand: Option<Rect>,
     /// A hand-drawn described state's box before it was measured.
     nominal: Option<(f64, f64)>,
+    /// A class `interfaceN` node's SVG label, which starts at the rect's centre
+    /// and may run past it: the drawn rect, and the right / bottom extent of the
+    /// node's ink from its centre. The layout (`w`, `h`) takes the node's DOM
+    /// box (`insertMeasuredNode`), the rect's left / top half plus that extent.
+    overhang: Option<Overhang>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Overhang {
+    rect_w: f64,
+    rect_h: f64,
+    right: f64,
+    bottom: f64,
+}
+
+impl Measured {
+    /// The size the node's outline is drawn at.
+    fn drawn_size(&self) -> (f64, f64) {
+        self.overhang
+            .map_or((self.w, self.h), |o| (o.rect_w, o.rect_h))
+    }
+
+    /// The box the node's drawing covers when centred at `c`.
+    fn ink(&self, c: Point) -> Rect {
+        match self.overhang {
+            Some(o) => Rect::new(
+                c.x - o.rect_w / 2.0,
+                c.y - o.rect_h / 2.0,
+                o.rect_w / 2.0 + o.right,
+                o.rect_h / 2.0 + o.bottom,
+            ),
+            None => Rect::centered(c, self.w, self.h),
+        }
+    }
 }
 
 fn compartment_layout(
@@ -1101,6 +1136,8 @@ fn measure_node(
     let node_pad = match (node.shape, kind) {
         (Shape::Note, DiagramKind::Class) => 6.0,
         (Shape::Note, DiagramKind::State) => 15.0,
+        // A lollipop's `interfaceN` node sets no `padding` (squareRect: 0 unless neo).
+        (Shape::Rect, DiagramKind::Class) => 0.0,
         _ => pad,
     };
     let metrics = ShapeMetrics::for_look(node.shape, node_pad, look).with_label(tw, th);
@@ -1163,6 +1200,19 @@ fn measure_node(
     let svg_class = (svg && kind == DiagramKind::Class && node.shape == Shape::Compartments)
         .then(|| svg_class_box(node, font, pad));
     let (w, h) = svg_class.as_ref().map_or((w, h), |b| (b.w, b.h));
+    // labelHelper sets an SVG label at `translate(0, -height / 2)` with no
+    // `text-anchor`: it starts at the centre, its glyph box `font − ⌊0.905·font⌉`
+    // below its top.
+    let overhang =
+        (svg && kind == DiagramKind::Class && node.shape == Shape::Rect).then(|| Overhang {
+            rect_w: w,
+            rect_h: h,
+            right: (w / 2.0).max(tw),
+            bottom: (h / 2.0).max(th / 2.0 + font - (0.905 * font).round()),
+        });
+    let (w, h) = overhang.map_or((w, h), |o| {
+        (o.rect_w / 2.0 + o.right, o.rect_h / 2.0 + o.bottom)
+    });
     Measured {
         svg_class,
         block,
@@ -1177,6 +1227,7 @@ fn measure_node(
         h,
         hand: None,
         nominal: None,
+        overhang,
     }
 }
 
@@ -1401,6 +1452,10 @@ pub fn render_with(
                     && cfg.html_labels
                     && crate::text::is_markdown_string(&n.label)
                 {
+                    0.0
+                } else if cfg.html_labels && (g.kind, n.shape) == (DiagramKind::Class, Shape::Note)
+                {
+                    // classDb gives a note `white-space: nowrap`.
                     0.0
                 } else {
                     opts.node_wrap.unwrap_or(cfg.wrapping_width)
@@ -1923,7 +1978,7 @@ pub fn render_with(
             bounds.add_rect(Rect::new(b.x + c.x, b.y + c.y, b.w, b.h));
         } else {
             cylinder_frame(&mut els, shapes::arc_frame(n.shape, c, m.w, m.h));
-            bounds.add_rect(Rect::centered(c, m.w, m.h));
+            bounds.add_rect(m.ink(c));
         }
         boundaries.push(boundary);
         if n.shape != Shape::Invisible {
@@ -1932,8 +1987,14 @@ pub fn render_with(
                 .chain(n.classes.iter().cloned())
                 .collect::<Vec<_>>()
                 .join(" ");
+            // A lollipop's `interfaceN` has no `domId`: its group takes the bare id.
+            let id = if (g.kind, n.shape) == (DiagramKind::Class, Shape::Rect) {
+                n.id.clone()
+            } else {
+                format!("{}-{}-{}", node_prefix(g.kind), n.id, i)
+            };
             node_els.push(Element::Group {
-                id: Some(format!("{}-{}-{}", node_prefix(g.kind), n.id, i)),
+                id: Some(id),
                 class: Some(class),
                 children: els,
             });
@@ -5355,7 +5416,7 @@ fn node_elements(
 ) -> (Vec<Element>, Boundary) {
     // A hand-drawn described state is laid out at its drawing's size, but
     // its box and rows stay where the nominal box puts them.
-    let (w, h) = m.nominal.unwrap_or((m.w, m.h));
+    let (w, h) = m.nominal.unwrap_or_else(|| m.drawn_size());
     // Flowchart CSS (`.node circle, .node path { fill: mainBkg; stroke: nodeBorder;
     // stroke-width: 2px }`) overrides the state shapes' own attributes; `f-circ` keeps
     // its inline `fill: nodeBorder !important`.
@@ -5417,6 +5478,10 @@ fn node_elements(
         n.style.stroke_width.unwrap_or(default_width),
     );
     paint.dash = n.style.dash.clone();
+    if (kind, n.shape) == (DiagramKind::Class, Shape::Rect) {
+        // classDb's `interfaceN` node: `cssStyles: ['opacity: 0;']`, only its label shows.
+        paint.opacity = Some(0.0);
+    }
     let text_color = n
         .style
         .color
@@ -5590,6 +5655,9 @@ fn node_elements(
                 Boundary::Rect(r)
             }
             Shape::Compartments => {
+                // classBox's dividers are rough.js paths (1.3) that the classic
+                // stylesheet's `.node path { stroke-width }` restyles.
+                let divider_width = lk.node_stroke_width;
                 let Some(layout) = &m.compartments else {
                     return (els, Boundary::Rect(r));
                 };
@@ -5605,7 +5673,7 @@ fn node_elements(
                                 PathCmd::MoveTo(Point::new(x0, c.y + dy)),
                                 PathCmd::LineTo(Point::new(x1, c.y + dy)),
                             ]),
-                            Paint::stroke(&stroke, 1.0),
+                            Paint::stroke(&stroke, divider_width),
                             "divider",
                         ));
                     }
@@ -5669,7 +5737,7 @@ fn node_elements(
                                 PathCmd::MoveTo(Point::new(x0, y)),
                                 PathCmd::LineTo(Point::new(x1, y)),
                             ]),
-                            Paint::stroke(&stroke, 1.0),
+                            Paint::stroke(&stroke, divider_width),
                             "divider",
                         ));
                     }
@@ -5861,10 +5929,19 @@ fn node_elements(
         if m.block.svg && matches!(kind, DiagramKind::State | DiagramKind::Class) {
             // State nodes and class notes centre their label box, but neither
             // stylesheet has `text-anchor: middle`: SVG text starts at its left.
-            t = t.anchored(Anchor::Start, at.x - m.label_w / 2.0);
+            let left = if m.overhang.is_some() {
+                at.x
+            } else {
+                at.x - m.label_w / 2.0
+            };
+            t = t.anchored(Anchor::Start, left);
         }
         t.bold = m.block.bold;
         els.push(shifted_lines(t, &m.block.shifts, "nodeLabel"));
+    }
+    if m.overhang.is_some() {
+        // `intersect.rect` reads the node's measured (DOM box) size.
+        return (els, Boundary::Rect(Rect::centered(c, m.w, m.h)));
     }
     (els, boundary)
 }

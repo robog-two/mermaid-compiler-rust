@@ -40,7 +40,12 @@ struct Builder {
     styles: Vec<(String, StyleOverrides)>,
     /// Backtick class names (classDiagram.jison `classLiteralName`), by placeholder index.
     literals: Literals,
+    /// classDb's `interfaces`: the label of each lollipop end, in order.
+    interfaces: Vec<String>,
 }
+
+/// Prefix of the relation endpoint naming the `interfaceN` node of a lollipop end.
+const INTERFACE: char = '\u{F0001}';
 
 /// Backtick class names (`` `Animal Class!` ``) may hold spaces and punctuation the
 /// statement parser splits on, so each is swapped for an opaque placeholder token
@@ -351,11 +356,8 @@ fn parse_hierarchical(body: &str, title: Option<String>) -> Result<(GraphDiagram
         if s.starts_with("link ") || s.starts_with("click ") || s.starts_with("callback ") {
             continue;
         }
-        if let Some(rel) = parse_relation(&s) {
-            let (from, to, edge) = rel;
-            b.class(&from);
-            b.class(&to);
-            b.relations.push((from, to, edge));
+        if let Some((from, to, edge)) = parse_relation(&s) {
+            b.relation(from, to, edge);
             continue;
         }
         if let Some((cls, member)) = s.split_once(':') {
@@ -572,7 +574,7 @@ fn parse_relation(s: &str) -> Option<(String, String, Edge)> {
     e.label = label;
     e.start_label = left_card;
     e.end_label = right_card;
-    Some((split_generic(&left_name).0, split_generic(&right_name).0, e))
+    Some((left_name, right_name, e))
 }
 
 fn find_operator(s: &str) -> Option<(usize, bool)> {
@@ -666,6 +668,33 @@ impl Builder {
         self.classes.get_mut(name).expect("inserted above")
     }
 
+    /// classDb's `addRelation`: a lollipop end whose other end has no head becomes
+    /// an `interfaceN` node labelled with the name written there; that name is not
+    /// added as a class.
+    fn relation(&mut self, from: String, to: String, edge: Edge) {
+        let plain = |h: Head| h == Head::None;
+        let iface = |b: &mut Self, label: &str| {
+            b.interfaces.push(label.to_string());
+            format!("{INTERFACE}{}", b.interfaces.len() - 1)
+        };
+        let (from, to) = if edge.start == Head::Lollipop && plain(edge.end) {
+            let to = split_generic(&to).0;
+            self.class(&to);
+            (iface(self, &from), to)
+        } else if edge.end == Head::Lollipop && plain(edge.start) {
+            let from = split_generic(&from).0;
+            self.class(&from);
+            let to = iface(self, &to);
+            (from, to)
+        } else {
+            let (from, to) = (split_generic(&from).0, split_generic(&to).0);
+            self.class(&from);
+            self.class(&to);
+            (from, to)
+        };
+        self.relations.push((from, to, edge));
+    }
+
     fn add_member(&mut self, cls: &str, member: &str) {
         let m = member.trim();
         if m.is_empty() {
@@ -734,6 +763,16 @@ impl Builder {
                 edges.push(e);
             }
             nodes.push(n);
+        }
+        // ... then the interfaces: invisible rects (`opacity: 0`) outside any
+        // namespace, showing only their label.
+        for (k, label) in self.interfaces.iter().enumerate() {
+            index.insert(format!("{INTERFACE}{k}"), nodes.len());
+            nodes.push(Node::new(
+                format!("interface{k}"),
+                self.literals.restore(label),
+                Shape::Rect,
+            ));
         }
         edges.extend(self.relations.into_iter().map(|(a, b, mut e)| {
             e.from = Endpoint::Node(NodeId(index[&a]));
@@ -1051,6 +1090,39 @@ mod tests {
         assert_eq!(d.edges.len(), 3);
         assert_eq!(d.edges[2].line, LineKind::Solid);
         assert!(d.edges[..2].iter().all(|e| e.line == LineKind::Dotted));
+    }
+
+    /// classDb.addRelation: a lollipop end opposite a plain end becomes an
+    /// `interfaceN` node (after the classes and notes) labelled with the name
+    /// written there, which is not added as a class; with a head opposite it,
+    /// both ends are classes.
+    #[test]
+    fn lollipop_ends_become_interface_nodes() {
+        let d = parse(
+            "classDiagram\nnamespace N {\nclass B\n}\nnote for B \"n\"\nA ()-- B\nB --() C\nD ()--|> E",
+            None,
+        )
+        .unwrap();
+        let ids: Vec<&str> = d.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["B", "D", "E", "note0", "interface0", "interface1"]);
+        let i0 = &d.nodes[4];
+        assert_eq!(
+            (i0.label.as_str(), i0.shape, i0.cluster),
+            ("A", Shape::Rect, None)
+        );
+        assert_eq!(d.nodes[5].label, "C");
+        let e = &d.edges[1];
+        assert_eq!(
+            (e.from, e.to),
+            (Endpoint::Node(NodeId(4)), Endpoint::Node(NodeId(0)))
+        );
+        assert_eq!((e.start, e.end), (Head::Lollipop, Head::None));
+        let e = &d.edges[2];
+        assert_eq!(
+            (e.from, e.to),
+            (Endpoint::Node(NodeId(0)), Endpoint::Node(NodeId(5)))
+        );
+        assert_eq!(d.nodes[4].model_seq, Some(5));
     }
 
     /// classDb.addClass: a class already added keeps the type it had.

@@ -25,8 +25,6 @@ pub enum End {
 enum Fill {
     /// Line colour (`.marker { fill: lineColor }`).
     Line,
-    /// Node background (`lollipop` → `mainBkg`).
-    Background,
     None,
 }
 
@@ -405,14 +403,16 @@ fn marker(head: Head, neo: bool) -> Option<Marker> {
             fill: Fill::Line,
             stroke: 1.0,
         },
-        // lollipop: r 6 circle, markerOffsets 13.5.
+        // lollipop: r 6 circle, markerOffsets 13.5. The circle's own
+        // `fill="transparent"` outranks the `fill: mainBkg` the class stylesheet
+        // sets on the marker (an inherited value).
         Head::Lollipop => Marker {
             end: def(1.0, 7.0, &[Part::Circle(7.0, 7.0, 6.0)]),
             start: Some(def(13.0, 7.0, &[Part::Circle(7.0, 7.0, 6.0)])),
             start_scale: None,
             scale: Scale::Fixed(Ratio::One),
             pullback: 13.5,
-            fill: Fill::Background,
+            fill: Fill::None,
             stroke: 1.0,
         },
         // ER cardinalities (markerUnits = strokeWidth; `.marker { fill: none !important }`).
@@ -653,7 +653,6 @@ pub fn elements(
     };
     let fill = match m.fill {
         Fill::Line => colors.line.clone(),
-        Fill::Background => colors.background.clone(),
         Fill::None => Color::none(),
     };
     let paint = Paint::both(&fill, colors.line, stroke);
