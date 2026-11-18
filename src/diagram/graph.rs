@@ -110,6 +110,17 @@ pub enum Shape {
     LinedDocument,
     /// `collapsedGroup`: a folded container (agentflow `@{ view: collapsed }`).
     CollapsedGroup,
+    /// icon.ts: an unframed icon over (or under) its label.
+    Icon,
+    /// iconSquare.ts / iconRounded.ts / iconCircle.ts: the icon on a filled
+    /// square, rounded square or circle.
+    IconSquare,
+    IconRounded,
+    IconCircle,
+    /// imageSquare.ts: an image in a frame, its label below or above.
+    ImageSquare,
+    /// anchor.ts: a 1px dot edges attach to.
+    Anchor,
     /// `datastore` / `data-store`: top and bottom rules only.
     Datastore,
     /// `folder` / `directory`.
@@ -254,6 +265,57 @@ pub struct Node {
     /// Where the diagram's `getData` hands this node to the layout, among the
     /// nodes and clusters that carry one (state diagrams: dataFetcher's order).
     pub model_seq: Option<usize>,
+    /// An icon or image node's `@{ icon | img, pos, w, h, constraint }`.
+    pub asset: Option<Asset>,
+}
+
+/// The asset of an icon or image node (flowDb's `icon`, `img`, `pos`,
+/// `assetWidth`, `assetHeight` and `constraint`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Asset {
+    /// The icon's name (`fa:user`, `logos:aws`, ...).
+    pub icon: Option<String>,
+    /// The image's URL.
+    pub img: Option<String>,
+    /// `pos: t`: the label above the asset.
+    pub top: bool,
+    pub w: Option<f64>,
+    pub h: Option<f64>,
+    /// `constraint: on`: the image keeps its aspect ratio.
+    pub constraint: bool,
+    /// `form`: `square`, `circle` or `rounded` (an icon's frame).
+    pub form: Option<String>,
+    /// The image's natural size, where its `data:` URI tells it.
+    pub natural: Option<(f64, f64)>,
+}
+
+/// Whether `shape` is an icon or image node's ([`Asset`]).
+pub(crate) fn is_asset_shape(shape: Shape) -> bool {
+    matches!(
+        shape,
+        Shape::Icon
+            | Shape::IconSquare
+            | Shape::IconRounded
+            | Shape::IconCircle
+            | Shape::ImageSquare
+    )
+}
+
+/// anchor.ts' dot: rough.js's circle of diameter 2 (roughness 0 unless
+/// hand-drawn), whose box sizes the node.
+fn anchor_dot(seed: Option<f64>) -> crate::rough::Drawable {
+    let o = crate::rough::Options {
+        roughness: if seed.is_some() { 0.7 } else { 0.0 },
+        fill: Some("black".into()),
+        stroke: "none".into(),
+        fill_style: "solid".into(),
+        fill_weight: 1.5,
+        hachure_gap: 1.5,
+        seed: seed.unwrap_or(0.0),
+        stroke_width: ROUGH_STROKE_WIDTH,
+        ..crate::rough::Options::default()
+    };
+    crate::rough::circle(0.0, 0.0, 2.0, o)
 }
 
 impl Node {
@@ -271,6 +333,7 @@ impl Node {
             annotation: None,
             group_seq: None,
             model_seq: None,
+            asset: None,
         }
     }
 }
@@ -535,6 +598,15 @@ fn casts_shadow(kind: DiagramKind, shape: Shape) -> bool {
                     | Shape::Braces
             )
             | (DiagramKind::Class, Shape::Rect)
+            | (
+                _,
+                Shape::Icon
+                    | Shape::IconSquare
+                    | Shape::IconRounded
+                    | Shape::IconCircle
+                    | Shape::ImageSquare
+                    | Shape::Anchor
+            )
     )
 }
 
@@ -939,6 +1011,8 @@ struct Measured {
     overhang: Option<Overhang>,
     /// [`shapes::ShapeSize::ink_offset`].
     ink_offset: Point,
+    /// An icon or image node's layout about its centre.
+    asset: Option<super::asset::Layout>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1083,6 +1157,15 @@ fn measure_node(
     svg: bool,
     table_scale: f64,
 ) -> Measured {
+    // icon.ts / imageSquare.ts set `node.width` before labelHelper: the label
+    // wraps in that (less its `p`'s padding).
+    let default_width = wrap_width;
+    let wrap_width = match &node.asset {
+        Some(a) if is_asset_shape(node.shape) => {
+            super::asset::label_wrap(node.shape, a, default_width)
+        }
+        _ => wrap_width,
+    };
     let mut block = TextBlock::label(&node.label, font).html();
     let bold = node.style.bold == Some(true);
     if svg {
@@ -1150,7 +1233,8 @@ fn measure_node(
         && !matches!(
             node.shape,
             Shape::Circle | Shape::DoubleCircle | Shape::CollapsedGroup
-        );
+        )
+        && !(is_asset_shape(node.shape) && node.asset.is_some());
     let (tw, th) = (
         if widen {
             block.width.max(min_label_width)
@@ -1179,6 +1263,7 @@ fn measure_node(
     let mut table = None;
     let mut label_offset = Point::default();
     let mut ink_offset = Point::default();
+    let mut asset_layout = None;
     let (w, h) = match shapes::size(node.shape, tw, th, &metrics, horizontal) {
         Some(s) => {
             label_offset = s.label_offset;
@@ -1228,6 +1313,38 @@ fn measure_node(
                 let r = requirement_metrics(node, font);
                 (r.w, r.h)
             }
+            s if is_asset_shape(s) && node.asset.is_some() => {
+                // The label box takes in its `p`'s 2px padding a side.
+                let p2 = 2.0 * super::asset::LABEL_P_PADDING;
+                let (bw, bh) = if block.is_empty() {
+                    (0.0, 0.0)
+                } else {
+                    (tw + p2, th + p2)
+                };
+                let a = node.asset.as_ref().expect("asset");
+                let l = super::asset::layout(s, a, bw, bh, node_pad, default_width);
+                label_offset = l.label.center();
+                // The layout takes the whole drawing's box (its rough.js
+                // circle reaches a hair past the outer box).
+                let mut ink = Rect::centered(Point::default(), l.w, l.h).union(&l.label);
+                for r in [l.icon, l.image].into_iter().flatten() {
+                    ink = ink.union(&r);
+                }
+                if let super::asset::Frame::Circle(p, r) = l.frame
+                    && let Some([x, y, w, h]) =
+                        super::svgbbox::cubic_group_box(&[shapes::rough_circle(p, r)])
+                {
+                    ink = ink.union(&Rect::new(x, y, w, h));
+                }
+                ink_offset = ink.center();
+                asset_layout = Some(l);
+                (ink.w, ink.h)
+            }
+            Shape::Anchor => {
+                let b = hand::drawable_bbox(&anchor_dot(None)).unwrap_or_default();
+                ink_offset = b.center();
+                (b.w, b.h)
+            }
             _ => (tw.max(20.0), th.max(10.0)),
         },
     };
@@ -1263,6 +1380,7 @@ fn measure_node(
         nominal: None,
         overhang,
         ink_offset,
+        asset: asset_layout,
     }
 }
 
@@ -2047,7 +2165,13 @@ pub fn render_with(
                 els.insert(0, el);
             }
         }
-        if lk.neo && !inline_accents && !(g.kind == DiagramKind::Class && n.shape == Shape::Note) {
+        // (Icon and image nodes are `icon-shape` / `image-shape` groups,
+        // which the `.node` rules miss.)
+        if lk.neo
+            && !inline_accents
+            && !is_asset_shape(n.shape)
+            && !(g.kind == DiagramKind::Class && n.shape == Shape::Note)
+        {
             neo_node_css(&mut els, pal, &n.style, drawn_as_paths(g.kind, n.shape));
         }
         if let Some(b) = m.hand {
@@ -4347,7 +4471,7 @@ pub fn draw_node(
     {
         cast_shadows(&mut els, sh, n.shape);
     }
-    if cfg.look == ConfigLook::Neo && !inline_accents {
+    if cfg.look == ConfigLook::Neo && !inline_accents && !is_asset_shape(n.shape) {
         neo_node_css(&mut els, pal, &n.style, drawn_as_paths(kind, n.shape));
     }
     cylinder_frame(&mut els, shapes::arc_frame(n.shape, c, m.w, m.h));
@@ -5705,7 +5829,22 @@ fn node_elements(
     let collapsed = lk
         .hand_seed
         .and_then(|seed| hand_collapsed_group(n, m, pal, lk, seed, kind));
-    let boundary = if let Some(hn) = collapsed {
+    let boundary = if let Some(l) = m.asset.as_ref() {
+        asset_elements(&mut els, n, l, m, c, pal, lk)
+    } else if n.shape == Shape::Anchor {
+        let dot = anchor_dot(lk.hand_seed);
+        let mut drawn = hand_elements(&hand::measured_node_of(dot), c, None);
+        if lk.neo {
+            // `[data-look="neo"].node path` strokes it.
+            for_each_shape(&mut drawn, &mut |p: &mut Paint| {
+                p.stroke = pal.node_border.clone();
+                p.stroke_width = lk.node_stroke_width;
+            });
+        }
+        els.extend(drawn);
+        // `intersect.circle(node, 1)`.
+        Boundary::Ellipse(c, 1.0, 1.0)
+    } else if let Some(hn) = collapsed {
         let mut drawn = hand_elements(&hn, c, None);
         // flowchart/styles.ts: a palette slot's colours on both paths
         // (`.collapsed-group path { stroke; fill }`), outranking rough.js's.
@@ -5843,6 +5982,9 @@ fn node_elements(
                 anchor: Anchor::Start,
                 fill: pal.node_border.clone(),
                 tspan_central: false,
+                // console.ts: `font-family: monospace` (DejaVu Sans Mono Bold
+                // where mmdc runs).
+                family: Some("monospace"),
             };
             els.push(Element::classed_text(text, "console-glyph"));
         }
@@ -6540,6 +6682,98 @@ fn measure_hand(
     }
 }
 
+/// An icon or image node's frame, label background, icon or image, laid
+/// out by [`super::asset::layout`], and its edge boundary.
+fn asset_elements(
+    els: &mut Vec<Element>,
+    n: &Node,
+    l: &super::asset::Layout,
+    m: &Measured,
+    c: Point,
+    pal: &Palette,
+    lk: &Look,
+) -> Boundary {
+    use super::asset::Frame;
+    let at = |r: Rect| Rect::new(r.x + c.x, r.y + c.y, r.w, r.h);
+    let fill = n.style.fill.clone().unwrap_or_else(|| pal.main_bkg.clone());
+    let width = n.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH);
+    // iconSquare / iconRounded / iconCircle stroke their frame in its fill;
+    // imageSquare frames the image in the node's border.
+    let framed = Paint {
+        stroke_width: width,
+        ..Paint::fill(&fill)
+    };
+    match &l.frame {
+        Frame::Bare(_) => {}
+        Frame::Square(r, rx) => els.push(Element::shape(
+            Geometry::Rect {
+                rect: at(*r),
+                rx: *rx,
+            },
+            Paint {
+                stroke: fill.clone(),
+                ..framed.clone()
+            },
+        )),
+        Frame::Circle(p, r) => els.push(Element::shape(
+            Geometry::Path(shapes::rough_circle(c.plus(*p), *r)),
+            Paint {
+                stroke: fill.clone(),
+                ..framed.clone()
+            },
+        )),
+        Frame::Image(r) => {
+            let stroke = n
+                .style
+                .stroke
+                .clone()
+                .unwrap_or_else(|| pal.node_border.clone());
+            els.push(Element::rect(
+                at(*r),
+                0.0,
+                Paint {
+                    stroke,
+                    ..framed.clone()
+                },
+            ));
+        }
+    }
+    if l.label.w > 0.0 || l.label.h > 0.0 {
+        // `.labelBkg` (the edge label background faded by 0.5) under the
+        // `p`'s own `edgeLabelBackground`.
+        let bg = &pal.edge_label_background;
+        if let Some(rgba) = crate::color::parse(bg.css()).filter(|c| c.a < 1.0) {
+            let faded = Color::new(format!(
+                "rgba({}, {}, {}, {})",
+                rgba.r,
+                rgba.g,
+                rgba.b,
+                (rgba.a - 0.5).max(0.0)
+            ));
+            els.push(Element::rect(at(l.label), 0.0, Paint::fill(&faded)));
+        }
+        els.push(Element::rect(at(l.label), 0.0, Paint::fill(bg)));
+    }
+    if let Some(r) = l.icon {
+        // unknownIcon: the blue square and its `?`.
+        let r = at(r);
+        els.push(Element::rect(
+            r,
+            0.0,
+            Paint::fill(&Color::new(super::asset::UNKNOWN_ICON_FILL)),
+        ));
+        els.push(super::archicons::unknown(r));
+    }
+    if let (Some(r), Some(href)) = (l.image, n.asset.as_ref().and_then(|a| a.img.clone())) {
+        els.push(Element::Image { rect: at(r), href });
+    }
+    let _ = lk;
+    match &l.clip {
+        Some(pts) => Boundary::Outline(c, hand::in_box(c, m.w, m.h, pts.clone())),
+        None => Boundary::Rect(Rect::centered(c, m.w, m.h)),
+    }
+}
+
 /// `f` on the paint of every shape in `els`.
 fn for_each_shape(els: &mut [Element], f: &mut dyn FnMut(&mut Paint)) {
     for e in els {
@@ -6629,6 +6863,7 @@ fn accent_parts(o: shapes::Outline, pal: &Palette) -> Vec<Element> {
             anchor: Anchor::Start,
             fill: pal.node_border.clone(),
             tspan_central: false,
+            family: Some("monospace"),
         };
         els.push(Element::classed_text(text, "console-glyph"));
     }

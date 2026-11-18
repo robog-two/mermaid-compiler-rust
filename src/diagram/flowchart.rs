@@ -262,6 +262,7 @@ impl Builder {
         // flowDb's `addVertex`: metadata on a declared subgraph id is the subgraph's
         // (`sub@{ view: collapsed }`) and does not make it a vertex.
         let mut shape = shape;
+        let mut asset = None;
         if let Some(d) = data {
             match self.cluster_index.get(id) {
                 Some(&c) if self.closed[c] => {
@@ -270,11 +271,52 @@ impl Builder {
                     }
                 }
                 _ => {
-                    let label = d.label.unwrap_or_else(|| {
-                        self.index
-                            .get(id)
-                            .map_or_else(|| id.to_string(), |&i| self.nodes[i].label.clone())
+                    let old = self
+                        .index
+                        .get(id)
+                        .map(|&i| (self.nodes[i].label.clone(), self.nodes[i].asset.clone()));
+                    let mut label = d.label.clone().unwrap_or_else(|| {
+                        old.as_ref()
+                            .map_or_else(|| id.to_string(), |(l, _)| l.clone())
                     });
+                    // An icon or image without a label of its own loses the
+                    // id it was labelled with.
+                    let unlabelled = d.label.as_deref().is_none_or(|l| l.trim().is_empty());
+                    if (d.icon.is_some() || d.img.is_some()) && unlabelled && label == id {
+                        label.clear();
+                    }
+                    if d.icon.is_some()
+                        || d.img.is_some()
+                        || d.form.is_some()
+                        || d.pos.is_some()
+                        || d.constraint.is_some()
+                        || d.w.is_some()
+                        || d.h.is_some()
+                    {
+                        let mut a = old.and_then(|(_, a)| a).unwrap_or_default();
+                        if let Some(v) = d.icon.clone() {
+                            a.icon = Some(v);
+                        }
+                        if let Some(v) = d.img.clone() {
+                            a.img = Some(v);
+                        }
+                        if let Some(v) = d.form.clone() {
+                            a.form = Some(v);
+                        }
+                        if let Some(v) = d.pos.as_deref() {
+                            a.top = v == "t";
+                        }
+                        if let Some(v) = d.constraint.as_deref() {
+                            a.constraint = v == "on";
+                        }
+                        if d.w.is_some() {
+                            a.w = d.w;
+                        }
+                        if d.h.is_some() {
+                            a.h = d.h;
+                        }
+                        asset = Some(a);
+                    }
                     let s = d.shape.unwrap_or_else(|| {
                         self.index
                             .get(id)
@@ -295,6 +337,9 @@ impl Builder {
         if let Some((s, label)) = shape {
             self.nodes[idx].shape = s;
             self.nodes[idx].label = label;
+        }
+        if asset.is_some() {
+            self.nodes[idx].asset = asset;
         }
         if let Some(c) = class {
             self.class_assignments.push((id.to_string(), c));
@@ -531,6 +576,26 @@ impl Builder {
                 Some(e)
             })
             .collect();
+        let mut nodes = nodes;
+        for n in &mut nodes {
+            if let Some(s) = n.asset.as_ref().and_then(asset_shape) {
+                n.shape = s;
+            }
+            // imageSquare.ts awaits `img.decode()`: an image mermaid cannot
+            // decode (a remote one where mmdc has no network) fails the
+            // render. Its natural size is only read from a `data:` URI; a
+            // remote image whose `w` and `h` size it alone is drawn.
+            if let Some(a) = n.asset.as_mut().filter(|_| n.shape == Shape::ImageSquare) {
+                let url = a.img.clone().unwrap_or_default();
+                a.natural = super::asset::natural_size(&url);
+                let data = url.trim_start().starts_with("data:");
+                if a.natural.is_none() && (data || super::asset::needs_natural(a)) {
+                    return Err(crate::error::Error::Render(
+                        super::asset::UNDECODABLE.to_string(),
+                    ));
+                }
+            }
+        }
         let g = GraphDiagram {
             kind: DiagramKind::Flowchart,
             direction,
@@ -720,6 +785,21 @@ struct NodeRef {
     class: Option<String>,
 }
 
+/// flowDb's `getTypeFromVertex`: an image, else an icon in its `form`'s
+/// frame, wins over the vertex's shape.
+fn asset_shape(a: &super::graph::Asset) -> Option<Shape> {
+    if a.img.is_some() {
+        return Some(Shape::ImageSquare);
+    }
+    a.icon.as_ref()?;
+    Some(match a.form.as_deref() {
+        Some("circle") => Shape::IconCircle,
+        Some("square") => Shape::IconSquare,
+        Some("rounded") => Shape::IconRounded,
+        _ => Shape::Icon,
+    })
+}
+
 /// The keys of an `@{ … }` block this renderer reads.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct ShapeData {
@@ -727,6 +807,48 @@ struct ShapeData {
     label: Option<String>,
     /// `view: collapsed` on a declared subgraph id folds that subgraph.
     view: Option<String>,
+    /// `icon`, `form`, `pos`, `img`, `constraint`, `w`, `h`: an icon or
+    /// image node (flowDb's `addVertex`).
+    icon: Option<String>,
+    form: Option<String>,
+    pos: Option<String>,
+    img: Option<String>,
+    constraint: Option<String>,
+    w: Option<f64>,
+    h: Option<f64>,
+}
+
+/// The `key: value` pairs of a shape-data body, split at the commas outside
+/// quotes (an image's `data:` URI has one).
+fn doc_pairs(body: &str) -> Vec<(String, String)> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for ch in body.chars() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => {
+                quote = None;
+                cur.push(c);
+            }
+            (None, '"' | '\'') => {
+                quote = Some(ch);
+                cur.push(ch);
+            }
+            (None, ',') => parts.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    parts.push(cur);
+    parts
+        .iter()
+        .filter_map(|part| {
+            let (k, v) = part.split_once(':')?;
+            Some((
+                k.trim().to_string(),
+                v.trim().trim_matches(['"', '\'']).to_string(),
+            ))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -957,24 +1079,39 @@ impl Scanner {
     fn shape_attrs(&mut self) -> std::result::Result<ShapeData, String> {
         self.pos += 1;
         let start = self.pos;
+        let mut quote: Option<char> = None;
         let end = (start..self.c.len())
-            .find(|&i| self.c[i] == '}')
+            .find(|&i| {
+                let c = self.c[i];
+                match quote {
+                    Some(q) if c == q => quote = None,
+                    Some(_) => {}
+                    None if c == '"' || c == '\'' => quote = Some(c),
+                    None => return c == '}',
+                }
+                false
+            })
             .ok_or("Unterminated '@{'")?;
         let body: String = self.c[start + 1..end].iter().collect();
         self.pos = end + 1;
         let mut data = ShapeData::default();
-        for part in body.split(',') {
-            let Some((k, v)) = part.split_once(':') else {
-                continue;
-            };
-            let v = v.trim().trim_matches(['"', '\'']);
-            match k.trim() {
+        for (k, v) in doc_pairs(&body) {
+            let v = v.as_str();
+            let num = || v.parse::<f64>().ok().filter(|x| *x != 0.0);
+            match k.as_str() {
                 "shape" => {
                     data.shape =
                         Some(shape_by_name(v).ok_or_else(|| format!("No such shape: {v}."))?);
                 }
                 "label" => data.label = Some(v.to_string()),
                 "view" => data.view = Some(v.to_string()),
+                "icon" if !v.is_empty() => data.icon = Some(v.to_string()),
+                "form" if !v.is_empty() => data.form = Some(v.to_string()),
+                "pos" if !v.is_empty() => data.pos = Some(v.to_string()),
+                "img" if !v.is_empty() => data.img = Some(v.to_string()),
+                "constraint" if !v.is_empty() => data.constraint = Some(v.to_string()),
+                "w" => data.w = num(),
+                "h" => data.h = num(),
                 _ => {}
             }
         }
@@ -1240,6 +1377,7 @@ pub(crate) fn shape_by_name(name: &str) -> Option<Shape> {
         "choice" => Shape::Choice,
         "note" => Shape::Note,
         "collapsedGroup" => Shape::CollapsedGroup,
+        "anchor" => Shape::Anchor,
         // Valid upstream shapes (other diagrams' internals) drawn as rectangles.
         "composite"
         | "rectWithTitle"
@@ -1250,7 +1388,6 @@ pub(crate) fn shape_by_name(name: &str) -> Option<Shape> {
         | "icon"
         | "iconRounded"
         | "imageSquare"
-        | "anchor"
         | "kanbanItem"
         | "mindmapCircle"
         | "defaultMindmapNode"

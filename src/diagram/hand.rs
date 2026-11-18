@@ -739,6 +739,11 @@ pub fn sized_node(shape: &Sized, st: &HandStyle) -> HandNode {
 
 /// A node of `pieces` whose box is the measured pieces' (`updateNodeBounds`
 /// of their group), clipped as a rectangle.
+/// One drawing at the node's centre, measured whole.
+pub fn measured_node_of(d: Drawable) -> HandNode {
+    measured_node(vec![piece(d, Point::default())])
+}
+
 pub fn measured_node(pieces: Vec<Piece>) -> HandNode {
     let bbox = pieces
         .iter()

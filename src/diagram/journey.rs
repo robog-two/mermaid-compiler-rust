@@ -276,6 +276,7 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                     anchor: Anchor::Start,
                     fill: pal.text_color.clone(),
                     tspan_central: false,
+                    family: None,
                 },
                 "legend",
             ));
@@ -403,6 +404,7 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 anchor: Anchor::Start,
                 fill: title_fill,
                 tspan_central: false,
+                family: None,
             },
             "titleText",
         ));

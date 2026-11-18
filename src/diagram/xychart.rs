@@ -124,6 +124,7 @@ pub(crate) fn text_at(
         anchor,
         fill: fill.clone(),
         tspan_central: false,
+        family: None,
     }
 }
 

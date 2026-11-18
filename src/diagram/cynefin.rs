@@ -1001,6 +1001,7 @@ pub fn draw(d: &Cynefin, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                         anchor: Anchor::Middle,
                         fill: t.text_color.clone(),
                         tspan_central: false,
+                        family: None,
                     },
                     "cynefinArrowLabel",
                 ));
@@ -1043,6 +1044,7 @@ fn translate(e: Element, dx: f64, dy: f64) -> Element {
         e @ (Element::OutlinedText { .. }
         | Element::Clipped { .. }
         | Element::Faded { .. }
+        | Element::Image { .. }
         | Element::Translated { .. }) => e.translated(dx, dy),
         Element::Group {
             id,

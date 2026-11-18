@@ -2149,6 +2149,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 anchor: Anchor::Middle,
                 fill: text_fill,
                 tspan_central: false,
+                family: None,
             }));
         }
         let class = if d.sets.len() == 1 {
@@ -2231,6 +2232,7 @@ fn translate_element(e: Element, dy: f64) -> Element {
         e @ (Element::OutlinedText { .. }
         | Element::Clipped { .. }
         | Element::Faded { .. }
+        | Element::Image { .. }
         | Element::Translated { .. }) => e.translated(0.0, dy),
         Element::Group {
             id,

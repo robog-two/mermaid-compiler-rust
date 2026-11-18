@@ -373,7 +373,16 @@ pub fn size(
         Shape::ForkBar => at(70.0, 10.0),
         // choice.ts: 28×28 diamond.
         Shape::Choice => at(28.0, 28.0),
-        Shape::Compartments | Shape::Invisible | Shape::EntityTable | Shape::Requirement => {
+        Shape::Compartments
+        | Shape::Invisible
+        | Shape::EntityTable
+        | Shape::Requirement
+        | Shape::Icon
+        | Shape::IconSquare
+        | Shape::IconRounded
+        | Shape::IconCircle
+        | Shape::ImageSquare
+        | Shape::Anchor => {
             return None;
         }
     })
@@ -392,6 +401,7 @@ pub fn shows_label(shape: Shape) -> bool {
             | Shape::Hourglass
             | Shape::CrossedCircle
             | Shape::Bolt
+            | Shape::Anchor
     )
 }
 
@@ -609,7 +619,7 @@ fn rough_stroke(d: &str) -> Vec<PathCmd> {
 
 /// The outline rough.js's `circle` draws at roughness 0 (its fitted curve
 /// overshoots the radius a little), centred on `c`.
-fn rough_circle(c: Point, r: f64) -> Vec<PathCmd> {
+pub(crate) fn rough_circle(c: Point, r: f64) -> Vec<PathCmd> {
     let d = crate::rough::circle(0.0, 0.0, r * 2.0, flat_rough());
     d.sets
         .iter()

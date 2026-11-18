@@ -569,6 +569,7 @@ fn line_text(x: f64, y: f64, shift: Baseline, line: &str, font_size: f64, fill: 
         anchor: Anchor::Middle,
         fill: fill.clone(),
         tspan_central: false,
+        family: None,
     }
 }
 
@@ -610,6 +611,7 @@ fn tspan_lines(cx: f64, cy: f64, lines: &[String], font_size: f64, fill: &Color)
             let dy = i as f64 * font_size - font_size * (n - 1.0) / 2.0;
             Text {
                 tspan_central: true,
+                family: None,
                 ..line_text(cx, cy + dy, BASELINE_CENTRAL, l, font_size, fill)
             }
         })
@@ -1545,6 +1547,7 @@ pub fn render(d: &SequenceDiagram, cfg: &SequenceConfig, pal: &Palette) -> Scene
             anchor: Anchor::Start,
             fill: pal.text_color.clone(),
             tspan_central: false,
+            family: None,
         }));
     }
 
@@ -1781,6 +1784,7 @@ fn message_elements(pm: &Pending, pal: &Palette, cfg: &SequenceConfig) -> Elemen
                 anchor: Anchor::Middle,
                 fill: pal.sequence_number.clone(),
                 tspan_central: false,
+                family: None,
             },
             "sequenceNumber",
         ));

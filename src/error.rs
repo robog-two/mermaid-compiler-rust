@@ -13,6 +13,8 @@ pub enum Error {
     UnsupportedDiagram { kind: String },
     /// Invalid configuration (config file, front-matter or `%%{init}%%` directive).
     Config(String),
+    /// mermaid threw while rendering (e.g. an image it could not decode).
+    Render(String),
 }
 
 impl Error {
@@ -46,6 +48,7 @@ impl fmt::Display for Error {
                 "Diagram type \"{kind}\" is valid mermaid but is not implemented by this mmdc yet"
             ),
             Error::Config(msg) => write!(f, "Configuration error: {msg}"),
+            Error::Render(msg) => write!(f, "{msg}"),
         }
     }
 }

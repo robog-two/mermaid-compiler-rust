@@ -154,7 +154,7 @@ impl Filters<'_> {
                         self.gradients.push(g.clone());
                     }
                 }
-                Element::Text { .. } | Element::OutlinedText { .. } => {}
+                Element::Text { .. } | Element::OutlinedText { .. } | Element::Image { .. } => {}
             }
         }
     }
@@ -260,20 +260,16 @@ fn paint_attrs(p: &Paint, stroke_url: Option<String>) -> String {
 
 fn class_attr(c: &Option<String>) -> String {
     c.as_ref()
-        .map(|c| format!(" class=\"{}\"{}", esc(c), class_font(c)))
+        .map(|c| format!(" class=\"{}\"", esc(c)))
         .unwrap_or_default()
 }
 
-/// The font a class of text sets inline (a style, so that it beats the
-/// stylesheet's `text` rule): console.ts writes its `>_` prompt in
-/// `font-family: monospace` (DejaVu Sans Mono Bold where mmdc runs, 8.43px a
-/// glyph at 14px), not the diagram's font.
-fn class_font(class: &str) -> &'static str {
-    if class == "console-glyph" {
-        " style=\"font-family:monospace\""
-    } else {
-        ""
-    }
+/// A text's inline `font-family` (a style, so that it beats the stylesheet's
+/// `text` rule).
+fn family_attr(t: &Text) -> String {
+    t.family
+        .map(|f| format!(" style=\"font-family:{}\"", esc(f)))
+        .unwrap_or_default()
 }
 
 fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option<f64>) {
@@ -297,6 +293,7 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option
                     &Text {
                         y,
                         tspan_central: false,
+                        family: None,
                         ..t.clone()
                     },
                     class,
@@ -308,6 +305,7 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option
                     out,
                     &Text {
                         tspan_central: false,
+                        family: None,
                         ..t.clone()
                     },
                     class,
@@ -318,8 +316,9 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option
         }
         let _ = write!(
             out,
-            "<text{} x=\"{}\" y=\"{}\" dominant-baseline=\"central\" alignment-baseline=\"central\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}><tspan x=\"{}\" dy=\"0\">",
+            "<text{}{} x=\"{}\" y=\"{}\" dominant-baseline=\"central\" alignment-baseline=\"central\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}><tspan x=\"{}\" dy=\"0\">",
             class_attr(class),
+            family_attr(t),
             num(t.x),
             num(central),
             num(t.font_size),
@@ -333,8 +332,9 @@ fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option
     }
     let _ = write!(
         out,
-        "<text{} x=\"{}\" y=\"{}\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}>",
+        "<text{}{} x=\"{}\" y=\"{}\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}>",
         class_attr(class),
+        family_attr(t),
         num(t.x),
         num(t.y),
         num(t.font_size),
@@ -535,6 +535,17 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
         Element::Text { text, class } | Element::OutlinedText { text, class, .. } => {
             write_text(out, text, class, fx.raster_scale)
         }
+        Element::Image { rect, href } => {
+            let _ = write!(
+                out,
+                "<image href=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\"/>",
+                esc(href),
+                num(rect.x),
+                num(rect.y),
+                num(rect.w),
+                num(rect.h)
+            );
+        }
         Element::Faded {
             opacity,
             class,
@@ -706,6 +717,7 @@ mod tests {
             anchor: Anchor::Middle,
             fill: crate::scene::Color::new("#28253D"),
             tspan_central: true,
+            family: None,
         };
         let mut out = String::new();
         write_text(&mut out, &t, &None, None);

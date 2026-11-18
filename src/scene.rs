@@ -275,6 +275,9 @@ pub struct Text {
     /// (see [`crate::text::painted_tspan_central`]), so SVG output writes
     /// mermaid's markup and a raster drawn from it the painted baseline.
     pub tspan_central: bool,
+    /// An inline `font-family` (which wins over the stylesheet's), as
+    /// mermaid's unknown icon writes its `?` in `ArialMT, Arial`.
+    pub family: Option<&'static str>,
 }
 
 /// The first line's baseline below the top of a block of `line_height`
@@ -315,6 +318,7 @@ impl Text {
             anchor: Anchor::Middle,
             fill: fill.clone(),
             tspan_central: false,
+            family: None,
         }
     }
     /// One line of SVG text centred on `center` with `dominant-baseline:
@@ -331,6 +335,7 @@ impl Text {
             anchor: Anchor::Middle,
             fill: fill.clone(),
             tspan_central: false,
+            family: None,
         }
     }
     pub fn bold(mut self) -> Self {
@@ -393,6 +398,12 @@ pub enum Element {
         dx: f64,
         dy: f64,
         children: Vec<Element>,
+    },
+    /// A raster image (`<image href preserveAspectRatio="none">`) stretched
+    /// over `rect` (imageSquare.ts).
+    Image {
+        rect: Rect,
+        href: String,
     },
     /// Children composited as one layer at `opacity` (SVG `<g opacity>`): where
     /// they overlap they do not darken each other, as the silhouette a filter
@@ -470,6 +481,10 @@ impl Element {
                 opacity,
                 class,
                 children: all(children),
+            },
+            Element::Image { rect, href } => Element::Image {
+                rect: Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h),
+                href,
             },
             Element::Shape { geom, paint, class } => Element::Shape {
                 geom: geom.translated(dx, dy),

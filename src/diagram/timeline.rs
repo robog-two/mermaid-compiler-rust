@@ -303,6 +303,7 @@ fn title_text(t: &str, x: f64, font: f64, pal: &Palette) -> (Element, Rect) {
             anchor: crate::scene::Anchor::Start,
             fill: pal.text_color.clone(),
             tspan_central: false,
+            family: None,
         },
         "titleText",
     );

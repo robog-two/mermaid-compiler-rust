@@ -464,6 +464,8 @@ impl Ctx {
                 let _ = writeln!(self.out, "/L{idx} Do\nQ");
             }
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
+            // Raster images are not embedded in PDF output.
+            Element::Image { .. } => {}
             Element::Text { text, .. } => self.text(text, None),
             Element::OutlinedText {
                 text, color, width, ..
@@ -960,6 +962,7 @@ mod tests {
             anchor: Anchor::Start,
             fill: Color::new("#333"),
             tspan_central: false,
+            family: None,
         };
         let scene = Scene {
             kind: DiagramKind::Sankey,

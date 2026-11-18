@@ -625,6 +625,7 @@ fn text_el(l: &Label, fill: &Color, class: &str) -> Element {
             anchor: l.anchor,
             fill: fill.clone(),
             tspan_central: false,
+            family: None,
         },
         class,
     )

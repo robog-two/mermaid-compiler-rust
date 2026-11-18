@@ -4,6 +4,7 @@ pub mod agentflow;
 pub mod archicons;
 pub mod architecture;
 pub mod architecture_fcose;
+pub mod asset;
 pub mod block;
 pub mod c4;
 pub mod class;
