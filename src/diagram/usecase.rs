@@ -4717,7 +4717,7 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
         let cx = content.x + content.w / 2.0;
         bounds.add_rect(Rect::new(
             cx - tw / 2.0,
-            -(0.905 * font).round(),
+            -crate::text::ascent_px(font),
             tw,
             crate::text::svg_line_box(font, t),
         ));

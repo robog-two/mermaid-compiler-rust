@@ -1103,12 +1103,14 @@ fn to_pdf_in_face(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         let bm = if multiply { " /BM /Multiply" } else { "" };
         objects.push(format!("<< /Type /ExtGState /ca {v} /CA {v}{bm} >>").into_bytes());
     }
-    let version = if font_objects.is_empty() {
-        "1.4"
-    } else {
-        // An OpenType font file (`FontFile3 /OpenType`) needs PDF 1.6.
-        "1.6"
-    };
+    // An OpenType font file (`FontFile3 /OpenType`, the CFF TeX Gyre faces)
+    // needs PDF 1.6; TrueType (`FontFile2`) does not.
+    let cff = ctx
+        .embedded
+        .iter()
+        .enumerate()
+        .any(|(i, g)| !g.is_empty() && crate::fonts::face(i).is_some_and(|f| !f.truetype));
+    let version = if cff { "1.6" } else { "1.4" };
     objects.extend(font_objects);
     for g in &ctx.gradients {
         let rgb = |c: &Color| {

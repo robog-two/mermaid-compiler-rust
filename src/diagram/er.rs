@@ -1758,7 +1758,7 @@ mod tests {
         .unwrap();
         // mermaid (14px): the viewBox starts 46px above the origin: 8 + 13px of
         // ascent above the baseline at y = -25, 37 above the first entity (y = 12).
-        let rise = 8.0 + 37.0 + (0.905 * pal.font_size).round();
+        let rise = 8.0 + 37.0 + crate::text::ascent_px(pal.font_size);
         assert!(
             (titled.view_box.y - (top - rise)).abs() < 1e-9,
             "{:?}",

@@ -894,7 +894,7 @@ fn svg_class_box(node: &Node, font: f64, pad: f64) -> SvgClassBox {
     let gap = pad;
     // The box top of a text of height `h` in its group, `y` down the group:
     // its first baseline is 1em below, the ascent above that.
-    let ascent = (0.905 * font).round();
+    let ascent = crate::text::ascent_px(font);
     let top_of = |t: &SvgClassText, y: f64| y - t.height / (2.0 * t.lines as f64) + font - ascent;
     let name = svg_class_text(
         node.sections
@@ -1398,7 +1398,7 @@ fn measure_node(
             rect_w: w,
             rect_h: h,
             right: (w / 2.0).max(tw),
-            bottom: (h / 2.0).max(th / 2.0 + font - (0.905 * font).round()),
+            bottom: (h / 2.0).max(th / 2.0 + font - crate::text::ascent_px(font)),
         });
     let (w, h) = overhang.map_or((w, h), |o| {
         (o.rect_w / 2.0 + o.right, o.rect_h / 2.0 + o.bottom)
@@ -3187,7 +3187,7 @@ pub fn render_with(
             _ => (18.0, "flowchartTitleText"),
         };
         let tw = crate::text::line_width(t, size, false);
-        let ascent = (0.905 * size).round();
+        let ascent = crate::text::ascent_px(size);
         let cx = content.x + content.w / 2.0;
         // Its `getBBox()` reaches each glyph's ink, rounded out to whole pixels.
         let (left, right) = crate::text::svg_bbox_extent(t, size, false);
@@ -6571,7 +6571,7 @@ fn node_elements(
         if m.block.svg && corrects_glyph_offset(n.shape) {
             // These shapes subtract the text's `getBBox().y` when placing the label,
             // so the glyph box (not the text origin) sits where the HTML box would.
-            at.y -= font - (0.905 * font).round();
+            at.y -= font - crate::text::ascent_px(font);
         }
         let mut t = m.block.centered_text(at, &text_color);
         if m.block.svg && matches!(kind, DiagramKind::State | DiagramKind::Class) {

@@ -1,6 +1,7 @@
 //! Under ELK (mermaid's default layout) the order of nodes within each layer
 //! follows ELK's layer-sweep crossing minimisation. The expected orders are those
-//! mermaid 12.3 renders for these graphs (headless Chromium, elkjs 0.12).
+//! mermaid 12.3 renders for these graphs (headless Chromium, elkjs 0.12, with the
+//! fonts mmdc loads: the labels are Recursive Variable).
 
 use mmdc::config::MermaidConfig;
 use mmdc::output::{self, EncodeOptions};
@@ -665,14 +666,14 @@ fn labels_of_edges_to_ancestor_containers_take_their_layers() {
   c0n0 --> x0
 ",
         &[
-            ("c0n0", 314.53, 529.0),
-            ("c1n0", 62.53, 524.0),
-            ("c2n0", 292.8, 267.0),
+            ("c0n0", 315.468, 529.0),
+            ("c1n0", 63.468, 524.0),
+            ("c2n0", 293.734, 267.0),
             ("c3n0", 44.0, 174.0),
             ("c3n1", 0.0, 69.0),
             ("c3n2", 0.0, 0.0),
-            ("x0", 419.59, 386.0),
-            ("x1", 537.59, 512.0),
+            ("x0", 421.469, 386.0),
+            ("x1", 539.469, 512.0),
         ],
     );
     // `C0 -->|yes| C2`: the label moves into C1's layer, to the dummy of
@@ -704,7 +705,7 @@ fn labels_of_edges_to_ancestor_containers_take_their_layers() {
             ("c1n0", 0.0, 119.0),
             ("c1n1", 176.0, 119.0),
             ("c2n0", 200.0, 0.0),
-            ("x0", 697.0, 238.0),
+            ("x0", 698.406, 238.0),
             ("x1", 185.0, 347.0),
         ],
     );
@@ -1061,7 +1062,7 @@ fn a_containers_port_without_edges_outside_holds_its_ports_in_their_made_order()
   c0n0 --> C0
   c0n0 -->|yes| x0
 ",
-        &[("c0n0", 0.0, 0.0), ("x0", 387.27, 6.0), ("x1", 579.27, 6.0)],
+        &[("c0n0", 0.0, 0.0), ("x0", 393.469, 6.0), ("x1", 585.469, 6.0)],
     );
 }
 
@@ -1102,8 +1103,8 @@ fn a_node_tied_only_to_ports_where_edges_leave_goes_past_a_label_layer() {
   c0n1 -->|a label| C0
 ",
         &[
-            ("c0n0", 887.0, 0.0),
-            ("c0n1", 887.0, 69.0),
+            ("c0n0", 890.0, 0.0),
+            ("c0n1", 890.0, 69.0),
             ("c1n0", 264.0, 261.5),
             ("c2n0", 490.0, 234.0),
             ("c2n1", 692.0, 234.0),
@@ -1112,8 +1113,8 @@ fn a_node_tied_only_to_ports_where_edges_leave_goes_past_a_label_layer() {
             ("c3n1", 490.0, 609.0),
             ("c4n0", 0.0, 156.0),
             ("c4n1", 0.0, 225.0),
-            ("x0", 1103.0, 178.5),
-            ("x1", 1295.0, 178.5),
+            ("x0", 1106.0, 178.5),
+            ("x1", 1298.0, 178.5),
         ],
     );
 }
@@ -1471,7 +1472,7 @@ fn a_container_with_only_a_loop_and_port_edges_is_pinned_like_elk() {
             ("c0n0", 78.0, 0.0),
             ("c1n0", 304.0, 7.0),
             ("c2n0", 0.0, 324.0),
-            ("x0", 154.78, 605.0),
+            ("x0", 152.682, 605.0),
         ],
     );
 }
@@ -1555,7 +1556,7 @@ fn a_containers_margin_ends_at_its_outer_loops_label() {
         &[
             ("c0n0", 0.0, 69.0),
             ("c0n1", 0.0, 0.0),
-            ("x0", 282.47, 22.5),
+            ("x0", 285.969, 22.5),
         ],
     );
     // So does a reversed edge's dummy below C0 (mermaid 12.3.0).
@@ -1605,7 +1606,7 @@ fn loop_labels_in_a_containers_graph_keep_its_edge_label_spacing() {
 ",
         "A",
     );
-    assert!((w - 529.84).abs() < 0.5, "{w}");
+    assert!((w - 535.086).abs() < 0.5, "{w}");
 }
 
 #[test]
@@ -1660,8 +1661,8 @@ fn a_containers_loops_take_the_lowest_free_slot_on_each_side_with_ports() {
         &[
             ("c0n0", 0.0, 173.0),
             ("x0", 6.0, 457.0),
-            ("x2", 93.98, 0.0),
-            ("x1", 219.97, 372.0),
+            ("x2", 96.484, 0.0),
+            ("x1", 224.969, 372.0),
         ],
     );
     // Round opposite sides, two loops leave from C0's ports apart but come
@@ -1686,7 +1687,7 @@ fn a_containers_loops_take_the_lowest_free_slot_on_each_side_with_ports() {
             ("c0n1", 212.0, 112.75),
             ("c0n2", 0.0, 0.0),
             ("x0", 101.0, 241.75),
-            ("x1", 524.47, 77.25),
+            ("x1", 527.969, 77.25),
         ],
     );
 }
@@ -1744,7 +1745,7 @@ fn a_ports_last_layer_comes_after_a_label_layer_beyond_all_nodes() {
         "C0",
     );
     assert!(
-        (w - 783.44).abs() < 0.5 && (h - 516.0).abs() < 0.5,
+        (w - 788.938).abs() < 0.5 && (h - 516.0).abs() < 0.5,
         "{w}x{h}"
     );
 }

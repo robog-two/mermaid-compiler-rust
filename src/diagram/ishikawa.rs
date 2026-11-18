@@ -262,7 +262,7 @@ impl Label {
         let th = super::treeview::text_height(last, fs);
         // The glyph box starts the font's ascent (rounded to whole pixels)
         // above the first baseline.
-        let top = self.first_baseline() - (0.905 * fs).round();
+        let top = self.first_baseline() - crate::text::ascent_px(fs);
         let h = (self.lines.len() as f64 - 1.0) * self.line_height + th;
         Rect::new(x, top, w, h)
     }

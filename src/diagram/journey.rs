@@ -393,7 +393,7 @@ pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             .filter(|s| !s.trim().is_empty())
             .map_or_else(|| pal.text_color.clone(), Color::new);
         // `4ex`: four x-heights (1082/2048em).
-        let size = 4.0 * 1082.0 / 2048.0 * font;
+        let size = 4.0 * crate::text::face().x_height_em(false) * font;
         fore.push(Element::classed_text(
             Text {
                 x: left,

@@ -1,5 +1,6 @@
-//! The bundled assets end to end: Font Awesome icons in labels and the TeX Gyre
-//! Heros fallback font in PDF (and PNG) output.
+//! The bundled assets end to end: Font Awesome icons in labels, the web fonts
+//! mmdc loads (Recursive Variable, Open Sans) and the TeX Gyre Heros fallback
+//! font in PDF (and PNG) output.
 
 use mmdc::config::MermaidConfig;
 use mmdc::output::{self, EncodeOptions};
@@ -69,7 +70,10 @@ fn icons_take_their_fixed_width() {
 #[cfg(feature = "icons")]
 #[test]
 fn icons_reach_the_pdf_as_filled_outlines() {
-    let p = String::from_utf8_lossy(&pdf("flowchart LR\n A[fa:fa-car Car]")).into_owned();
+    let p = String::from_utf8_lossy(&pdf(
+        "---\nconfig:\n  theme: default\n---\nflowchart LR\n A[fa:fa-car Car]",
+    ))
+    .into_owned();
     // One transformed outline (scale 14/512) filled in the text colour.
     assert!(p.contains("q 0.0273438 0 0 0.0273438 "), "{p}");
     assert!(p.contains("/F1 1 Tf ( Car) Tj"));
@@ -78,12 +82,16 @@ fn icons_reach_the_pdf_as_filled_outlines() {
 #[cfg(feature = "fonts")]
 #[test]
 fn pdf_embeds_the_bundled_font_only_for_text_helvetica_lacks() {
-    let latin = pdf("flowchart LR\n A[Café] --> B[“quoted” – ok]");
+    // The classic theme's labels are Arial-measured, drawn in Helvetica.
+    let classic = "---\nconfig:\n  theme: default\n---\n";
+    let latin = pdf(&format!("{classic}flowchart LR\n A[Café] --> B[“quoted” – ok]"));
     assert!(latin.starts_with(b"%PDF-1.4"));
     assert!(!latin.windows(9).any(|w| w == b"FontFile3"));
 
     // Polish, Greek and Vietnamese letters (TeX Gyre Heros has no Cyrillic or CJK).
-    let bytes = pdf("flowchart LR\n A[Łódź → Ω] --> B[\"`**Ωμγα** and *ơi*`\"]");
+    let bytes = pdf(&format!(
+        "{classic}flowchart LR\n A[Łódź → Ω] --> B[\"`**Ωμγα** and *ơi*`\"]"
+    ));
     assert!(bytes.starts_with(b"%PDF-1.6"));
     let text = String::from_utf8_lossy(&bytes);
     for needle in [
@@ -101,9 +109,38 @@ fn pdf_embeds_the_bundled_font_only_for_text_helvetica_lacks() {
     }
 }
 
+/// The redux themes' labels are Recursive Variable, embedded as TrueType with
+/// each glyph at its measured advance; C4's Open Sans too.
+#[cfg(feature = "fonts")]
+#[test]
+fn pdf_embeds_the_web_fonts_for_their_text() {
+    let bytes = pdf("flowchart LR\n A[\"`AV **To** *Ty*`\"] --> B[Łódź]");
+    assert!(bytes.starts_with(b"%PDF-1.4"));
+    let text = String::from_utf8_lossy(&bytes);
+    for needle in [
+        "/BaseFont /RecursiveVariable-Regular",
+        "/BaseFont /RecursiveVariable-Bold",
+        "/BaseFont /RecursiveVariable-Italic",
+        "/Subtype /CIDFontType2",
+        "/CIDToGIDMap /Identity",
+        "/FontFile2",
+        "] TJ",
+    ] {
+        assert!(text.contains(needle), "{needle}");
+    }
+    // Everything Recursive draws is drawn in it: no Helvetica text.
+    assert!(!text.contains("/F1 1 Tf ("), "{text}");
+    let c4 = String::from_utf8_lossy(&pdf(
+        "C4Context\n Person(a, \"Customer\", \"A customer\")",
+    ))
+    .into_owned();
+    assert!(c4.contains("/BaseFont /OpenSans-Bold"));
+    assert!(c4.contains("/BaseFont /OpenSans-Regular"));
+}
+
 #[cfg(not(feature = "fonts"))]
 #[test]
 fn without_bundled_fonts_pdf_text_outside_windows_1252_is_replaced() {
-    let text = String::from_utf8_lossy(&pdf("flowchart LR\n A[Łódź]")).into_owned();
+    let text = String::from_utf8_lossy(&pdf("---\nconfig:\n  theme: default\n---\nflowchart LR\n A[Łódź]")).into_owned();
     assert!(text.contains("(?\\363d?)"));
 }

@@ -131,7 +131,9 @@ fn port_an_ulp_inside_its_node_is_cut_further_on() {
 ";
     let pts = edge_points(&svg(src), "g4n0", "g0n0");
     let last = pts[pts.len() - 1];
-    assert!(near(last, 1197.632, 85.398), "{pts:?}");
+    // mermaid 12.3.0 with mmdc's fonts (the labels in Recursive Variable)
+    // ends the edge at (1222.8503953567624, 85.39776887418328).
+    assert!(near(last, 1222.850, 85.398), "{pts:?}");
 }
 
 /// A cylinder's east side as ELK and mermaid sum it, in a container in a
@@ -226,7 +228,8 @@ fn port_inside_a_node_of_a_graph_laid_out_up() {
   g2n2 --- g5n0 & g3n0
 ";
     let pts = edge_points(&svg(src), "g2n2", "g5n0");
-    assert!(near(pts[0], 266.902, 494.0), "{pts:?}");
+    // mermaid 12.3.0 with mmdc's fonts: M268.606746031746,515.
+    assert!(near(pts[0], 268.607, 515.0), "{pts:?}");
 }
 
 /// The same, mirrored right to left, for an edge from a node to the
@@ -439,6 +442,7 @@ fn circle_bounds_are_read_as_chromium_reads_the_radius() {
   g7n2 -...->|a label| g12n1
 ";
     let (_, _, w, h) = cluster(&svg(src), "G10");
+    // mermaid 12.3.0 with mmdc's fonts: 975.5733333333333 × 1753.5289993286133.
     assert!((w - 975.5733).abs() < 1e-3, "G10 width {w}");
-    assert!((h - 1735.8757).abs() < 1e-3, "G10 height {h}");
+    assert!((h - 1753.529).abs() < 1e-3, "G10 height {h}");
 }

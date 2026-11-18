@@ -1,5 +1,6 @@
 //! `htmlLabels: false`: labels laid out as mermaid 12.3's SVG `<text>` labels. The
-//! sizes below are the ones mermaid 12.3.0 renders in Chromium for the same input.
+//! sizes below are the ones mermaid 12.3.0 renders in Chromium for the same input,
+//! with the fonts mmdc loads (the redux themes' labels are Recursive Variable).
 
 use mmdc::config::MermaidConfig;
 use mmdc::output::{self, EncodeOptions};
@@ -42,15 +43,17 @@ fn svg_labels_use_1_1em_lines_and_the_text_box_height() {
     let s = svg(&format!(
         "---\nconfig:\n  htmlLabels: false\n---\n{FLOWCHART_03}"
     ));
-    // One line: a 16px text box plus 2·12 padding; three lines add 2·1.1em.
+    // In Recursive the first label wraps at 120px into two lines: a 17px text
+    // box plus 1.1em, plus 2·12 padding; three lines add 2·1.1em (mermaid
+    // 12.3.0 with mmdc's fonts: 152×56.4 and 152×71.8).
     assert_eq!(
         node_rects(&s),
-        [rect("152", "40"), rect("152", "70.8")],
+        [rect("152", "56.4"), rect("152", "71.8")],
         "{s}"
     );
-    // First baseline 1em below the top of the text box.
+    // Baselines 1.1em apart, the first 1em below the top of the text box.
     // (The layout starts inside ELK's 12px root padding.)
-    assert!(s.contains("y=\"53.4\""), "{s}");
+    assert!(s.contains("y=\"38\"") && s.contains("y=\"53.4\""), "{s}");
 }
 
 #[test]
@@ -105,10 +108,11 @@ fn flowchart_html_labels_only_changes_edge_labels_and_titles() {
     ));
     // labelHelper reads only the top-level key: node labels stay HTML-sized.
     assert_eq!(node_rects(&s), node_rects(&html));
-    // The edge label is SVG text: its box plus 2px all round, half transparent,
-    // on `edgeLabelBackground` (`adjust('#cccccc', { h: -120 })`, khroma's #ccc).
+    // The edge label is SVG text: its box (17px in Recursive) plus 2px all
+    // round, half transparent, on `edgeLabelBackground` (`adjust('#cccccc',
+    // { h: -120 })`, khroma's #ccc): mermaid's `rect.background` is 21 high.
     assert!(
-        s.contains("height=\"20\" fill=\"hsl(-120, 0%, 80%)\" stroke=\"none\" opacity=\"0.5\"")
+        s.contains("height=\"21\" fill=\"hsl(-120, 0%, 80%)\" stroke=\"none\" opacity=\"0.5\"")
     );
     assert!(!html.contains("opacity=\"0.5\""));
 }
@@ -137,7 +141,8 @@ classDiagram
     }
 ");
     let heights: Vec<String> = node_rects(&s).into_iter().map(|r| r.1).collect();
-    assert_eq!(heights, ["158", "139", "136"]);
+    // Recursive's 17px text boxes (mermaid 12.3.0 with mmdc's fonts).
+    assert_eq!(heights, ["163", "143", "140"]);
 }
 
 #[test]
@@ -155,18 +160,18 @@ stateDiagram-v2
     [*] --> Still
     Still --> Moving : push it
 ");
-    // 5px shorter: a 16px text box instead of a 21px HTML line.
+    // 4px shorter: a 17px text box (Recursive) instead of a 21px HTML line.
     let (sh, hh): (f64, f64) = (
         node_rects(&s)[0].1.parse().unwrap(),
         node_rects(&html)[0].1.parse().unwrap(),
     );
-    assert_eq!(hh - sh, 5.0);
+    assert_eq!(hh - sh, 4.0);
 }
 
 #[test]
 fn an_html_edge_labels_background_is_its_text_box() {
-    // `.edgeLabel p` paints the label's own box: in mermaid 12.3.0 the
-    // foreignObject of "Get money" is 68.484375 wide, and so is its grey.
+    // `.edgeLabel p` paints the label's own box: in mermaid 12.3.0 (with mmdc's
+    // fonts) the foreignObject of "Get money" is 73.78125 wide, and so is its grey.
     for layout in ["elk", "dagre"] {
         let s = svg(&format!(
             "---\nconfig:\n  layout: {layout}\n---\nflowchart TD\n  A -->|Get money| B\n"
@@ -175,6 +180,6 @@ fn an_html_edge_labels_background_is_its_text_box() {
             .split("<g class=\"edgeLabel\"><rect")
             .nth(1)
             .expect("edge label");
-        assert!(bg.contains("width=\"68.484\""), "{layout}: {}", &bg[..80]);
+        assert!(bg.contains("width=\"73.781\""), "{layout}: {}", &bg[..80]);
     }
 }
