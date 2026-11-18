@@ -4308,7 +4308,15 @@ fn cluster_shapes(
             let th = if t.is_empty() { 0.0 } else { t.height };
             let inner = Rect::new(r.x, r.y + th + 2.0, r.w, (r.h - th - 6.0).max(0.0));
             if let Some(seed) = lk.hand_seed {
-                return hand_composite(r, inner, alt, seed, hand_at, [&outer, &inner_paint]);
+                // The palette slot's rules restroke the outer shape only: the
+                // body keeps its `nodeBorder` stroke.
+                let mut body = inner_paint.clone();
+                body.stroke = c
+                    .style
+                    .stroke
+                    .clone()
+                    .unwrap_or_else(|| pal.node_border.clone());
+                return hand_composite(r, inner, alt, seed, hand_at, [&outer, &body]);
             }
             vec![
                 Element::rect(r, rx, outer),
@@ -4490,12 +4498,15 @@ fn hand_cluster(
 }
 
 /// `pts` with the points of `joints` (an ELK route before its collinear points
-/// went, see [`layout::ElkExact::joints`]) that lie inside one of its segments
-/// put back in.
+/// went, see [`layout::ElkExact::joints`]) that a straight run passes and that
+/// lie inside one of `pts`' segments put back in. (A corner of `joints` may
+/// since have been straightened away: it stays out.)
 fn with_joints(pts: &[Point], joints: &[Point]) -> Vec<Point> {
-    let inner = joints
-        .get(1..joints.len().saturating_sub(1))
-        .unwrap_or_default();
+    let inner: Vec<Point> = joints
+        .windows(3)
+        .filter(|w| collinear(w[0], w[1], w[2]))
+        .map(|w| w[1])
+        .collect();
     let mut out: Vec<Point> = Vec::with_capacity(pts.len() + inner.len());
     for (i, &p) in pts.iter().enumerate() {
         out.push(p);
