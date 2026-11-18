@@ -1466,7 +1466,7 @@ pub fn render_with(
         })
         .collect();
     for (n, m) in nodes.iter().zip(measured.iter_mut()) {
-        measure_hand(n, m, pal, &lk);
+        measure_hand(n, m, pal, &lk, font);
     }
     for (ci, p) in empty_of.iter().enumerate() {
         if let Some(p) = *p {
@@ -1952,7 +1952,11 @@ pub fn render_with(
         // (classDiagram's slot rules reach no rough.js path; erDiagram's rough
         // entities are `.rough-node`s, outside its `.node` rules.)
         let slot = slot_colors(n.color_slot, pal).filter(|_| {
-            !(lk.hand_seed.is_some() && matches!(g.kind, DiagramKind::Class | DiagramKind::Er))
+            !(lk.hand_seed.is_some()
+                && matches!(
+                    g.kind,
+                    DiagramKind::Class | DiagramKind::Er | DiagramKind::Requirement
+                ))
         });
         let painted;
         let n = if slot.is_some() {
@@ -5506,9 +5510,10 @@ fn node_elements(
             (DiagramKind::State, _) => pal.state_label.clone(),
             // classDiagram's `.nodeLabel { color: classText }`.
             (DiagramKind::Class, _) => pal.class_text.clone(),
-            // erDiagram's `.label { color: nodeTextColor || textColor }`: the
+            // erDiagram's and requirementDiagram's `.label { color: nodeTextColor
+            // || textColor }`: the
             // classic themes define no `nodeTextColor`.
-            (DiagramKind::Er, _)
+            (DiagramKind::Er | DiagramKind::Requirement, _)
                 if matches!(
                     pal.theme,
                     ThemeName::Default
@@ -5880,11 +5885,22 @@ fn node_elements(
             }
             Shape::Requirement => {
                 let rm = requirement_metrics(n, font);
-                els.push(Element::classed_shape(
-                    Geometry::Rect { rect: r, rx: 0.0 },
-                    paint.clone(),
-                    "basic label-container",
-                ));
+                let rough = lk
+                    .hand_seed
+                    .and_then(|seed| hand_requirement_box(n, m, pal, lk, seed, font));
+                match &rough {
+                    // The box, then (after the labels) the divider.
+                    Some(hn) => els.extend(hand_elements(
+                        &hand::subset(hn, 0..1),
+                        c,
+                        n.style.dash.as_ref(),
+                    )),
+                    None => els.push(Element::classed_shape(
+                        Geometry::Rect { rect: r, rx: 0.0 },
+                        paint.clone(),
+                        "basic label-container",
+                    )),
+                }
                 let mut y = y0 + rm.top;
                 for (block, class) in [(&rm.stereo, "stereotype"), (&rm.name, "nodeLabel")] {
                     if !block.is_empty() {
@@ -5910,14 +5926,21 @@ fn node_elements(
                     } else {
                         ROUGH_STROKE_WIDTH
                     };
-                    els.push(Element::classed_shape(
-                        Geometry::Path(vec![
-                            PathCmd::MoveTo(Point::new(x0, divider)),
-                            PathCmd::LineTo(Point::new(x1, divider)),
-                        ]),
-                        Paint::stroke(&stroke, line_width),
-                        "divider",
-                    ));
+                    match &rough {
+                        Some(hn) => els.extend(hand_elements(
+                            &hand::subset(hn, 1..hn.pieces.len()),
+                            c,
+                            n.style.dash.as_ref(),
+                        )),
+                        None => els.push(Element::classed_shape(
+                            Geometry::Path(vec![
+                                PathCmd::MoveTo(Point::new(x0, divider)),
+                                PathCmd::LineTo(Point::new(x1, divider)),
+                            ]),
+                            Paint::stroke(&stroke, line_width),
+                            "divider",
+                        )),
+                    }
                     // Body lines are left-aligned `padding / 2` in from the edge.
                     let top = divider + rm.top;
                     let t = Text::centered(
@@ -5934,6 +5957,10 @@ fn node_elements(
                         ..t
                     };
                     els.push(Element::classed_text(t, "label"));
+                }
+                if rough.is_some() {
+                    // `intersect.rect(node)`: the measured box.
+                    return (els, Boundary::Rect(Rect::centered(c, m.w, m.h)));
                 }
                 return (els, Boundary::Rect(r));
             }
@@ -6101,6 +6128,31 @@ fn hand_state_box(
     Some(hand::class_box(w, h, &dividers, &st))
 }
 
+/// A requirement's hand-drawn box ([`hand::requirement_box`]) at its nominal
+/// size; `None` for other nodes.
+fn hand_requirement_box(
+    n: &Node,
+    m: &Measured,
+    pal: &Palette,
+    lk: &Look,
+    seed: f64,
+    font: f64,
+) -> Option<hand::HandNode> {
+    if n.shape != Shape::Requirement {
+        return None;
+    }
+    let rm = requirement_metrics(n, font);
+    let (w, h) = m.nominal.unwrap_or((m.w, m.h));
+    let divider =
+        (!rm.body.is_empty()).then(|| -h / 2.0 + rm.stereo.height + rm.name.height + REQ_GAP);
+    Some(hand::requirement_box(
+        w,
+        h,
+        divider,
+        &hand_style(n, pal, lk, seed),
+    ))
+}
+
 /// An entity's hand-drawn box ([`hand::er_box`]) at its nominal size, and
 /// how many of its pieces precede the labels; `None` for other nodes.
 fn hand_er_box(
@@ -6132,7 +6184,7 @@ fn hand_er_box(
 
 /// Under the handDrawn look, size node `n` by its drawing's box, as
 /// `updateNodeBounds` does.
-fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
+fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look, font: f64) {
     let Some(seed) = lk.hand_seed else {
         return;
     };
@@ -6143,6 +6195,14 @@ fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
         let b = if lk.state { hn.bbox } else { hn.drawn_bbox() };
         (m.w, m.h) = (b.w, b.h);
         m.hand = Some(hn.drawn_bbox());
+        return;
+    }
+    if let Some(hn) = hand_requirement_box(n, m, pal, lk, seed, font) {
+        // `insertMeasuredNode`: the whole drawing's box, divider included.
+        m.nominal = Some((m.w, m.h));
+        let b = hn.drawn_bbox();
+        (m.w, m.h) = (b.w, b.h);
+        m.hand = Some(b);
         return;
     }
     if let Some((hn, _)) = hand_er_box(n, m, pal, lk, seed) {

@@ -452,6 +452,29 @@ pub fn flat_row_outline(w: f64, y: f64, h: f64, seed: f64, at: Point) -> Vec<Pat
         .collect()
 }
 
+/// requirementBox.ts under the handDrawn look: the `w`×`h` box centred on
+/// the origin as a rough rectangle, and (with body text) the divider
+/// `divider` below the centre as a rough line, both with the node's options.
+/// The box alone is measured.
+pub fn requirement_box(w: f64, h: f64, divider: Option<f64>, st: &HandStyle) -> HandNode {
+    let (x, y) = (-w / 2.0, -h / 2.0);
+    let rect = rough::rectangle(x, y, w, h, node_options(st));
+    let bbox = drawable_bbox(&rect).unwrap_or(Rect::new(x, y, w, h));
+    let mut pieces = vec![piece(rect, Point::default())];
+    if let Some(ly) = divider {
+        pieces.push(Piece {
+            drawable: rough::line(x, ly, x + w, ly, node_options(st)),
+            at: Point::default(),
+            measured: false,
+        });
+    }
+    HandNode {
+        pieces,
+        bbox,
+        boundary: Bound::Rect,
+    }
+}
+
 /// The pieces `range` of `hn` as a node of their own (to draw apart).
 pub fn subset(hn: &HandNode, range: std::ops::Range<usize>) -> HandNode {
     HandNode {

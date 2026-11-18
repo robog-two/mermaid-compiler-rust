@@ -821,4 +821,58 @@ mod tests {
             [1.3, 1.3]
         );
     }
+
+    fn scene_of(src: &str) -> crate::scene::Scene {
+        crate::render::render(src, &crate::config::MermaidConfig::default())
+            .expect("renders")
+            .scene
+    }
+
+    fn collect(els: &[crate::scene::Element], paths: &mut Vec<String>, fills: &mut Vec<String>) {
+        use crate::scene::{Element, Geometry};
+        for el in els {
+            match el {
+                Element::Group { children, .. } => collect(children, paths, fills),
+                Element::Shape {
+                    geom: Geometry::Path(cmds),
+                    ..
+                } => paths.push(crate::output::svg::path_data(cmds)),
+                Element::Text { text, .. } => fills.push(text.fill.css().to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    /// mermaid 12.3.0 under `look: handDrawn` (seed 11): requirementBox draws
+    /// a rough rectangle and a rough divider, and the layout takes the whole
+    /// drawing's box (checkout_req at (137.719, 303.952), its fill sketch from
+    /// (-124.194, -82.785), its outline from (-123.187, -83.802)).
+    #[test]
+    fn hand_drawn_requirements_match_mermaid() {
+        let scene = scene_of(
+            "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 11\n---\nrequirementDiagram\n  \
+             requirement checkout_req {\n    id: 1\n    text: Orders must be payable online.\n    \
+             risk: high\n    verifymethod: test\n  }\n  element checkout_service {\n    \
+             type: service\n  }\n  checkout_service - satisfies -> checkout_req\n",
+        );
+        let (mut paths, mut fills) = (Vec::new(), Vec::new());
+        collect(&scene.elements, &mut paths, &mut fills);
+        for start in ["M13.525,221.167C", "M14.532,220.15C"] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
+    }
+
+    /// The classic themes define no `nodeTextColor`: a requirement's labels
+    /// take `textColor` (`.label text, span`), black under neutral.
+    #[test]
+    fn neutral_labels_are_the_text_colour() {
+        let scene = scene_of(
+            "---\nconfig:\n  theme: neutral\n---\nrequirementDiagram\n  requirement r1 {\n    \
+             id: 9\n    text: Plain.\n  }\n",
+        );
+        let (mut paths, mut fills) = (Vec::new(), Vec::new());
+        collect(&scene.elements, &mut paths, &mut fills);
+        assert!(!fills.is_empty());
+        assert!(fills.iter().all(|f| f == "#000000"), "{fills:?}");
+    }
 }
