@@ -351,8 +351,8 @@ pub fn frame_bbox(r: Rect, style: FrameStyle) -> Option<Rect> {
             ..solid()
         },
     );
-    let inner = rough::rectangle(r.x, r.y + th + 2.0, r.w, (r.h - th - 6.0).max(0.0), solid());
     let a = drawable_bbox(&outer)?;
+    let inner = rough::rectangle(r.x, r.y + th + 2.0, r.w, (r.h - th - 6.0).max(0.0), solid());
     Some(drawable_bbox(&inner).map_or(a, |b| a.union(&b)))
 }
 

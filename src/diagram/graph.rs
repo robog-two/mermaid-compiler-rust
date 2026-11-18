@@ -5690,6 +5690,10 @@ fn node_elements(
                     }
                     y += sh;
                 }
+                // `intersect.rect(node)`: the measured box.
+                if rough.is_some() {
+                    return (els, Boundary::Rect(Rect::centered(c, m.w, m.h)));
+                }
                 return (els, Boundary::Rect(r));
             }
             Shape::EntityTable => {
