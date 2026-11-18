@@ -1,11 +1,47 @@
 //! Font-free text measurement and label normalisation.
 //!
-//! mermaid measures text in a real browser. We use Helvetica/Arial advance widths
-//! (the same metrics the PDF backend's built-in Helvetica uses), which gives sizes
-//! within a few percent of the browser's "trebuchet ms"/arial rendering.
+//! mermaid measures text in a real browser. We use the metrics of the fonts
+//! mmdc's page draws it in: Arial's (Liberation Sans, which `"trebuchet ms",
+//! verdana, arial` resolves to) by default, and the web fonts mmdc loads,
+//! Recursive Variable and Open Sans ([`webfonts`]), for text whose
+//! `font-family` names them. Which one applies is the measuring face ([`face`]),
+//! set for the extent of a diagram's layout by [`with_face`].
 
 pub mod inter;
 pub mod serif;
+mod webfont_data;
+pub mod webfonts;
+
+pub use webfonts::Face;
+
+thread_local! {
+    static FACE: std::cell::Cell<Face> = const { std::cell::Cell::new(Face::Arial) };
+}
+
+/// The face text is measured in: the one set by the innermost [`with_face`]
+/// on this thread, Arial outside any.
+pub fn face() -> Face {
+    FACE.with(std::cell::Cell::get)
+}
+
+/// Run `f` with text measured in `face` (the previous face comes back
+/// afterwards, also when `f` panics). A diagram's layout runs inside one,
+/// with the face its theme's `fontFamily` names.
+pub fn with_face<R>(face: Face, f: impl FnOnce() -> R) -> R {
+    struct Restore(Face);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FACE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(FACE.with(|c| c.replace(face)));
+    f()
+}
+
+/// [`with_face`] for a CSS `font-family` list ([`Face::of_family`]).
+pub fn with_family<R>(font_family: &str, f: impl FnOnce() -> R) -> R {
+    with_face(Face::of_family(font_family), f)
+}
 
 use crate::geom::Point;
 use crate::scene::{Color, Text};
@@ -197,8 +233,27 @@ pub fn balance_marks(lines: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Advance width of one character in em units (emphasis marks take none).
+/// Advance width of one character in em units (emphasis marks take none), in
+/// the measuring face ([`face`]); a character the face lacks takes Arial's.
 pub fn char_width_em(c: char, bold: bool) -> f64 {
+    char_width_em_styled(c, bold, false)
+}
+
+/// [`char_width_em`] upright or italic (Open Sans' italic face has advances
+/// of its own; Arial's and Recursive's slanted text keeps the upright ones).
+pub fn char_width_em_styled(c: char, bold: bool, italic: bool) -> f64 {
+    if mark::is_mark(c) || crate::icons::is_tag(c) {
+        return 0.0;
+    }
+    if let Some(w) = face().data(italic).and_then(|d| d.advance_em(c)) {
+        return w;
+    }
+    arial_char_width_em(c, bold)
+}
+
+/// Arial's advance width of one character in em units, whatever the measuring
+/// face.
+pub fn arial_char_width_em(c: char, bold: bool) -> f64 {
     let table = if bold { &ARIAL_BOLD } else { &ARIAL };
     let code = c as u32;
     if mark::is_mark(c) || crate::icons::is_tag(c) {
@@ -422,8 +477,17 @@ const KERNING_BOLD: &[(&str, i16)] = &[
     ("y.", -152),
 ];
 
-/// The kerning between two characters, in em.
+/// The kerning between two characters, in em: the measuring face's when it
+/// draws both, none across a font fallback, Arial's between two characters
+/// Arial draws.
 fn kerning_em(a: char, b: char, bold: bool) -> f64 {
+    if let Some(d) = face().data(false) {
+        match (d.has(a), d.has(b)) {
+            (true, true) => return d.kern_em(a, b),
+            (false, false) => {}
+            _ => return 0.0,
+        }
+    }
     if !a.is_ascii() || !b.is_ascii() {
         return 0.0;
     }
@@ -434,28 +498,39 @@ fn kerning_em(a: char, b: char, bold: bool) -> f64 {
         .map_or(0.0, |&(_, k)| f64::from(k) / 2048.0)
 }
 
-/// Width of a single line in pixels (kerned as Arial and Arial Bold are).
+/// Width of a single line in pixels in the measuring face ([`face`]): its
+/// advances, kerning and ligatures (Open Sans' `fi`, `ffl`, ...), each styled
+/// run in its own weight and slant.
 pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
+    let chars: Vec<char> = text.chars().filter(|&c| c != mark::RUN).collect();
     let mut st = Emphasis::default();
     let mut prev: Option<char> = None;
-    text.chars()
-        .filter(|&c| c != mark::RUN)
-        .map(|c| {
-            if st.apply(c) {
-                // A change of style starts a new run, which is not kerned across.
-                prev = None;
-                return 0.0;
-            }
-            let b = bold || st.bold > 0;
-            let kern = match prev {
-                Some(p) => kerning_em(p, c, b),
-                None => 0.0,
-            };
-            prev = Some(c);
-            char_width_em(c, b) + kern
-        })
-        .sum::<f64>()
-        * font_size
+    let mut em = 0.0;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if st.apply(c) {
+            // A change of style starts a new run, which is not kerned across.
+            prev = None;
+            i += 1;
+            continue;
+        }
+        let b = bold || st.bold > 0;
+        let italic = st.italic > 0;
+        if let Some(p) = prev {
+            em += kerning_em(p, c, b);
+        }
+        if let Some((n, w)) = face().data(italic).and_then(|d| d.ligature_at(&chars[i..])) {
+            em += w;
+            prev = Some(chars[i + n - 1]);
+            i += n;
+            continue;
+        }
+        em += char_width_em_styled(c, b, italic);
+        prev = Some(c);
+        i += 1;
+    }
+    em * font_size
 }
 
 /// Horizontal ink extents (`xMin`, `xMax`) of ASCII 0x21..=0x7E in 1/2048 em:
@@ -798,9 +873,14 @@ fn glyph_ink(table: &[(i16, i16); 94], c: char) -> Option<(i16, i16)> {
     }
 }
 
-/// [`svg_bbox_extent`] for any weight: bold (`font-weight` 600 and up, drawn
-/// with the bold face) takes the bold advances and ink.
-pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bool) -> (f64, f64) {
+/// The horizontal ink extent of `c` in em (`xMin`, `xMax`) in the measuring
+/// face, or Arial's for characters it lacks (`None`: count by the advance).
+fn ink_em(c: char, bold: bool, italic: bool) -> Option<(f64, f64)> {
+    if let Some(d) = face().data(italic) {
+        if let Some((lo, hi, _, _)) = d.ink_em(c, bold) {
+            return Some((lo, hi));
+        }
+    }
     let table = if bold {
         &ARIAL_BOLD_INK
     } else if italic {
@@ -808,6 +888,12 @@ pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bo
     } else {
         &ARIAL_INK
     };
+    glyph_ink(table, c).map(|(lo, hi)| (f64::from(lo) / 2048.0, f64::from(hi) / 2048.0))
+}
+
+/// [`svg_bbox_extent`] for any weight: bold (`font-weight` 600 and up, drawn
+/// with the bold face) takes the bold advances and ink.
+pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bool) -> (f64, f64) {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut x = 0.0f64;
     let (mut left, mut right) = (0.0f64, 0.0f64);
@@ -816,12 +902,13 @@ pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bo
         if let Some(p) = prev {
             x += kerning_em(p, c, bold) * font_size;
         }
-        if let Some((lo, hi)) = glyph_ink(table, c) {
-            let ink = |u: i16| f64::from(u) / 2048.0 * font_size;
-            left = left.min(x + (ink(lo) + 0.005).floor());
-            right = right.max(x + (ink(hi) - 0.005).ceil());
+        if c != ' ' {
+            if let Some((lo, hi)) = ink_em(c, bold, italic) {
+                left = left.min(x + (lo * font_size + 0.005).floor());
+                right = right.max(x + (hi * font_size - 0.005).ceil());
+            }
         }
-        x += char_width_em(c, bold) * font_size;
+        x += char_width_em_styled(c, bold, italic) * font_size;
         prev = Some(c);
     }
     (left, right.max(layout_unit_ceil(x)))
@@ -880,7 +967,6 @@ pub fn mmdc_page_scale(width: f64, height: f64) -> f64 {
 /// count by their advance alone.
 pub fn svg_word_runs_box(line: &str, font_size: f64, bold: bool) -> (f64, f64, f64) {
     let size = shaping_size(font_size);
-    let ink_table = if bold { &ARIAL_BOLD_INK } else { &ARIAL_INK };
     let chars: Vec<char> = line.chars().filter(|&c| !mark::is_mark(c)).collect();
     let (mut x, mut run) = (0.0f64, 0.0f64);
     let (mut left, mut right) = (0.0f64, 0.0f64);
@@ -889,10 +975,11 @@ pub fn svg_word_runs_box(line: &str, font_size: f64, bold: bool) -> (f64, f64, f
             x += layout_unit_ceil(run);
             run = 0.0;
         }
-        if let Some((lo, hi)) = glyph_ink(ink_table, c) {
-            let ink = |u: i16| f64::from(u) / 2048.0 * size;
-            left = left.min(x + run + (ink(lo) + 0.005).floor());
-            right = right.max(x + run + (ink(hi) - 0.005).ceil());
+        if c != ' ' {
+            if let Some((lo, hi)) = ink_em(c, bold, false) {
+                left = left.min(x + run + (lo * size + 0.005).floor());
+                right = right.max(x + run + (hi * size - 0.005).ceil());
+            }
         }
         let kern = chars.get(i + 1).map_or(0.0, |&n| kerning_em(c, n, bold));
         run += (char_width_em(c, bold) + kern) * size;
@@ -913,18 +1000,34 @@ pub enum Baseline {
     Ideographic,
 }
 
+/// The measuring face's ascent above the baseline in whole pixels, as Blink
+/// rounds it (Arial: 0.905em, 13px at 14px; Recursive: 0.95em; Open Sans:
+/// 2189/2048em).
+pub fn ascent_px(font_size: f64) -> f64 {
+    (face().vertical_em().0 * font_size).round()
+}
+
+/// The measuring face's descent below the baseline in whole pixels (Arial:
+/// 0.212em; Recursive: 0.25em; Open Sans: 600/2048em).
+pub fn descent_px(font_size: f64) -> f64 {
+    (face().vertical_em().1 * font_size).round()
+}
+
 /// How far below its `y` Chromium draws the alphabetic baseline of SVG text with
-/// `dominant-baseline: b` in mermaid's fonts (Liberation Sans, the Arial the
-/// browser falls back to). Blink takes the font's ascent and descent rounded
-/// to whole pixels (0.905em and 0.212em), its x-height (1082/2048 em) and the
-/// hanging baseline (0.8 × ascent) to the 1/64 px layout unit; `middle` is half
-/// the x-height, a tie rounding down. Measured in Chromium for 6–60px.
+/// `dominant-baseline: b` in the measuring face (Liberation Sans, the Arial the
+/// browser falls back to, unless a web font applies). Blink takes the font's
+/// ascent and descent rounded to whole pixels (0.905em and 0.212em), its
+/// x-height (1082/2048 em) and the hanging baseline (0.8 × ascent) to the
+/// 1/64 px layout unit; `middle` is half the x-height, a tie rounding down.
+/// Measured in Chromium for 6–60px.
 pub fn baseline_shift(b: Baseline, font_size: f64) -> f64 {
-    let ascent = (0.905 * font_size).round();
-    let descent = (0.212 * font_size).round();
+    let ascent = ascent_px(font_size);
+    let descent = descent_px(font_size);
     match b {
         Baseline::Alphabetic => 0.0,
-        Baseline::Middle => (font_size * 1082.0 / 4096.0 * 64.0 - 0.5).ceil() / 64.0,
+        Baseline::Middle => {
+            (font_size * face().x_height_em(false) / 2.0 * 64.0 - 0.5).ceil() / 64.0
+        }
         Baseline::Central => (ascent - descent) / 2.0,
         Baseline::Hanging => (0.8 * ascent * 64.0).round() / 64.0,
         Baseline::TextBeforeEdge => ascent,
@@ -948,7 +1051,8 @@ pub fn painted_tspan_central(y: f64, font_size: f64) -> f64 {
 /// Sans): its ascent, descent and line gap (67/2048em), each rounded to
 /// whole pixels (18px at 16px).
 pub fn normal_line_height(font_size: f64) -> f64 {
-    (0.905 * font_size).round() + (0.212 * font_size).round() + (67.0 / 2048.0 * font_size).round()
+    let (a, d, g) = face().vertical_em();
+    (a * font_size).round() + (d * font_size).round() + (g * font_size).round()
 }
 
 /// Multi-line text with its measured extent.
@@ -980,6 +1084,11 @@ pub const SVG_LINE_HEIGHT: f64 = 1.1;
 /// further, `Q` and `_` less (only where the descent rounds down by more than
 /// 0.01em); `@` and `$` never.
 fn descender_depth(c: char) -> f64 {
+    if let Some(d) = face().data(false) {
+        if let Some((_, _, y0, _)) = d.ink_em(c, false) {
+            return (-y0).max(0.0);
+        }
+    }
     match c {
         '|' | 'ç' | 'Ç' => 0.22,
         'g' | 'j' | 'p' | 'q' | 'y' | '(' | ')' | '[' | ']' | '{' | '}' | 'µ' | 'þ' | 'ÿ' | 'ý' => {
@@ -995,8 +1104,8 @@ fn descender_depth(c: char) -> f64 {
 /// rounded to whole pixels; a glyph whose ink reaches further down extends it to
 /// that ink, rounded out): 16px at 14px, 17px (18px with a `g`) at 16px.
 pub fn svg_line_box(font_size: f64, line: &str) -> f64 {
-    let ascent = (0.905 * font_size).round();
-    let descent = (0.212 * font_size).round();
+    let ascent = ascent_px(font_size);
+    let descent = descent_px(font_size);
     let ink = line.chars().map(descender_depth).fold(0.0, f64::max);
     ascent + descent.max((ink * font_size - 1e-9).ceil())
 }
@@ -1061,7 +1170,7 @@ impl TextBlock {
             return self.centered_text(center, fill);
         }
         let (left, right) = self.svg_ink_extent();
-        let ascent = (0.905 * self.font_size).round();
+        let ascent = ascent_px(self.font_size);
         Text {
             x: center.x - (left + right) / 2.0,
             y: center.y + ascent - self.height / 2.0,

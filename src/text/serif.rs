@@ -28,7 +28,7 @@ pub fn bbox_width(text: &str, font_size: f64) -> f64 {
                 }
                 x += em(f64::from(adv));
             }
-            None => x += super::char_width_em(c, false) * font_size,
+            None => x += super::arial_char_width_em(c, false) * font_size,
         }
         prev = Some(c);
     }
