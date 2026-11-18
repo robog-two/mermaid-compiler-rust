@@ -199,6 +199,21 @@ impl Face {
     }
 }
 
+/// The glyph a bundled face draws the `liga` ligature `text` with (HarfBuzz's,
+/// as Chromium shapes it): Open Sans' ff, fi, fl, ffi and ffl, whose upright
+/// files (and the emboldened ones made from them) keep them at glyphs 236 to
+/// 240 and whose italic ones at 238 to 242. `None` for any other face or text.
+pub fn ligature_glyph(face: usize, text: &str) -> Option<u16> {
+    const LIGATURES: [&str; 5] = ["ff", "fi", "fl", "ffi", "ffl"];
+    let first = match face {
+        8 | 9 => 236,
+        10 | 11 => 238,
+        _ => return None,
+    };
+    let k = LIGATURES.iter().position(|&l| l == text)?;
+    Some(first + k as u16)
+}
+
 /// A bundled face by index, parsed once.
 #[cfg(feature = "fonts")]
 pub fn face(index: usize) -> Option<&'static Face> {
@@ -288,5 +303,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The ligature glyphs [`ligature_glyph`] names have the advances the
+    /// text tables measure the ligatures by.
+    #[test]
+    fn ligature_glyphs_carry_the_measured_advances() {
+        use crate::text::Face as F;
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            let index = web_face_index(F::OpenSans, bold, italic).unwrap();
+            let f = super::face(index).unwrap();
+            let data = F::OpenSans.data(italic).unwrap();
+            for lig in ["ff", "fi", "fl", "ffi", "ffl"] {
+                let chars: Vec<char> = lig.chars().collect();
+                let (n, adv) = data.ligature_at(&chars).unwrap();
+                assert_eq!(n, chars.len());
+                let g = ligature_glyph(index, lig).unwrap();
+                assert_eq!(
+                    f64::from(f.advance(g)) / data.upem,
+                    adv,
+                    "{lig} {bold} {italic}"
+                );
+            }
+        }
+        assert_eq!(
+            ligature_glyph(web_face_index(F::Recursive, false, false).unwrap(), "fi"),
+            None
+        );
     }
 }

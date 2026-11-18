@@ -10,6 +10,7 @@
 pub mod inter;
 pub mod serif;
 mod webfont_data;
+mod webfont_synthetic;
 pub mod webfonts;
 
 pub use webfonts::Face;
@@ -893,14 +894,8 @@ fn glyph_ink(table: &[(i16, i16); 94], c: char) -> Option<(i16, i16)> {
 fn ink_em(c: char, bold: bool, italic: bool) -> Option<(f64, f64)> {
     if let Some(d) = face().data(italic) {
         if let Some((lo, hi, _, _)) = d.ink_em(c, bold) {
-            // Open Sans has no bold face: Skia emboldens the regular outline
-            // (FreeType's `FT_Outline_EmboldenXY`, em/24 in all), half each side.
-            let grow = if bold && face() == Face::OpenSans {
-                1.0 / 48.0
-            } else {
-                0.0
-            };
-            return Some((lo - grow, hi + grow));
+            // (Open Sans' synthetic bold: `Face::synthetic_ink_px`.)
+            return Some((lo, hi));
         }
     }
     let table = if bold {
@@ -930,22 +925,52 @@ fn ink_px(lo: f64, hi: f64, size: f64) -> (f64, f64) {
 /// with the bold face) takes the bold advances and ink.
 pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bool) -> (f64, f64) {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = text.chars().filter(|&c| !mark::is_mark(c)).collect();
     let mut x = 0.0f64;
     let (mut left, mut right) = (0.0f64, 0.0f64);
     let mut prev: Option<char> = None;
-    for c in text.chars().filter(|&c| !mark::is_mark(c)) {
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
         if let Some(p) = prev {
             x += glyph_px(kerning_em(p, c, bold), font_size);
         }
-        if c != ' ' {
-            if let Some((lo, hi)) = ink_em(c, bold, italic) {
-                let (lo, hi) = ink_px(lo, hi, font_size);
-                left = left.min(x + lo);
-                right = right.max(x + hi);
+        // A `liga` ligature (Open Sans' ff, fi, fl, ffi, ffl) is one glyph,
+        // with its own advance and ink.
+        let lig = face()
+            .data(italic)
+            .and_then(|d| d.ligature_at(&chars[i..]))
+            .and_then(|(k, adv)| {
+                let s: String = chars[i..i + k].iter().collect();
+                let size = if bold {
+                    shaping_size(font_size)
+                } else {
+                    font_size
+                };
+                Some((k, adv, face().ligature_ink_px(&s, bold, italic, size)?))
+            });
+        let (k, advance, ink) = match lig {
+            Some((k, adv, ink)) => (k, adv, Some(ink)),
+            None => {
+                let ink = (c != ' ')
+                    .then(|| {
+                        face()
+                            .synthetic_ink_px(c, bold, italic, shaping_size(font_size))
+                            .or_else(|| {
+                                ink_em(c, bold, italic).map(|(lo, hi)| ink_px(lo, hi, font_size))
+                            })
+                    })
+                    .flatten();
+                (1, char_width_em_styled(c, bold, italic), ink)
             }
+        };
+        if let Some((lo, hi)) = ink {
+            left = left.min(x + lo);
+            right = right.max(x + hi);
         }
-        x += glyph_px(char_width_em_styled(c, bold, italic), font_size);
-        prev = Some(c);
+        x += glyph_px(advance, font_size);
+        prev = Some(chars[i + k - 1]);
+        i += k;
     }
     (left, right.max(layout_unit_ceil(x)))
 }
@@ -1022,8 +1047,10 @@ pub fn svg_word_runs_box(line: &str, font_size: f64, bold: bool) -> (f64, f64, f
             run = 0.0;
         }
         if c != ' ' {
-            if let Some((lo, hi)) = ink_em(c, bold, false) {
-                let (lo, hi) = ink_px(lo, hi, size);
+            if let Some((lo, hi)) = face()
+                .synthetic_ink_px(c, bold, false, size)
+                .or_else(|| ink_em(c, bold, false).map(|(lo, hi)| ink_px(lo, hi, size)))
+            {
                 left = left.min(x + run + lo);
                 right = right.max(x + run + hi);
             }
@@ -1952,6 +1979,63 @@ mod tests {
         // SVG text is measured as is.
         let svg = TextBlock::svg(vec!["some edge".into()], 14.0, false);
         assert!(svg.width < 69.28125);
+    }
+
+    /// Chromium's `getBBox()` of slanted Recursive (mmdc's fonts, no italic
+    /// face): the right edge of each glyph's sheared ink rounded up from its
+    /// origin. Single glyphs whose outermost point lands a hair past a pixel
+    /// (`k` at 12px: 8.0004 by the unrounded outline, 9 in Chromium; at 18px
+    /// 12.0007, 12 in Chromium) pin the 26.6 rounding before the shear.
+    #[test]
+    fn slanted_recursive_boxes_follow_chromium() {
+        with_face(Face::Recursive, || {
+            let right =
+                |s: &str, size: f64, bold: bool| svg_bbox_extent_styled(s, size, bold, true).1;
+            for (s, size, bold, want) in [
+                ("k", 12.0, false, 9.0),
+                ("k", 18.0, false, 12.0),
+                ("k", 24.0, false, 17.0),
+                ("E", 12.0, false, 9.0),
+                ("E", 18.0, false, 13.0),
+                ("t", 14.0, true, 9.0),
+                ("U", 16.0, true, 13.0),
+                ("<", 18.0, true, 13.0),
+                ("`", 14.0, true, 6.0),
+            ] {
+                assert_eq!(right(s, size, bold), want, "{s} {size} {bold}");
+            }
+            // Whole strings (probe: 74.79971313476562, 25.519927978515625).
+            assert!((right("dash name", 14.0, false) - 74.7997).abs() < 1e-3);
+            assert!((right("yes", 14.0, false) - 25.5199).abs() < 1e-3);
+            assert_eq!(svg_bbox_extent_styled(")", 14.0, false, true).0, -1.0);
+        });
+    }
+
+    /// Chromium's `getBBox()` of emboldened Open Sans (mmdc loads no bold
+    /// face): each glyph's outline stroked `size * k` wide, the probes'
+    /// `(x, x + width)` (13.3px is laid out at its shaping size, 13.296875).
+    #[test]
+    fn emboldened_open_sans_boxes_follow_chromium() {
+        with_face(Face::OpenSans, || {
+            for (s, size, italic, want) in [
+                ("www", 14.0, false, (-1.0, 33.697265625)),
+                ("iwB", 18.0, false, (0.0, 30.125)),
+                ("yes", 13.296875, false, (-1.0, 21.1279296875)),
+                ("Alice", 11.0, false, (-1.0, 23.96875)),
+                ("AV To Ty", 11.0, false, (-1.0, 43.962890625)),
+                ("fi fl ffi", 14.0, false, (-1.0, 36.76171875)),
+                ("State1", 16.0, true, (0.0, 44.4375)),
+                ("yes", 13.296875, true, (-2.0, 18.745010375976562)),
+                ("Alice", 11.0, true, (-2.0, 22.7041015625)),
+                ("fi fl ffi", 14.0, true, (-2.0, 36.064453125)),
+            ] {
+                let (l, r) = svg_bbox_extent_styled(s, size, true, italic);
+                assert!(
+                    l == want.0 && (r - want.1).abs() < 1e-3,
+                    "{s} {size} {italic}: {l} {r}"
+                );
+            }
+        });
     }
 
     #[test]

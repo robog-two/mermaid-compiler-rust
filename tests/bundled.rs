@@ -139,6 +139,24 @@ fn pdf_embeds_the_web_fonts_for_their_text() {
     assert!(c4.contains("/BaseFont /OpenSans-Regular"));
 }
 
+/// Open Sans' `liga` ligatures are drawn as HarfBuzz shapes them for
+/// Chromium: one glyph (ffi is glyph 239 upright), at the ligature's measured
+/// advance, copied back as its letters.
+#[cfg(feature = "fonts")]
+#[test]
+fn pdf_draws_open_sans_ligatures_as_one_glyph() {
+    let text = String::from_utf8_lossy(&pdf(
+        "C4Context\n Person(a, \"Office\", \"fluffy offices\")",
+    ))
+    .into_owned();
+    // "Office" (bold): O, then the ffi ligature, then c, e.
+    assert!(text.contains("<00EF>"), "{text}");
+    assert!(text.contains("<00EF> <006600660069>"), "{text}");
+    // "fluffy offices": fl, u, ff, y, ..., o, ffi, ...
+    assert!(text.contains("<00EE> <0066006C>"), "{text}");
+    assert!(text.contains("<00EC> <00660066>"), "{text}");
+}
+
 #[cfg(not(feature = "fonts"))]
 #[test]
 fn without_bundled_fonts_pdf_text_outside_windows_1252_is_replaced() {

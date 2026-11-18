@@ -913,7 +913,11 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             let mut children = vec![Element::rect(r, 0.0, paint)];
             // `.cluster rect` casts the neo look's shadow; only the lanes'
             // (`.swimlane.cluster rect`) are reset to `filter: none`.
-            if let Some(sh) = pal.drop_shadow.as_ref().filter(|_| gcfg.look == ConfigLook::Neo) {
+            if let Some(sh) = pal
+                .drop_shadow
+                .as_ref()
+                .filter(|_| gcfg.look == ConfigLook::Neo)
+            {
                 graph::cast_shadow(&mut children, sh);
             }
             if !t.is_empty() {
@@ -1022,21 +1026,34 @@ pub fn draw(sl: &Swimlanes, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         };
         // The marker sits on the line end pulled back by its offset.
         let drawn = apply_marker_offsets(pts, marker_offset(e.start), marker_offset(e.end));
-        let mut heads = markers::elements(
-            e.end,
-            End::End,
+        // The browser orients it along the drawn path's last segment: an end
+        // moved back past a segment shorter than the offset turns it round,
+        // its tip on the moved end.
+        let tip_dir = |end: Point, before: Point, moved: Point, prev: Point, off: f64| {
+            let dir = end.minus(before).norm();
+            let drawn_dir = moved.minus(prev).norm();
+            if dir.x * drawn_dir.x + dir.y * drawn_dir.y < 0.0 {
+                (moved.plus(drawn_dir.scale(off)), drawn_dir)
+            } else {
+                (end, dir)
+            }
+        };
+        let (end_tip, end_dir) = tip_dir(
             pts[last],
-            pts[last].minus(pts[last - 1]).norm(),
-            colors,
-            width,
-            neo,
+            pts[last - 1],
+            drawn[last],
+            drawn[last - 1],
+            marker_offset(e.end),
         );
+        let (start_tip, start_dir) =
+            tip_dir(pts[0], pts[1], drawn[0], drawn[1], marker_offset(e.start));
+        let mut heads = markers::elements(e.end, End::End, end_tip, end_dir, colors, width, neo);
         let end_heads = heads.len();
         heads.extend(markers::elements(
             e.start,
             End::Start,
-            pts[0],
-            pts[0].minus(pts[1]).norm(),
+            start_tip,
+            start_dir,
             colors,
             width,
             neo,

@@ -16,6 +16,10 @@
 //! the next family in mermaid's lists.
 
 use super::webfont_data::{OPEN_SANS, OPEN_SANS_ITALIC, RECURSIVE};
+use super::webfont_synthetic::{
+    OPEN_SANS_BOLD, OPEN_SANS_BOLD_PAIRS, OPEN_SANS_ITALIC_BOLD, OPEN_SANS_ITALIC_LIGATURES,
+    OPEN_SANS_LIGATURES, RECURSIVE_SLANT, RECURSIVE_SLANT_BOLD, RECURSIVE_SLANT_POINTS,
+};
 
 /// A face's metrics, in font units.
 #[derive(Debug)]
@@ -94,6 +98,27 @@ impl FaceData {
     }
 }
 
+/// Open Sans' emboldened ink (see [`Face::synthetic_ink_px`]) from its entry
+/// in the bold tables: the first of its pairs, how many bound it on the left
+/// and on the right.
+fn emboldened_ink_px((at, nl, nh): (u16, u8, u8), size: f64, upem: f64) -> Option<(f64, f64)> {
+    let (at, nl, nh) = (usize::from(at), usize::from(nl), usize::from(nh));
+    if nl == 0 || nh == 0 {
+        return None;
+    }
+    // `SkScalarInterpFunc(size, {9, 36}, {1/24, 1/32})`, half of it.
+    let t = (size.clamp(9.0, 36.0) - 9.0) / 27.0;
+    let r = size * (1.0 / 24.0 + t * (1.0 / 32.0 - 1.0 / 24.0)) / 2.0;
+    let scale = (size * 64.0).trunc() / upem;
+    let at_px =
+        |&(x2, a): &(i16, f32)| (f64::from(x2) / 2.0 * scale).round() / 64.0 + r * f64::from(a);
+    let low = &OPEN_SANS_BOLD_PAIRS[at..at + nl];
+    let high = &OPEN_SANS_BOLD_PAIRS[at + nl..at + nl + nh];
+    let lo = low.iter().map(at_px).fold(f64::INFINITY, f64::min);
+    let hi = high.iter().map(at_px).fold(f64::NEG_INFINITY, f64::max);
+    Some((lo.floor(), hi.ceil()))
+}
+
 /// The font a piece of text is measured in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum Face {
@@ -142,6 +167,97 @@ impl Face {
             Face::Recursive => "Recursive Variable",
             Face::OpenSans => "Open Sans",
         }
+    }
+
+    /// The horizontal ink of `c` in a style Chromium synthesises for a face
+    /// that lacks it, as `getBBox()` takes it: `(left, right)` in whole pixels
+    /// from the glyph's origin at `size` (the shaping size). `None` where the
+    /// face has the style (or the character is not in it).
+    ///
+    /// * Recursive italic: Blink has Skia skew the glyph by a quarter
+    ///   (`setSkewX(-1/4)`) once each outline point is scaled to 26.6 fixed
+    ///   point; the control box of the slanted points (`x + y / 4` in floating
+    ///   point) is rounded out.
+    /// * Open Sans bold: Skia strokes and fills the outline (`kEmbolden`), the
+    ///   stroke `size * k` wide, `k` going from 1/24 at 9px to 1/32 at 36px
+    ///   (`kStdFakeBoldInterpKeys`), with miter joins; the stroked path's
+    ///   control box is rounded out.
+    ///
+    /// Fitted to the boxes Chromium measures with mmdc's fonts: every one of
+    /// 1434 slanted and of 1740 emboldened probes (single glyphs and strings,
+    /// 10 to 24px), but one emboldened string whose last glyph's ink ends
+    /// 0.0008px short of a pixel by this model.
+    pub fn synthetic_ink_px(
+        self,
+        c: char,
+        bold: bool,
+        italic: bool,
+        size: f64,
+    ) -> Option<(f64, f64)> {
+        let size26 = (size * 64.0).trunc();
+        match self {
+            Face::Recursive if italic => {
+                let i = RECURSIVE.index(c)?;
+                let (at, nl, nh) = if bold {
+                    RECURSIVE_SLANT_BOLD[i]
+                } else {
+                    RECURSIVE_SLANT[i]
+                };
+                let (at, nl, nh) = (usize::from(at), usize::from(nl), usize::from(nh));
+                // (A character without outline counts by its advance.)
+                if nl == 0 || nh == 0 {
+                    return None;
+                }
+                let scale = size26 / RECURSIVE.upem;
+                let slant = |&(x, y): &(f32, f32)| {
+                    (f64::from(x) * scale).round() + (f64::from(y) * scale).round() / 4.0
+                };
+                let low = &RECURSIVE_SLANT_POINTS[at..at + nl];
+                let high = &RECURSIVE_SLANT_POINTS[at + nl..at + nl + nh];
+                let lo = low.iter().map(slant).fold(f64::INFINITY, f64::min);
+                let hi = high.iter().map(slant).fold(f64::NEG_INFINITY, f64::max);
+                Some(((lo / 64.0).floor(), (hi / 64.0).ceil()))
+            }
+            Face::OpenSans if bold => {
+                let d = self.data(italic)?;
+                let i = d.index(c)?;
+                let entry = if italic {
+                    OPEN_SANS_ITALIC_BOLD[i]
+                } else {
+                    OPEN_SANS_BOLD[i]
+                };
+                emboldened_ink_px(entry, size, d.upem)
+            }
+            _ => None,
+        }
+    }
+
+    /// The ink of the `liga` ligature `text` (one glyph: Open Sans' ff, fi,
+    /// fl, ffi, ffl) in whole pixels from its origin at `size`, as
+    /// [`Face::synthetic_ink_px`] and Skia's rounding out of the outline's
+    /// box (26.6 fixed point) take a glyph's.
+    pub fn ligature_ink_px(
+        self,
+        text: &str,
+        bold: bool,
+        italic: bool,
+        size: f64,
+    ) -> Option<(f64, f64)> {
+        if self != Face::OpenSans {
+            return None;
+        }
+        let ligs = if italic {
+            &OPEN_SANS_ITALIC_LIGATURES
+        } else {
+            &OPEN_SANS_LIGATURES
+        };
+        let &(_, lo, hi, at, nl, nh) = ligs.iter().find(|l| l.0 == text)?;
+        let upem = self.data(italic)?.upem;
+        if bold {
+            return emboldened_ink_px((at, nl, nh), size, upem);
+        }
+        let q = |v: i16| (f64::from(v) / upem * size * 64.0).round() / 64.0;
+        Some((q(lo).floor(), q(hi).ceil()))
     }
 
     /// Vertical metrics in em: ascent, descent, line gap (hhea; the typo metrics

@@ -116,7 +116,7 @@ struct Ctx {
     text_outline: Option<f64>,
     /// Glyphs drawn with each embedded bundled face (TeX Gyre Heros, then the
     /// web fonts; [`crate::fonts::face`]), with their characters.
-    embedded: Vec<BTreeMap<u16, char>>,
+    embedded: Vec<BTreeMap<u16, String>>,
     /// Stroke gradients, drawn as axial shading patterns `/P{index}`.
     gradients: Vec<Gradient>,
     /// Blurred drop shadows: image XObjects `/Sh{index}` in the shadow colour
@@ -455,7 +455,7 @@ impl Ctx {
                     let mut hex = String::new();
                     for c in rest[..end].chars() {
                         if let Some(g) = embedded_glyph(face, c) {
-                            self.embedded[face].insert(g, c);
+                            self.embedded[face].insert(g, c.to_string());
                             let _ = write!(hex, "{g:04X}");
                         }
                     }
@@ -514,16 +514,28 @@ impl Ctx {
                 if let (Some(f), Some(wf)) = (bundled.filter(|_| has(chars[i])), wf) {
                     let mut tj = String::new();
                     while i < chars.len() && has(chars[i]) {
-                        let g = f.glyph(chars[i]).unwrap_or(0);
-                        self.embedded[wf].insert(g, chars[i]);
+                        // A `liga` ligature (Open Sans' ff, fi, fl, ffi, ffl) is
+                        // one glyph, as HarfBuzz shapes it for Chromium.
+                        let lig = face
+                            .data(run.italic)
+                            .and_then(|d| d.ligature_at(&chars[i..]))
+                            .filter(|&(k, _)| chars[i..i + k].iter().all(|&c| has(c)))
+                            .and_then(|(k, _)| {
+                                let s: String = chars[i..i + k].iter().collect();
+                                crate::fonts::ligature_glyph(wf, &s).map(|g| (g, k, s))
+                            });
+                        let (g, k, text) = lig.unwrap_or_else(|| {
+                            (f.glyph(chars[i]).unwrap_or(0), 1, chars[i].to_string())
+                        });
+                        self.embedded[wf].insert(g, text);
                         let default = f64::from(f.advance(g)) / f64::from(f.units_per_em);
-                        let measured = measure(i + 1) - measure(i);
+                        let measured = measure(i + k) - measure(i);
                         let _ = write!(tj, "<{g:04X}>");
                         let adjust = ((default - measured) * 1000.0 * 1000.0).round() / 1000.0;
                         if adjust != 0.0 {
                             let _ = write!(tj, " {} ", n(adjust));
                         }
-                        i += 1;
+                        i += k;
                     }
                     let _ = write!(self.out, " /H{} 1 Tf [{tj}] TJ", wf + 1);
                 } else {
@@ -805,7 +817,11 @@ fn pdf_string(s: &str) -> String {
 /// The PDF objects that embed one TeX Gyre Heros face, numbered from `first`: a
 /// Type0 font over an OpenType CIDFont (CIDs are glyph ids, `Identity-H`), its
 /// descriptor, the font file, and a ToUnicode map so the text can be copied.
-fn embedded_font_objects(face: usize, glyphs: &BTreeMap<u16, char>, first: usize) -> Vec<Vec<u8>> {
+fn embedded_font_objects(
+    face: usize,
+    glyphs: &BTreeMap<u16, String>,
+    first: usize,
+) -> Vec<Vec<u8>> {
     let Some(f) = crate::fonts::face(face) else {
         return Vec::new();
     };
@@ -824,13 +840,8 @@ fn embedded_font_objects(face: usize, glyphs: &BTreeMap<u16, char>, first: usize
     let entries: Vec<_> = glyphs.iter().collect();
     for chunk in entries.chunks(100) {
         let _ = writeln!(cmap, "{} beginbfchar", chunk.len());
-        for (g, c) in chunk {
-            let mut units = [0u16; 2];
-            let hex: String = c
-                .encode_utf16(&mut units)
-                .iter()
-                .map(|u| format!("{u:04X}"))
-                .collect();
+        for (g, text) in chunk {
+            let hex: String = text.encode_utf16().map(|u| format!("{u:04X}")).collect();
             let _ = writeln!(cmap, "<{g:04X}> <{hex}>");
         }
         cmap.push_str("endbfchar\n");

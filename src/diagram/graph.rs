@@ -7820,9 +7820,12 @@ mod tests {
         // Two paddings around a point; the title is narrower.
         assert!(title.width + CLUSTER_TITLE_PAD < 48.0);
         assert!((outer.w - 48.0).abs() < 1e-6, "{outer:?}");
+        // (After the flat frame the cluster shape draws for the point.)
         let inner = cluster_group(&scene, "inner");
-        let Some(Element::Text { text: t, .. }) = inner.first() else {
-            panic!("title only: {inner:?}");
+        let Some(Element::Text { text: t, .. }) =
+            inner.iter().find(|e| matches!(e, Element::Text { .. }))
+        else {
+            panic!("title: {inner:?}");
         };
         assert!((t.x - outer.center().x).abs() < 1e-6);
         // The title's top on the point, the padding (24) above the frame's
@@ -7876,11 +7879,14 @@ mod tests {
         assert!((f.w - 72.0).abs() < 1e-6, "{f:?}");
     }
 
-    /// The title of empty subgraph `id`: its text element.
+    /// The title of empty subgraph `id`: its text element, after the flat
+    /// frame (shadow and all) the cluster shape draws for its point.
     fn empty_title(scene: &Scene, id: &str) -> Text {
-        match cluster_group(scene, id) {
-            [Element::Text { text, .. }] => text.clone(),
-            other => panic!("title only: {other:?}"),
+        let els = cluster_group(scene, id);
+        let flat = |e: &Element| matches!(e, Element::Shape { geom: Geometry::Rect { rect, .. }, .. } if rect.h == 0.0);
+        match els {
+            [frame @ .., Element::Text { text, .. }] if frame.iter().all(flat) => text.clone(),
+            other => panic!("flat frame and title: {other:?}"),
         }
     }
 
@@ -8113,13 +8119,20 @@ mod tests {
         assert_eq!(labels, 1, "the title is the node's label, painted once");
     }
 
+    /// mmdc 12.2.0 (ELK) draws an empty subgraph's frame 0 high and as wide
+    /// as its title plus the padding: `<rect x="226.015625" y="70.5"
+    /// width="51.96875" height="0"/>` for "empty".
     #[test]
-    fn empty_subgraph_draws_only_its_title() {
+    fn empty_subgraph_draws_a_flat_frame_and_its_title() {
         let (_, scene) =
             render_flowchart("flowchart TB\nsubgraph empty\nend\nsubgraph full\na\nend");
         let empty = cluster_group(&scene, "empty");
-        assert_eq!(empty.len(), 1, "{empty:?}");
-        assert!(matches!(empty[0], Element::Text { .. }));
+        assert_eq!(empty.len(), 2, "{empty:?}");
+        assert!(
+            matches!(&empty[0], Element::Shape { geom: Geometry::Rect { rect, .. }, .. } if rect.h == 0.0),
+            "{empty:?}"
+        );
+        assert!(matches!(empty[1], Element::Text { .. }));
         let full = cluster_group(&scene, "full");
         assert!(full.iter().any(|e| matches!(e, Element::Shape { .. })));
     }

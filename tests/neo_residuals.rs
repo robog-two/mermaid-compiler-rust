@@ -28,10 +28,12 @@ fn view_box(svg: &str) -> String {
 /// entity, its rows' included, with the slot fill (`#FDF4FF` for color-0).
 #[test]
 fn entity_rows_take_the_slot_fill() {
-    let s = svg("---\nconfig:\n  layout: dagre\n---\nerDiagram\n  direction RL\n  E1 {\n    \
+    let s = svg(
+        "---\nconfig:\n  layout: dagre\n---\nerDiagram\n  direction RL\n  E1 {\n    \
          date created\n    string name\n    string name\n  }\n  E2 {\n    string name\n    \
          string name\n    string email UK\n  }\n  E1 }o--|| E0 : \"is part of\"\n  \
-         E3 ||--|| E1 : contains\n  E2 }o--o{ E1 : \"is part of\"\n");
+         E3 ||--|| E1 : contains\n  E2 }o--o{ E1 : \"is part of\"\n",
+    );
     for class in ["row-rect-odd", "row-rect-even"] {
         let at = s.find(&format!("class=\"{class}\"")).expect("row");
         let tag = &s[at..at + s[at..].find('>').expect("tag end")];
@@ -43,8 +45,10 @@ fn entity_rows_take_the_slot_fill() {
 /// shadow from it (mermaid draws none; the composite's `rect.outer` keeps one).
 #[test]
 fn regions_cast_no_shadow() {
-    let s = svg("stateDiagram-v2\n  direction LR\n  [*] --> A\n  state A {\n    a1 --> a2\n    \
-         --\n    b1 --> b2\n  }\n  A --> [*]\n");
+    let s = svg(
+        "stateDiagram-v2\n  direction LR\n  [*] --> A\n  state A {\n    a1 --> a2\n    \
+         --\n    b1 --> b2\n  }\n  A --> [*]\n",
+    );
     let g = group(&s, "cluster-divider-id-1");
     let first = &g[..g.find("</g>").expect("end")];
     assert!(!first.contains("drop-shadow"), "{first}");
@@ -121,8 +125,10 @@ fn groups_in_lanes_cast_the_shadow() {
 /// title's width plus the padding, 0 high (`82.625` for "Inner title").
 #[test]
 fn an_empty_subgraph_under_elk_is_a_flat_frame() {
-    let s = svg("flowchart LR\nsubgraph outer\nsubgraph inner[Inner title]\nend\nX\nend\n\
-         A --> inner\nclassDef hot fill:#f96\nclass inner hot\n");
+    let s = svg(
+        "flowchart LR\nsubgraph outer\nsubgraph inner[Inner title]\nend\nX\nend\n\
+         A --> inner\nclassDef hot fill:#f96\nclass inner hot\n",
+    );
     let g = group(&s, "cluster-inner");
     assert!(
         g.contains("<rect x=\"196.688\" y=\"165.8\" width=\"82.625\" height=\"0\" fill=\"#f96\""),
@@ -160,7 +166,9 @@ flowchart LR
 "#);
     let g = group(&s, "L-user-src-3");
     assert!(
-        g.contains("<path class=\"marker\" d=\"M144.858,125.287L152.858,129.287L144.858,133.287Z\""),
+        g.contains(
+            "<path class=\"marker\" d=\"M144.858,125.287L152.858,129.287L144.858,133.287Z\""
+        ),
         "{g}"
     );
 }
@@ -170,7 +178,9 @@ flowchart LR
 /// -16).
 #[test]
 fn container_loops_count_in_the_root_offset() {
-    let s = svg("flowchart BT\n  subgraph C0\n    c0n0\n    c0n1\n    c0n0 --> c0n1\n  end\n  \
-         x0\n  C0 --> c0n0\n  C0 --> C0\n  C0 -->|lab1| C0\n  C0 --> C0\n");
+    let s = svg(
+        "flowchart BT\n  subgraph C0\n    c0n0\n    c0n1\n    c0n0 --> c0n1\n  end\n  \
+         x0\n  C0 --> c0n0\n  C0 --> C0\n  C0 -->|lab1| C0\n  C0 --> C0\n",
+    );
     assert_eq!(view_box(&s), "4 4 497.969 282");
 }
