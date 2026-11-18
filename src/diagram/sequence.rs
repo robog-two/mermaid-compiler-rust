@@ -541,8 +541,11 @@ fn text_dims(lines: &[String], font_size: f64) -> (f64, f64) {
             (w.max(js_round(width(l))), h + line_h, lh.max(line_h))
         })
     };
-    let sans = dims(&|l| crate::text::svg_bbox_width(l, font_size), &|l| {
-        svg_line_box(font_size, l)
+    // `sans-serif` is Arial (Liberation Sans), whatever the diagram's face.
+    let sans = crate::text::with_face(crate::text::Face::Arial, || {
+        dims(&|l| crate::text::svg_bbox_width(l, font_size), &|l| {
+            svg_line_box(font_size, l)
+        })
     });
     let serif = dims(&|l| crate::text::serif::bbox_width(l, font_size), &|l| {
         crate::text::serif::line_box(font_size, l)
@@ -1784,7 +1787,8 @@ fn message_elements(pm: &Pending, pal: &Palette, cfg: &SequenceConfig) -> Elemen
                 anchor: Anchor::Middle,
                 fill: pal.sequence_number.clone(),
                 tspan_central: false,
-                family: None,
+                // svgDraw writes `font-family="sans-serif"` on the number (Arial).
+                family: Some("sans-serif".into()),
             },
             "sequenceNumber",
         ));

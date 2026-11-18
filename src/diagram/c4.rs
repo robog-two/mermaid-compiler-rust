@@ -1099,11 +1099,7 @@ impl Section {
     }
     /// Baseline of the first line below the section top (font ascent).
     fn ascent(&self) -> f64 {
-        match self.kind {
-            SectionKind::Name => self.font * 13.0 / 14.0,
-            SectionKind::Type => self.font * 10.0 / 10.5,
-            SectionKind::Descr => self.font * 10.0 / 11.48,
-        }
+        text::ascent_px(self.font)
     }
 }
 
@@ -2245,8 +2241,39 @@ pub fn render(
         radius: pal.radius.unwrap_or(5.0),
     });
     let lconf = LayoutConf::from_config(cfg);
-    let lay = layout(&d, &conf, &lconf);
-    draw(&d, &lay, &conf, &lconf, pal)
+    // The cards, boundaries and relationship labels are measured and drawn in
+    // `c4.personFontFamily` and its siblings (`"Open Sans", sans-serif`, a web
+    // font mmdc loads): calculateTextDimensions keeps that family's box over
+    // sans-serif's, and svgDraw's texts take it. The title keeps the theme's.
+    let family = cfg
+        .section("c4", "personFontFamily")
+        .and_then(crate::json::Json::as_str)
+        .unwrap_or(C4_FONT_FAMILY)
+        .to_string();
+    let lay = text::with_family(&family, || layout(&d, &conf, &lconf));
+    let mut scene = text::with_family(&family, || draw(&d, &lay, &conf, &lconf, pal))?;
+    set_text_family(&mut scene.elements, &family);
+    Ok(scene)
+}
+
+/// mermaid's default `c4.*FontFamily`.
+const C4_FONT_FAMILY: &str = "\"Open Sans\", sans-serif";
+
+/// Give every text but the title `family`.
+fn set_text_family(els: &mut [Element], family: &str) {
+    for el in els {
+        match el {
+            Element::Text { text, class } if class.as_deref() != Some("c4-title") => {
+                text.family = Some(family.to_string().into());
+            }
+            Element::OutlinedText { text, .. } => text.family = Some(family.to_string().into()),
+            Element::Group { children, .. }
+            | Element::Rotated { children, .. }
+            | Element::Brightened { children, .. }
+            | Element::Translated { children, .. } => set_text_family(children, family),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

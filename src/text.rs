@@ -505,8 +505,9 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
     let chars: Vec<char> = text.chars().filter(|&c| c != mark::RUN).collect();
     let mut st = Emphasis::default();
     let mut prev: Option<char> = None;
-    let mut em = 0.0;
+    let mut px = 0.0;
     let mut i = 0;
+    let pos = |em: f64| glyph_px(em, font_size);
     while i < chars.len() {
         let c = chars[i];
         if st.apply(c) {
@@ -518,19 +519,33 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
         let b = bold || st.bold > 0;
         let italic = st.italic > 0;
         if let Some(p) = prev {
-            em += kerning_em(p, c, b);
+            px += pos(kerning_em(p, c, b));
         }
         if let Some((n, w)) = face().data(italic).and_then(|d| d.ligature_at(&chars[i..])) {
-            em += w;
+            px += pos(w);
             prev = Some(chars[i + n - 1]);
             i += n;
             continue;
         }
-        em += char_width_em_styled(c, b, italic);
+        px += pos(char_width_em_styled(c, b, italic));
         prev = Some(c);
         i += 1;
     }
-    em * font_size
+    px
+}
+
+/// One glyph's advance (or kerning) of `em` at `font_size` as HarfBuzz hands
+/// it to Blink: in a web font, rounded to its 16.16 fixed point (1/65536 px;
+/// Recursive's 1000-unit em makes 9.6px digits 9.6000061px, so ten of them
+/// round up to 96.015625px as a layout unit). Arial's 2048-unit advances are
+/// left exact, as its tables were fitted.
+fn glyph_px(em: f64, font_size: f64) -> f64 {
+    let v = em * font_size;
+    if face() == Face::Arial {
+        v
+    } else {
+        (v * 65536.0).round() / 65536.0
+    }
 }
 
 /// Horizontal ink extents (`xMin`, `xMax`) of ASCII 0x21..=0x7E in 1/2048 em:
@@ -878,7 +893,14 @@ fn glyph_ink(table: &[(i16, i16); 94], c: char) -> Option<(i16, i16)> {
 fn ink_em(c: char, bold: bool, italic: bool) -> Option<(f64, f64)> {
     if let Some(d) = face().data(italic) {
         if let Some((lo, hi, _, _)) = d.ink_em(c, bold) {
-            return Some((lo, hi));
+            // Open Sans has no bold face: Skia emboldens the regular outline
+            // (FreeType's `FT_Outline_EmboldenXY`, em/24 in all), half each side.
+            let grow = if bold && face() == Face::OpenSans {
+                1.0 / 48.0
+            } else {
+                0.0
+            };
+            return Some((lo - grow, hi + grow));
         }
     }
     let table = if bold {
@@ -900,7 +922,7 @@ pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bo
     let mut prev: Option<char> = None;
     for c in text.chars().filter(|&c| !mark::is_mark(c)) {
         if let Some(p) = prev {
-            x += kerning_em(p, c, bold) * font_size;
+            x += glyph_px(kerning_em(p, c, bold), font_size);
         }
         if c != ' ' {
             if let Some((lo, hi)) = ink_em(c, bold, italic) {
@@ -908,7 +930,7 @@ pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bo
                 right = right.max(x + (hi * font_size - 0.005).ceil());
             }
         }
-        x += char_width_em_styled(c, bold, italic) * font_size;
+        x += glyph_px(char_width_em_styled(c, bold, italic), font_size);
         prev = Some(c);
     }
     (left, right.max(layout_unit_ceil(x)))
@@ -992,7 +1014,7 @@ pub fn svg_word_runs_box(line: &str, font_size: f64, bold: bool) -> (f64, f64, f
             }
         }
         let kern = chars.get(i + 1).map_or(0.0, |&n| kerning_em(c, n, bold));
-        run += (char_width_em(c, bold) + kern) * size;
+        run += glyph_px(char_width_em(c, bold), size) + glyph_px(kern, size);
     }
     x += layout_unit_ceil(run);
     (left, right.max(x) - left, x)
