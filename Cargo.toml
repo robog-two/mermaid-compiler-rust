@@ -25,9 +25,11 @@ png = ["dep:resvg", "dep:miniz_oxide"]
 # Font Awesome Free 7 icon outlines (CC BY 4.0) for `fa:fa-car` label icons, as
 # mmdc draws them (assets/fontawesome, ~0.8 MB). Without it icons become `•`.
 icons = []
-# TeX Gyre Heros (GUST Font License) bundled as the fallback font for PNG text
-# when no system font matches, and embedded in PDFs for text outside
-# Windows-1252 (assets/fonts, ~0.5 MB).
+# The web fonts mmdc loads, Recursive Variable and Open Sans (SIL OFL 1.1), so
+# PNG and PDF text in them looks as mmdc draws it, and TeX Gyre Heros (GUST
+# Font License) as the fallback font for PNG text when no system font matches
+# and for PDF text outside Windows-1252 (assets/fonts, ~1.5 MB). Text is
+# measured from compiled-in tables either way.
 fonts = []
 
 [dependencies]

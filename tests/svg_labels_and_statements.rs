@@ -55,12 +55,12 @@ fn class_annotation_ink_and_member_rows() {
     let s = svg(
         "---\nconfig:\n  htmlLabels: false\n---\nclassDiagram\n  class A {\n    <<iface>>\n    +int x\n    +int y\n    +foo()\n  }\n",
     );
-    assert!(s.contains("viewBox=\"4 4 99.647 171\""), "{s}");
+    assert!(s.contains("viewBox=\"4 4 107.289 176\""), "{s}");
     assert!(s.contains(
-        "x=\"24\" y=\"94\" text-anchor=\"start\" font-size=\"14\" fill=\"#28253D\">+int x</text>"
+        "x=\"24\" y=\"95.5\" text-anchor=\"start\" font-size=\"14\" fill=\"#28253D\"><tspan>+int</tspan><tspan> x</tspan></text>"
     ));
     assert!(s.contains(
-        "x=\"24\" y=\"113\" text-anchor=\"start\" font-size=\"14\" fill=\"#28253D\">+int y</text>"
+        "x=\"24\" y=\"115.5\" text-anchor=\"start\" font-size=\"14\" fill=\"#28253D\"><tspan>+int</tspan><tspan> y</tspan></text>"
     ));
 }
 
@@ -71,7 +71,7 @@ fn class_svg_note_wraps_at_the_flowchart_width() {
         "---\nconfig:\n  htmlLabels: false\n---\nclassDiagram\n  A --> B\n  note \"Orders are immutable\"\n",
     );
     assert!(
-        s.contains(">Orders are</tspan><tspan x=\"92.125\" y=\"62.7\">immutable</tspan>"),
+        s.contains(">Orders are</tspan><tspan x=\"91.109\" y=\"62.7\">immutable</tspan>"),
         "{s}"
     );
 }
@@ -85,7 +85,7 @@ fn svg_edge_labels_centre_their_text_box() {
     );
     assert!(
         s.contains(
-            "y=\"107\" text-anchor=\"middle\" font-size=\"14\" fill=\"#28253D\">owns</text>"
+            "y=\"108\" text-anchor=\"middle\" font-size=\"14\" fill=\"#28253D\">owns</text>"
         ),
         "{s}"
     );

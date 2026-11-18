@@ -177,7 +177,7 @@ fn options() -> resvg::usvg::Options<'static> {
     #[allow(unused_mut)]
     let mut opt = resvg::usvg::Options::default();
     #[cfg(feature = "fonts")]
-    for data in crate::fonts::FILES {
+    for data in crate::fonts::WEB_FILES.iter().chain(&crate::fonts::FILES) {
         opt.fontdb_mut()
             .load_font_source(resvg::usvg::fontdb::Source::Binary(std::sync::Arc::new(
                 data,

@@ -587,7 +587,7 @@ fn edge_label(
         return Vec::new();
     }
     let middle = crate::text::baseline_shift(crate::text::Baseline::Middle, font);
-    let ascent = (0.905 * font).round();
+    let ascent = crate::text::ascent_px(font);
     // The text box (as getBBox / getBoundingClientRect see it) about the
     // group's origin: from the first line's ascent to the block's height.
     // The text box about the anchor (lines centred on it).
@@ -972,7 +972,7 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                             + font
                             + crate::text::baseline_shift(crate::text::Baseline::Middle, font);
                         let last = b.lines.last().map_or("", String::as_str);
-                        let ascent = (0.905 * font).round();
+                        let ascent = crate::text::ascent_px(font);
                         // The viewBox is measured before it is set (at scale 1):
                         // Chromium boxes the text from its single-precision row
                         // positions (row `i` at `y = (1.1i - 0.1)em`, `dy =
@@ -985,14 +985,14 @@ fn draw(d: &Architecture, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                             let em = |k: f64| k as f32 * font as f32;
                             f64::from(em(i as f64 * 1.1 - 0.1) + em(1.1)) + shift
                         };
-                        let raw = font * 1082.0 / 4096.0;
+                        let raw = font * crate::text::face().x_height_em(false) / 2.0;
                         let drawn = first - ib.bottom() - font;
                         let lu = |v: f64, up: bool| {
                             let u = v * 64.0;
                             (if up { u.ceil() } else { u.floor() }) / 64.0
                         };
                         let n = b.lines.len() - 1;
-                        let descent = (0.212 * font).round();
+                        let descent = crate::text::descent_px(font);
                         let below = crate::text::svg_line_box(font, last) - ascent;
                         let top = ib.bottom() + lu(row(0, raw) - ascent, false);
                         let bottom = ib.bottom()

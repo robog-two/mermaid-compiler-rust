@@ -143,191 +143,202 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
     // the site config (`-t`, `--configFile`) says otherwise.
     let cfg = cfg.scoped(kind.config_key());
     let pal = cfg.palette();
-    let (mut scene, use_max_width) = match kind {
-        DiagramType::Flowchart => {
-            let opts = diagram::flowchart::ParseOptions {
-                inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
-            };
-            let mut g = diagram::flowchart::parse_with(&pre.body, pre.title.clone(), opts)?;
-            diagram::flowchart::attach_assets(&mut g, &cfg.icon_packs, &env.images)?;
-            let g = packed(g, &cfg.flowchart, &cfg);
-            (
-                diagram::graph::render_with(&g, &cfg.flowchart, &pal, &graph_options(&cfg)),
-                cfg.flowchart.use_max_width,
-            )
-        }
-        DiagramType::State => {
-            let g = diagram::state::parse(&pre.body, pre.title.clone())?;
-            let g = packed(g, &cfg.state, &cfg);
-            (
-                diagram::graph::render_with(&g, &cfg.state, &pal, &graph_options(&cfg)),
-                cfg.state.use_max_width,
-            )
-        }
-        DiagramType::Class => {
-            let opts = diagram::class::ParseOptions {
-                hierarchical_namespaces: cfg.section_bool("class", "hierarchicalNamespaces", true),
-            };
-            let g = diagram::class::parse_with(&pre.body, pre.title.clone(), opts)?;
-            let g = packed(g, &cfg.class, &cfg);
-            let mut options = graph_options(&cfg);
-            // Notes and lollipop interfaces wrap at labelHelper's fallback width,
-            // `flowchart.wrappingWidth` (an HTML note keeps `white-space: nowrap`;
-            // class boxes size their text themselves).
-            options.node_wrap = Some(cfg.flowchart.wrapping_width);
-            (
-                diagram::graph::render_with(&g, &cfg.class, &pal, &options),
-                cfg.class.use_max_width,
-            )
-        }
-        DiagramType::Sequence => {
-            let d = diagram::sequence::parse(&pre.body, pre.title.clone())?;
-            (
-                diagram::sequence::render(&d, &cfg.sequence, &pal),
-                cfg.sequence.use_max_width,
-            )
-        }
-        DiagramType::Pie => {
-            let p = diagram::pie::parse(&pre.body, pre.title.clone())?;
-            (
-                diagram::pie::render(&p, &cfg.pie, &pal),
-                cfg.pie.use_max_width,
-            )
-        }
-        DiagramType::Er => (
-            diagram::er::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("er"),
-        ),
-        DiagramType::Gantt => (
-            diagram::gantt::render(&pre.body, pre.title.clone(), &cfg, &pal, env.now_ms)?,
-            cfg.use_max_width("gantt"),
-        ),
-        DiagramType::Journey => (
-            diagram::journey::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("journey"),
-        ),
-        DiagramType::GitGraph => (
-            diagram::gitgraph::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("gitGraph"),
-        ),
-        DiagramType::Mindmap => (
-            diagram::mindmap::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("mindmap"),
-        ),
-        DiagramType::Timeline => (
-            diagram::timeline::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("timeline"),
-        ),
-        DiagramType::Quadrant => (
-            diagram::quadrant::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("quadrantChart"),
-        ),
-        DiagramType::Requirement => (
-            diagram::requirement::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("requirement"),
-        ),
-        DiagramType::C4 => (
-            diagram::c4::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("c4"),
-        ),
-        DiagramType::Sankey => (
-            diagram::sankey::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("sankey"),
-        ),
-        DiagramType::XyChart => (
-            diagram::xychart::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("xyChart"),
-        ),
-        DiagramType::Block => (
-            diagram::block::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("block"),
-        ),
-        DiagramType::Packet => (
-            diagram::packet::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("packet"),
-        ),
-        DiagramType::Architecture => (
-            diagram::architecture::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("architecture"),
-        ),
-        DiagramType::Kanban => (
-            diagram::kanban::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("kanban"),
-        ),
-        DiagramType::Radar => (
-            diagram::radar::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("radar"),
-        ),
-        DiagramType::Treemap => (
-            diagram::treemap::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("treemap"),
-        ),
-        DiagramType::ZenUml => (
-            diagram::zenuml::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("zenuml"),
-        ),
-        DiagramType::Info => (
-            diagram::info::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("info"),
-        ),
-        DiagramType::Agentflow => (
-            diagram::agentflow::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("agentflow"),
-        ),
-        DiagramType::Swimlane => match diagram::swimlane::other_layout(&cfg) {
-            Some(layout) => {
-                let opts = diagram::flowchart::ParseOptions {
-                    inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
-                };
-                let mut g = diagram::swimlane::parse_flowchart(&pre.body, pre.title.clone(), opts)?;
-                diagram::flowchart::attach_assets(&mut g, &cfg.icon_packs, &env.images)?;
-                let g = packed(g, &cfg.flowchart, &cfg);
-                let fcfg = crate::config::GraphConfig {
-                    layout,
-                    ..cfg.flowchart.clone()
-                };
-                let mut scene = diagram::graph::render_with(&g, &fcfg, &pal, &graph_options(&cfg));
-                scene.kind = crate::scene::DiagramKind::Swimlane;
-                (scene, cfg.use_max_width("swimlane"))
-            }
-            None => (
-                diagram::swimlane::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-                cfg.use_max_width("swimlane"),
-            ),
-        },
-        DiagramType::EventModeling => (
-            diagram::eventmodeling::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("eventmodeling"),
-        ),
-        DiagramType::TreeView => (
-            diagram::treeview::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("treeView"),
-        ),
-        DiagramType::Ishikawa => (
-            diagram::ishikawa::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.section_bool("ishikawa", "useMaxWidth", true),
-        ),
-        DiagramType::Railroad => (
-            diagram::railroad::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("railroad"),
-        ),
-        DiagramType::Venn => (
-            diagram::venn::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("venn"),
-        ),
-        DiagramType::Wardley => (
-            diagram::wardley::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("wardley-beta") && cfg.use_max_width("wardley"),
-        ),
-        DiagramType::Cynefin => (
-            diagram::cynefin::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("cynefin"),
-        ),
-        DiagramType::Usecase => (
-            diagram::usecase::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
-            cfg.use_max_width("usecase"),
-        ),
-    };
+    // Text is measured in the face the theme's `fontFamily` names (the redux themes'
+    // Recursive Variable, which mmdc loads as a web font; see `text::webfonts`).
+    let (mut scene, use_max_width) =
+        crate::text::with_family(&pal.font_family, || -> Result<_> {
+            Ok(match kind {
+                DiagramType::Flowchart => {
+                    let opts = diagram::flowchart::ParseOptions {
+                        inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
+                    };
+                    let mut g = diagram::flowchart::parse_with(&pre.body, pre.title.clone(), opts)?;
+                    diagram::flowchart::attach_assets(&mut g, &cfg.icon_packs, &env.images)?;
+                    let g = packed(g, &cfg.flowchart, &cfg);
+                    (
+                        diagram::graph::render_with(&g, &cfg.flowchart, &pal, &graph_options(&cfg)),
+                        cfg.flowchart.use_max_width,
+                    )
+                }
+                DiagramType::State => {
+                    let g = diagram::state::parse(&pre.body, pre.title.clone())?;
+                    let g = packed(g, &cfg.state, &cfg);
+                    (
+                        diagram::graph::render_with(&g, &cfg.state, &pal, &graph_options(&cfg)),
+                        cfg.state.use_max_width,
+                    )
+                }
+                DiagramType::Class => {
+                    let opts = diagram::class::ParseOptions {
+                        hierarchical_namespaces: cfg.section_bool(
+                            "class",
+                            "hierarchicalNamespaces",
+                            true,
+                        ),
+                    };
+                    let g = diagram::class::parse_with(&pre.body, pre.title.clone(), opts)?;
+                    let g = packed(g, &cfg.class, &cfg);
+                    let mut options = graph_options(&cfg);
+                    // Notes and lollipop interfaces wrap at labelHelper's fallback width,
+                    // `flowchart.wrappingWidth` (an HTML note keeps `white-space: nowrap`;
+                    // class boxes size their text themselves).
+                    options.node_wrap = Some(cfg.flowchart.wrapping_width);
+                    (
+                        diagram::graph::render_with(&g, &cfg.class, &pal, &options),
+                        cfg.class.use_max_width,
+                    )
+                }
+                DiagramType::Sequence => {
+                    let d = diagram::sequence::parse(&pre.body, pre.title.clone())?;
+                    (
+                        diagram::sequence::render(&d, &cfg.sequence, &pal),
+                        cfg.sequence.use_max_width,
+                    )
+                }
+                DiagramType::Pie => {
+                    let p = diagram::pie::parse(&pre.body, pre.title.clone())?;
+                    (
+                        diagram::pie::render(&p, &cfg.pie, &pal),
+                        cfg.pie.use_max_width,
+                    )
+                }
+                DiagramType::Er => (
+                    diagram::er::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("er"),
+                ),
+                DiagramType::Gantt => (
+                    diagram::gantt::render(&pre.body, pre.title.clone(), &cfg, &pal, env.now_ms)?,
+                    cfg.use_max_width("gantt"),
+                ),
+                DiagramType::Journey => (
+                    diagram::journey::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("journey"),
+                ),
+                DiagramType::GitGraph => (
+                    diagram::gitgraph::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("gitGraph"),
+                ),
+                DiagramType::Mindmap => (
+                    diagram::mindmap::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("mindmap"),
+                ),
+                DiagramType::Timeline => (
+                    diagram::timeline::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("timeline"),
+                ),
+                DiagramType::Quadrant => (
+                    diagram::quadrant::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("quadrantChart"),
+                ),
+                DiagramType::Requirement => (
+                    diagram::requirement::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("requirement"),
+                ),
+                DiagramType::C4 => (
+                    diagram::c4::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("c4"),
+                ),
+                DiagramType::Sankey => (
+                    diagram::sankey::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("sankey"),
+                ),
+                DiagramType::XyChart => (
+                    diagram::xychart::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("xyChart"),
+                ),
+                DiagramType::Block => (
+                    diagram::block::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("block"),
+                ),
+                DiagramType::Packet => (
+                    diagram::packet::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("packet"),
+                ),
+                DiagramType::Architecture => (
+                    diagram::architecture::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("architecture"),
+                ),
+                DiagramType::Kanban => (
+                    diagram::kanban::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("kanban"),
+                ),
+                DiagramType::Radar => (
+                    diagram::radar::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("radar"),
+                ),
+                DiagramType::Treemap => (
+                    diagram::treemap::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("treemap"),
+                ),
+                DiagramType::ZenUml => (
+                    diagram::zenuml::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("zenuml"),
+                ),
+                DiagramType::Info => (
+                    diagram::info::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("info"),
+                ),
+                DiagramType::Agentflow => (
+                    diagram::agentflow::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("agentflow"),
+                ),
+                DiagramType::Swimlane => match diagram::swimlane::other_layout(&cfg) {
+                    Some(layout) => {
+                        let opts = diagram::flowchart::ParseOptions {
+                            inherit_dir: cfg.section_bool("flowchart", "inheritDir", false),
+                        };
+                        let mut g =
+                            diagram::swimlane::parse_flowchart(&pre.body, pre.title.clone(), opts)?;
+                        diagram::flowchart::attach_assets(&mut g, &cfg.icon_packs, &env.images)?;
+                        let g = packed(g, &cfg.flowchart, &cfg);
+                        let fcfg = crate::config::GraphConfig {
+                            layout,
+                            ..cfg.flowchart.clone()
+                        };
+                        let mut scene =
+                            diagram::graph::render_with(&g, &fcfg, &pal, &graph_options(&cfg));
+                        scene.kind = crate::scene::DiagramKind::Swimlane;
+                        (scene, cfg.use_max_width("swimlane"))
+                    }
+                    None => (
+                        diagram::swimlane::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                        cfg.use_max_width("swimlane"),
+                    ),
+                },
+                DiagramType::EventModeling => (
+                    diagram::eventmodeling::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("eventmodeling"),
+                ),
+                DiagramType::TreeView => (
+                    diagram::treeview::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("treeView"),
+                ),
+                DiagramType::Ishikawa => (
+                    diagram::ishikawa::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.section_bool("ishikawa", "useMaxWidth", true),
+                ),
+                DiagramType::Railroad => (
+                    diagram::railroad::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("railroad"),
+                ),
+                DiagramType::Venn => (
+                    diagram::venn::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("venn"),
+                ),
+                DiagramType::Wardley => (
+                    diagram::wardley::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("wardley-beta") && cfg.use_max_width("wardley"),
+                ),
+                DiagramType::Cynefin => (
+                    diagram::cynefin::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("cynefin"),
+                ),
+                DiagramType::Usecase => (
+                    diagram::usecase::render(&pre.body, pre.title.clone(), &cfg, &pal)?,
+                    cfg.use_max_width("usecase"),
+                ),
+            })
+        })?;
     if !cfg.icon_packs.is_empty() {
         scene.elements =
             crate::icons::place_pack_icons(std::mem::take(&mut scene.elements), &cfg.icon_packs);

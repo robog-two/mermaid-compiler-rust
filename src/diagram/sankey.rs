@@ -615,7 +615,7 @@ fn label_box(t: &Text) -> Rect {
         Anchor::Middle => t.x - adv / 2.0,
         Anchor::End => t.x - adv,
     };
-    let ascent = (0.905 * t.font_size).round();
+    let ascent = crate::text::ascent_px(t.font_size);
     Rect::new(
         x,
         t.y - ascent,

@@ -1,4 +1,4 @@
-*Includes [Font Awesome Free](https://fontawesome.com) icons by Fonticons, Inc. ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)) and the [TeX Gyre Heros](https://www.gust.org.pl/projects/e-foundry/tex-gyre/heros) font by B. Jackowski and J.M. Nowacki for GUST ([GUST Font License](http://www.gust.org.pl/fonts/licenses/GUST-FONT-LICENSE.txt)); see [NOTICE](NOTICE) and [LICENSES](LICENSES/).*
+*Includes [Font Awesome Free](https://fontawesome.com) icons by Fonticons, Inc. ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)) the [TeX Gyre Heros](https://www.gust.org.pl/projects/e-foundry/tex-gyre/heros) font by B. Jackowski and J.M. Nowacki for GUST ([GUST Font License](http://www.gust.org.pl/fonts/licenses/GUST-FONT-LICENSE.txt)), and the [Recursive](https://github.com/arrowtype/recursive) font by The Recursive Project Authors and the [Open Sans](https://github.com/googlefonts/opensans) font by The Open Sans Project Authors ([SIL Open Font License 1.1](https://openfontlicense.org)); see [NOTICE](NOTICE) and [LICENSES](LICENSES/).*
 
 # Mermaid Diagram Compiler (rust)
 

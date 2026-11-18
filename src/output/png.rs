@@ -1,10 +1,13 @@
 //! SVG → PNG rasterisation with resvg (pure Rust). Enabled by the `png` feature.
 //!
-//! Text is drawn with the first installed font of a label's `font-family`; when
-//! none is installed (a bare server or container), with the bundled TeX Gyre
-//! Heros ([`crate::fonts`], the `fonts` feature), so PNG output never depends on
-//! what the machine has. Layout is unaffected either way: it is measured with
-//! Arial's metrics before any font is chosen.
+//! Text is drawn with the first available font of a label's `font-family`. The
+//! web fonts mmdc loads, Recursive Variable and Open Sans, are bundled
+//! ([`crate::fonts`], the `fonts` feature) and found before any system font of
+//! the same name, so the redux themes' labels look as mmdc draws them; for
+//! other families the machine's fonts serve, and when none matches (a bare
+//! server or container), the bundled TeX Gyre Heros, so PNG output never
+//! depends on what the machine has. Layout is unaffected either way: it is
+//! measured from tables before any font is chosen.
 
 use resvg::tiny_skia;
 use resvg::usvg::{self, fontdb};
@@ -36,6 +39,11 @@ impl Rasterizer {
     fn with_system_fonts(system: bool) -> Self {
         let mut opt = usvg::Options::default();
         let db = opt.fontdb_mut();
+        // The web fonts first: a query takes the first face that matches.
+        #[cfg(feature = "fonts")]
+        for data in crate::fonts::WEB_FILES {
+            db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(data)));
+        }
         if system {
             db.load_system_fonts();
         }
@@ -179,6 +187,32 @@ mod tests {
         let mut faces = Vec::new();
         collect_fonts(tree.root(), &r.opt, &mut faces);
         assert_eq!(faces, ["TeXGyreHeros-BoldItalic"]);
+    }
+
+    /// The redux themes' and C4's families draw in the bundled web fonts, by
+    /// weight and slant (Open Sans' bold is the emboldened regular outline).
+    #[test]
+    fn web_font_families_draw_in_the_bundled_faces() {
+        let r = Rasterizer::bundled_only();
+        let faces = |family: &str, weight: &str, style: &str| {
+            let svg = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"40\"><text x=\"10\" y=\"28\" font-family=\"{family}\" font-weight=\"{weight}\" font-style=\"{style}\">Hello</text></svg>"
+            );
+            let tree = usvg::Tree::from_str(&svg, &r.opt).unwrap();
+            let mut out = Vec::new();
+            collect_fonts(tree.root(), &r.opt, &mut out);
+            out
+        };
+        let rec = "&quot;Recursive Variable&quot;, arial, sans-serif";
+        assert_eq!(
+            faces(rec, "normal", "normal"),
+            ["RecursiveVariable-Regular"]
+        );
+        assert_eq!(faces(rec, "bold", "normal"), ["RecursiveVariable-Bold"]);
+        assert_eq!(faces(rec, "normal", "italic"), ["RecursiveVariable-Italic"]);
+        let os = "&quot;Open Sans&quot;, sans-serif";
+        assert_eq!(faces(os, "normal", "normal"), ["OpenSans-Regular"]);
+        assert_eq!(faces(os, "bold", "italic"), ["OpenSans-BoldItalic"]);
     }
 
     fn collect_fonts(g: &usvg::Group, opt: &usvg::Options, out: &mut Vec<String>) {

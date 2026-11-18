@@ -1241,7 +1241,7 @@ mod tests {
                    triage -->|Needs code change| investigate\n  investigate --> fix --> answer\n  \
                    answer --> receive\n";
         let paths = drawn_paths(src);
-        for start in ["M-54.131,-25.349C", "M-72.446,411.378C"] {
+        for start in ["M-54.131,-25.349C", "M-72.584,411.258C"] {
             assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
         }
     }

@@ -2,7 +2,8 @@
 //! drawing's bbox less the diagram padding, and the drawing starts inside the
 //! layout's own margin (ELK's 12px root padding, dagre's 8px `marginx` /
 //! `marginy`). The expected values are the ones mermaid 12.3.0 renders in
-//! Chromium for the same input.
+//! Chromium for the same input, with the fonts mmdc loads (the redux themes'
+//! labels in Recursive Variable).
 
 use mmdc::config::MermaidConfig;
 use mmdc::output::{self, EncodeOptions};
@@ -67,9 +68,9 @@ test_entity - satisfies -> test_req
 #[test]
 fn elk_drawings_start_inside_the_12px_root_padding() {
     assert_view_box(FLOWCHART, [4.0, 4.0, 360.0, 418.0], 1e-3);
-    assert_view_box(CLASS, [4.0, 4.0, 113.5625, 290.0], 1e-2);
+    assert_view_box(CLASS, [4.0, 4.0, 121.141, 290.0], 1e-2);
     assert_view_box(STATE, [4.0, 4.0, 152.0, 238.0], 1e-3);
-    assert_view_box(REQUIREMENT, [4.0, 4.0, 148.859375, 386.0], 1e-2);
+    assert_view_box(REQUIREMENT, [4.0, 4.0, 172.781, 386.0], 1e-2);
 }
 
 #[test]
@@ -78,9 +79,9 @@ fn dagre_drawings_start_inside_the_8px_margins() {
     // diagrams keep `rankSpacing` 50.
     let d = |s: &str| format!("{DAGRE}{s}");
     assert_view_box(&d(FLOWCHART), [0.0, 0.0, 370.0, 398.0], 1e-3);
-    assert_view_box(&d(CLASS), [0.0, 0.0, 113.5625, 300.0], 1e-2);
+    assert_view_box(&d(CLASS), [0.0, 0.0, 121.141, 300.0], 1e-2);
     assert_view_box(&d(STATE), [0.0, 0.0, 152.0, 268.0], 1e-3);
-    assert_view_box(&d(REQUIREMENT), [0.0, 0.0, 148.859375, 356.0], 1e-2);
+    assert_view_box(&d(REQUIREMENT), [0.0, 0.0, 172.781, 356.0], 1e-2);
 }
 
 #[test]
@@ -97,27 +98,27 @@ fn titles_sit_on_a_baseline_at_minus_title_top_margin() {
     // (ascent 13).
     assert_view_box(
         &format!("{TITLED}{FLOWCHART}"),
-        [4.0, -49.0, 360.0, 471.0],
+        [4.0, -50.0, 360.0, 472.0],
         1e-3,
     );
     assert_view_box(
         &format!("{TITLED}{STATE}"),
-        [4.0, -49.0, 152.0, 291.0],
+        [-4.41, -50.0, 168.828, 292.0],
         1e-3,
     );
     assert_view_box(
         &format!("{TITLED}{CLASS}"),
-        [1.9453125, -46.0, 117.671875, 340.0],
+        [-2.86, -46.0, 134.875, 340.0],
         2e-2,
     );
     assert_view_box(
         &format!("{TITLED}{REQUIREMENT}"),
-        [4.0, -46.0, 148.859375, 436.0],
+        [4.0, -46.0, 172.781, 436.0],
         1e-2,
     );
     assert_view_box(
         &format!("{TITLED_DAGRE}{STATE}"),
-        [0.0, -49.0, 152.0, 317.0],
+        [-8.41, -50.0, 168.828, 318.0],
         1e-3,
     );
 }
@@ -128,13 +129,13 @@ fn usecase_drawings_start_inside_the_layout_margin() {
     // labels' `.labelBkg` padding (2px a side) is part of the size ELK gets.
     assert_view_box(
         "usecase-beta\ndirection LR\nA(\"Alpha\")\nB(\"Beta\")\nA -- \"include\" --> B\n",
-        [-8.0, -8.0, 475.703125, 98.0],
+        [-8.0, -8.0, 480.0, 98.0],
         2e-2,
     );
     assert_view_box(
         "usecase-beta\ndirection LR\nactor X\nsystemBoundary S[\"Sys\"]\n  A(\"Alpha\")\n  \
          B(\"Beta\")\nend\nX --> A\nA ..> : include B\n",
-        [-8.0, -8.0, 628.8125, 177.5],
+        [-8.0, -8.0, 634.0, 177.5],
         2e-2,
     );
 }
@@ -167,7 +168,7 @@ fn dagre_clusters_take_dagre_frames() {
     );
     assert_view_box(
         &d("classDiagram\n  namespace N {\n    class A\n    class B\n  }\n  A <|-- B\n  C --> A\n"),
-        [0.0, 0.0, 120.125, 409.0],
+        [0.0, 0.0, 119.109, 409.0],
         1e-2,
     );
 }
@@ -196,27 +197,27 @@ fn gallery_examples_under_dagre_match_mermaid() {
     let cases: [(&str, [f64; 4]); 6] = [
         (
             include_str!("../examples/diagrams/subgraphs.mmd"),
-            [0.0, 0.0, 1674.26220703125, 304.75],
+            [0.0, 0.0, 1675.8582763671875, 304.75],
         ),
         (
             include_str!("../examples/diagrams/flowchart.mmd"),
-            [0.0, -49.0, 533.64453125, 825.66015625],
+            [0.0, -50.0, 534.40625, 827.37744140625],
         ),
         (
             include_str!("../examples/diagrams/shapes.mmd"),
-            [0.0, -49.0, 1344.2384033203125, 1889.31005859375],
+            [0.0, -50.0, 1344.2384033203125, 1891.7811279296875],
         ),
         (
             include_str!("../examples/diagrams/agentflow.mmd"),
-            [0.0, 0.0, 483.1999816894531, 881.9920043945312],
+            [0.0, 0.0, 483.765625, 881.9920043945312],
         ),
         (
             include_str!("../examples/diagrams/usecase.mmd"),
-            [-12.0, -12.0, 853.265625, 648.75],
+            [-12.0, -12.0, 891.09375, 664.5],
         ),
         (
             include_str!("../examples/diagrams/subgraph-collapse.mmd"),
-            [0.0, 0.0, 1178.26220703125, 287.398681640625],
+            [0.0, 0.0, 1179.8582763671875, 287.398681640625],
         ),
     ];
     for (src, expected) in cases {
@@ -266,12 +267,8 @@ fn dagre_labels_move_with_their_cut_routes() {
          n1 ==> n4\n  n6 --> n3\n  n7 ==> n0\n  n5 --> n8\n",
     );
     // (The text widths differ from Chromium's by a few hundredths.)
-    assert_label_at(&flat, (660.7725875, 19.54185), 0.1);
-    assert_view_box(
-        &flat,
-        [0.0, 1.041849136352539, 878.887939453125, 418.2081604003906],
-        5e-2,
-    );
+    assert_label_at(&flat, (665.831, 19.609), 0.1);
+    assert_view_box(&flat, [0.0, 1.109, 884.997, 418.141], 5e-2);
     // From a cluster: the route leaves the frame where the line from its
     // centre to the first bend does, and a route cut at a frame always counts
     // as moved.
@@ -280,7 +277,7 @@ fn dagre_labels_move_with_their_cut_routes() {
             "flowchart TD\n  subgraph C0\n    c0n0\n  end\n  x0\n  x1\n  C0 -->|x| x1\n  \
             c0n0 --> x1\n  C0 --> x0\n  C0 --> x1\n",
         ),
-        (107.5, 123.31887),
+        (108.203, 123.086),
         1e-3,
     );
     // Between a cluster and one inside it: routed (not a loop), and cut down
@@ -291,9 +288,9 @@ fn dagre_labels_move_with_their_cut_routes() {
          c3n0\n    c3n1\n    c3n2\n    c3n0 --> c3n1\n    c3n1 --> c3n2\n  end\n  x0\n  \
          C1 -->|a label| C2\n  c3n1 --> c1n0\n  C2 -->|x| C3\n",
     );
-    assert_label_at(&nested, (271.12814249999997, 88.08064516129032), 1e-2);
-    assert_label_at(&nested, (275.69647, 117.75), 1e-2);
-    assert_view_box(&nested, [0.0, 0.0, 967.265625, 576.0], 1e-2);
+    assert_label_at(&nested, (271.8335, 88.155), 1e-2);
+    assert_label_at(&nested, (276.399, 117.75), 1e-2);
+    assert_view_box(&nested, [0.0, 0.0, 974.875, 576.0], 1e-2);
 }
 
 #[test]
@@ -373,7 +370,7 @@ fn elk_state_composites_keep_their_title_band() {
     // subgraphs), not 23.
     assert_view_box(
         include_str!("../examples/diagrams/state.mmd"),
-        [4.0, 4.0, 312.375, 718.0],
+        [4.0, 4.0, 326.258, 718.0],
         1e-2,
     );
     assert_view_box(

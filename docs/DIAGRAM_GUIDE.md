@@ -20,7 +20,12 @@ It is wired up in `src/diagram/mod.rs` (detection) and `src/render.rs` (dispatch
   Arrowheads, arcs and curves must be geometry (`geom::polygon`, `geom::arc_cubics`,
   `geom::basis_curve`, `geom::ellipse`) — no SVG markers or filters — so the PDF writer can draw them.
 - **Text** is measured with `text::TextBlock::label(raw, font_size)` / `text::line_width`. Text `y` is a
-  baseline; `Text::centered` handles vertical centring.
+  baseline; `Text::centered` handles vertical centring. Measurement uses the face the theme's
+  `fontFamily` names (`render` runs each layout inside `text::with_family`): Arial's metrics for
+  the classic themes, Recursive Variable for the redux themes (mermaid's default for flowcharts,
+  sequence, class, state, ER, ...), Open Sans for `"Open Sans"` families. Text drawn in a family
+  of its own (C4 cards, usecase actors) is measured inside `text::with_family(family, ..)` and
+  carries `Text::family`, so the SVG / PDF writers place it in the same face.
 - **Colours** come from `Palette` (`pal.main_bkg`, `pal.node_border`, `pal.line_color`, `pal.text_color`,
   `pal.scale_color(i)` / `pal.scale_text_color(i)` for per-section colours, `pal.dark`, ...). Do not edit
   `theme.rs`; derive what you need locally.

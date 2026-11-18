@@ -1107,11 +1107,7 @@ impl Section {
     }
     /// Baseline of the first line below the section top (font ascent).
     fn ascent(&self) -> f64 {
-        match self.kind {
-            SectionKind::Name => self.font * 13.0 / 14.0,
-            SectionKind::Type => self.font * 10.0 / 10.5,
-            SectionKind::Descr => self.font * 10.0 / 11.48,
-        }
+        text::ascent_px(self.font)
     }
 }
 
@@ -2261,8 +2257,39 @@ pub fn render(
         radius: pal.radius.unwrap_or(5.0),
     });
     let lconf = LayoutConf::from_config(cfg);
-    let lay = layout(&d, &conf, &lconf);
-    draw(&d, &lay, &conf, &lconf, pal)
+    // The cards, boundaries and relationship labels are measured and drawn in
+    // `c4.personFontFamily` and its siblings (`"Open Sans", sans-serif`, a web
+    // font mmdc loads): calculateTextDimensions keeps that family's box over
+    // sans-serif's, and svgDraw's texts take it. The title keeps the theme's.
+    let family = cfg
+        .section("c4", "personFontFamily")
+        .and_then(crate::json::Json::as_str)
+        .unwrap_or(C4_FONT_FAMILY)
+        .to_string();
+    let lay = text::with_family(&family, || layout(&d, &conf, &lconf));
+    let mut scene = text::with_family(&family, || draw(&d, &lay, &conf, &lconf, pal))?;
+    set_text_family(&mut scene.elements, &family);
+    Ok(scene)
+}
+
+/// mermaid's default `c4.*FontFamily`.
+const C4_FONT_FAMILY: &str = "\"Open Sans\", sans-serif";
+
+/// Give every text but the title `family`.
+fn set_text_family(els: &mut [Element], family: &str) {
+    for el in els {
+        match el {
+            Element::Text { text, class } if class.as_deref() != Some("c4-title") => {
+                text.family = Some(family.to_string().into());
+            }
+            Element::OutlinedText { text, .. } => text.family = Some(family.to_string().into()),
+            Element::Group { children, .. }
+            | Element::Rotated { children, .. }
+            | Element::Brightened { children, .. }
+            | Element::Translated { children, .. } => set_text_family(children, family),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2656,10 +2683,10 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
                    Rel(web, q, \"Publishes\")\n  Rel(q, comp, \"Feeds\")\n";
         let paths = drawn_paths(src);
         for start in [
-            "M157.134,270.95C",
-            "M470.752,169.865C",
-            "M152.115,457.324C",
-            "M152.44,661.935C",
+            "M157.673,277.327C",
+            "M474.159,175.738C",
+            "M152.115,470.085C",
+            "M156.204,680.176C",
         ] {
             assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
         }
@@ -2752,7 +2779,8 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
 
     /// A boundary's `$sprite` reserves 48px above its label (nothing is drawn); a
     /// named attribute in the type slot leaves the type unset, a positional
-    /// sprite is dropped. View boxes from mermaid 12.3.0.
+    /// sprite is dropped. View boxes from mermaid 12.3.0 (with mmdc's fonts:
+    /// the cards in Open Sans).
     #[test]
     fn boundary_sprites_reserve_room_above_the_label() {
         let vb = |src: &str| scene(src).view_box;
@@ -2764,33 +2792,33 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         let system =
             "C4Context\nSystem_Boundary(b, \"Bound\", $sprite=\"users\") {\n  System(a, \"A\")\n}";
         assert!(
-            close(vb(system), (0.0, -10.0, 616.0, 503.0)),
+            close(vb(system), (0.0, -10.0, 616.0, 522.0)),
             "{:?}",
             vb(system)
         );
         let plain = "C4Context\nSystem_Boundary(b, \"Bound\") {\n  System(a, \"A\")\n}";
-        assert!(close(vb(plain), (0.0, -10.0, 616.0, 455.0)));
+        assert!(close(vb(plain), (0.0, -10.0, 616.0, 474.0)));
         let positional = node("n, \"Node\", \"Ubuntu\", \"desc\", \"ubuntu\"");
         assert!(
-            close(positional, (0.0, -10.0, 616.0, 489.0)),
+            close(positional, (0.0, -10.0, 616.0, 511.0)),
             "{positional:?}"
         );
         let in_type_slot = node("n, \"Node\", $sprite=\"ubuntu\"");
         assert!(
-            close(in_type_slot, (0.0, -10.0, 616.0, 482.0)),
+            close(in_type_slot, (0.0, -10.0, 616.0, 498.0)),
             "{in_type_slot:?}"
         );
         let typed = node("n, \"Node\", \"Ubuntu\", $sprite=\"ubuntu\"");
-        assert!(close(typed, (0.0, -10.0, 616.0, 503.0)), "{typed:?}");
+        assert!(close(typed, (0.0, -10.0, 616.0, 522.0)), "{typed:?}");
         let empty_type = vb("C4Context\nBoundary(b, \"Bound\", \"\") {\n  System(a, \"A\")\n}");
         assert!(
-            close(empty_type, (0.0, -10.0, 616.0, 434.0)),
+            close(empty_type, (0.0, -10.0, 616.0, 450.0)),
             "{empty_type:?}"
         );
         let updated = vb(
             "C4Context\nBoundary(b, \"Bound\") {\n  System(a, \"A\")\n}\nUpdateElementStyle(b, $sprite=\"x\")",
         );
-        assert!(close(updated, (0.0, -10.0, 616.0, 503.0)), "{updated:?}");
+        assert!(close(updated, (0.0, -10.0, 616.0, 522.0)), "{updated:?}");
     }
 
     #[test]
@@ -2798,20 +2826,20 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         // mermaid 12.3 in mmdc's 800px-wide headless screen.
         let s = scene(include_str!("../../examples/diagrams/c4-container.mmd"));
         assert!(
-            close(s.view_box, (0.0, -70.0, 955.489, 1546.478)),
+            close(s.view_box, (0.0, -70.0, 957.39682, 1620.505736)),
             "{:?}",
             s.view_box
         );
         let s = scene(include_str!("../../examples/diagrams/c4.mmd"));
         assert!(
-            close(s.view_box, (0.0, -70.0, 1032.0, 2801.359)),
+            close(s.view_box, (0.0, -70.0, 1032.0, 2914.615474)),
             "{:?}",
             s.view_box
         );
         // Without a title there is no 60px band.
         let s = scene("C4Context\nSystem(a, \"A\")");
         assert!(
-            close(s.view_box, (0.0, -10.0, 516.0, 349.0)),
+            close(s.view_box, (0.0, -10.0, 516.0, 360.0)),
             "{:?}",
             s.view_box
         );
@@ -2830,7 +2858,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
             .iter()
             .find(|t| t.lines.iter().map(|l| text::plain(l)).eq(["[HHHH]"]))
             .unwrap();
-        assert_eq!((label.y, techn.y), (294.5, 311.5));
+        assert_eq!((label.y, techn.y), (306.5, 323.5));
         // The technology is italic.
         assert_eq!(
             text::styled_runs(&techn.lines[0], false),
@@ -2846,7 +2874,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
         let t = texts(&s);
         let label = t.iter().find(|t| t.lines == ["HHHH"]).unwrap();
         let kind = t.iter().find(|t| t.lines == ["[HHHH]"]).unwrap();
-        assert_eq!((label.y, kind.y), (138.0, 159.5));
+        assert_eq!((label.y, kind.y), (154.5, 180.5));
         assert!(label.bold && (label.x - 308.0).abs() < 1e-9);
     }
 

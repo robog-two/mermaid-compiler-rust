@@ -37,7 +37,7 @@ pub fn unknown(r: Rect) -> Element {
         fill: Color::new("#ffffff"),
         tspan_central: false,
         dy_tspans: false,
-        family: Some("ArialMT, Arial"),
+        family: Some("ArialMT, Arial".into()),
     })
 }
 

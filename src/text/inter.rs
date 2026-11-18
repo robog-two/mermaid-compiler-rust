@@ -21,7 +21,7 @@ pub fn canvas_width(text: &str, font_size: f64) -> f64 {
         }
         units += match c as u32 {
             code @ 0x20..=0x7E => f64::from(INTER_ADVANCE[(code - 0x20) as usize]),
-            _ => super::char_width_em(c, false) * 2048.0,
+            _ => super::arial_char_width_em(c, false) * 2048.0,
         };
         prev = Some(c);
     }

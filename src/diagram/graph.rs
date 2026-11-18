@@ -875,7 +875,7 @@ fn svg_class_box(node: &Node, font: f64, pad: f64) -> SvgClassBox {
     let gap = pad;
     // The box top of a text of height `h` in its group, `y` down the group:
     // its first baseline is 1em below, the ascent above that.
-    let ascent = (0.905 * font).round();
+    let ascent = crate::text::ascent_px(font);
     let top_of = |t: &SvgClassText, y: f64| y - t.height / (2.0 * t.lines as f64) + font - ascent;
     let name = svg_class_text(
         node.sections
@@ -1379,7 +1379,7 @@ fn measure_node(
             rect_w: w,
             rect_h: h,
             right: (w / 2.0).max(tw),
-            bottom: (h / 2.0).max(th / 2.0 + font - (0.905 * font).round()),
+            bottom: (h / 2.0).max(th / 2.0 + font - crate::text::ascent_px(font)),
         });
     let (w, h) = overhang.map_or((w, h), |o| {
         (o.rect_w / 2.0 + o.right, o.rect_h / 2.0 + o.bottom)
@@ -3168,7 +3168,7 @@ pub fn render_with(
             _ => (18.0, "flowchartTitleText"),
         };
         let tw = crate::text::line_width(t, size, false);
-        let ascent = (0.905 * size).round();
+        let ascent = crate::text::ascent_px(size);
         let cx = content.x + content.w / 2.0;
         // Its `getBBox()` reaches each glyph's ink, rounded out to whole pixels.
         let (left, right) = crate::text::svg_bbox_extent(t, size, false);
@@ -3406,7 +3406,7 @@ fn rect_intersection(c: Point, w: f64, h: f64, outside: Point, inside: Point) ->
 }
 
 /// `utils.calcLabelPosition`: the point half way along `points`.
-fn calc_label_position(points: &[Point]) -> Point {
+pub(super) fn calc_label_position(points: &[Point]) -> Point {
     if points.len() == 1 {
         return points[0];
     }
@@ -3544,7 +3544,7 @@ fn calculate_point(points: &[Point], distance: f64) -> Point {
 
 /// `utils.isLabelCoordinateInPath`: whether the rounded `x` or `y` of `p`
 /// occurs anywhere in the path data (its decimals rounded too), as text.
-fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> bool {
+pub(super) fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> bool {
     // JS `Math.round` (half up) and number printing.
     let js_round = |v: f64| ((v + 0.5).floor() as i64).to_string();
     // Both in the coordinates of the group the path is drawn in.
@@ -6044,7 +6044,7 @@ fn node_elements(
                 dy_tspans: false,
                 // console.ts: `font-family: monospace` (DejaVu Sans Mono Bold
                 // where mmdc runs).
-                family: Some("monospace"),
+                family: Some("monospace".into()),
             };
             els.push(Element::classed_text(text, "console-glyph"));
         }
@@ -6150,9 +6150,11 @@ fn node_elements(
                                 si == 0,
                             ),
                         };
+                        // createText's SVG rows: one tspan per word (each laid
+                        // out in whole layout units), as the box was measured.
                         let mut t = Text::centered(
                             Point::new(c.x + x, c.y),
-                            std::slice::from_ref(&line),
+                            &[crate::text::word_runs(&line)],
                             font,
                             font,
                             &text_color,
@@ -6551,7 +6553,7 @@ fn node_elements(
         if m.block.svg && corrects_glyph_offset(n.shape) {
             // These shapes subtract the text's `getBBox().y` when placing the label,
             // so the glyph box (not the text origin) sits where the HTML box would.
-            at.y -= font - (0.905 * font).round();
+            at.y -= font - crate::text::ascent_px(font);
         }
         let mut t = m.block.centered_text(at, &text_color);
         if m.block.svg && matches!(kind, DiagramKind::State | DiagramKind::Class) {
@@ -7102,7 +7104,7 @@ fn accent_parts(o: shapes::Outline, pal: &Palette) -> Vec<Element> {
             fill: pal.node_border.clone(),
             tspan_central: false,
             dy_tspans: false,
-            family: Some("monospace"),
+            family: Some("monospace".into()),
         };
         els.push(Element::classed_text(text, "console-glyph"));
     }
@@ -7345,7 +7347,7 @@ mod tests {
             _ => None,
         });
         assert!(
-            d.as_deref().unwrap_or("").starts_with("M480.89,323.683C"),
+            d.as_deref().unwrap_or("").starts_with("M480.89,323.504C"),
             "{d:?}"
         );
     }
@@ -7418,7 +7420,7 @@ mod tests {
             }),
             _ => None,
         });
-        assert_eq!(d.as_deref(), Some("M385.374,92.5L428.039,155.193"));
+        assert_eq!(d.as_deref(), Some("M385.553,92.5L428.641,155.203"));
     }
 
     /// mermaid 12.3.0: a stadium is as wide as its drawn polygon, whose
@@ -7453,7 +7455,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let at = Point::new(987.4221854345703, 434.0);
+        let at = Point::new(993.7346854345703, 434.0);
         assert!(centres.iter().any(|c| c.dist(at) < 1e-3), "{centres:?}");
     }
 
@@ -7988,7 +7990,9 @@ mod tests {
     #[test]
     fn elk_separate_container_holds_its_title_label() {
         let long = "A really very much longer title for this subgraph here";
-        let title = TextBlock::label(long, 14.0).html();
+        let title = crate::text::with_face(crate::text::Face::Recursive, || {
+            TextBlock::label(long, 14.0).html()
+        });
         let scene = render_cli(&format!(
             "flowchart TD\nsubgraph S[{long}]\ndirection LR\na\nend\nb --> S"
         ));
@@ -8050,7 +8054,9 @@ mod tests {
                 _ => None,
             })
             .expect("the title as the node's label");
-        let title = TextBlock::label("Inner title", label.font_size).html();
+        let title = crate::text::with_face(crate::text::Face::Recursive, || {
+            TextBlock::label("Inner title", label.font_size).html()
+        });
         assert!((inner.0.w - (title.width + 32.0)).abs() < 1e-6, "{inner:?}");
         assert!(
             (inner.0.h - (title.height + 24.0)).abs() < 1e-6,

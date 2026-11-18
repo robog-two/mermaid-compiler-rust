@@ -9,7 +9,7 @@ fn svg(src: &str) -> String {
     output::encode_svg(&r, &EncodeOptions::default())
 }
 
-/// ClassMember's classifiers (mermaid 12.3.0, pixel-compared in Chromium): a
+/// ClassMember's classifiers (mermaid 12.3.0 with mmdc's fonts, pixel-compared in Chromium): a
 /// static (`$`) member is underlined, an abstract (`*`) one italic where its
 /// label is HTML. SVG text paints the underline in the label group's fill
 /// (the theme's textColor), `max(1, size / 10)` thick from one pixel under the
@@ -19,16 +19,16 @@ fn static_members_are_underlined_and_abstract_ones_italic() {
     let body = "classDiagram\n  class Queue~int~ {\n    +List~int~ items$\n    +push(int x)$\n    +pop()* int\n    +count$ int\n  }\n";
     let svg_labels = svg(&format!("---\nconfig:\n  htmlLabels: false\n---\n{body}"));
     assert!(svg_labels.contains(
-        "<rect class=\"member-underline\" x=\"24\" y=\"79\" width=\"98.438\" height=\"1.4\" fill=\"#28253D\""
+        "<rect class=\"member-underline\" x=\"24\" y=\"79.5\" width=\"116.06\" height=\"1.4\" fill=\"#28253D\""
     ));
-    assert!(svg_labels.contains("y=\"138\" width=\"73.534\" height=\"1.4\""));
+    assert!(svg_labels.contains("y=\"140.5\" width=\"84.7\" height=\"1.4\""));
     // `count$ int` is an attribute ending in `t`: no classifier.
     assert_eq!(svg_labels.matches("member-underline").count(), 2);
     // An SVG label's own `font-style` keeps the abstract member upright.
     assert!(!svg_labels.contains("italic"));
     let html = svg(body);
     assert!(html.contains(
-        "<rect class=\"member-underline\" x=\"24\" y=\"86.5\" width=\"98.438\" height=\"1\" fill=\"#000000\""
+        "<rect class=\"member-underline\" x=\"24\" y=\"86.5\" width=\"116.062\" height=\"1\" fill=\"#000000\""
     ));
     assert!(html.contains("font-style=\"italic\">+pop() : int<"));
     let big = svg(
@@ -45,8 +45,8 @@ fn class_namespaces_come_first_under_elk() {
     let s = svg(
         "classDiagram\n  class Animal\n  class Dog\n  Animal <|-- Dog\n  namespace Zoo {\n    class Cage\n  }\n",
     );
-    assert!(s.contains("<rect x=\"12\" y=\"12\" width=\"106.234\" height=\"153\""));
-    assert!(s.contains("x=\"158.234\" y=\"84\" width=\"70.688\" height=\"81\""));
+    assert!(s.contains("<rect x=\"12\" y=\"12\" width=\"105.047\" height=\"153\""));
+    assert!(s.contains("x=\"157.047\" y=\"84\" width=\"71.75\" height=\"81\""));
 }
 
 /// Class labels take `classText`: the default theme's `primaryTextColor`,

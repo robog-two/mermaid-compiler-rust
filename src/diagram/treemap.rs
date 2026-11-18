@@ -536,7 +536,7 @@ pub fn draw(
         // (the baseline lands on Chromium's 1/64px grid in screen space)
         let baseline_px = title_h / 2.0 * scale + baseline_shift(Baseline::Middle, fs);
         let baseline = (baseline_px * 64.0 + 1e-6).floor() / 64.0 / scale;
-        let top = baseline - (0.905 * fs).round() / scale;
+        let top = baseline - crate::text::ascent_px(fs) / scale;
         bounds.add_rect(Rect::new(
             width / 2.0 - tw / 2.0,
             top,

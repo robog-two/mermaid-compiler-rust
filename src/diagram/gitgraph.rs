@@ -568,7 +568,7 @@ impl<'a> Commits<'a> {
 /// top below the text's origin).
 fn branch_label_box(name: &str, font: f64, bold: bool) -> (f64, f64, f64, Vec<String>) {
     let rows: Vec<String> = split_rows(name);
-    let ascent = (0.905 * font).round();
+    let ascent = crate::text::ascent_px(font);
     let (mut w, mut top, mut bottom) = (0.0f64, f64::INFINITY, f64::NEG_INFINITY);
     for (i, r) in rows.iter().enumerate() {
         let baseline = font * (i + 1) as f64;
@@ -1054,7 +1054,7 @@ fn rounded(points: &[Point], r: f64) -> Vec<PathCmd> {
 fn text_box(x: f64, y: f64, s: &str, font: f64) -> Rect {
     Rect::new(
         x,
-        y - (0.905 * font).round(),
+        y - crate::text::ascent_px(font),
         svg_bbox_width(s, font),
         svg_line_box(font, s),
     )
@@ -1485,7 +1485,7 @@ fn commit_label(
     // themes) under the neo colour generator.
     let w = crate::text::svg_bbox_width_weight(id, LABEL_FONT, st.redux);
     let h = svg_line_box(LABEL_FONT, id);
-    let ascent = (0.905 * LABEL_FONT).round();
+    let ascent = crate::text::ascent_px(LABEL_FONT);
     let (rect, tx, ty) = if o == Orientation::LR {
         (
             Rect::new(
@@ -1592,7 +1592,7 @@ fn commit_tags(
     if c.tags.is_empty() {
         return out;
     }
-    let ascent = (0.905 * TAG_FONT).round();
+    let ascent = crate::text::ascent_px(TAG_FONT);
     let tag_w = c
         .tags
         .iter()

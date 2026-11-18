@@ -210,7 +210,7 @@ fn padded_node_height(lines: &[String], font: f64, conf_font: f64, pad: f64) -> 
 }
 
 /// `getBBox().height` of the node text: lines 1.1em apart, `dominant-baseline:
-/// middle`. Chromium shifts the baseline by half the x-height (1082/2048 em) and
+/// middle`. Chromium shifts the baseline by half the x-height (Arial 1082/2048 em) and
 /// snaps the box's edges to 1/64 px, a tie moving each edge outwards: at 16px the
 /// shift is 270.5/64 px, so a line whose bottom is its font's descent (no deep
 /// descender) is 1/64 px taller than [`text::svg_line_box`] (17.015625px,
@@ -221,7 +221,7 @@ fn middle_text_height(lines: &[String], font: f64) -> f64 {
         return h;
     }
     let last = lines.last().map_or("", String::as_str);
-    let shift64 = 1082.0 / 2048.0 * font / 2.0 * 64.0;
+    let shift64 = text::face().x_height_em(false) * font / 2.0 * 64.0;
     let tie = (shift64 - shift64.floor() - 0.5).abs() < 1e-9;
     let at_descent = text::svg_line_box(font, last) == text::svg_line_box(font, "");
     if tie && at_descent { h + 1.0 / 64.0 } else { h }
@@ -353,14 +353,14 @@ fn draw_node(
 }
 
 /// The title: a bold `4ex` text at (`x`, 20). Chromium's `ex` is the font's
-/// x-height (1082/2048 em) and its text box the rounded ascent and descent. It
+/// x-height (the measuring face's) and its text box the rounded ascent and descent. It
 /// has no class or fill of its own, so it paints in the diagram root's `fill`,
 /// the theme's `textColor`.
 fn title_text(t: &str, x: f64, font: f64, pal: &Palette) -> (Element, Rect) {
-    let size = 4.0 * 1082.0 / 2048.0 * font;
+    let size = 4.0 * crate::text::face().x_height_em(false) * font;
     let line = crate::text::label_lines(t).join(" ");
     let w = line_width(&line, size, true);
-    let (asc, desc) = ((0.905 * size).round(), (0.212 * size).round());
+    let (asc, desc) = (text::ascent_px(size), text::descent_px(size));
     let el = Element::classed_text(
         Text {
             x,
@@ -914,14 +914,26 @@ fn node_box(r: Rect, ci: usize, st: &NodeStyle) -> Element {
     }
     let mut els = vec![Element::classed_shape(Geometry::Path(d), paint, "node-bkg")];
     if st.redux.is_none() {
-        // A gradient across the line's empty bounding box paints nothing.
-        if st.gradient.is_none() {
-            els.push(Element::line(
-                p(0.0, h),
-                p(w, h),
-                Paint::stroke(pal.scale_inv_color(ci), 3.0),
-            ));
-        }
+        // Under the gradient rule (`stroke: url(#{id}-gradient)`) the line
+        // paints nothing: the gradient spans its empty bounding box, or
+        // (`timeline TD`) is not defined.
+        let paint = match &st.gradient {
+            None => Paint::stroke(pal.scale_inv_color(ci), 3.0),
+            Some(Some(g)) => Paint::stroke(&Color::none(), 2.0).with_stroke_gradient(g.clone()),
+            // Written with a gradient too: the outline is there, painting nothing.
+            Some(None) => match pal.node_gradient.as_ref() {
+                Some((a, b)) => Paint::stroke(&Color::none(), 2.0)
+                    .with_stroke_gradient(Gradient::across_bbox(a, b)),
+                None => Paint::stroke(&Color::none(), 2.0),
+            },
+        };
+        els.push(Element::shape(
+            Geometry::Line {
+                a: p(0.0, h),
+                b: p(w, h),
+            },
+            paint,
+        ));
     }
     Element::group("node", els)
 }
