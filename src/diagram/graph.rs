@@ -2134,6 +2134,16 @@ pub fn render_with(
             match e.from {
                 Endpoint::Cluster(c) => pts = cut_at_rect(&pts, &cluster_rects[c.0], elk),
                 Endpoint::Node(NodeId(i)) if by_centre => pts[0] = boundaries[i].clip(pts[0]),
+                // A hand-drawn start circle measures past its port: mermaid's
+                // `intersect.circle` still puts the end on the ray from the
+                // centre, beyond the port (which the route then keeps).
+                Endpoint::Node(NodeId(i))
+                    if elk
+                        && lk.hand_seed.is_some()
+                        && matches!(nodes[i].shape, Shape::StateStart | Shape::SmallCircle) =>
+                {
+                    pts[0] = boundaries[i].clip(pts[0])
+                }
                 Endpoint::Node(NodeId(i)) => pts[0] = clip_end(&boundaries[i], &pts, elk),
             }
             pts.reverse();
