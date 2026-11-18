@@ -8,6 +8,9 @@
 //! CSS pixel of the box it is drawn in. Decoding and rasterising use resvg, so
 //! without the `png` feature only JPEGs are embedded.
 
+// Without the `png` feature only the JPEG path is live.
+#![cfg_attr(not(feature = "png"), allow(dead_code))]
+
 /// Samples per CSS pixel an SVG image or icon is rasterised at.
 pub const SVG_SCALE: f64 = 4.0;
 /// The largest side, in samples, an SVG is rasterised at.
