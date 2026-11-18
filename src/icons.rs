@@ -347,6 +347,15 @@ pub fn place_pack_icons(
                 rect,
                 children: place_pack_icons(children, packs),
             }),
+            Element::Brightened {
+                factor,
+                class,
+                children,
+            } => out.push(Element::Brightened {
+                factor,
+                class,
+                children: place_pack_icons(children, packs),
+            }),
             Element::Translated { dx, dy, children } => out.push(Element::Translated {
                 dx,
                 dy,
