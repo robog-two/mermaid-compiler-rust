@@ -3425,7 +3425,7 @@ fn rect_intersection(c: Point, w: f64, h: f64, outside: Point, inside: Point) ->
 }
 
 /// `utils.calcLabelPosition`: the point half way along `points`.
-fn calc_label_position(points: &[Point]) -> Point {
+pub(super) fn calc_label_position(points: &[Point]) -> Point {
     if points.len() == 1 {
         return points[0];
     }
@@ -3563,7 +3563,7 @@ fn calculate_point(points: &[Point], distance: f64) -> Point {
 
 /// `utils.isLabelCoordinateInPath`: whether the rounded `x` or `y` of `p`
 /// occurs anywhere in the path data (its decimals rounded too), as text.
-fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> bool {
+pub(super) fn label_coordinate_in_path(p: Point, cmds: &[geom::PathCmd], origin: Point) -> bool {
     // JS `Math.round` (half up) and number printing.
     let js_round = |v: f64| ((v + 0.5).floor() as i64).to_string();
     // Both in the coordinates of the group the path is drawn in.

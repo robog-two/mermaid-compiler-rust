@@ -30,6 +30,56 @@ Font Awesome Free 7.3.1
   No font file is included.
 
 
+Recursive 1.085 (Recursive Variable)
+------------------------------------
+
+  assets/fonts/recursive-400.ttf
+  assets/fonts/recursive-700.ttf
+  assets/fonts/recursive-400-italic.ttf
+  assets/fonts/recursive-700-italic.ttf
+  (compiled in with the `fonts` cargo feature; their metrics are also in
+  src/text/webfont_data.rs, compiled in always)
+
+  Recursive by The Recursive Project Authors (github.com/arrowtype/recursive)
+  Copyright 2019 The Recursive Project Authors
+  Source: the npm package @fontsource-variable/recursive@5.3.0 (its `wght`
+  subsets, files/recursive-*-wght-normal.woff2), which mermaid-cli loads
+  License: SIL Open Font License 1.1 (no Reserved Font Name):
+           LICENSES/Recursive-OFL-1.1.txt (the package's own LICENSE file)
+
+  Changes (tools/gen_bundled_fonts.py): the latin, latin-ext, vietnamese and
+  cyrillic-ext subsets instanced at wght 400 and 700, merged into one font per
+  weight, hinting dropped, and named "Recursive Variable" (the family name the
+  package's CSS gives them); the Italic files are those outlines slanted by a
+  quarter of their height (the oblique a browser synthesises for this upright
+  face). The metric tables in src/text/webfont_data.rs are generated from the
+  package's files by tools/gen_font_tables.py.
+
+
+Open Sans 3.003
+---------------
+
+  assets/fonts/open-sans-400.ttf
+  assets/fonts/open-sans-700.ttf
+  assets/fonts/open-sans-400-italic.ttf
+  assets/fonts/open-sans-700-italic.ttf
+  (compiled in with the `fonts` cargo feature; their metrics are also in
+  src/text/webfont_data.rs, compiled in always)
+
+  Open Sans by The Open Sans Project Authors (github.com/googlefonts/opensans)
+  Copyright 2020 The Open Sans Project Authors
+  Source: the npm package @fontsource/open-sans@5.3.0 (400 and 400 italic,
+  files/open-sans-*-400-*.woff2), which mermaid-cli loads
+  License: SIL Open Font License 1.1 (no Reserved Font Name):
+           LICENSES/OpenSans-OFL-1.1.txt (the package's own LICENSE file)
+
+  Changes (tools/gen_bundled_fonts.py): the latin, latin-ext, vietnamese,
+  greek, greek-ext, cyrillic, cyrillic-ext, math and symbols subsets merged
+  into one font per style and hinting dropped; the 700 files are the 400
+  outlines emboldened by 1/24 em (the bold a browser synthesises when, as
+  here, no bold face is loaded), with the same advances.
+
+
 TeX Gyre Heros 2.004
 --------------------
 

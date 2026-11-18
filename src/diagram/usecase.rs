@@ -3157,7 +3157,13 @@ fn measure_use_case(u: &UseCase, o: &Options) -> (Shape, f64, f64) {
         let fam = &o.usecase_family;
         let label = Block::wrapped_in(fam, &text, font, bold, o.wrap);
         let stereotype = u.stereotype.as_ref().map(|s| {
-            Block::wrapped_in(fam, &[format!("«{}»", decode_entities(s))], font, bold, o.wrap)
+            Block::wrapped_in(
+                fam,
+                &[format!("«{}»", decode_entities(s))],
+                font,
+                bold,
+                o.wrap,
+            )
         });
         let label_w = label
             .w
@@ -4496,10 +4502,13 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             }
         }
     }
-    for (ei, ((e, route), label_pos)) in edges.iter().zip(routes).zip(label_at).enumerate() {
+    for (ei, ((e, route), mut label_pos)) in edges.iter().zip(routes).zip(label_at).enumerate() {
         let Some(mut pts) = route else {
             continue;
         };
+        // The route as `insertEdge` cut it at the shapes, before its corners
+        // are fixed and its ends pulled back for the markers.
+        let cut = pts.clone();
         if elk && o.hand.is_some() {
             // mermaid's ELK routes hold the ports beside the outline points,
             // and a point where an edge crosses a boundary; a straight run
@@ -4576,6 +4585,31 @@ fn draw(d: &UsecaseDiagram, o: &Options, pal: &Palette) -> Scene {
             Curve::Linear | Curve::Step => geom::polyline(&pts),
             Curve::Basis => geom::basis_curve(&pts),
         };
+        // `insertEdge`'s `pointsHasChanged` when the drawn path does not mention
+        // the cut route's middle point: `positionEdgeLabel` then moves the
+        // label by as much as cutting moved the midpoint of dagre's route
+        // (whose ends dagre put on the nodes' boxes).
+        if !elk && o.hand.is_none() && e.from != e.to {
+            let raw = &out.edges[ei].points;
+            if raw.len() >= 3
+                && !super::graph::label_coordinate_in_path(
+                    cut[cut.len() / 2],
+                    &cmds,
+                    Point::new(origin, origin),
+                )
+            {
+                let mut orig = raw.clone();
+                let last = orig.len() - 1;
+                let rect = |i: usize| Rect::centered(out.nodes[i], nodes[i].w, nodes[i].h);
+                orig[0] = geom::intersect_rect(&rect(e.from), raw[1]);
+                orig[last] = geom::intersect_rect(&rect(e.to), raw[last - 1]);
+                let (a, b) = (
+                    super::graph::calc_label_position(&cut),
+                    super::graph::calc_label_position(&orig),
+                );
+                label_pos = label_pos.map(|at| Point::new(at.x + a.x - b.x, at.y + a.y - b.y));
+            }
+        }
         if let Some(seed) = o.hand {
             // `insertEdge` hands the path to rough.js (`roughness: 0.3`).
             let (drawn, moved) = super::graph::rough_edge(

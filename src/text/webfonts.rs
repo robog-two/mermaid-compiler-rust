@@ -27,7 +27,6 @@ pub(crate) struct FaceData {
     pub line_gap: i16,
     /// x-height at `wght` 400 and 700 (Recursive's `MVAR` varies it).
     pub x_height: [i16; 2],
-    pub cap_height: i16,
     /// Sorted by code point: (code point, advance).
     pub chars: &'static [(u16, u16)],
     /// Per character: `xMin`, `xMax`, `yMin`, `yMax` of its ink, regular and bold.

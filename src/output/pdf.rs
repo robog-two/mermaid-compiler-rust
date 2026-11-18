@@ -2,7 +2,10 @@
 //!
 //! Text uses the PDF standard Helvetica fonts (always available, never embedded),
 //! whose metrics are the same ones the layout measured with, so text placement
-//! matches the SVG. Characters outside Windows-1252 are replaced with `?`.
+//! matches the SVG. Text in the web fonts mmdc loads (the redux themes'
+//! Recursive Variable, C4's and usecase's Open Sans) is drawn with the bundled
+//! faces, embedded, each glyph placed at the advance the layout measured.
+//! Characters outside Windows-1252 and the bundled faces are replaced with `?`.
 
 use crate::color::{self, Rgba};
 use crate::geom::{PathCmd, Point, Rect};
@@ -111,8 +114,9 @@ struct Ctx {
     /// While drawing a text outline: its width in user space. Glyphs are then
     /// stroked (render mode 1) instead of filled.
     text_outline: Option<f64>,
-    /// Glyphs drawn with each embedded TeX Gyre Heros face, with their characters.
-    embedded: [BTreeMap<u16, char>; 4],
+    /// Glyphs drawn with each embedded bundled face (TeX Gyre Heros, then the
+    /// web fonts; [`crate::fonts::face`]), with their characters.
+    embedded: Vec<BTreeMap<u16, char>>,
     /// Stroke gradients, drawn as axial shading patterns `/P{index}`.
     gradients: Vec<Gradient>,
     /// Blurred drop shadows: image XObjects `/Sh{index}` in the shadow colour
@@ -329,6 +333,13 @@ impl Ctx {
     /// A text block; with `outline`, each glyph is first stroked `width` wide in
     /// that colour with round joins, then filled over it (`paint-order: stroke`).
     fn text(&mut self, t: &Text, outline: Option<(&crate::scene::Color, f64)>) {
+        match &t.family {
+            Some(f) => crate::text::with_family(f, || self.text_in_face(t, outline)),
+            None => self.text_in_face(t, outline),
+        }
+    }
+
+    fn text_in_face(&mut self, t: &Text, outline: Option<(&crate::scene::Color, f64)>) {
         let Some(c) = resolve(&t.fill) else { return };
         let (r, g, b) = c.unit();
         self.out.push_str("q\n");
@@ -407,6 +418,9 @@ impl Ctx {
     /// switch per run of emphasis, and the bundled TeX Gyre Heros for characters
     /// the standard Helvetica fonts lack ([`crate::fonts`]).
     fn line(&mut self, line: &str, x: f64, y: f64, font_size: f64, bold: bool) {
+        if crate::text::face() != crate::text::Face::Arial {
+            return self.web_line(line, x, y, font_size, bold);
+        }
         // The page CTM flips y; flip glyphs back with a negative d in Tm.
         let _ = write!(
             self.out,
@@ -422,7 +436,16 @@ impl Ctx {
         }
         for run in crate::text::styled_runs(line, bold) {
             let face = crate::fonts::face_index(run.bold, run.italic);
-            let mut rest = run.text.as_str();
+            self.fallback_text(&run.text, face);
+        }
+        self.out.push_str(" ET\n");
+    }
+
+    /// Text in the standard Helvetica face `face` (bold | italic << 1), the
+    /// bundled TeX Gyre Heros for characters outside Windows-1252.
+    fn fallback_text(&mut self, text: &str, face: usize) {
+        {
+            let mut rest = text;
             while !rest.is_empty() {
                 let embedded = |c: char| win_ansi(c).is_none() && embedded_glyph(face, c).is_some();
                 let split =
@@ -450,7 +473,97 @@ impl Ctx {
                 }
             }
         }
-        self.out.push_str(" ET\n");
+    }
+
+    /// One line in a web font (the measuring face, [`crate::text::face`]): a
+    /// text object per styled run, placed where the layout's measure puts it,
+    /// in the bundled face of its weight and slant. Each glyph advances by its
+    /// measured advance (kerning and ligatures included) through `TJ`
+    /// adjustments; characters the face lacks fall back to Helvetica.
+    fn web_line(&mut self, line: &str, x: f64, y: f64, font_size: f64, bold: bool) {
+        let face = crate::text::face();
+        let mut at = x;
+        for run in crate::text::styled_runs(line, bold) {
+            let _ = write!(
+                self.out,
+                "BT {} 0 0 {} {} {} Tm",
+                n(font_size),
+                n(-font_size),
+                n(at),
+                n(y),
+            );
+            if let Some(w) = self.text_outline {
+                let _ = write!(self.out, " 1 Tr {} w", n(w / font_size));
+            }
+            let wf = crate::fonts::web_face_index(face, run.bold, run.italic);
+            let bundled = wf.and_then(crate::fonts::face);
+            let chars: Vec<char> = run.text.chars().collect();
+            // Measured pen positions after each character (em).
+            let measure = |k: usize| {
+                let prefix = crate::text::StyledRun {
+                    text: chars[..k].iter().collect(),
+                    bold: run.bold,
+                    italic: run.italic,
+                };
+                crate::text::run_width(&prefix, 1.0)
+            };
+            let mut i = 0;
+            while i < chars.len() {
+                let has = |c: char| bundled.and_then(|f| f.glyph(c)).is_some();
+                let start = i;
+                if let (Some(f), Some(wf)) = (bundled.filter(|_| has(chars[i])), wf) {
+                    let mut tj = String::new();
+                    while i < chars.len() && has(chars[i]) {
+                        let g = f.glyph(chars[i]).unwrap_or(0);
+                        self.embedded[wf].insert(g, chars[i]);
+                        let default = f64::from(f.advance(g)) / f64::from(f.units_per_em);
+                        let measured = measure(i + 1) - measure(i);
+                        let _ = write!(tj, "<{g:04X}>");
+                        let adjust = ((default - measured) * 1000.0 * 1000.0).round() / 1000.0;
+                        if adjust != 0.0 {
+                            let _ = write!(tj, " {} ", n(adjust));
+                        }
+                        i += 1;
+                    }
+                    let _ = write!(self.out, " /H{} 1 Tf [{tj}] TJ", wf + 1);
+                } else {
+                    while i < chars.len() && !has(chars[i]) {
+                        i += 1;
+                    }
+                    let seg: String = chars[start..i].iter().collect();
+                    let style = crate::fonts::face_index(run.bold, run.italic);
+                    // Helvetica's advances are not the layout's here: place the
+                    // segment where the measure puts it.
+                    let _ = write!(
+                        self.out,
+                        " ET BT {} 0 0 {} {} {} Tm",
+                        n(font_size),
+                        n(-font_size),
+                        n(at + measure(start) * font_size),
+                        n(y),
+                    );
+                    if let Some(w) = self.text_outline {
+                        let _ = write!(self.out, " 1 Tr {} w", n(w / font_size));
+                    }
+                    self.fallback_text(&seg, style);
+                    if i < chars.len() {
+                        let _ = write!(
+                            self.out,
+                            " ET BT {} 0 0 {} {} {} Tm",
+                            n(font_size),
+                            n(-font_size),
+                            n(at + measure(i) * font_size),
+                            n(y),
+                        );
+                        if let Some(w) = self.text_outline {
+                            let _ = write!(self.out, " 1 Tr {} w", n(w / font_size));
+                        }
+                    }
+                }
+            }
+            self.out.push_str(" ET\n");
+            at += crate::text::run_width(&run, font_size);
+        }
     }
 
     /// Draw an image XObject over `rect` (stored once per `key`); nothing
@@ -725,10 +838,25 @@ fn embedded_font_objects(face: usize, glyphs: &BTreeMap<u16, char>, first: usize
     cmap.push_str("endcmap CMapName currentdict /CMap defineresource pop end end\n");
     let flags = 32 + if f.italic_angle != 0.0 { 64 } else { 0 };
     let [x0, y0, x1, y1] = f.bbox.map(|v| n(f64::from(v) * scale));
-    let mut file = format!(
-        "<< /Subtype /OpenType /Length {} >>\nstream\n",
-        f.data.len()
-    )
+    // TrueType outlines: a CIDFontType2 over `FontFile2` (CIDs are glyph ids);
+    // CFF: a CIDFontType0 over an OpenType `FontFile3`.
+    let (cid_type, file_key, gid_map) = if f.truetype {
+        ("CIDFontType2", "FontFile2", " /CIDToGIDMap /Identity")
+    } else {
+        ("CIDFontType0", "FontFile3", "")
+    };
+    let mut file = if f.truetype {
+        format!(
+            "<< /Length {} /Length1 {} >>\nstream\n",
+            f.data.len(),
+            f.data.len()
+        )
+    } else {
+        format!(
+            "<< /Subtype /OpenType /Length {} >>\nstream\n",
+            f.data.len()
+        )
+    }
     .into_bytes();
     file.extend_from_slice(f.data);
     file.extend_from_slice(b"\nendstream");
@@ -740,12 +868,12 @@ fn embedded_font_objects(face: usize, glyphs: &BTreeMap<u16, char>, first: usize
         )
         .into_bytes(),
         format!(
-            "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /{name} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 0 /W [{widths}] >>",
+            "<< /Type /Font /Subtype /{cid_type} /BaseFont /{name} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 0 /W [{widths}]{gid_map} >>",
             first + 2
         )
         .into_bytes(),
         format!(
-            "<< /Type /FontDescriptor /FontName /{name} /Flags {flags} /FontBBox [{x0} {y0} {x1} {y1}] /ItalicAngle {} /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile3 {} 0 R >>",
+            "<< /Type /FontDescriptor /FontName /{name} /Flags {flags} /FontBBox [{x0} {y0} {x1} {y1}] /ItalicAngle {} /Ascent {} /Descent {} /CapHeight {} /StemV 80 /{file_key} {} 0 R >>",
             n(f.italic_angle),
             n(f64::from(f.ascent) * scale),
             n(f64::from(f.descent) * scale),
@@ -844,7 +972,7 @@ fn to_pdf_in_face(scene: &Scene, opt: &PdfOptions) -> Vec<u8> {
         out: String::new(),
         alphas: Vec::new(),
         text_outline: None,
-        embedded: Default::default(),
+        embedded: vec![BTreeMap::new(); crate::fonts::FACE_COUNT],
         gradients: Vec::new(),
         shadows: Vec::new(),
         layers: Vec::new(),

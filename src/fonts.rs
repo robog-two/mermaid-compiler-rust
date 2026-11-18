@@ -1,17 +1,24 @@
-//! The bundled TeX Gyre Heros fonts (GUST Font License; see `LICENSES/`).
+//! The bundled fonts: the web fonts mmdc loads and TeX Gyre Heros.
 //!
-//! Layout never reads these: text is measured with Arial's metrics
-//! ([`crate::text`]). They only draw glyphs where nothing else can, so PNG and PDF
-//! output works on a machine with no fonts installed:
+//! Layout never reads these files: text is measured with tables generated from
+//! the same fonts ([`crate::text`]). They draw the glyphs, so PNG and PDF output
+//! looks like mmdc's and works on a machine with no fonts installed:
 //!
-//! * the PNG rasteriser falls back to them when no system font matches a label's
-//!   `font-family` (`output::png`);
-//! * the PDF writer embeds a face for text outside Windows-1252, which the
-//!   standard Helvetica fonts cannot show (`output::pdf`).
+//! * Recursive Variable (Sans Linear at `wght` 400 and 700, and the slanted
+//!   outlines Chromium synthesises for its italic) and Open Sans (400, 400
+//!   italic, and the emboldened outlines Chromium synthesises for their bold),
+//!   SIL Open Font License 1.1, built by `tools/gen_bundled_fonts.py`
+//!   from the fontsource packages mmdc links ([`WEB_FILES`]). The rasteriser
+//!   finds them by family name before any system font; the PDF writer embeds
+//!   them for text in those families.
+//! * TeX Gyre Heros (GUST Font License; see `LICENSES/`), URW's Nimbus Sans (a
+//!   Helvetica design) extended by GUST, whose advance widths are Helvetica's,
+//!   close to Arial's: the PNG fallback when no font matches a label's
+//!   `font-family`, and the PDF face for text outside Windows-1252, which the
+//!   standard Helvetica fonts cannot show.
 //!
-//! TeX Gyre Heros is URW's Nimbus Sans (a Helvetica design) extended by GUST: its
-//! advance widths are Helvetica's, close to the Arial metrics the layout uses.
-//! Faces are indexed `bold as usize | (italic as usize) << 1`.
+//! Faces are indexed 0..4 for TeX Gyre Heros, `bold as usize | (italic as
+//! usize) << 1`, then [`WEB_FILES`]'s order from 4 ([`web_face_index`]).
 
 /// The four faces' OpenType (CFF) files: regular, bold, italic, bold italic.
 #[cfg(feature = "fonts")]
@@ -22,16 +29,53 @@ pub const FILES: [&[u8]; 4] = [
     include_bytes!("../assets/fonts/texgyreheros-bolditalic.otf"),
 ];
 
-/// The family name the faces register under.
+/// The web fonts' TrueType files: Recursive Variable 400, 700, 400 italic, 700
+/// italic (slanted); Open Sans 400, 700 (emboldened), 400 italic, 700 italic
+/// (emboldened).
+#[cfg(feature = "fonts")]
+pub const WEB_FILES: [&[u8]; 8] = [
+    include_bytes!("../assets/fonts/recursive-400.ttf"),
+    include_bytes!("../assets/fonts/recursive-700.ttf"),
+    include_bytes!("../assets/fonts/recursive-400-italic.ttf"),
+    include_bytes!("../assets/fonts/recursive-700-italic.ttf"),
+    include_bytes!("../assets/fonts/open-sans-400.ttf"),
+    include_bytes!("../assets/fonts/open-sans-700.ttf"),
+    include_bytes!("../assets/fonts/open-sans-400-italic.ttf"),
+    include_bytes!("../assets/fonts/open-sans-700-italic.ttf"),
+];
+
+/// The family name the TeX Gyre faces register under.
 pub const FAMILY: &str = "TeX Gyre Heros";
 
-/// The faces' PostScript names.
-pub const POSTSCRIPT_NAMES: [&str; 4] = [
+/// Number of bundled faces ([`face`] indexes 0 up to this).
+pub const FACE_COUNT: usize = 12;
+
+/// The faces' PostScript names, by face index.
+pub const POSTSCRIPT_NAMES: [&str; FACE_COUNT] = [
     "TeXGyreHeros-Regular",
     "TeXGyreHeros-Bold",
     "TeXGyreHeros-Italic",
     "TeXGyreHeros-BoldItalic",
+    "RecursiveVariable-Regular",
+    "RecursiveVariable-Bold",
+    "RecursiveVariable-Italic",
+    "RecursiveVariable-BoldItalic",
+    "OpenSans-Regular",
+    "OpenSans-Bold",
+    "OpenSans-Italic",
+    "OpenSans-BoldItalic",
 ];
+
+/// The bundled face that draws text measured in `face`, if it is a web font,
+/// by weight and slant.
+pub fn web_face_index(face: crate::text::Face, bold: bool, italic: bool) -> Option<usize> {
+    let style = usize::from(bold) + 2 * usize::from(italic);
+    match face {
+        crate::text::Face::Arial => None,
+        crate::text::Face::Recursive => Some(4 + style),
+        crate::text::Face::OpenSans => Some(8 + style),
+    }
+}
 
 /// The face index for a style.
 pub fn face_index(bold: bool, italic: bool) -> usize {
@@ -44,6 +88,8 @@ pub fn face_index(bold: bool, italic: bool) -> usize {
 #[derive(Debug, Clone)]
 pub struct Face {
     pub data: &'static [u8],
+    /// TrueType outlines (`glyf`), embedded as `FontFile2`; else CFF.
+    pub truetype: bool,
     pub units_per_em: u16,
     pub bbox: [i16; 4],
     pub ascent: i16,
@@ -86,6 +132,7 @@ impl Face {
         let fixed = be32(post, 4)? as i32;
         Some(Face {
             data,
+            truetype: table(b"glyf").is_some(),
             units_per_em: be16(head, 18)?,
             bbox: [
                 be16(head, 36)? as i16,
@@ -152,13 +199,19 @@ impl Face {
     }
 }
 
-/// The bundled face for a style, parsed once.
+/// A bundled face by index, parsed once.
 #[cfg(feature = "fonts")]
 pub fn face(index: usize) -> Option<&'static Face> {
     use std::sync::OnceLock;
-    static FACES: OnceLock<[Option<Face>; 4]> = OnceLock::new();
+    static FACES: OnceLock<Vec<Option<Face>>> = OnceLock::new();
     FACES
-        .get_or_init(|| FILES.map(Face::parse))
+        .get_or_init(|| {
+            FILES
+                .iter()
+                .chain(&WEB_FILES)
+                .map(|d| Face::parse(d))
+                .collect()
+        })
         .get(index)?
         .as_ref()
 }
@@ -203,6 +256,37 @@ mod tests {
             // No Cyrillic or CJK.
             assert!(f.glyph('Ж').is_none() && f.glyph('中').is_none());
             assert_eq!(f.italic_angle != 0.0, i & 2 == 2);
+        }
+    }
+
+    #[test]
+    fn web_faces_carry_the_measured_advances() {
+        use crate::text::Face as F;
+        for (face, bold, italic) in [
+            (F::Recursive, false, false),
+            (F::Recursive, true, false),
+            (F::Recursive, false, true),
+            (F::Recursive, true, true),
+            (F::OpenSans, false, false),
+            (F::OpenSans, true, false),
+            (F::OpenSans, false, true),
+            (F::OpenSans, true, true),
+        ] {
+            let f = super::face(web_face_index(face, bold, italic).unwrap()).unwrap();
+            assert!(f.truetype);
+            let data = face.data(italic).unwrap();
+            assert_eq!(f64::from(f.units_per_em), data.upem);
+            // Every character the tables measure is drawn with that advance
+            // (the emboldened Open Sans keeps the regular advances).
+            for c in ['a', 'W', 'é', 'ế', '1', ' '] {
+                let g = f.glyph(c).unwrap_or_else(|| panic!("{c} in {face:?}"));
+                let adv = f64::from(f.advance(g)) / data.upem;
+                assert_eq!(
+                    Some(adv),
+                    data.advance_em(c),
+                    "{c} in {face:?} {bold} {italic}"
+                );
+            }
         }
     }
 }

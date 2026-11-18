@@ -213,7 +213,7 @@ def build(name, css_files, variable):
             xh[i] = inst['OS/2'].sxHeight
     return dict(name=name, upem=upem, cps=cps, adv=adv, owner=owner, left=left, right=right, nl=nl, nr=nr,
                 matrix=matrix, ink=ink, ink_bold=ink_bold, ligs=ligs, ascent=hhea.ascent, descent=-hhea.descent,
-                line_gap=hhea.lineGap, x_height=xh, cap_height=os2.sCapHeight, npairs=len(kern), files=files)
+                line_gap=hhea.lineGap, x_height=xh, npairs=len(kern), files=files)
 
 
 def rs_face(d):
@@ -226,7 +226,6 @@ def rs_face(d):
     out.append(f'    descent: {d["descent"]},')
     out.append(f'    line_gap: {d["line_gap"]},')
     out.append(f'    x_height: [{d["x_height"][0]}, {d["x_height"][1]}],')
-    out.append(f'    cap_height: {d["cap_height"]},')
     out.append(f'    chars: &{n}_CHARS,')
     out.append(f'    ink: &{n}_INK,')
     out.append(f'    ink_bold: {"&" + n + "_INK_BOLD" if d["ink_bold"] else "&" + n + "_INK"},')
