@@ -25,7 +25,8 @@ fn neo_cylinders_pad_their_labels_by_24() {
     let neo = scene("  look: neo").view_box;
     assert_eq!(neo.w, classic.w);
     assert!(
-        (neo.h - classic.h - 4.0).abs() < 1e-6,
+        // (getBBox in single precision: 3.9999985 at this height.)
+        (neo.h - classic.h - 4.0).abs() < 1e-3,
         "{classic:?} {neo:?}"
     );
 }
