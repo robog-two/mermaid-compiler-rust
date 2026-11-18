@@ -3264,15 +3264,13 @@ fn measure_json(
     )
 }
 
-/// Push `el` casting the neo look's drop shadow `sh`: a blurred CSS
-/// `drop-shadow()` as the shape's own filter, a hard one (`stdDeviation="0"`)
-/// as an offset copy of its silhouette drawn first.
+/// Push `el` casting the neo look's drop shadow `sh` as the shape's own
+/// filter: a blurred CSS `drop-shadow()`, or a hard one (`stdDeviation="0"`),
+/// the redux themes' `feDropShadow`, which works in linear RGB (the shape
+/// passing through it too).
 fn push_shadowed(els: &mut Vec<Element>, mut el: Element, sh: Option<&DropShadow>) {
-    if let (Some(sh), Element::Shape { geom, paint, .. }) = (sh, &mut el) {
-        match sh.blurred() {
-            Some(b) => paint.shadow = Some(b),
-            None => els.extend(shadow(geom, Some(sh))),
-        }
+    if let (Some(sh), Element::Shape { paint, .. }) = (sh, &mut el) {
+        paint.shadow = Some(sh.blurred().unwrap_or_else(|| sh.filter()));
     }
     els.push(el);
 }
@@ -5302,7 +5300,8 @@ mod tests {
                     | Element::Translated { children, .. }
                     | Element::Clipped { children, .. }
                     | Element::Faded { children, .. }
-                    | Element::Brightened { children, .. } => dashes(children, out),
+                    | Element::Brightened { children, .. }
+                    | Element::Shadowed { children, .. } => dashes(children, out),
                     Element::Text { .. }
                     | Element::OutlinedText { .. }
                     | Element::Image { .. }
@@ -5570,8 +5569,15 @@ Finish x-- Support";
                 _ => None,
             })
             .collect();
-        // The border, the title cell, the value cell and the key cell.
-        let shadows = shapes.iter().filter(|s| s.0 == Some("drop-shadow")).count();
+        // The border, the title cell, the value cell and the key cell, each
+        // through its own feDropShadow.
+        let shadows = g
+            .iter()
+            .filter(|e| {
+                matches!(e, Element::Shape { geom: Geometry::Rect { .. }, paint, .. }
+                    if paint.shadow.as_ref().is_some_and(|s| s.linear_rgb))
+            })
+            .count();
         assert_eq!(shadows, 4);
         let cells: Vec<Rect> = shapes
             .iter()

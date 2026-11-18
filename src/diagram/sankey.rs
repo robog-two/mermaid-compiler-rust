@@ -748,6 +748,7 @@ pub fn render(
                 anchor,
                 fill: pal.text_color.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             };
             bounds.add_rect(label_box(&t));

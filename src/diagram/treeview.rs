@@ -971,6 +971,7 @@ fn icon_elements(
                         anchor: Anchor::Start,
                         fill: Color::new("#fff"),
                         tspan_central: false,
+                        dy_tspans: false,
                         family: None,
                     }),
                 ],
@@ -999,6 +1000,7 @@ pub fn draw(
         anchor: Anchor::Start,
         fill: fill.clone(),
         tspan_central: false,
+        dy_tspans: false,
         family: None,
     };
     let line_paint = Paint::stroke(&colors.line, cfg.line_thickness);

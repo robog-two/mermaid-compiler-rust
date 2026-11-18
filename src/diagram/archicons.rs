@@ -36,6 +36,7 @@ pub fn unknown(r: Rect) -> Element {
         anchor: Anchor::Start,
         fill: Color::new("#ffffff"),
         tspan_central: false,
+        dy_tspans: false,
         family: Some("ArialMT, Arial".into()),
     })
 }

@@ -1679,6 +1679,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                     anchor: Anchor::Middle,
                     fill: c.text.clone(),
                     tspan_central: false,
+                    dy_tspans: false,
                     family: None,
                 },
                 "tick-label",
@@ -1807,6 +1808,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                 anchor,
                 fill: fill_text,
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             if inside {
@@ -1848,6 +1850,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
             anchor: Anchor::Start,
             fill: c.title.clone(),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         };
         labels.push(Element::classed_text(t, "sectionTitle"));
@@ -1885,6 +1888,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                 anchor: Anchor::Middle,
                 fill: c.vert.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             "vertText",
@@ -1930,6 +1934,7 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
                 anchor: Anchor::Middle,
                 fill: c.title.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             "titleText",

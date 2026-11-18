@@ -263,6 +263,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
                 anchor: Anchor::Middle,
                 fill: pal.pie_section_text.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             "slice",
@@ -295,6 +296,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
                 anchor: Anchor::Middle,
                 fill: pal.pie_title_text.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             "pieTitleText",
@@ -320,6 +322,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
             anchor: Anchor::Start,
             fill: pal.pie_legend_text.clone(),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         };
         els.push(Element::classed_text(t, "legend"));

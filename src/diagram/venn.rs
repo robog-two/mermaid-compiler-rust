@@ -2149,6 +2149,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 anchor: Anchor::Middle,
                 fill: text_fill,
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             }));
         }
@@ -2233,6 +2234,7 @@ fn translate_element(e: Element, dy: f64) -> Element {
         | Element::Clipped { .. }
         | Element::Faded { .. }
         | Element::Brightened { .. }
+        | Element::Shadowed { .. }
         | Element::Image { .. }
         | Element::Icon { .. }
         | Element::Translated { .. }) => e.translated(0.0, dy),

@@ -671,24 +671,11 @@ fn cast_shadows(els: &mut Vec<Element>, sh: &DropShadow, shape: Shape) {
     let mut out = Vec::with_capacity(els.len() + 2);
     for el in els.drain(..) {
         match &el {
-            Element::Shape { geom, paint, .. } if each(geom) => {
-                if paint.fill.is_none() && sh.blurred().is_none() {
-                    // An unfilled source casts its stroke's shadow.
-                    let copy = Element::classed_shape(
-                        geom.translated(sh.dx, sh.dy),
-                        Paint {
-                            opacity: Some(sh.opacity * paint.opacity.unwrap_or(1.0)),
-                            ..Paint::stroke(&sh.color, paint.stroke_width)
-                        },
-                        "drop-shadow",
-                    );
-                    out.push(copy);
-                    out.push(el);
-                } else {
-                    let mut one = vec![el];
-                    cast_shadow(&mut one, sh);
-                    out.extend(one);
-                }
+            // An unfilled source casts its stroke's shadow through its filter.
+            Element::Shape { geom, .. } if each(geom) => {
+                let mut one = vec![el];
+                cast_shadow(&mut one, sh);
+                out.extend(one);
             }
             _ => out.push(el),
         }
@@ -717,22 +704,16 @@ fn small_shadow(
 }
 
 /// The neo look's drop shadow cast by `els[0]`: a blurred CSS `drop-shadow()`
-/// as that shape's own filter, a hard one (`stdDeviation="0"`) as an offset copy
-/// of its silhouette drawn before it.
-pub(super) fn cast_shadow(els: &mut Vec<Element>, sh: &DropShadow) {
-    match sh.blurred() {
-        Some(blurred) => {
-            if let Some(Element::Shape { paint, .. }) = els.first_mut()
-                && !(paint.fill.is_none() && paint.stroke.is_none())
-            {
-                paint.shadow = Some(blurred);
-            }
-        }
-        None => {
-            if let Some(s) = els.first().and_then(|e| drop_shadow(e, sh)) {
-                els.insert(0, s);
-            }
-        }
+/// as that shape's own filter; a hard one (`stdDeviation="0"`) the redux
+/// themes' `url(#…-drop-shadow)`, an `feDropShadow` that works in linear RGB,
+/// the shape itself passing through it (a dark fill visibly so: #111113
+/// comes out #0D0D16).
+pub(super) fn cast_shadow(els: &mut [Element], sh: &DropShadow) {
+    let shadow = sh.filter();
+    if let Some(Element::Shape { paint, .. }) = els.first_mut()
+        && !(paint.fill.is_none() && paint.stroke.is_none())
+    {
+        paint.shadow = Some(shadow);
     }
 }
 
@@ -6091,6 +6072,7 @@ fn node_elements(
                 anchor: Anchor::Start,
                 fill: pal.node_border.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 // console.ts: `font-family: monospace` (DejaVu Sans Mono Bold
                 // where mmdc runs).
                 family: Some("monospace".into()),
@@ -7147,6 +7129,7 @@ fn accent_parts(o: shapes::Outline, pal: &Palette) -> Vec<Element> {
             anchor: Anchor::Start,
             fill: pal.node_border.clone(),
             tspan_central: false,
+            dy_tspans: false,
             family: Some("monospace".into()),
         };
         els.push(Element::classed_text(text, "console-glyph"));

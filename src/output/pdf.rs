@@ -298,6 +298,18 @@ impl Ctx {
         sh: &crate::scene::Shadow,
     ) {
         let Some(c) = resolve(&sh.color) else { return };
+        // A hard shadow (the redux themes' `feDropShadow` with no blur) is the
+        // silhouette's offset copy, filled flat in the shadow colour: vector,
+        // not a soft mask rasterised for every shape.
+        if sh.std_dev == 0.0 {
+            let mut flat = Paint::fill(&crate::scene::Color::new(format!(
+                "rgb({}, {}, {})",
+                c.r, c.g, c.b
+            )));
+            flat.opacity = Some(c.a * paint.opacity.unwrap_or(1.0));
+            self.shape(&geom.translated(sh.dx, sh.dy), &flat);
+            return;
+        }
         let cmds = match geom {
             Geometry::Rect { rect, rx } => rounded_rect(rect, *rx),
             Geometry::Circle { c, r } => crate::geom::ellipse(*c, *r, *r),
@@ -375,7 +387,7 @@ impl Ctx {
                 Anchor::Middle => t.x - w / 2.0,
                 Anchor::End => t.x - w,
             };
-            let y = t.y + i as f64 * t.line_height;
+            let y = t.line_y(i);
             if crate::icons::has_icons(line) {
                 self.line_with_icons(line, x, y, t);
                 continue;
@@ -648,6 +660,9 @@ impl Ctx {
             } => children
                 .iter()
                 .for_each(|c| self.element(&c.brightened(*factor))),
+            Element::Shadowed { shadow, children } => children
+                .iter()
+                .for_each(|c| self.element(&c.with_shape_shadows(shadow))),
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
             Element::Image { rect, href, inline } => {
                 let src = inline.as_deref().unwrap_or(href);
@@ -1263,6 +1278,7 @@ mod tests {
             anchor: Anchor::Start,
             fill: Color::new("#333"),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         };
         let scene = Scene {

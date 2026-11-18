@@ -25,7 +25,7 @@
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
-use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
+use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Shadow, Text};
 use crate::text::{line_width, svg_bbox_width, svg_line_box};
 use crate::theme::Palette;
 
@@ -466,6 +466,10 @@ pub struct GitConfig {
     pub rotate_commit_label: bool,
     pub title_top_margin: f64,
     pub diagram_padding: f64,
+    /// Branch labels' font size: the root's (the theme's `fontSize`).
+    pub branch_font: f64,
+    /// `look: neo`: branch label boxes cast the theme's drop shadow.
+    pub neo: bool,
 }
 
 impl GitConfig {
@@ -477,6 +481,8 @@ impl GitConfig {
             rotate_commit_label: cfg.section_bool("gitGraph", "rotateCommitLabel", true),
             title_top_margin: cfg.section_f64("gitGraph", "titleTopMargin", 25.0),
             diagram_padding: cfg.section_f64("gitGraph", "diagramPadding", 8.0),
+            branch_font: cfg.stylesheet_font_size(),
+            neo: cfg.look == crate::config::Look::Neo,
         }
     }
 }
@@ -490,6 +496,8 @@ impl Default for GitConfig {
             rotate_commit_label: true,
             title_top_margin: 25.0,
             diagram_padding: 8.0,
+            branch_font: BRANCH_FONT,
+            neo: false,
         }
     }
 }
@@ -497,7 +505,8 @@ impl Default for GitConfig {
 /// `.commit-label` / `.tag-label` font size (`commitLabelFontSize`, `tagLabelFontSize`).
 const LABEL_FONT: f64 = 10.0;
 const TAG_FONT: f64 = 10.0;
-/// Branch labels are SVG text in the root font (no stylesheet rule sizes them).
+/// Branch labels are SVG text in the root font (no stylesheet rule sizes them):
+/// 16px but in the neo and redux themes ([`GitConfig::branch_font`]).
 const BRANCH_FONT: f64 = 16.0;
 /// `gitGraphRenderer.ts` constants.
 const LAYOUT_OFFSET: f64 = 10.0;
@@ -555,16 +564,17 @@ impl<'a> Commits<'a> {
 
 /// `drawText(name).getBBox()` of a branch label as mermaid measures it while
 /// drawing: rows (split at `\n` / `<br>`) as `<tspan dy="1em" x="0">`, each
-/// as wide as its ink. Returns (width, height, top below the text's origin).
-fn branch_label_box(name: &str) -> (f64, f64, f64, Vec<String>) {
+/// as wide as its ink (bold under the redux themes). Returns (width, height,
+/// top below the text's origin).
+fn branch_label_box(name: &str, font: f64, bold: bool) -> (f64, f64, f64, Vec<String>) {
     let rows: Vec<String> = split_rows(name);
-    let ascent = (0.905 * BRANCH_FONT).round();
+    let ascent = crate::text::ascent_px(font);
     let (mut w, mut top, mut bottom) = (0.0f64, f64::INFINITY, f64::NEG_INFINITY);
     for (i, r) in rows.iter().enumerate() {
-        let baseline = BRANCH_FONT * (i + 1) as f64;
-        w = w.max(svg_bbox_width(r, BRANCH_FONT));
+        let baseline = font * (i + 1) as f64;
+        w = w.max(crate::text::svg_bbox_width_weight(r, font, bold));
         top = top.min(baseline - ascent);
-        bottom = bottom.max(baseline - ascent + svg_line_box(BRANCH_FONT, r));
+        bottom = bottom.max(baseline - ascent + svg_line_box(font, r));
     }
     if rows.is_empty() {
         return (0.0, 0.0, 0.0, rows);
@@ -795,7 +805,9 @@ pub fn layout(g: &GitGraph, gc: &GitConfig, redux: bool) -> Layout {
         lane[b] = p;
         lane_index[b] = idx;
         let half = if vertical {
-            branch_label_box(&g.branches[b].name).0 / 2.0
+            // Measured in a bare `label branch-label` group: no
+            // `.branch-labelN` weight.
+            branch_label_box(&g.branches[b].name, gc.branch_font, false).0 / 2.0
         } else {
             0.0
         };
@@ -969,7 +981,7 @@ impl<'a> GitStyle<'a> {
         match self.family {
             Family::Classic => (self.git(k), None),
             // `genGitGraphGradient`: `url(#gradient)` from `gradientStart` (#0042eb) to
-            // `gradientStop` (#eb0042); drawn in the start colour.
+            // `gradientStop` (#eb0042) ([`GitStyle::label_gradient`]).
             Family::Neo => (main, Some((Color::new("#0042eb"), sw))),
             Family::ReduxColor if k > 0 => {
                 let b = self.border(k);
@@ -977,6 +989,16 @@ impl<'a> GitStyle<'a> {
             }
             _ => (main, Some((self.pal.node_border.clone(), sw))),
         }
+    }
+
+    /// `genGitGraphGradient` (the neo themes with `useGradient`): `.labelN`
+    /// outlined with the `{id}-gradient` across each box.
+    fn label_gradient(&self) -> Option<crate::scene::Gradient> {
+        self.pal
+            .node_gradient
+            .as_ref()
+            .filter(|_| self.family == Family::Neo)
+            .map(|(a, b)| crate::scene::Gradient::across_bbox(a, b))
     }
 
     /// `.branch-label{k}` text colour.
@@ -1032,7 +1054,7 @@ fn rounded(points: &[Point], r: f64) -> Vec<PathCmd> {
 fn text_box(x: f64, y: f64, s: &str, font: f64) -> Rect {
     Rect::new(
         x,
-        y - (0.905 * font).round(),
+        y - crate::text::ascent_px(font),
         svg_bbox_width(s, font),
         svg_line_box(font, s),
     )
@@ -1082,6 +1104,13 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
     let cm = Commits::new(g);
     let mut bounds = Bounds::default();
     let st = GitStyle::new(pal);
+    // `look: neo`: the branch label boxes' inline `filter`, the redux themes'
+    // feDropShadow (in `filterColor`) or the theme's CSS `dropShadow`.
+    let branch_shadow = match (gc.neo, st.redux) {
+        (false, _) => None,
+        (true, true) => Some(crate::theme::DropShadow::look_defs(pal.theme, 4.0).filter()),
+        (true, false) => pal.drop_shadow.as_ref().map(|d| d.filter()),
+    };
     let ck = |b: usize| st.commit_index(lay.lane_index[b]);
     let max_pos = lay.max_pos;
     let mut lanes: Vec<f64> = Vec::new();
@@ -1110,7 +1139,8 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 format!("branch branch{k}"),
             ));
             lanes.push(spine);
-            let (bw, bh, btop, rows) = branch_label_box(&g.branches[b].name);
+            let (bw, bh, btop, rows) =
+                branch_label_box(&g.branches[b].name, gc.branch_font, st.redux);
             let (pad_x, pad_y) = if st.redux { (16.0, 12.0) } else { (0.0, 0.0) };
             let rot = if gc.rotate_commit_label { 30.0 } else { 0.0 };
             let (w, h) = (bw + 18.0 + pad_x, bh + 4.0 + pad_y);
@@ -1154,10 +1184,14 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             };
             bounds.add_rect(rect);
             let (fill, stroke) = st.label_box(k);
-            let paint = match &stroke {
+            let mut paint = match &stroke {
                 Some((c, w)) => Paint::both(&fill, c, *w),
                 None => Paint::fill(&fill),
-            };
+            }
+            .with_shadow(branch_shadow.clone());
+            if let Some(g) = st.label_gradient() {
+                paint = paint.with_stroke_gradient(g);
+            }
             branch_els.push(Element::classed_shape(
                 Geometry::Rect {
                     rect,
@@ -1172,15 +1206,16 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             }
             let text = Text {
                 x: label_at.x,
-                y: label_at.y + BRANCH_FONT,
+                y: label_at.y + gc.branch_font,
                 lines: rows,
-                line_height: BRANCH_FONT,
-                font_size: BRANCH_FONT,
+                line_height: gc.branch_font,
+                font_size: gc.branch_font,
                 bold: false,
                 weight: None,
                 anchor: Anchor::Start,
                 fill: st.branch_label(k),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             };
             branch_els.push(Element::classed_text(
@@ -1266,6 +1301,14 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
     } else {
         (pal.tag_label_bkg.clone(), pal.tag_label_border.clone())
     };
+    // `.tag-label-bkg { filter: dropShadow }` under the neo colour generator,
+    // in any look; the redux themes' unscoped `url(#drop-shadow)` finds
+    // nothing.
+    let tag_shadow = pal
+        .drop_shadow
+        .as_ref()
+        .filter(|_| st.neo_gen() && !st.redux)
+        .map(|d| d.filter());
     let mut label_els = Vec::new();
     // `.commit-merge` / `-reverse` / `-highlight-inner`: `mainBkg` under the neo colour
     // generator, `primaryColor` (the same colour in the classic themes) otherwise.
@@ -1378,6 +1421,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             o,
             pal,
             (&tag_bkg, &tag_border),
+            tag_shadow.as_ref(),
             &mut bounds,
         ));
     }
@@ -1407,6 +1451,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 anchor: Anchor::Middle,
                 fill: pal.text_color.clone(),
                 tspan_central: false,
+                dy_tspans: false,
                 family: None,
             },
             "gitTitleText",
@@ -1436,8 +1481,11 @@ fn commit_label(
     bounds: &mut Bounds,
 ) -> Vec<Element> {
     let id = c.id.as_str();
-    let (w, h) = (svg_bbox_width(id, LABEL_FONT), svg_line_box(LABEL_FONT, id));
-    let ascent = (0.905 * LABEL_FONT).round();
+    // `.commit-label { font-weight: noteFontWeight }` (600 in the redux
+    // themes) under the neo colour generator.
+    let w = crate::text::svg_bbox_width_weight(id, LABEL_FONT, st.redux);
+    let h = svg_line_box(LABEL_FONT, id);
+    let ascent = crate::text::ascent_px(LABEL_FONT);
     let (rect, tx, ty) = if o == Orientation::LR {
         (
             Rect::new(
@@ -1488,6 +1536,7 @@ fn commit_label(
                 pal.commit_label_color.clone()
             },
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         },
         "commit-label",
@@ -1536,13 +1585,14 @@ fn commit_tags(
     o: Orientation,
     pal: &Palette,
     (tag_bkg, tag_border): (&Color, &Color),
+    shadow: Option<&Shadow>,
     bounds: &mut Bounds,
 ) -> Vec<Element> {
     let mut out = Vec::new();
     if c.tags.is_empty() {
         return out;
     }
-    let ascent = (0.905 * TAG_FONT).round();
+    let ascent = crate::text::ascent_px(TAG_FONT);
     let tag_w = c
         .tags
         .iter()
@@ -1566,6 +1616,7 @@ fn commit_tags(
         anchor: Anchor::Start,
         fill: pal.tag_label_color.clone(),
         tspan_central: false,
+        dy_tspans: false,
         family: None,
     };
     for (k, t) in c.tags.iter().rev().enumerate() {
@@ -1600,7 +1651,7 @@ fn commit_tags(
                 children: vec![
                     Element::classed_shape(
                         Geometry::Path(geom::polygon(&poly)),
-                        Paint::both(tag_bkg, tag_border, 1.0),
+                        Paint::both(tag_bkg, tag_border, 1.0).with_shadow(shadow.cloned()),
                         "tag-label-bkg",
                     ),
                     Element::classed_shape(
@@ -1641,7 +1692,7 @@ fn commit_tags(
         bounds.add_rect(Rect::centered(hole, 3.0, 3.0));
         out.push(Element::classed_shape(
             Geometry::Path(geom::polygon(&poly)),
-            Paint::both(tag_bkg, tag_border, 1.0),
+            Paint::both(tag_bkg, tag_border, 1.0).with_shadow(shadow.cloned()),
             "tag-label-bkg",
         ));
         out.push(Element::classed_shape(

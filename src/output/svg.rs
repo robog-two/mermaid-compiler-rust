@@ -1,6 +1,6 @@
 //! `Scene` → SVG text, shaped like mermaid's output (`<svg id="my-svg" ...>`).
 
-use crate::geom::PathCmd;
+use crate::geom::{PathCmd, Rect};
 use crate::scene::{Anchor, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Shadow, Text};
 use std::fmt::Write as _;
 
@@ -135,6 +135,8 @@ struct Filters<'a> {
     brightness: Vec<(String, f64)>,
     /// [`SvgOptions::raster_scale`].
     raster_scale: Option<f64>,
+    /// Rasterising: how many per-shape shadow filters have been written.
+    local: std::cell::Cell<usize>,
 }
 
 impl Filters<'_> {
@@ -146,6 +148,12 @@ impl Filters<'_> {
                 | Element::Translated { children, .. }
                 | Element::Faded { children, .. }
                 | Element::Clipped { children, .. } => {
+                    self.collect(children);
+                }
+                Element::Shadowed { shadow, children } => {
+                    if !self.shadows.contains(shadow) {
+                        self.shadows.push(shadow.clone());
+                    }
                     self.collect(children);
                 }
                 Element::Brightened {
@@ -190,9 +198,50 @@ impl Filters<'_> {
     fn attr(&self, p: &Paint) -> String {
         p.shadow
             .as_ref()
-            .and_then(|sh| self.shadows.iter().position(|s| s == sh))
+            .map(|sh| self.filter_attr(sh))
+            .unwrap_or_default()
+    }
+
+    /// The attribute that casts `sh`: its `<filter>`, or, for a CSS shadow in
+    /// SVG output, the CSS function itself.
+    fn filter_attr(&self, sh: &Shadow) -> String {
+        if sh.css && self.raster_scale.is_none() {
+            return format!(" style=\"filter:{}\"", esc(&sh.css_function()));
+        }
+        self.shadows
+            .iter()
+            .position(|s| s == sh)
             .map(|k| format!(" filter=\"url(#{}-shadow-{k})\"", self.id))
             .unwrap_or_default()
+    }
+
+    /// The `filter` attribute of a shape casting `sh` when rasterising, its
+    /// filter written here over the shape's own box (grown by its stroke, the
+    /// blur and the offset) rather than the whole drawing: a renderer
+    /// allocates and blurs a filter's whole region for every shape using it.
+    /// Where the shape has no box, the shared filter.
+    fn local_shadow(&self, out: &mut String, sh: &Shadow, geom: &Geometry, p: &Paint) -> String {
+        let Some(bb) = geom.bbox() else {
+            return self.filter_attr(sh);
+        };
+        let grow = 2.0 * p.stroke_width + 4.0 * sh.std_dev + sh.dx.abs().max(sh.dy.abs()) + 2.0;
+        let k = self.local.get();
+        self.local.set(k + 1);
+        let id = format!("{}-shape-shadow-{k}", self.id);
+        out.push_str("<defs>");
+        write_shadow_filter(
+            out,
+            &id,
+            sh,
+            Rect::new(
+                bb.x - grow,
+                bb.y - grow,
+                bb.w + 2.0 * grow,
+                bb.h + 2.0 * grow,
+            ),
+        );
+        out.push_str("</defs>");
+        format!(" filter=\"url(#{id})\"")
     }
 
     /// mermaid's rule for each brightened class (timeline/styles.js
@@ -236,7 +285,9 @@ impl Filters<'_> {
         } else {
             &[]
         };
-        if self.shadows.is_empty() && self.gradients.is_empty() && brightness.is_empty() {
+        // A CSS shadow is written in SVG output as the function itself.
+        let svg_css = |sh: &Shadow| sh.css && self.raster_scale.is_none();
+        if self.shadows.iter().all(svg_css) && self.gradients.is_empty() && brightness.is_empty() {
             return String::new();
         }
         let mut out = String::from("<defs>");
@@ -286,33 +337,79 @@ impl Filters<'_> {
         let r = self.region;
         let m = r.w.max(r.h);
         for (k, sh) in self.shadows.iter().enumerate() {
+            if svg_css(sh) {
+                continue;
+            }
             let c = crate::color::parse(sh.color.css()).unwrap_or(crate::color::Rgba {
                 r: 0,
                 g: 0,
                 b: 0,
                 a: 1.0,
             });
-            let unit = |v: u8| num(f64::from(v) / 255.0);
-            let _ = write!(
-                out,
-                "<filter id=\"{}-shadow-{k}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"sRGB\"><feColorMatrix in=\"SourceAlpha\" type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\"/><feGaussianBlur stdDeviation=\"{}\"/><feOffset dx=\"{}\" dy=\"{}\"/><feMerge><feMergeNode/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>",
-                self.id,
-                num(r.x - m),
-                num(r.y - m),
-                num(r.w + 2.0 * m),
-                num(r.h + 2.0 * m),
-                unit(c.r),
-                unit(c.g),
-                unit(c.b),
-                num(c.a),
-                num(sh.std_dev),
-                num(sh.dx),
-                num(sh.dy),
+            if sh.linear_rgb && self.raster_scale.is_none() {
+                // As mermaid writes it: insertLookDefs' region is 130% wide
+                // and tall for the 4px shadow, 150% for the small 2px one.
+                let size = if sh.dx == 2.0 { 150 } else { 130 };
+                let _ = write!(
+                    out,
+                    "<filter id=\"{}-shadow-{k}\" height=\"{size}%\" width=\"{size}%\"><feDropShadow dx=\"{}\" dy=\"{}\" stdDeviation=\"{}\" flood-opacity=\"{}\" flood-color=\"#{:02X}{:02X}{:02X}\"/></filter>",
+                    self.id,
+                    num(sh.dx),
+                    num(sh.dy),
+                    num(sh.std_dev),
+                    num(c.a),
+                    c.r,
+                    c.g,
+                    c.b,
+                );
+                continue;
+            }
+            write_shadow_filter(
+                &mut out,
+                &format!("{}-shadow-{k}", self.id),
+                sh,
+                Rect::new(r.x - m, r.y - m, r.w + 2.0 * m, r.h + 2.0 * m),
             );
         }
         out.push_str("</defs>");
         out
     }
+}
+
+/// A shadow's filter, written as its parts: the shadow colour from the alpha
+/// (a colour matrix; an `feDropShadow` works in linear RGB, its colour
+/// converted), blurred, offset, under the source, over `region`.
+fn write_shadow_filter(out: &mut String, id: &str, sh: &Shadow, region: Rect) {
+    let c = crate::color::parse(sh.color.css()).unwrap_or(crate::color::Rgba {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 1.0,
+    });
+    let unit = |v: u8| {
+        let v = f64::from(v) / 255.0;
+        num(match sh.linear_rgb {
+            false => v,
+            true if v <= 0.04045 => v / 12.92,
+            true => ((v + 0.055) / 1.055).powf(2.4),
+        })
+    };
+    let space = if sh.linear_rgb { "linearRGB" } else { "sRGB" };
+    let _ = write!(
+        out,
+        "<filter id=\"{id}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"{space}\"><feColorMatrix in=\"SourceAlpha\" type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\"/><feGaussianBlur stdDeviation=\"{}\"/><feOffset dx=\"{}\" dy=\"{}\"/><feMerge><feMergeNode/><feMergeNode in=\"SourceGraphic\"/></feMerge></filter>",
+        num(region.x),
+        num(region.y),
+        num(region.w),
+        num(region.h),
+        unit(c.r),
+        unit(c.g),
+        unit(c.b),
+        num(c.a),
+        num(sh.std_dev),
+        num(sh.dx),
+        num(sh.dy),
+    );
 }
 
 fn paint_attrs(p: &Paint, stroke_url: Option<String>) -> String {
@@ -386,6 +483,7 @@ fn write_text_in_face(out: &mut String, t: &Text, class: &Option<String>, raster
                     &Text {
                         y,
                         tspan_central: false,
+                        dy_tspans: false,
                         family: None,
                         ..t.clone()
                     },
@@ -398,6 +496,7 @@ fn write_text_in_face(out: &mut String, t: &Text, class: &Option<String>, raster
                     out,
                     &Text {
                         tspan_central: false,
+                        dy_tspans: false,
                         family: None,
                         ..t.clone()
                     },
@@ -421,6 +520,55 @@ fn write_text_in_face(out: &mut String, t: &Text, class: &Option<String>, raster
         );
         write_line(out, &t.lines[0], t);
         out.push_str("</tspan></text>");
+        return;
+    }
+    if t.dy_tspans && raster.is_none() {
+        let _ = write!(
+            out,
+            "<text{}{} x=\"{}\" y=\"{}\" dy=\"1em\" alignment-baseline=\"middle\" dominant-baseline=\"middle\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}>",
+            class_attr(class),
+            family_attr(t),
+            num(t.x),
+            num(t.y),
+            num(t.font_size),
+            esc(t.fill.css()),
+            weight_attr(t)
+        );
+        let step = num(t.line_height / t.font_size);
+        for (i, line) in t.lines.iter().enumerate() {
+            let dy = if i == 0 { "1" } else { &step };
+            let _ = write!(out, "<tspan x=\"{}\" dy=\"{dy}em\">", num(t.x));
+            write_line(out, line, t);
+            out.push_str("</tspan>");
+        }
+        out.push_str("</text>");
+        return;
+    }
+    if t.dy_tspans {
+        // Rasterising: each line at the baseline Chromium computes for it.
+        use crate::diagram::xychart::js_num;
+        let _ = write!(
+            out,
+            "<text{}{} x=\"{}\" y=\"{}\" text-anchor=\"{anchor}\" font-size=\"{}\" fill=\"{}\"{}>",
+            class_attr(class),
+            family_attr(t),
+            num(t.x),
+            js_num(t.line_y(0)),
+            num(t.font_size),
+            esc(t.fill.css()),
+            weight_attr(t)
+        );
+        for (i, line) in t.lines.iter().enumerate() {
+            let _ = write!(
+                out,
+                "<tspan x=\"{}\" y=\"{}\">",
+                num(t.x),
+                js_num(t.line_y(i))
+            );
+            write_line(out, line, t);
+            out.push_str("</tspan>");
+        }
+        out.push_str("</text>");
         return;
     }
     let _ = write!(
@@ -584,7 +732,11 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
             out.push_str("</g>");
         }
         Element::Shape { geom, paint, class } => {
-            let attrs = paint_attrs(paint, fx.stroke_url(paint)) + &fx.attr(paint);
+            let shadow_attr = match &paint.shadow {
+                Some(sh) if fx.raster_scale.is_some() => fx.local_shadow(out, sh, geom, paint),
+                _ => fx.attr(paint),
+            };
+            let attrs = paint_attrs(paint, fx.stroke_url(paint)) + &shadow_attr;
             let cls = class_attr(class);
             match geom {
                 Geometry::Rect { rect, rx } => {
@@ -670,6 +822,13 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 esc(class),
                 fx.brightness_attr(class, *factor)
             );
+            for c in children {
+                write_element(out, c, fx);
+            }
+            out.push_str("</g>");
+        }
+        Element::Shadowed { shadow, children } => {
+            let _ = write!(out, "<g{}>", fx.filter_attr(shadow));
             for c in children {
                 write_element(out, c, fx);
             }
@@ -798,13 +957,22 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
             );
         }
     }
+    // A timeline's in full, as mermaid writes it (a browser sizes the
+    // drawing from it).
+    let vb_num = |v: f64| {
+        if scene.kind == DiagramKind::Timeline {
+            crate::diagram::xychart::js_num(v)
+        } else {
+            num(v)
+        }
+    };
     let _ = write!(
         out,
         " viewBox=\"{} {} {} {}\" role=\"graphics-document document\" aria-roledescription=\"{}\"",
-        num(vb.x),
-        num(vb.y),
-        num(vb.w),
-        num(vb.h),
+        vb_num(vb.x),
+        vb_num(vb.y),
+        vb_num(vb.w),
+        vb_num(vb.h),
         scene.kind.role()
     );
     if scene.acc_title.is_some() {
@@ -827,6 +995,7 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
         gradients: Vec::new(),
         brightness: Vec::new(),
         raster_scale: opt.raster_scale,
+        local: Default::default(),
     };
     fx.collect(&scene.elements);
     let _ = write!(
@@ -865,6 +1034,7 @@ mod tests {
             anchor: Anchor::Middle,
             fill: crate::scene::Color::new("#28253D"),
             tspan_central: true,
+            dy_tspans: false,
             family: None,
         };
         let mut out = String::new();
@@ -941,6 +1111,8 @@ mod tests {
             dy: 2.0,
             std_dev: 1.0,
             color: Color::new("rgba(185, 185, 185, 0.5)"),
+            linear_rgb: false,
+            css: false,
         };
         let paint = Paint::fill(&Color::new("#fff")).with_shadow(Some(sh));
         let els = vec![
@@ -955,6 +1127,7 @@ mod tests {
             gradients: Vec::new(),
             brightness: Vec::new(),
             raster_scale: None,
+            local: Default::default(),
         };
         fx.collect(&els);
         for e in &els {

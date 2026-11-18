@@ -121,6 +121,28 @@ pub struct Shadow {
     /// The standard deviation of the blur.
     pub std_dev: f64,
     pub color: Color,
+    /// An SVG `<filter>` of its own (`feDropShadow`) rather than a CSS
+    /// filter function: it works in `linearRGB`, the shape it draws
+    /// (`SourceGraphic`) quantised through that space as well.
+    pub linear_rgb: bool,
+    /// Written, in SVG output, as the CSS `filter: drop-shadow()` mermaid's
+    /// stylesheet gives it, which a browser draws as it draws mermaid's
+    /// (rasterisers get the equivalent `<filter>`).
+    pub css: bool,
+}
+
+impl Shadow {
+    /// The CSS `drop-shadow(dx dy blur color)` function.
+    pub fn css_function(&self) -> String {
+        use crate::output::svg::num;
+        format!(
+            "drop-shadow({}px {}px {}px {})",
+            num(self.dx),
+            num(self.dy),
+            num(self.std_dev),
+            self.color.css()
+        )
+    }
 }
 
 impl Paint {
@@ -300,6 +322,13 @@ pub struct Text {
     /// (see [`crate::text::painted_tspan_central`]), so SVG output writes
     /// mermaid's markup and a raster drawn from it the painted baseline.
     pub tspan_central: bool,
+    /// mermaid writes this text as timeline's `wrap` does: `<text dy="1em"
+    /// dominant-baseline="middle">` at `y` with one `<tspan x dy>` per line,
+    /// the first `1em` and each further one `line_height` (in em) below the
+    /// last. SVG output writes that markup, so a browser lays it out as it
+    /// lays out mermaid's; the other backends draw each line at the baseline
+    /// [`Text::line_y`] gives, Chromium's for it.
+    pub dy_tspans: bool,
     /// An inline `font-family` (which wins over the stylesheet's), as
     /// mermaid's unknown icon writes its `?` in `ArialMT, Arial`, or a
     /// stylesheet's family for the text's class (usecase actors' `"Open
@@ -345,6 +374,7 @@ impl Text {
             anchor: Anchor::Middle,
             fill: fill.clone(),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         }
     }
@@ -362,8 +392,26 @@ impl Text {
             anchor: Anchor::Middle,
             fill: fill.clone(),
             tspan_central: false,
+            dy_tspans: false,
             family: None,
         }
+    }
+    /// The alphabetic baseline of line `i`. For [`Text::dy_tspans`] text, as
+    /// Chromium computes it: the `dy` lengths resolved and accumulated in
+    /// single precision (`1em`, then `line_height / font_size` em per line)
+    /// and the `middle` baseline shift added.
+    pub fn line_y(&self, i: usize) -> f64 {
+        if !self.dy_tspans {
+            return self.y + i as f64 * self.line_height;
+        }
+        let em = self.font_size as f32;
+        let step = (self.line_height / self.font_size) as f32 * em;
+        let mut acc = em;
+        for _ in 0..i {
+            acc += step;
+        }
+        f64::from(self.y as f32 + acc)
+            + crate::text::baseline_shift(crate::text::Baseline::Middle, self.font_size)
     }
     pub fn bold(mut self) -> Self {
         self.bold = true;
@@ -453,6 +501,15 @@ pub enum Element {
         class: Option<String>,
         children: Vec<Element>,
     },
+    /// Children composited as one layer and drawn through a drop shadow
+    /// filter: the layer's silhouette offset (and blurred) under it, as a
+    /// filter on a whole group casts it (mindmap's neo nodes). PDF output,
+    /// which has no filters, casts each shape's own shadow instead
+    /// ([`Element::with_shape_shadows`]).
+    Shadowed {
+        shadow: Shadow,
+        children: Vec<Element>,
+    },
     /// Children composited as one layer and drawn through CSS `filter:
     /// brightness(factor)`: every colour channel of the layer scaled by
     /// `factor` and clamped, antialiased edges included (timeline's
@@ -511,6 +568,33 @@ impl Element {
     /// `brightness(k)` ([`Color::brightened`]): what the filter makes of
     /// flat colours, though not of the antialiased edges where they meet.
     /// Images are left as they are.
+    /// This element with `shadow` cast by each of its shapes that casts
+    /// none of its own.
+    pub fn with_shape_shadows(&self, shadow: &Shadow) -> Element {
+        let mut e = self.clone();
+        fn walk(e: &mut Element, sh: &Shadow) {
+            match e {
+                Element::Shape { paint, .. } => {
+                    if paint.shadow.is_none() {
+                        paint.shadow = Some(sh.clone());
+                    }
+                }
+                Element::Group { children, .. }
+                | Element::Rotated { children, .. }
+                | Element::Clipped { children, .. }
+                | Element::Translated { children, .. }
+                | Element::Faded { children, .. }
+                | Element::Shadowed { children, .. }
+                | Element::Brightened { children, .. } => {
+                    children.iter_mut().for_each(|c| walk(c, sh))
+                }
+                _ => {}
+            }
+        }
+        walk(&mut e, shadow);
+        e
+    }
+
     pub fn brightened(&self, k: f64) -> Element {
         let all = |children: &[Element]| children.iter().map(|c| c.brightened(k)).collect();
         let paint = |p: &Paint| Paint {
@@ -607,6 +691,13 @@ impl Element {
                 class: class.clone(),
                 children: all(children),
             },
+            Element::Shadowed { shadow, children } => Element::Shadowed {
+                shadow: Shadow {
+                    color: shadow.color.brightened(k),
+                    ..shadow.clone()
+                },
+                children: all(children),
+            },
         }
     }
 
@@ -644,6 +735,10 @@ impl Element {
             } => Element::Brightened {
                 factor,
                 class,
+                children: all(children),
+            },
+            Element::Shadowed { shadow, children } => Element::Shadowed {
+                shadow,
                 children: all(children),
             },
             Element::Image { rect, href, inline } => Element::Image {
@@ -858,6 +953,7 @@ impl Scene {
                     Element::Group { children, .. }
                     | Element::Rotated { children, .. }
                     | Element::Brightened { children, .. }
+                    | Element::Shadowed { children, .. }
                     | Element::Translated { children, .. } => 1 + count(children),
                     _ => 1,
                 })

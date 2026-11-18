@@ -90,7 +90,8 @@ fn neo_shadows_fall_on_each_rect_and_circle_of_a_browser_and_person() {
     assert_eq!(view_box(&s), "4 10 356 235.685");
     // Bucket none; console its rect; browser its rect, three dots and the
     // address bar; person its rect and head.
-    assert_eq!(s.matches("class=\"drop-shadow\"").count(), 8);
+    // Each through the redux themes' feDropShadow, as a filter of its own.
+    assert_eq!(s.matches("filter=\"url(#my-svg-shadow-").count(), 8);
 }
 
 #[test]

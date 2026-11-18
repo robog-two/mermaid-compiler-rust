@@ -2168,7 +2168,8 @@ linkStyle 0 stroke:#00f");
             Element::Group { children, .. }
             | Element::Clipped { children, .. }
             | Element::Faded { children, .. }
-            | Element::Brightened { children, .. } => children.iter().for_each(|c| bbox(c, out)),
+            | Element::Brightened { children, .. }
+            | Element::Shadowed { children, .. } => children.iter().for_each(|c| bbox(c, out)),
             Element::Shape { geom, .. } => match geom {
                 Geometry::Rect { rect, .. } => {
                     add(crate::geom::Point::new(rect.x, rect.y));
@@ -2452,9 +2453,9 @@ linkStyle 0 stroke:#00f");
                 _ => None,
             })
             .unwrap();
-        // (The node's box, its drop shadow aside, starts at its left side.)
+        // The node's box starts at its left side (its drop shadow a filter).
         assert!((end.x - guide.x).abs() < 1e-3, "{end:?} {guide:?}");
-        assert!((guide.w - 4.0 - 167.2).abs() < 1e-3, "{guide:?}");
+        assert!((guide.w - 167.2).abs() < 1e-3, "{guide:?}");
     }
 
     /// mermaid 12.3.0 under `look: handDrawn` (seed 59, dark): a flow is a
