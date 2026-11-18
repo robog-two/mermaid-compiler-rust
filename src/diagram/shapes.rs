@@ -413,6 +413,56 @@ impl Boundary {
             Boundary::Cylinder(r, rx, ry) => cylinder_clip(r, *rx, *ry, toward),
         }
     }
+
+    /// What the node's `intersect` returns for a probe that may lie inside it
+    /// (mermaid's `insideOutline`). For an outline that is `intersect.polygon`
+    /// verbatim: every crossing of the whole line through the centre and the
+    /// probe, the one nearest the probe (the centre itself where none), so a
+    /// probe between doubled-back edges sees the edge next to it.
+    pub fn probe(&self, p: Point) -> Point {
+        match self {
+            Boundary::Outline(c, pts) => polygon_line_crossing(*c, pts, p),
+            _ => self.clip(p),
+        }
+    }
+}
+
+/// `intersect-polygon.js` over already placed points: `intersectLine(centre,
+/// p, q1, q2)` for each side (which tests only that the side straddles the
+/// line), the crossing nearest `p`; the centre where there is none.
+fn polygon_line_crossing(c: Point, pts: &[Point], p: Point) -> Point {
+    let mut best: Option<(f64, Point)> = None;
+    for i in 0..pts.len() {
+        let (q1, q2) = (pts[i], pts[(i + 1) % pts.len()]);
+        let a1 = p.y - c.y;
+        let b1 = c.x - p.x;
+        let c1 = p.x * c.y - c.x * p.y;
+        let r3 = a1 * q1.x + b1 * q1.y + c1;
+        let r4 = a1 * q2.x + b1 * q2.y + c1;
+        if r3 != 0.0 && r4 != 0.0 && r3 * r4 > 0.0 {
+            continue;
+        }
+        let a2 = q2.y - q1.y;
+        let b2 = q1.x - q2.x;
+        let c2 = q2.x * q1.y - q1.x * q2.y;
+        let r1 = a2 * c.x + b2 * c.y + c2;
+        let r2 = a2 * p.x + b2 * p.y + c2;
+        if r1.abs() < 1e-6 && r2.abs() < 1e-6 && r1 * r2 > 0.0 {
+            continue;
+        }
+        let denom = a1 * b2 - a2 * b1;
+        if denom == 0.0 {
+            continue;
+        }
+        let x = Point::new((b1 * c2 - b2 * c1) / denom, (a2 * c1 - a1 * c2) / denom);
+        let (dx, dy) = (x.x - p.x, x.y - p.y);
+        let d = (dx * dx + dy * dy).sqrt();
+        // A stable sort keeps the first of equally near crossings.
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, x));
+        }
+    }
+    best.map_or(c, |(_, x)| x)
 }
 
 /// `cylinder.ts`'s `intersect`: the bounding box's crossing, moved along y by

@@ -4033,7 +4033,7 @@ fn attach_along(b: &Boundary, c: Point, port: Point, next: Point) -> Option<Poin
     // `insideOutline`: no further from the centre than the outline is that way.
     let inside = |p: Point| {
         let d = p.dist(c);
-        d < 1e-12 || d <= b.clip(p).dist(c) + 1e-9
+        d < 1e-12 || d <= b.probe(p).dist(c) + 1e-9
     };
     let (mut inner, mut outer) = if horizontal {
         (c.x, port.x)
@@ -4093,6 +4093,14 @@ pub(crate) fn clip_along(b: &Boundary, port: Point, next: Point) -> Point {
         Boundary::Rect(r) | Boundary::Cylinder(r, ..) => r.center(),
         Boundary::Ellipse(c, _, _) | Boundary::Polygon(c, _) | Boundary::Outline(c, _) => *c,
     };
+    // An outline that doubles back: `outlineAttachPoint` itself, whose
+    // probes see the side of the outline nearest them (not the crossing
+    // nearest the port).
+    if let Boundary::Outline(..) = b
+        && let Some(p) = attach_along(b, center, port, next)
+    {
+        return p;
+    }
     let inward = port.minus(next);
     if inward.len() < 1e-9 {
         return port;

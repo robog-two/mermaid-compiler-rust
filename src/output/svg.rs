@@ -260,8 +260,20 @@ fn paint_attrs(p: &Paint, stroke_url: Option<String>) -> String {
 
 fn class_attr(c: &Option<String>) -> String {
     c.as_ref()
-        .map(|c| format!(" class=\"{}\"", esc(c)))
+        .map(|c| format!(" class=\"{}\"{}", esc(c), class_font(c)))
         .unwrap_or_default()
+}
+
+/// The font a class of text sets inline (a style, so that it beats the
+/// stylesheet's `text` rule): console.ts writes its `>_` prompt in
+/// `font-family: monospace` (DejaVu Sans Mono Bold where mmdc runs, 8.43px a
+/// glyph at 14px), not the diagram's font.
+fn class_font(class: &str) -> &'static str {
+    if class == "console-glyph" {
+        " style=\"font-family:monospace\""
+    } else {
+        ""
+    }
 }
 
 fn write_text(out: &mut String, t: &Text, class: &Option<String>, raster: Option<f64>) {
