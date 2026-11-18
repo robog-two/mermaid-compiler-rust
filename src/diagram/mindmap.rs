@@ -13,6 +13,7 @@
 //! deterministic radial placement, so this reproduces mermaid's node positions.
 
 use super::graph::Shape;
+use super::hand::{self, HandNode, HandStyle};
 use super::shapes;
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
@@ -281,6 +282,8 @@ pub struct Placed {
     pub bbox: Rect,
     /// Outline of a bang or cloud node around its centre.
     pub outline: Option<Vec<PathCmd>>,
+    /// The label's measured size.
+    pub label: (f64, f64),
 }
 
 impl Placed {
@@ -387,6 +390,7 @@ fn measure(n: &Node, font: f64, padding: f64, widths: Widths) -> Placed {
         section: None,
         bbox,
         outline,
+        label: (tw, th),
     }
 }
 
@@ -395,11 +399,30 @@ fn measure(n: &Node, font: f64, padding: f64, widths: Widths) -> Placed {
 /// one `Placed` per node (same indices as `mm.nodes`), centred in cytoscape's
 /// coordinates.
 pub fn layout(mm: &Mindmap, font: f64, padding: f64, widths: Widths) -> Vec<Placed> {
+    layout_with(mm, font, padding, widths, None)
+}
+
+/// [`layout`], under the handDrawn look with `hand`'s rough.js options: a
+/// node is as big as its rough drawing.
+fn layout_with(
+    mm: &Mindmap,
+    font: f64,
+    padding: f64,
+    widths: Widths,
+    hand: Option<&HandStyle>,
+) -> Vec<Placed> {
     let mut placed: Vec<Placed> = mm
         .nodes
         .iter()
         .map(|nd| measure(nd, font, padding, widths))
         .collect();
+    if let Some(st) = hand {
+        for (nd, p) in mm.nodes.iter().zip(placed.iter_mut()) {
+            if let Some(hn) = hand_node(nd.shape, p.label, padding, st) {
+                p.bbox = hn.bbox;
+            }
+        }
+    }
     if placed.is_empty() {
         return placed;
     }
@@ -421,6 +444,32 @@ pub fn layout(mm: &Mindmap, font: f64, padding: f64, widths: Widths) -> Vec<Plac
         p.center = Point::new(x, y);
     }
     placed
+}
+
+/// The rough.js drawing of a node of `shape` around a `label`-sized label
+/// under the handDrawn look, as the flowchart shapes mindmapRenderer hands
+/// it to draw it (`None`: a default node, drawn as in the other looks).
+fn hand_node(
+    shape: NodeShape,
+    label: (f64, f64),
+    padding: f64,
+    st: &HandStyle,
+) -> Option<HandNode> {
+    let (graph_shape, p) = match shape {
+        NodeShape::Default => return None,
+        // squareRect.ts with node.padding 10, roundedRect.ts with 15.
+        NodeShape::Square => (Shape::Rect, 10.0),
+        NodeShape::Rounded => (Shape::Rounded, 15.0),
+        // mindmapCircle: circle.ts with `options.padding` (a whole padding,
+        // where circle.ts alone takes half of node.padding).
+        NodeShape::Circle => (Shape::Circle, 2.0 * padding),
+        // mindmapDb doubles the hexagon's padding.
+        NodeShape::Hexagon => (Shape::Hexagon, 2.0 * padding),
+        NodeShape::Bang => (Shape::Bang, padding),
+        NodeShape::Cloud => (Shape::Cloud, padding),
+    };
+    let m = shapes::ShapeMetrics::classic(graph_shape, p).with_label(label.0, label.1);
+    hand::node(graph_shape, &m, st)
 }
 
 /// An edge as cytoscape routes it for mermaid: between the 30px default
@@ -497,7 +546,20 @@ pub fn render(
         max_node: cfg.section_f64("mindmap", "maxNodeWidth", 200.0),
         wrapping: cfg.section_f64("flowchart", "wrappingWidth", 120.0),
     };
-    let mut placed = layout(&mm, pal.font_size, padding, widths);
+    let hand = (cfg.look == crate::config::Look::HandDrawn).then(|| HandStyle {
+        fill: pal.main_bkg.css().to_string(),
+        stroke: pal.node_border.css().to_string(),
+        stroke_width: 1.3,
+        seed: cfg.hand_drawn_seed(),
+        radius: pal.radius.unwrap_or(5.0),
+        line: pal.line_color.css().to_string(),
+        end_dot: pal.node_border.css().to_string(),
+        note_fill: pal.note_bkg.css().to_string(),
+        note_stroke: pal.note_border.css().to_string(),
+        horizontal: false,
+        state: false,
+    });
+    let mut placed = layout_with(&mm, pal.font_size, padding, widths, hand.as_ref());
     if cfg
         .section("mindmap", "colorBy")
         .and_then(|j| j.as_str())
@@ -505,7 +567,14 @@ pub fn render(
     {
         assign_sections(&mm, &mut placed, true);
     }
-    Ok(draw(&mm, &placed, pal, padding, underlines(cfg, pal)))
+    Ok(draw(
+        &mm,
+        &placed,
+        pal,
+        padding,
+        underlines(cfg, pal),
+        hand.as_ref(),
+    ))
 }
 
 /// `(fill, text, underline)` of a node: section `s` is `.section-s` (`cScale(s+1)`,
@@ -538,6 +607,7 @@ pub fn draw(
     pal: &Palette,
     padding: f64,
     underline: bool,
+    hand: Option<&HandStyle>,
 ) -> Scene {
     let font = pal.font_size;
     let mut bounds = Bounds::default();
@@ -554,8 +624,25 @@ pub fn draw(
             // indentation characters from the root's.
             let depth = mm.nodes[par].level - mm.nodes[0].level + 1;
             let (c, _, _) = section_colors(pal, p.section);
+            let mut cmds = geom::basis_curve(&pts);
+            if let Some(st) = hand {
+                // insertEdge under the handDrawn look: the curve's path data
+                // through rough.js at roughness 0.3.
+                let d = super::graph::d3_path_data(&Geometry::Path(cmds));
+                let o = crate::rough::Options {
+                    roughness: 0.3,
+                    seed: st.seed,
+                    ..Default::default()
+                };
+                let drawn = crate::rough::path(&d, o);
+                let ops: Vec<_> = drawn.sets.into_iter().flat_map(|s| s.ops).collect();
+                cmds = hand::set_cmds(&ops, Point::default());
+                if let Some(b) = geom::path_bbox(&cmds) {
+                    bounds.add_rect(b);
+                }
+            }
             edges.push(Element::classed_shape(
-                Geometry::Path(geom::basis_curve(&pts)),
+                Geometry::Path(cmds),
                 Paint::stroke(&c, edge_width(depth)),
                 format!(
                     "edge section-edge-{} edge-depth-{depth}",
@@ -567,7 +654,14 @@ pub fn draw(
         let r = p.rect();
         let b = p.bbox;
         bounds.add_rect(Rect::new(p.center.x + b.x, p.center.y + b.y, b.w, b.h));
+        let rough = hand.and_then(|st| hand_node(nd.shape, p.label, padding, st));
         let mut els = match &p.outline {
+            _ if rough.is_some() => {
+                let hn = rough.as_ref().expect("checked");
+                let b = hn.drawn_bbox();
+                bounds.add_rect(Rect::new(p.center.x + b.x, p.center.y + b.y, b.w, b.h));
+                hand_elements(hn, p.center, &fill)
+            }
             Some(cmds) => vec![Element::shape(
                 Geometry::Path(cmds.clone()).translated(p.center.x, p.center.y),
                 Paint::fill(&fill),
@@ -622,6 +716,40 @@ pub fn draw(
         font_family: pal.font_family.clone(),
         css: String::new(),
     }
+}
+
+/// A hand-drawn node's rough.js paths centred on `c`: hachures stroked in the
+/// fill colour, outlines in the stroke colour, and every path filled with
+/// its section's colour (`.section-N path { fill }` outranks rough.js's
+/// `fill` attributes).
+fn hand_elements(hn: &HandNode, c: Point, section_fill: &Color) -> Vec<Element> {
+    let mut out = Vec::new();
+    for pc in &hn.pieces {
+        let o = &pc.drawable.options;
+        let at = c.plus(pc.at);
+        let mut kids = Vec::new();
+        for set in pc.drawable.sets.iter().filter(|s| !s.ops.is_empty()) {
+            let mut paint = match set.kind {
+                crate::rough::SetKind::Path => {
+                    Paint::stroke(&Color::new(o.stroke.clone()), o.stroke_width)
+                }
+                crate::rough::SetKind::FillSketch => Paint::stroke(
+                    &Color::new(o.fill.clone().unwrap_or_default()),
+                    pc.drawable.fill_weight(),
+                ),
+                crate::rough::SetKind::FillPath => {
+                    Paint::fill(&Color::new(o.fill.clone().unwrap_or_default()))
+                }
+            };
+            paint.fill = section_fill.clone();
+            kids.push(Element::shape(
+                Geometry::Path(hand::set_cmds(&set.ops, at)),
+                paint,
+            ));
+        }
+        out.push(Element::group("basic label-container", kids));
+    }
+    out
 }
 
 /// Stroke width of `.edge-depth-{depth}` (classic look: `17 - 3·(depth + 1)` for
@@ -1041,5 +1169,39 @@ line\"(";
         assign_sections(mm, p, true);
         let s: Vec<_> = p.iter().map(|p| p.section).collect();
         assert_eq!(s, [None, Some(0), Some(1), Some(0), Some(1)]);
+    }
+
+    /// mermaid 12.3.0 under `look: handDrawn` (seed 13): the shaped nodes are
+    /// the flowchart's rough.js shapes, laid out at their drawings' size (the
+    /// root circle's outline from (188.324, 221.661), the bang's from
+    /// (26.913, 430.009)), and every edge is a rough path.
+    #[test]
+    fn hand_drawn_nodes_and_edges_match_mermaid() {
+        let src = "---\nconfig:\n  look: handDrawn\n  handDrawnSeed: 13\n---\nmindmap\n  \
+                   root((Root))\n    A[Square]\n      B(Rounded)\n      C))Bang((\n    \
+                   D)Cloud(\n      E{{Hexagon}}\n    F\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .expect("renders")
+            .scene;
+        fn walk(els: &[Element], out: &mut Vec<String>) {
+            for el in els {
+                match el {
+                    Element::Group { children, .. } => walk(children, out),
+                    Element::Shape {
+                        geom: Geometry::Path(cmds),
+                        ..
+                    } => out.push(crate::output::svg::path_data(cmds)),
+                    _ => {}
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        walk(&scene.elements, &mut paths);
+        for start in ["M188.324,221.661C", "M26.913,430.009C"] {
+            assert!(paths.iter().any(|d| d.starts_with(start)), "{start}");
+        }
+        // Six rough edges: each segment drawn twice.
+        let rough_edges = paths.iter().filter(|d| d.matches('M').count() >= 6).count();
+        assert!(rough_edges >= 6, "{paths:?}");
     }
 }

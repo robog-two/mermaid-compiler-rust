@@ -3441,7 +3441,7 @@ fn label_coordinate_in_data(p: Point, d: &str) -> bool {
 
 /// The path data d3's `line` writes for `g` (d3-shape 3 rounds every
 /// coordinate to 3 decimals, `Math.round(v * 1000) / 1000`).
-fn d3_path_data(g: &Geometry) -> String {
+pub(crate) fn d3_path_data(g: &Geometry) -> String {
     let Geometry::Path(cmds) = g else {
         return String::new();
     };

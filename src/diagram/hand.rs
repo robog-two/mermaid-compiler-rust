@@ -252,6 +252,81 @@ fn stadium_points(w: f64, h: f64) -> Vec<Point> {
     pts
 }
 
+/// bang.ts's path for a `tw`×`th` label with `node.padding` `p` (as its
+/// template literal writes it), and the drawn width and height.
+fn bang_path(tw: f64, th: f64, p: f64) -> (String, f64, f64) {
+    let half = p / 2.0;
+    let w0 = tw + 10.0 * half;
+    let h0 = th + 8.0 * half;
+    let r = 0.15 * w0;
+    let (w, h) = (w0.max(tw + 20.0), h0.max(th + 20.0));
+    let r8 = r * 0.8;
+    let d = format!(
+        "M0 0 a{r},{r} 1 0,0 {},{} a{r},{r} 1 0,0 {},0 a{r},{r} 1 0,0 {},0 \
+         a{r},{r} 1 0,0 {},{} a{r},{r} 1 0,0 {},{} a{r8},{r8} 1 0,0 0,{} \
+         a{r},{r} 1 0,0 {},{} a{r},{r} 1 0,0 {},{} a{r},{r} 1 0,0 {},0 \
+         a{r},{r} 1 0,0 {},0 a{r},{r} 1 0,0 {},{} a{r},{r} 1 0,0 {},{} \
+         a{r8},{r8} 1 0,0 0,{} a{r},{r} 1 0,0 {},{} H0 V0 Z",
+        w * 0.25,
+        -h * 0.1,
+        w * 0.25,
+        w * 0.25,
+        w * 0.25,
+        h * 0.1,
+        w * 0.15,
+        h * 0.33,
+        h * 0.34,
+        -w * 0.15,
+        h * 0.33,
+        -w * 0.25,
+        h * 0.15,
+        -w * 0.25,
+        -w * 0.25,
+        -w * 0.25,
+        -h * 0.15,
+        -w * 0.1,
+        -h * 0.33,
+        -h * 0.34,
+        w * 0.1,
+        -h * 0.33,
+    );
+    (d, w, h)
+}
+
+/// cloud.ts's path for a `tw`×`th` label with `node.padding` `p`, and its
+/// width and height.
+fn cloud_path(tw: f64, th: f64, p: f64) -> (String, f64, f64) {
+    let half = p / 2.0;
+    let (w, h) = (tw + 2.0 * half, th + 2.0 * half);
+    let (r1, r2, r3, r4) = (0.15 * w, 0.25 * w, 0.35 * w, 0.2 * w);
+    let d = format!(
+        "M0 0 a{r1},{r1} 0 0,1 {},{} a{r3},{r3} 1 0,1 {},{} a{r2},{r2} 1 0,1 {},{} \
+         a{r1},{r1} 1 0,1 {},{} a{r4},{r4} 1 0,1 {},{} a{r2},{r1} 1 0,1 {},{} \
+         a{r3},{r3} 1 0,1 {},0 a{r1},{r1} 1 0,1 {},{} a{r1},{r1} 1 0,1 {},{} \
+         a{r4},{r4} 1 0,1 {},{} H0 V0 Z",
+        w * 0.25,
+        -w * 0.1,
+        w * 0.4,
+        -w * 0.1,
+        w * 0.35,
+        w * 0.2,
+        w * 0.15,
+        h * 0.35,
+        -w * 0.15,
+        h * 0.65,
+        -w * 0.25,
+        w * 0.15,
+        -w * 0.5,
+        -w * 0.25,
+        -w * 0.15,
+        -w * 0.1,
+        -h * 0.35,
+        w * 0.1,
+        -h * 0.65,
+    );
+    (d, w, h)
+}
+
 /// util.ts `createPathFromPoints`.
 fn path_from_points(pts: &[Point]) -> String {
     let mut s: Vec<String> = pts
@@ -836,6 +911,17 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
                 Point::new(-14.0, 0.0),
             ]);
             (vec![piece(rough::path(&path, o()), origin)], Bound::Polygon)
+        }
+        // bang.ts / cloud.ts: the outline as a rough path, moved by
+        // (-w/2, -h/2).
+        Shape::Bang | Shape::Cloud => {
+            let (d, w, h) = if shape == Shape::Bang {
+                bang_path(tw, th, p)
+            } else {
+                cloud_path(tw, th, p)
+            };
+            let at = Point::new(-w / 2.0, -h / 2.0);
+            (vec![piece(rough::path(&d, o()), at)], Bound::Rect)
         }
         // note.ts: a rectangle padded by `node.padding`, in the note colours.
         Shape::Note => {
