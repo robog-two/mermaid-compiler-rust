@@ -1095,13 +1095,17 @@ pub fn descent_px(font_size: f64) -> f64 {
 /// 1/64 px layout unit; `middle` is half the x-height, a tie rounding down.
 /// Measured in Chromium for 6–60px.
 pub fn baseline_shift(b: Baseline, font_size: f64) -> f64 {
+    baseline_shift_weight(b, font_size, false)
+}
+
+/// [`baseline_shift`] for regular or bold text: `middle` takes the x-height
+/// of the weight (Recursive's `MVAR` raises it at `wght` 700).
+pub fn baseline_shift_weight(b: Baseline, font_size: f64, bold: bool) -> f64 {
     let ascent = ascent_px(font_size);
     let descent = descent_px(font_size);
     match b {
         Baseline::Alphabetic => 0.0,
-        Baseline::Middle => {
-            (font_size * face().x_height_em(false) / 2.0 * 64.0 - 0.5).ceil() / 64.0
-        }
+        Baseline::Middle => (font_size * face().x_height_em(bold) / 2.0 * 64.0 - 0.5).ceil() / 64.0,
         Baseline::Central => (ascent - descent) / 2.0,
         Baseline::Hanging => (0.8 * ascent * 64.0).round() / 64.0,
         Baseline::TextBeforeEdge => ascent,

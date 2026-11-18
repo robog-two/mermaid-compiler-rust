@@ -691,7 +691,12 @@ pub struct Layout {
 
 /// Browser `getBBox().height` of one line of text: 17.02px at 16px, one pixel more
 /// when a glyph descends below the baseline (measured from Chromium).
+/// In a web font (Recursive, Open Sans) it is the face's ascent and descent,
+/// each rounded to a pixel (19 for Recursive at 16px), whatever the glyphs.
 pub fn text_height(s: &str, font_size: f64) -> f64 {
+    if crate::text::face() != crate::text::Face::Arial {
+        return crate::text::ascent_px(font_size) + crate::text::descent_px(font_size);
+    }
     let desc = s.chars().any(|c| "gjpqy(),;[]{}|_@Q".contains(c));
     font_size * (17.015625 + if desc { 0.984375 } else { 0.0 }) / 16.0
 }
@@ -1028,6 +1033,11 @@ pub fn draw(
         }
         let mut t = label_text(row.label_x, row.center_y, &row.name, &colors.label);
         t.bold = row.is_dir;
+        if row.is_dir {
+            // `middle` sits half the bold x-height up (Recursive's `MVAR`).
+            t.y = row.center_y
+                + crate::text::baseline_shift_weight(crate::text::Baseline::Middle, fs, true);
+        }
         g.push(Element::classed_text(t, class));
         if let (Some(d), Some(dx)) = (&row.description, lay.desc_x) {
             g.push(Element::classed_text(
@@ -1302,6 +1312,19 @@ mod tests {
         let mut out = Vec::new();
         walk(&r.scene.elements, &mut out);
         (r.scene, out)
+    }
+
+    /// mermaid 12.3.0 under `theme: redux` (Recursive Variable, mmdc's
+    /// fonts): rows of 19px text (Recursive's rounded ascent and descent), the
+    /// slanted descriptions' ink (Recursive has no italic: Chromium skews it)
+    /// widening the view box to "-0.5 0 333.20843505859375 145".
+    #[test]
+    fn recursive_rows_and_slanted_descriptions() {
+        let (s, _) = flat(
+            "---\nconfig:\n  theme: redux\n---\ntreeView-beta\n    src/\n        index.js ## app entry point\n        config.ts ## runtime configuration k\n    package.json ## project manifest E\n",
+        );
+        assert!((s.view_box.w - 333.2084).abs() < 0.01, "{:?}", s.view_box);
+        assert!((s.view_box.h - 145.0).abs() < 1e-9, "{:?}", s.view_box);
     }
 
     #[test]
