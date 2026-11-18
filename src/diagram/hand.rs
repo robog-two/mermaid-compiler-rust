@@ -26,6 +26,17 @@ pub struct HandStyle {
     pub seed: f64,
     /// `themeVariables.radius` (rounded rectangles).
     pub radius: f64,
+    /// `themeVariables.lineColor` (state start and end, fork bars).
+    pub line: String,
+    /// `stateBorder ?? nodeBorder` (the state end's dot).
+    pub end_dot: String,
+    /// `noteBkgColor` and `noteBorderColor` (notes).
+    pub note_fill: String,
+    pub note_stroke: String,
+    /// The graph is laid out across (fork bars stand upright).
+    pub horizontal: bool,
+    /// A state diagram's node (its states are `rx: 10` rects).
+    pub state: bool,
 }
 
 /// One rough.js drawing placed at `at` in the node's frame.
@@ -43,6 +54,8 @@ pub struct HandNode {
     pub pieces: Vec<Piece>,
     /// `getBBox()` of the measured group, in the node's frame.
     pub bbox: Rect,
+    /// The size the layout gets, where the shape does not take the bbox's.
+    pub size: Option<(f64, f64)>,
     boundary: Bound,
 }
 
@@ -53,6 +66,8 @@ enum Bound {
     Rect,
     /// `intersect.circle(node, r)`.
     Circle(f64),
+    /// `intersect.circle(node, node.width / 2)` (the measured width).
+    MeasuredCircle,
     /// `intersect.polygon(node, points)` with points given in [`HandNode::poly`].
     Polygon,
     /// question.ts: a diamond as wide as the measured box.
@@ -68,6 +83,7 @@ impl HandNode {
         match self.boundary {
             Bound::Rect => Boundary::Rect(Rect::centered(c, w, h)),
             Bound::Circle(r) => Boundary::Ellipse(c, r, r),
+            Bound::MeasuredCircle => Boundary::Ellipse(c, w / 2.0, w / 2.0),
             Bound::Diamond => {
                 let s = w;
                 let local = vec![
@@ -170,6 +186,7 @@ fn poly(shape: Shape, m: &ShapeMetrics) -> Vec<Point> {
             let (w, h) = stadium_dims(tw, th, p);
             stadium_points(w, h)
         }
+        Shape::Choice => vec![pt(0.0, 14.0), pt(14.0, 0.0), pt(0.0, -14.0), pt(-14.0, 0.0)],
         _ => Vec::new(),
     }
 }
@@ -347,6 +364,13 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
             let d = rough::rectangle(-w / 2.0, -h / 2.0, w, h, o());
             (vec![piece(d, origin)], Bound::Rect)
         }
+        // A state: roundedRect (`themeVariables.radius ?? 5`, `padding` 8
+        // round the label), a rough path.
+        Shape::Rounded if st.state => {
+            let (w, h) = (tw + 2.0 * p, th + 2.0 * p);
+            let path = rounded_rect_path(-w / 2.0, -h / 2.0, w, h, st.radius);
+            (vec![piece(rough::path(&path, o()), origin)], Bound::Rect)
+        }
         // roundedRect: drawRect with rx = ry = radius, a rough path.
         Shape::Rounded => {
             let (w, h) = (tw + 2.0 * p, th + 2.0 * p);
@@ -511,6 +535,82 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
                 Bound::Cylinder(rx, ry),
             )
         }
+        // stateStart.ts: `rc.circle(0, 0, 14, solidStateFill(lineColor))`.
+        Shape::StateStart | Shape::SmallCircle => {
+            let so = Options {
+                fill: Some(st.line.clone()),
+                hachure_angle: 120.0,
+                hachure_gap: 1.5,
+                fill_weight: 1.5,
+                roughness: 0.7,
+                stroke: st.line.clone(),
+                seed: st.seed,
+                ..Options::default()
+            };
+            (
+                vec![piece(rough::circle(0.0, 0.0, 14.0, so), origin)],
+                Bound::MeasuredCircle,
+            )
+        }
+        // stateEnd.ts: a 14px ring stroked `lineColor` at 2 round a solid 5px
+        // dot, one measured group.
+        Shape::StateEnd => {
+            let oo = Options {
+                stroke: st.line.clone(),
+                stroke_width: 2.0,
+                ..o()
+            };
+            let io = Options {
+                fill: Some(st.end_dot.clone()),
+                stroke: st.end_dot.clone(),
+                stroke_width: 2.0,
+                fill_style: "solid".into(),
+                ..o()
+            };
+            (
+                vec![
+                    piece(rough::circle(0.0, 0.0, 14.0, oo), origin),
+                    piece(rough::circle(0.0, 0.0, 5.0, io), origin),
+                ],
+                Bound::MeasuredCircle,
+            )
+        }
+        // forkJoin.ts: a 70×10 bar (10×70 across) of `lineColor`.
+        Shape::ForkBar => {
+            let (w, h) = if st.horizontal {
+                (10.0, 70.0)
+            } else {
+                (70.0, 10.0)
+            };
+            let fo = Options {
+                fill: Some(st.line.clone()),
+                stroke: st.line.clone(),
+                ..o()
+            };
+            let d = rough::rectangle(-w / 2.0, -h / 2.0, w, h, fo);
+            (vec![piece(d, origin)], Bound::Rect)
+        }
+        // choice.ts: the 28px diamond as a rough path; the node stays 28×28.
+        Shape::Choice => {
+            let path = path_from_points(&[
+                Point::new(0.0, 14.0),
+                Point::new(14.0, 0.0),
+                Point::new(0.0, -14.0),
+                Point::new(-14.0, 0.0),
+            ]);
+            (vec![piece(rough::path(&path, o()), origin)], Bound::Polygon)
+        }
+        // note.ts: a rectangle padded by `node.padding`, in the note colours.
+        Shape::Note => {
+            let (w, h) = (tw + 2.0 * p, th + 2.0 * p);
+            let no = Options {
+                fill: Some(st.note_fill.clone()),
+                stroke: st.note_stroke.clone(),
+                ..o()
+            };
+            let d = rough::rectangle(-w / 2.0, -h / 2.0, w, h, no);
+            (vec![piece(d, origin)], Bound::Rect)
+        }
         _ => return None,
     };
     // The measured pieces share one frame (one group, or two groups side by
@@ -525,9 +625,17 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
         .collect();
     let [x, y, w, h] = super::svgbbox::cubic_group_box(&paths)?;
     let bbox = Rect::new(x + at.x, y + at.y, w, h);
+    // forkJoin.ts adds half the state padding (8) to the measured size;
+    // choice.ts keeps 28×28.
+    let size = match shape {
+        Shape::ForkBar => Some((bbox.w + 4.0, bbox.h + 4.0)),
+        Shape::Choice => Some((28.0, 28.0)),
+        _ => None,
+    };
     Some(HandNode {
         pieces,
         bbox,
+        size,
         boundary,
     })
 }

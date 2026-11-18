@@ -430,6 +430,10 @@ struct Look {
     neo: bool,
     /// The rough.js seed under the handDrawn look (`None` in the other looks).
     hand_seed: Option<f64>,
+    /// The diagram is laid out across (left to right or back).
+    horizontal: bool,
+    /// A state diagram.
+    state: bool,
 }
 
 fn look(kind: DiagramKind) -> Look {
@@ -452,6 +456,8 @@ fn look(kind: DiagramKind) -> Look {
         rounded_rx: 5.0,
         neo: false,
         hand_seed: None,
+        horizontal: false,
+        state: kind == DiagramKind::State,
     }
 }
 
@@ -1313,6 +1319,7 @@ pub fn render_with(
     let g = &*with_icons(g, cfg);
     let mut lk = themed_look(look(g.kind), g.kind, cfg.look, pal);
     lk.hand_seed = (cfg.look == ConfigLook::HandDrawn).then_some(cfg.hand_drawn_seed);
+    lk.horizontal = g.direction.is_horizontal();
     let shadow = pal
         .drop_shadow
         .as_ref()
@@ -5727,7 +5734,23 @@ fn hand_style(n: &Node, pal: &Palette, lk: &Look, seed: f64) -> hand::HandStyle 
             .to_string(),
         stroke_width: n.style.stroke_width.unwrap_or(ROUGH_STROKE_WIDTH),
         seed,
-        radius: lk.rounded_rx,
+        // State nodes take `themeVariables.radius` only here.
+        radius: if lk.state {
+            pal.radius.unwrap_or(5.0)
+        } else {
+            lk.rounded_rx
+        },
+        line: pal.line_color.css().to_string(),
+        end_dot: pal
+            .state_border
+            .as_ref()
+            .unwrap_or(&pal.node_border)
+            .css()
+            .to_string(),
+        note_fill: pal.note_bkg.css().to_string(),
+        note_stroke: pal.note_border.css().to_string(),
+        horizontal: lk.horizontal,
+        state: lk.state,
     }
 }
 
@@ -5738,8 +5761,7 @@ fn measure_hand(n: &Node, m: &mut Measured, pal: &Palette, lk: &Look) {
         return;
     };
     if let Some(hn) = hand::node(n.shape, &m.metrics, &hand_style(n, pal, lk, seed)) {
-        m.w = hn.bbox.w;
-        m.h = hn.bbox.h;
+        (m.w, m.h) = hn.size.unwrap_or((hn.bbox.w, hn.bbox.h));
         m.hand = Some(hn.bbox);
     }
 }
