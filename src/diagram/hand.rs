@@ -1250,7 +1250,7 @@ fn extended(shape: Shape, tw: f64, th: f64, p: f64, st: &HandStyle) -> Option<(V
         Shape::Folder => {
             let w = (tw + 2.0 * p).max(90.0);
             let ch = th + 2.0 * p;
-            let tab_h = (ch * 0.16).min(14.0).max(8.0);
+            let tab_h = (ch * 0.16).clamp(8.0, 14.0);
             let total = ch + tab_h;
             let tab_w = (w * 0.38).max(28.0);
             let top = -total / 2.0;
@@ -1495,7 +1495,7 @@ fn extended(shape: Shape, tw: f64, th: f64, p: f64, st: &HandStyle) -> Option<(V
         // bucket.ts: the rough body; the rim ellipse is drawn as classic.
         Shape::Bucket => {
             let w = (tw + p * 2.0).max(80.0);
-            let rim = (w * 0.08).min(12.0).max(5.0);
+            let rim = (w * 0.08).clamp(5.0, 12.0);
             let total = th + p * 2.0 + rim;
             let top = -total / 2.0 + rim;
             let bottom = total / 2.0;
@@ -1545,7 +1545,7 @@ fn extended(shape: Shape, tw: f64, th: f64, p: f64, st: &HandStyle) -> Option<(V
         // head's arc and the body's rounded corners.
         Shape::Person => {
             let w = (tw + p * 2.0).max(100.0);
-            let head = (w * 0.23).max(16.0).min(56.0);
+            let head = (w * 0.23).clamp(16.0, 56.0);
             let overlap = head * 0.27;
             let body_h = th + p * 2.0;
             let body_r = (w * 0.177).min(body_h * 0.45);
@@ -1950,7 +1950,7 @@ pub fn node(shape: Shape, m: &ShapeMetrics, st: &HandStyle) -> Option<HandNode> 
     if shape == Shape::Bucket {
         // bucket.ts measures its group, the (classic) rim ellipse with it.
         let w = (tw + p * 2.0).max(80.0);
-        let rim = (w * 0.08).min(12.0).max(5.0);
+        let rim = (w * 0.08).clamp(5.0, 12.0);
         let top = -(th + p * 2.0 + rim) / 2.0 + rim;
         bbox = bbox.union(&Rect::new(-w / 2.0, top - rim, w, 2.0 * rim));
     }
