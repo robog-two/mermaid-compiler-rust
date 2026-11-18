@@ -55,33 +55,15 @@ fn js_num(x: f64) -> String {
 }
 
 fn clamp_rgb(v: f64) -> f64 {
-    if v >= 255.0 {
-        255.0
-    } else if v < 0.0 {
-        0.0
-    } else {
-        v
-    }
+    v.clamp(0.0, 255.0)
 }
 
 fn clamp_pct(v: f64) -> f64 {
-    if v >= 100.0 {
-        100.0
-    } else if v < 0.0 {
-        0.0
-    } else {
-        v
-    }
+    v.clamp(0.0, 100.0)
 }
 
 fn clamp_a(v: f64) -> f64 {
-    if v >= 1.0 {
-        1.0
-    } else if v < 0.0 {
-        0.0
-    } else {
-        v
-    }
+    v.clamp(0.0, 1.0)
 }
 
 /// `hsl2rgb` for a colour held in HSL (channel 0, 1, 2 = r, g, b).

@@ -1431,31 +1431,31 @@ mod tests {
         };
         // `DUMP_PALETTE=<cases.json>`: `[{"name", "theme", "vars": {..}}]`; otherwise
         // every theme without overrides.
-        let cases: Vec<(String, ThemeName, Vec<(String, String)>)> =
-            match std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| crate::json::parse(&s).ok())
-            {
-                Some(crate::json::Json::Array(items)) => items
-                    .iter()
-                    .map(|c| {
-                        let name = c.get("name").and_then(|v| v.as_str()).unwrap().to_string();
-                        let theme = c.get("theme").and_then(|v| v.as_str()).unwrap();
-                        let vars = c
-                            .get("vars")
-                            .and_then(|v| v.as_object())
-                            .unwrap_or(&[])
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.to_scalar_string().unwrap()))
-                            .collect();
-                        (name, theme.parse().unwrap(), vars)
-                    })
-                    .collect(),
-                _ => ThemeName::ALL
-                    .iter()
-                    .map(|&(n, t)| (n.to_string(), t, Vec::new()))
-                    .collect(),
-            };
+        type Case = (String, ThemeName, Vec<(String, String)>);
+        let cases: Vec<Case> = match std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| crate::json::parse(&s).ok())
+        {
+            Some(crate::json::Json::Array(items)) => items
+                .iter()
+                .map(|c| {
+                    let name = c.get("name").and_then(|v| v.as_str()).unwrap().to_string();
+                    let theme = c.get("theme").and_then(|v| v.as_str()).unwrap();
+                    let vars = c
+                        .get("vars")
+                        .and_then(|v| v.as_object())
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_scalar_string().unwrap()))
+                        .collect();
+                    (name, theme.parse().unwrap(), vars)
+                })
+                .collect(),
+            _ => ThemeName::ALL
+                .iter()
+                .map(|&(n, t)| (n.to_string(), t, Vec::new()))
+                .collect(),
+        };
         for (name, t, vars) in cases {
             let p = palette(t, &vars);
             let one = |k: &str, c: &Color| println!("{name} {k} {}", c.css());
