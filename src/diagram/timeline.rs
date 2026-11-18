@@ -423,7 +423,7 @@ fn node_style<'a>(cfg: &MermaidConfig, pal: &'a Palette, vertical: bool) -> Node
         // The stylesheet's `font-size` is the theme's: a top-level `fontSize`
         // (which `pal` carries) only sizes `conf.fontSize`'s em.
         font: match cfg.font_size {
-            Some(_) => crate::theme::palette(cfg.theme, &cfg.theme_variables).font_size,
+            Some(_) => cfg.stylesheet_font_size(),
             None => pal.font_size,
         },
         conf_font: cfg.font_size.unwrap_or(16.0),

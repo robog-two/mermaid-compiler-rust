@@ -336,6 +336,32 @@ impl DropShadow {
         })
     }
 
+    /// This shadow as the filter a stylesheet's `filter:` declaration
+    /// casts: a hard one is the redux themes' `url(#…-drop-shadow)`
+    /// (`feDropShadow`, in linear RGB), any other the CSS `drop-shadow()`.
+    pub fn filter(&self) -> crate::scene::Shadow {
+        let c = color::parse(self.color.css()).unwrap_or(Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 1.0,
+        });
+        crate::scene::Shadow {
+            dx: self.dx,
+            dy: self.dy,
+            std_dev: self.std_dev,
+            color: Color::new(format!(
+                "rgba({}, {}, {}, {})",
+                c.r,
+                c.g,
+                c.b,
+                crate::output::svg::num(c.a * self.opacity)
+            )),
+            linear_rgb: self.std_dev == 0.0,
+            css: self.std_dev > 0.0,
+        }
+    }
+
     /// The blurred shadow as a scene paint shadow (`None` for a hard one, which
     /// is drawn as an offset copy instead).
     pub fn blurred(&self) -> Option<crate::scene::Shadow> {

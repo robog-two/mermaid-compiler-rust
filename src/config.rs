@@ -733,6 +733,13 @@ impl MermaidConfig {
     }
 
     /// Resolve theme + variables + top-level font overrides into concrete colours.
+    /// The theme's `fontSize`, which sizes the stylesheet's root text (a
+    /// top-level `fontSize`, which [`MermaidConfig::palette`] applies, does
+    /// not reach the stylesheet).
+    pub fn stylesheet_font_size(&self) -> f64 {
+        theme::palette(self.theme, &self.theme_variables).font_size
+    }
+
     pub fn palette(&self) -> Palette {
         let mut p = theme::palette(self.theme, &self.theme_variables);
         if let Some(f) = &self.font_family {

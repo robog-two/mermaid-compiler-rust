@@ -627,28 +627,7 @@ impl Neo {
         let name = pal.theme.name();
         // `[data-look="neo"].mindmap-node { filter: dropShadow }`: the redux
         // themes' `url(#drop-shadow)` is insertLookDefs' feDropShadow.
-        let shadow = pal.drop_shadow.as_ref().map(|d| {
-            let c = crate::color::parse(d.color.css()).unwrap_or(crate::color::Rgba {
-                r: 0,
-                g: 0,
-                b: 0,
-                a: 1.0,
-            });
-            Shadow {
-                dx: d.dx,
-                dy: d.dy,
-                std_dev: d.std_dev,
-                color: Color::new(format!(
-                    "rgba({}, {}, {}, {})",
-                    c.r,
-                    c.g,
-                    c.b,
-                    crate::output::svg::num(c.a * d.opacity)
-                )),
-                linear_rgb: d.std_dev == 0.0,
-                css: d.std_dev > 0.0,
-            }
-        });
+        let shadow = pal.drop_shadow.as_ref().map(|d| d.filter());
         Neo {
             redux_mono: matches!(pal.theme, T::Redux | T::ReduxDark),
             redux: name.contains("redux"),
