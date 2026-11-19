@@ -456,7 +456,6 @@ fn face_markup(mk: &mut String, cx: f64, cy: f64, score: f64) {
 }
 
 /// Lay out and draw a parsed journey.
-
 pub fn draw(j: &Journey, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     // journeyRenderer.ts / svgDraw.js with the journey config defaults.
     let task_w = cfg.section_f64("journey", "width", 150.0);
