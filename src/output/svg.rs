@@ -4,6 +4,11 @@ use crate::geom::{PathCmd, Rect};
 use crate::scene::{Anchor, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Shadow, Text};
 use std::fmt::Write as _;
 
+/// In a [`Element::Markup`] string: what comes before it belongs ahead of the
+/// root's `<style>` (a drawing that lowers an element to be the root's first
+/// child), what follows it where the markup normally goes.
+pub const BEFORE_STYLE: &str = "\u{1}BEFORE_STYLE\u{1}";
+
 /// How the root `<svg>` element is sized.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SvgSizing {
@@ -1148,6 +1153,20 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
         local: Default::default(),
     };
     fx.collect(&scene.elements);
+    // A drawing whose markup is mermaid's own: no wrapper of ours.
+    let own_markup = match (opt.raster_scale, scene.elements.as_slice()) {
+        (None, [Element::Markup { svg, .. }]) => {
+            Some(svg.replace(crate::diagram::wardley::ID_MARK, &id))
+        }
+        _ => None,
+    };
+    let own_markup = own_markup.map(|m| match m.split_once(BEFORE_STYLE) {
+        Some((first, rest)) => {
+            out.push_str(first);
+            rest.to_string()
+        }
+        None => m,
+    });
     let faithful = opt
         .style
         .and_then(|spec| crate::theme::styles::style_text(spec, &id));
@@ -1169,9 +1188,8 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
         }
     }
     out.push_str(&fx.defs());
-    if let (None, [Element::Markup { svg, .. }]) = (opt.raster_scale, scene.elements.as_slice()) {
-        // A drawing whose markup is mermaid's own: no wrapper of ours.
-        out.push_str(&svg.replace(crate::diagram::wardley::ID_MARK, &id));
+    if let Some(markup) = own_markup {
+        out.push_str(&markup);
         out.push_str("</svg>");
         return out;
     }

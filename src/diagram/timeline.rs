@@ -8,11 +8,14 @@
 
 use crate::color;
 use crate::config::MermaidConfig;
+use crate::diagram::wardley::ID_MARK;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
+use crate::output::svg::{BEFORE_STYLE, esc, esc_text, js_num as n};
 use crate::scene::{Color, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Shadow, Text};
 use crate::text::{self, BreakRule, line_width};
 use crate::theme::Palette;
+use std::fmt::Write;
 
 /// Wrap a raw label (`<br>` respected) to `max_width` pixels the way the browser
 /// lays out an HTML label (spaces, hyphens, CJK); see [`BreakRule::Browser`].
@@ -20,9 +23,65 @@ pub(crate) fn wrap_text(raw: &str, max_width: f64, font_size: f64, bold: bool) -
     text::wrap(raw, max_width, font_size, bold, BreakRule::Browser)
 }
 
-/// Greedy word wrap at spaces only, as timeline's SVG `wrap` (`split(/(\s+|<br>)/)`).
-fn wrap_words(raw: &str, max_width: f64, font_size: f64, bold: bool) -> Vec<String> {
-    text::wrap(raw, max_width, font_size, bold, BreakRule::Spaces)
+/// `raw.split(/(\s+|<br>)/)`: the words, the whitespace runs between them and
+/// the literal `<br>`s, each its own entry (empty strings at the edges too).
+fn js_split_words(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut rest = raw;
+    while let Some(c) = rest.chars().next() {
+        if c.is_whitespace() {
+            let run: usize = rest
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .map(char::len_utf8)
+                .sum();
+            out.push(std::mem::take(&mut cur));
+            out.push(rest[..run].to_string());
+            rest = &rest[run..];
+        } else if let Some(after) = rest.strip_prefix("<br>") {
+            out.push(std::mem::take(&mut cur));
+            out.push("<br>".to_string());
+            rest = after;
+        } else {
+            cur.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// svgDraw.js `wrap`: the texts of the `tspan`s it leaves. The words and the
+/// whitespace between them are joined with a space each (so a gap is three
+/// spaces wide in the DOM, one when painted), a `tspan`'s measured text being
+/// `getComputedTextLength` of the trimmed line, whitespace collapsed.
+fn wrap_tspans(raw: &str, width: f64, font: f64, bold: bool) -> Vec<String> {
+    let trim = |s: String| s.trim().to_string();
+    let mut tspans = vec![String::new()];
+    let mut line: Vec<String> = Vec::new();
+    for word in js_split_words(raw) {
+        line.push(word.clone());
+        let t = trim(line.join(" "));
+        let collapsed = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        let over = line_width(&collapsed, font, bold) > width;
+        if let Some(last) = tspans.last_mut() {
+            *last = t;
+        }
+        if over || word == "<br>" {
+            line.pop();
+            if let Some(last) = tspans.last_mut() {
+                *last = trim(line.join(" "));
+            }
+            line = if word == "<br>" {
+                vec![String::new()]
+            } else {
+                vec![word.clone()]
+            };
+            tspans.push(word);
+        }
+    }
+    tspans
 }
 
 /// Darker (light themes) or lighter (dark themes) shade of a CSS colour.
@@ -57,12 +116,6 @@ pub struct Timeline {
     pub title: Option<String>,
     pub direction: Direction,
     pub sections: Vec<Section>,
-}
-
-impl Timeline {
-    fn has_sections(&self) -> bool {
-        self.sections.iter().any(|s| s.name.is_some())
-    }
 }
 
 /// Lex the events of a line, `s` starting at its first `:` (timeline.jison
@@ -197,16 +250,32 @@ const NODE_PAD: f64 = 20.0;
 
 /// A node's text: the timeline renderer's SVG `wrap` (greedy, at spaces and
 /// `<br>`), lines 1.1em apart, measured `bold` where the redux themes'
-/// `.section-N text { font-weight: 600 }` reaches it.
-fn node_lines(raw: &str, width: f64, font: f64, bold: bool) -> Vec<String> {
-    wrap_words(raw, width, font, bold)
+/// `.section-N text { font-weight: 600 }` reaches it. Returns the `tspan`
+/// texts as the DOM has them and the lines as painted (whitespace collapsed).
+fn node_lines(raw: &str, width: f64, font: f64, bold: bool) -> (Vec<String>, Vec<String>) {
+    let tspans = wrap_tspans(raw, width, font, bold);
+    let lines = tspans
+        .iter()
+        .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    (tspans, lines)
 }
 
-/// `getVirtualNodeHeight` / `drawNode`: the text's bounding box plus half a
-/// line of the configuration's `fontSize` (`conf.fontSize`, not the theme's)
-/// and the padding.
+/// `getVirtualNodeHeight` / `drawNode`: the text's bounding box (`getBBox`
+/// reads in single precision) plus half a line of the configuration's
+/// `fontSize` (`conf.fontSize`, not the theme's) and the padding.
 fn padded_node_height(lines: &[String], font: f64, conf_font: f64, pad: f64) -> f64 {
-    middle_text_height(lines, font) + conf_font * 1.1 * 0.5 + pad
+    // The box of the last line, then a line step (single precision) for each
+    // line above it, added one after the other.
+    let mut bbox = match lines {
+        [.., last] => middle_text_height(std::slice::from_ref(last), font) as f32,
+        [] => 0.0,
+    };
+    let step = (1.1 * font) as f32;
+    for _ in 1..lines.len() {
+        bbox += step;
+    }
+    f64::from(bbox) + conf_font * 1.1 * 0.5 + pad
 }
 
 /// `getBBox().height` of the node text: lines 1.1em apart, `dominant-baseline:
@@ -232,6 +301,8 @@ struct Redux {
     /// `isDarkTheme && isColorTheme`: boxes keep `mainBkg`, only outlines
     /// take the slot colour.
     dark_color: bool,
+    /// The theme's name has "dark" in it.
+    dark: bool,
     /// Under the neo look, `drawNode`'s `{id}-drop-shadow` filter, which the
     /// boxes' `filter: url(…)` then finds (without it, a missing reference
     /// Chromium ignores).
@@ -255,6 +326,8 @@ struct NodeStyle<'a> {
     /// The horizontal renderer passes `drawNode` its `isEvent` (the redux
     /// event text offset); the vertical one never does.
     event_offset: bool,
+    /// The neo look (`data-look="neo"` on every node).
+    neo: bool,
 }
 
 impl NodeStyle<'_> {
@@ -265,20 +338,73 @@ impl NodeStyle<'_> {
     /// A pre-pass `getVirtualNodeHeight`: its text appended to the svg root,
     /// outside any `.section-N`, so never bold.
     fn virtual_height(&self, raw: &str, width: f64, pad: f64) -> f64 {
-        let lines = node_lines(raw, width, self.font, false);
+        let (_, lines) = node_lines(raw, width, self.font, false);
         padded_node_height(&lines, self.font, self.conf_font, pad)
     }
 }
 
+/// `THEME_COLOR_LIMIT`: `drawNode` numbers its sections `fullSection % 12 - 1`.
+const MAX_SECTIONS: usize = 12;
+
+/// Which wrapper group `drawNode` is called on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A section header: a plain `<g>`.
+    Section,
+    /// `taskWrapper`.
+    Task,
+    /// `eventWrapper`, under a brightness filter.
+    Event,
+}
+
+/// Mermaid's own markup of the drawing (see [`Element::Markup`]): the node
+/// groups and lines in document order, `drawNode`'s counter for the box ids.
+struct Mk {
+    s: String,
+    nodes: usize,
+    /// What `diagramId` is: the svg's id (the horizontal renderer) or
+    /// `undefined` (the vertical one never passes it on).
+    id: String,
+}
+
+impl Mk {
+    fn new(id: &str) -> Self {
+        Mk {
+            s: String::new(),
+            nodes: 0,
+            id: id.to_string(),
+        }
+    }
+
+    /// A drop line (`lineWrapper`): the vertical renderer's name its marker
+    /// `arrowhead` alone.
+    fn line(&mut self, a: Point, b: Point, width: u32, marker: &str, dashed: bool) {
+        let _ = write!(
+            self.s,
+            "<g class=\"lineWrapper\"><line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke-width=\"{width}\" stroke=\"black\" marker-end=\"url(#{marker})\"{}/></g>",
+            n(a.x),
+            n(a.y),
+            n(b.x),
+            n(b.y),
+            if dashed {
+                " stroke-dasharray=\"5,5\""
+            } else {
+                ""
+            },
+        );
+    }
+}
+
 /// One `drawNode` call at (x, y): `width` wraps the text and the box is
-/// 2·`pad` wider; at least `min_h` tall. `event` selects the event text offset
-/// and the `eventWrapper` group with its brightness filter. Returns the box.
+/// 2·`pad` wider; at least `min_h` tall. `kind` selects the wrapper group, the
+/// event text offset and the brightness filter on events. Returns the box.
 ///
 /// Drawn as mermaid nests it: the node translated to (x, y), its box from the
 /// origin and its text in a group translated to (w / 2, the text offset).
 #[allow(clippy::too_many_arguments)]
 fn draw_node(
     out: &mut Vec<Element>,
+    mk: &mut Mk,
     st: &NodeStyle,
     x: f64,
     y: f64,
@@ -287,11 +413,12 @@ fn draw_node(
     pad: f64,
     min_h: f64,
     ci: usize,
-    event: bool,
+    kind: Kind,
 ) -> Rect {
+    let event = kind == Kind::Event;
     let font = st.font;
     let bold = st.bold();
-    let lines = node_lines(raw, width, font, bold);
+    let (tspans, lines) = node_lines(raw, width, font, bold);
     let h = padded_node_height(&lines, font, st.conf_font, pad).max(min_h);
     let w = width + 2.0 * pad;
     let bkg = node_box(Rect::new(0.0, 0.0, w, h), ci, st);
@@ -306,6 +433,66 @@ fn draw_node(
     } else {
         pad / 2.0
     };
+    // The markup: the wrapper, the node's group, its box and its text.
+    let section = (ci % MAX_SECTIONS) as i64 - 1;
+    let wrapper = match kind {
+        Kind::Section => String::new(),
+        Kind::Task => " class=\"taskWrapper\"".to_string(),
+        Kind::Event => " class=\"eventWrapper\"".to_string(),
+    };
+    let rd = 5.0;
+    let d = if st.redux.is_some() {
+        format!(
+            "M0 {} v{} h{} v{} H0 Z",
+            n(h - rd),
+            n(-(h - rd)),
+            n(w),
+            n(h)
+        )
+    } else {
+        format!(
+            "M0 {} v{} q0,-5,5,-5 h{} q5,0,5,5 v{} H0 Z",
+            n(h - rd),
+            n(-h + 2.0 * rd),
+            n(w - 2.0 * rd),
+            n(h - rd)
+        )
+    };
+    let _ = write!(
+        mk.s,
+        "<g{wrapper} transform=\"translate({}, {})\"><g class=\"timeline-node section-{section}\"{}><g><path id=\"{}-node-{}\" class=\"node-bkg node-undefined\" d=\"{d}\"/>",
+        n(x),
+        n(y),
+        if st.neo { " data-look=\"neo\"" } else { "" },
+        mk.id,
+        mk.nodes,
+    );
+    mk.nodes += 1;
+    if st.redux.is_none() {
+        let _ = write!(
+            mk.s,
+            "<line class=\"node-line-{section}\" x1=\"0\" y1=\"{}\" x2=\"{}\" y2=\"{}\"/>",
+            n(h),
+            n(w),
+            n(h),
+        );
+    }
+    let _ = write!(
+        mk.s,
+        "</g><g transform=\"translate({}, {})\"><text dy=\"1em\" alignment-baseline=\"middle\" dominant-baseline=\"middle\" text-anchor=\"middle\">",
+        n(w / 2.0),
+        n(ty),
+    );
+    for (i, t) in tspans.iter().enumerate() {
+        let dy = if i == 0 { "1em" } else { "1.1em" };
+        if t.is_empty() {
+            let _ = write!(mk.s, "<tspan x=\"0\" dy=\"{dy}\"/>");
+        } else {
+            let _ = write!(mk.s, "<tspan x=\"0\" dy=\"{dy}\">{}</tspan>", esc_text(t));
+        }
+    }
+    mk.s.push_str("</text></g></g></g>");
+
     let fill = if st.redux.is_some() {
         &st.pal.node_border
     } else {
@@ -398,6 +585,7 @@ fn node_style<'a>(cfg: &MermaidConfig, pal: &'a Palette, vertical: bool) -> Node
     let dark = name.contains("dark");
     let redux = name.contains("redux").then(|| Redux {
         dark_color: dark && pal.color_slots.is_some(),
+        dark,
         // `feDropShadow dx=4 dy=4 stdDeviation=0`, 20% white on a theme with
         // "dark" in its name, 6% black otherwise.
         shadow: neo.then(|| Shadow {
@@ -430,7 +618,61 @@ fn node_style<'a>(cfg: &MermaidConfig, pal: &'a Palette, vertical: bool) -> Node
         redux,
         gradient,
         event_offset: !vertical,
+        neo,
     }
+}
+
+/// The `<defs>` of the drawing: the arrowhead marker, then what `drawNode`
+/// added once the first node was drawn (the redux themes' drop shadow under
+/// the neo look) and, last, the gradient the horizontal renderer defines.
+fn defs_markup(st: &NodeStyle, mk: &Mk, marker_id: &str, svg_id: &str, gradient: bool) -> String {
+    let mut out = format!(
+        "<defs><marker id=\"{marker_id}-arrowhead\" refX=\"5\" refY=\"2\" markerWidth=\"6\" markerHeight=\"4\" orient=\"auto\"><path d=\"M 0,0 V 4 L6,2 Z\"/></marker>"
+    );
+    if let (true, Some(rx), true) = (st.neo, &st.redux, mk.nodes > 0) {
+        let (opacity, colour) = if rx.dark {
+            ("0.2", "#FFFFFF")
+        } else {
+            ("0.06", "#000000")
+        };
+        let _ = write!(
+            out,
+            "<filter id=\"{svg_id}-drop-shadow\" height=\"130%\" width=\"130%\"><feDropShadow dx=\"4\" dy=\"4\" stdDeviation=\"0\" flood-opacity=\"{opacity}\" flood-color=\"{colour}\"/></filter>"
+        );
+    }
+    if let (true, Some((a, b))) = (gradient, st.pal.node_gradient.as_ref()) {
+        let _ = write!(
+            out,
+            "<linearGradient id=\"{svg_id}-gradient\" gradientUnits=\"objectBoundingBox\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\"><stop offset=\"0%\" stop-color=\"{}\" stop-opacity=\"1\"/><stop offset=\"100%\" stop-color=\"{}\" stop-opacity=\"1\"/></linearGradient>",
+            esc(a.css()),
+            esc(b.css()),
+        );
+    }
+    out.push_str("</defs>");
+    out
+}
+
+/// The title's text as the DOM holds it: `sanitizeText`'s DOMPurify output is
+/// HTML text, which `.text()` then escapes once more on serialisation.
+fn title_markup_text(t: &str) -> String {
+    let plain = crate::text::label_lines(t).join(" ");
+    esc_text(&esc_text(&plain))
+}
+
+/// The `.5em + 20` and `2em` offsets of the vertical axis are in
+/// `conf.fontSize`'s em; `getBBox` numbers are single precision.
+fn f32d(v: f64) -> f64 {
+    f64::from(v as f32)
+}
+
+/// The tasks of the sections named `name` (upstream matches them by name, so
+/// two sections of one name each get both's tasks).
+fn tasks_named<'a>(tl: &'a Timeline, name: &str) -> Vec<&'a Period> {
+    tl.sections
+        .iter()
+        .filter(|s| s.name.as_deref() == Some(name))
+        .flat_map(|s| s.periods.iter())
+        .collect()
 }
 
 /// The `.lineWrapper line` rules: the last section's `cScaleLabel` over the
@@ -460,8 +702,12 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let left_margin = cfg.section_f64("timeline", "leftMargin", 150.0);
     let padding = cfg.section_f64("timeline", "padding", 50.0);
     let style = node_style(cfg, pal, true);
-    let has_sections = tl.has_sections();
-    let sections: Vec<&Section> = tl.sections.iter().filter(|s| s.name.is_some()).collect();
+    let names: Vec<&str> = tl
+        .sections
+        .iter()
+        .filter_map(|s| s.name.as_deref())
+        .collect();
+    let has_sections = !names.is_empty();
     let tasks: Vec<&Period> = tl.sections.iter().flat_map(|s| s.periods.iter()).collect();
 
     let master_x = 50.0 + left_margin;
@@ -471,9 +717,8 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let section_w = (left_w + right_w - 2.0 * PAD).max(50.0);
     let height = |raw: &str, width: f64| style.virtual_height(raw, width, PAD);
 
-    let max_section_h = sections
+    let max_section_h = names
         .iter()
-        .filter_map(|s| s.name.as_deref())
         .map(|n| height(n, section_w))
         .fold(0.0, f64::max);
     let max_task_h = if tasks.is_empty() {
@@ -498,34 +743,58 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let mut bounds = Bounds::default();
     let mut nodes = Vec::new();
     let mut lines = Vec::new();
+    let mut mk = Mk::new("undefined");
     let draw_tasks = |nodes: &mut Vec<Element>,
                       lines: &mut Vec<Element>,
+                      mk: &mut Mk,
                       bounds: &mut Bounds,
                       periods: &[&Period],
                       mut color: usize,
                       mut y: f64,
                       without_sections: bool| {
+        let mut cur_max = max_task_h;
         for p in periods {
             let w = NODE_WIDTH + 2.0 * PAD;
             let r = draw_node(
                 nodes,
+                mk,
                 &style,
                 axis_x - TASK_AXIS_GAP - w,
                 y,
                 &p.label,
                 NODE_WIDTH,
                 PAD,
-                max_task_h,
+                cur_max,
                 color,
-                false,
+                Kind::Task,
             );
             bounds.add_rect(r);
+            cur_max = cur_max.max(r.h);
             let mut ey = y;
             for e in &p.events {
                 let ex = axis_x + EVENT_AXIS_GAP;
-                let r = draw_node(nodes, &style, ex, ey, e, EVENT_WIDTH, PAD, 0.0, color, true);
+                let r = draw_node(
+                    nodes,
+                    mk,
+                    &style,
+                    ex,
+                    ey,
+                    e,
+                    EVENT_WIDTH,
+                    PAD,
+                    0.0,
+                    color,
+                    Kind::Event,
+                );
                 bounds.add_rect(r);
                 let ly = ey + r.h / 2.0;
+                mk.line(
+                    Point::new(axis_x, ly),
+                    Point::new(ex, ly),
+                    2,
+                    "arrowhead",
+                    true,
+                );
                 lines.push(Element::classed_shape(
                     Geometry::Line {
                         a: Point::new(axis_x, ly),
@@ -534,7 +803,7 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                     line_paint(&style, 2.0).dashed(vec![5.0, 5.0]),
                     "eventLine",
                 ));
-                ey += r.h + EVENT_SPACING;
+                ey = ey + r.h + EVENT_SPACING;
             }
             y += task_spacing;
             if without_sections && multicolor {
@@ -545,10 +814,10 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
 
     let mut master_y = 50.0;
     if has_sections {
-        for (si, sec) in sections.iter().enumerate() {
-            let name = sec.name.as_deref().unwrap_or_default();
+        for (si, name) in names.iter().enumerate() {
             let r = draw_node(
                 &mut nodes,
+                &mut mk,
                 &style,
                 axis_x - left_w,
                 master_y,
@@ -557,19 +826,22 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 PAD,
                 max_section_h,
                 si,
-                false,
+                Kind::Section,
             );
             bounds.add_rect(r);
-            let periods: Vec<&Period> = sec.periods.iter().collect();
-            draw_tasks(
-                &mut nodes,
-                &mut lines,
-                &mut bounds,
-                &periods,
-                si,
-                master_y + r.h + SECTION_TASK_GAP,
-                false,
-            );
+            let periods = tasks_named(tl, name);
+            if !periods.is_empty() {
+                draw_tasks(
+                    &mut nodes,
+                    &mut lines,
+                    &mut mk,
+                    &mut bounds,
+                    &periods,
+                    si,
+                    master_y + r.h + SECTION_TASK_GAP,
+                    false,
+                );
+            }
             let n = periods.len();
             master_y += r.h + SECTION_TASK_GAP + task_spacing * n.max(1) as f64
                 - if n > 0 { 2.0 * TASK_VERTICAL_GAP } else { 0.0 };
@@ -578,6 +850,7 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         draw_tasks(
             &mut nodes,
             &mut lines,
+            &mut mk,
             &mut bounds,
             &tasks,
             0,
@@ -587,8 +860,15 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
 
     let mut content = bounds.rect();
+    let mut title_mk = String::new();
     if let Some(t) = tl.title.as_ref().filter(|t| !t.trim().is_empty()) {
         let (el, r) = title_text(t, content.w / 2.0 - left_margin, style.font, pal);
+        let _ = write!(
+            title_mk,
+            "<text x=\"{}\" font-size=\"4ex\" font-weight=\"bold\" y=\"20\">{}</text>",
+            n(f32d(content.w) / 2.0 - left_margin),
+            title_markup_text(t),
+        );
         bounds.add_rect(r);
         nodes.push(el);
         content = bounds.rect();
@@ -597,6 +877,13 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     // bottom, in `conf.fontSize`'s em.
     let em = style.conf_font;
     let (y1, y2) = (50.0 - 2.0 * em, content.bottom() + 0.5 * em + 20.0);
+    let y2_markup = f32d(content.y) + f32d(content.h) + (em * 0.5 + 20.0);
+    let axis_mk = format!(
+        "<g class=\"lineWrapper\"><line x1=\"{x}\" y1=\"{}\" x2=\"{x}\" y2=\"{}\" stroke-width=\"4\" stroke=\"black\" marker-end=\"url(#arrowhead)\"/></g>",
+        n(y1),
+        n(y2_markup),
+        x = n(axis_x),
+    );
     let mut back = vec![Element::classed_shape(
         Geometry::Line {
             a: Point::new(axis_x, y1),
@@ -607,13 +894,23 @@ fn draw_vertical(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     )];
     bounds.add_rect(Rect::new(axis_x, y1, 0.0, y2 - y1));
     back.extend(lines);
+    // The axis is lowered to be the root's first child, ahead of the styles.
+    let svg = format!(
+        "{axis_mk}{BEFORE_STYLE}<g/><g/>{}{}{title_mk}",
+        defs_markup(&style, &mk, "undefined", ID_MARK, false),
+        mk.s,
+    );
     Scene {
         kind: DiagramKind::Timeline,
         view_box: graph_view_box(bounds.rect(), padding),
-        elements: vec![
-            Element::group("lines", back),
-            Element::group("nodes", nodes),
-        ],
+        elements: vec![Element::Markup {
+            svg,
+            svg_view_box: None,
+            children: vec![
+                Element::group("lines", back),
+                Element::group("nodes", nodes),
+            ],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -628,26 +925,27 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let padding = cfg.section_f64("timeline", "padding", 50.0);
     let style = node_style(cfg, pal, false);
     let neo = cfg.look == crate::config::Look::Neo;
-    let has_sections = tl.has_sections();
-    let sections: Vec<&Section> = if has_sections {
-        tl.sections.iter().filter(|s| s.name.is_some()).collect()
-    } else {
-        tl.sections.iter().collect()
-    };
-    let periods = || sections.iter().flat_map(|s| s.periods.iter());
+    let names: Vec<&str> = tl
+        .sections
+        .iter()
+        .filter_map(|s| s.name.as_deref())
+        .collect();
+    let has_sections = !names.is_empty();
+    // The pre-pass looks at every task, those before the first section too.
+    let all: Vec<&Period> = tl.sections.iter().flat_map(|s| s.periods.iter()).collect();
 
     // The pre-pass: tallest section, tallest period, tallest event stack.
-    let max_section_h = sections
+    let max_section_h = names
         .iter()
-        .filter_map(|s| s.name.as_ref())
         .map(|n| style.virtual_height(n, NODE_W, NODE_PAD) + 20.0)
         .fold(0.0, f64::max);
-    let max_task_h = if periods().next().is_none() {
+    let max_task_h = if all.is_empty() {
         0.0
     } else {
         style.virtual_height(TASK_OBJECT_TEXT, NODE_W, NODE_PAD) + 20.0
     };
-    let max_event_len = periods()
+    let max_event_len = all
+        .iter()
         .map(|p| {
             let n = p.events.len() as f64;
             p.events
@@ -662,55 +960,51 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     // In upstream's document order: per period its node, its (empty, filled
     // later) `lineWrapper`, its events; then the title and the axis on top.
     let mut nodes = Vec::new();
+    let mut mk = Mk::new(ID_MARK);
     // The arrowhead marker's path has no class: it fills with the svg root's
     // `fill: textColor`.
     let arrow_fill = pal.text_color.clone();
 
-    let node = |nodes: &mut Vec<Element>,
-                x: f64,
-                y: f64,
-                raw: &str,
-                width: f64,
-                min_h: f64,
-                ci: usize,
-                event: bool| {
-        let r = draw_node(nodes, &style, x, y, raw, width, NODE_PAD, min_h, ci, event);
-        (r.h, r)
-    };
-
-    let mut master_x = 50.0 + left_margin;
-    let section_y = 50.0;
-    let mut color = 0usize;
-    for (si, sec) in sections.iter().enumerate() {
-        let mut master_y = 50.0;
-        let n = sec.periods.len().max(1) as f64;
-        if let Some(name) = sec.name.as_ref().filter(|_| has_sections) {
-            let (_, r) = node(
-                &mut nodes,
-                master_x,
-                section_y,
-                name,
-                200.0 * n - 50.0,
-                max_section_h,
-                si,
-                false,
-            );
-            bounds.add_rect(r);
-            master_y += max_section_h + 50.0;
-        }
+    // drawTasks: the periods of one section (or all, without sections), from
+    // (master_x, master_y), `maxTaskHeight` growing with each node.
+    let draw_tasks = |nodes: &mut Vec<Element>,
+                      mk: &mut Mk,
+                      bounds: &mut Bounds,
+                      periods: &[&Period],
+                      mut color: usize,
+                      master_x: f64,
+                      master_y: f64,
+                      without_sections: bool| {
+        let mut cur_max = max_task_h;
         let mut x = master_x;
-        for p in &sec.periods {
-            let ci = if has_sections { si } else { color };
-            let (th, r) = node(
-                &mut nodes, x, master_y, &p.label, NODE_W, max_task_h, ci, false,
+        for p in periods {
+            let r = draw_node(
+                nodes,
+                mk,
+                &style,
+                x,
+                master_y,
+                &p.label,
+                NODE_W,
+                NODE_PAD,
+                cur_max,
+                color,
+                Kind::Task,
             );
             bounds.add_rect(r);
-            let task_h = max_task_h.max(th);
+            cur_max = cur_max.max(r.h);
             // The dashed drop line with its arrowhead (marker scaled by 2),
             // under the events.
             let lx = x + 190.0 / 2.0;
-            let y1 = master_y + task_h;
+            let y1 = master_y + cur_max;
             let y2 = y1 + 100.0 + max_event_len + 100.0;
+            mk.line(
+                Point::new(lx, y1),
+                Point::new(lx, y2),
+                2,
+                &format!("{ID_MARK}-arrowhead"),
+                true,
+            );
             nodes.push(Element::classed_shape(
                 Geometry::Line {
                     a: Point::new(lx, y1),
@@ -730,23 +1024,82 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 &arrow_fill,
             ));
             bounds.add_rect(Rect::new(lx - 1.0, y1, 2.0, y2 - y1));
-            if !p.events.is_empty() {
-                let mut ey = master_y + 200.0;
-                for e in &p.events {
-                    let (eh, r) = node(&mut nodes, x, ey, e, NODE_W, 50.0, ci, true);
-                    bounds.add_rect(r);
-                    ey += 10.0 + eh;
-                }
+            let mut ey = master_y + 100.0;
+            ey += 100.0;
+            for e in &p.events {
+                let r = draw_node(
+                    nodes,
+                    mk,
+                    &style,
+                    x,
+                    ey,
+                    e,
+                    NODE_W,
+                    NODE_PAD,
+                    50.0,
+                    color,
+                    Kind::Event,
+                );
+                bounds.add_rect(r);
+                ey = ey + 10.0 + r.h;
             }
             x += 200.0;
-            if !has_sections && multicolor {
+            if without_sections && multicolor {
                 color += 1;
             }
         }
-        master_x += 200.0 * n;
+    };
+
+    let mut master_x = 50.0 + left_margin;
+    let section_y = 50.0;
+    if has_sections {
+        for (si, name) in names.iter().enumerate() {
+            let periods = tasks_named(tl, name);
+            let count = periods.len().max(1) as f64;
+            let r = draw_node(
+                &mut nodes,
+                &mut mk,
+                &style,
+                master_x,
+                section_y,
+                name,
+                200.0 * count - 50.0,
+                NODE_PAD,
+                max_section_h,
+                si,
+                Kind::Section,
+            );
+            bounds.add_rect(r);
+            if !periods.is_empty() {
+                let master_y = 50.0 + max_section_h + 50.0;
+                draw_tasks(
+                    &mut nodes,
+                    &mut mk,
+                    &mut bounds,
+                    &periods,
+                    si,
+                    master_x,
+                    master_y,
+                    false,
+                );
+            }
+            master_x += 200.0 * count;
+        }
+    } else {
+        draw_tasks(
+            &mut nodes,
+            &mut mk,
+            &mut bounds,
+            &all,
+            0,
+            master_x,
+            50.0,
+            true,
+        );
     }
 
     let content = bounds.rect();
+    let mut title_mk = String::new();
     if let Some(t) = tl.title.as_ref().filter(|t| !t.trim().is_empty()) {
         // At (width / 2 - leftMargin, 20); under the neo look at
         // (2·x + leftMargin, 20), x the drawing's left edge.
@@ -755,7 +1108,18 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         } else {
             content.w / 2.0 - left_margin
         };
+        let x_markup = if neo {
+            f32d(content.x) * 2.0 + left_margin
+        } else {
+            f32d(content.w) / 2.0 - left_margin
+        };
         let (el, r) = title_text(t, x, style.font, pal);
+        let _ = write!(
+            title_mk,
+            "<text x=\"{}\" font-size=\"4ex\" font-weight=\"bold\" y=\"20\">{}</text>",
+            n(x_markup),
+            title_markup_text(t),
+        );
         bounds.add_rect(r);
         nodes.push(el);
     }
@@ -769,6 +1133,13 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         max_task_h + 100.0
     };
     let x2 = content.w + 3.0 * left_margin;
+    let axis_mk = format!(
+        "<g class=\"lineWrapper\"><line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke-width=\"4\" stroke=\"black\" marker-end=\"url(#{ID_MARK}-arrowhead)\"/></g>",
+        n(left_margin),
+        n(depth_y),
+        n(f32d(content.w) + 3.0 * left_margin),
+        n(depth_y),
+    );
     let axis = line_paint(&style, 4.0);
     // `M 0,0 V 4 L6,2 Z`, refX 5, refY 2.
     let k = axis.stroke_width;
@@ -799,10 +1170,19 @@ fn draw_horizontal(tl: &Timeline, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         Element::group("lines", back),
     ];
     snap_marker_clips(&mut elements, view_box);
+    let svg = format!(
+        "<g/><g/>{}{}{title_mk}{axis_mk}",
+        defs_markup(&style, &mk, ID_MARK, ID_MARK, style.gradient.is_some()),
+        mk.s,
+    );
     Scene {
         kind: DiagramKind::Timeline,
         view_box,
-        elements,
+        elements: vec![Element::Markup {
+            svg,
+            svg_view_box: None,
+            children: elements,
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -1046,7 +1426,10 @@ mod tests {
         let cfg = MermaidConfig::default();
         let pal = cfg.palette();
         let s = render("timeline\n2002 : LinkedIn : Facebook", None, &cfg, &pal).unwrap();
-        let Element::Group { children, .. } = &s.elements[0] else {
+        let Element::Markup { children: top, .. } = &s.elements[0] else {
+            panic!()
+        };
+        let Element::Group { children, .. } = &top[0] else {
             panic!()
         };
         let events: Vec<&Vec<Element>> = children
@@ -1100,7 +1483,10 @@ mod tests {
         assert_eq!((v.x, v.y, v.w), (100.0, -61.0, 1390.0));
         assert!((v.bottom() - 661.6).abs() < 0.1, "{v:?}");
         // The axis is drawn last, over the drop lines.
-        let Element::Group { children, .. } = s.elements.last().unwrap() else {
+        let Element::Markup { children: top, .. } = &s.elements[0] else {
+            panic!()
+        };
+        let Element::Group { children, .. } = top.last().unwrap() else {
             panic!()
         };
         let axis = children
@@ -1129,6 +1515,7 @@ mod tests {
             for x in e {
                 match x {
                     Element::Group { children, .. }
+                    | Element::Markup { children, .. }
                     | Element::Brightened { children, .. }
                     | Element::Clipped { children, .. }
                     | Element::Translated { children, .. } => walk(children, out),
