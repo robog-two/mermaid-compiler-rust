@@ -2217,7 +2217,7 @@ mod tests {
         assert_eq!(t[0].end, d(2014, 1, 31));
         assert_eq!(t[1].start, d(2014, 1, 31));
         assert_eq!(t[1].end, d(2014, 2, 20));
-        assert_eq!(t[1].id, "task2");
+        assert_eq!(t[1].id, "task1");
         assert_eq!(t[3].start, d(2014, 1, 24)); // previous task's end
         assert!(t[4].done && t[4].crit && !t[4].active);
         assert_eq!(t[4].end, d(2014, 1, 8));
@@ -2261,7 +2261,9 @@ mod tests {
         fn walk<'a>(els: &'a [Element], v: &mut Option<Rect>, l: &mut Option<&'a Text>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => walk(children, v, l),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, v, l)
+                    }
                     Element::Shape {
                         geom: Geometry::Rect { rect, .. },
                         class: Some(c),
@@ -2378,7 +2380,9 @@ mod tests {
         fn walk(els: &[Element], out: &mut Vec<(f64, f64, f64, Paint)>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, out)
+                    }
                     Element::Shape {
                         geom: Geometry::Line { a, b },
                         paint,
@@ -2432,7 +2436,7 @@ mod tests {
         let svg = crate::output::svg::to_svg(&r.scene, &opt);
         assert!(
             svg.contains(
-                "<line class=\"today\" x1=\"15234843269\" y1=\"25\" x2=\"15234843269\" y2=\"195\""
+                "<line x1=\"15234843269\" x2=\"15234843269\" y1=\"25\" y2=\"195\" class=\"today\""
             ),
             "{svg}"
         );

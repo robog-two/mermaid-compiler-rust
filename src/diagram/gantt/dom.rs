@@ -145,9 +145,9 @@ pub(super) fn dom(g: &Gantt, cfg: &MermaidConfig, now: Option<i64>) -> String {
             by_start.sort_by_key(|&i| (g.tasks[i].start, order[i]));
             let mut max_j = 0;
             for &i in &by_start {
-                for j in 0..timeline.len() {
-                    if g.tasks[i].start >= timeline[j] {
-                        timeline[j] = g.tasks[i].end;
+                for (j, busy) in timeline.iter_mut().enumerate() {
+                    if g.tasks[i].start >= *busy {
+                        *busy = g.tasks[i].end;
                         order[i] = j as i64 + offset;
                         max_j = max_j.max(j);
                         break;
