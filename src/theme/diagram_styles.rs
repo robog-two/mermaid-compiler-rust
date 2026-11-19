@@ -43,6 +43,7 @@ pub(super) fn diagram(kind: DiagramKind, o: &Opts) -> Option<String> {
         DiagramKind::Journey => journey(o),
         DiagramKind::Kanban => kanban(o),
         DiagramKind::Sequence => sequence(o),
+        DiagramKind::GitGraph => gitgraph(o),
         DiagramKind::Mindmap => mindmap(o),
         DiagramKind::Timeline => timeline(o),
         DiagramKind::Er => er(o),
@@ -711,6 +712,157 @@ fn timeline(o: &Opts) -> String {
     tpl(o, include_str!("css/timeline.css"), &|e| match e {
         "@1" => Some(sections.clone()),
         "gradientSections" => Some(gradient.clone()),
+        _ => None,
+    })
+}
+
+fn gitgraph(o: &Opts) -> String {
+    let name = o.theme.name();
+    let redux_geometry = matches!(
+        name,
+        "redux" | "redux-dark" | "redux-color" | "redux-dark-color"
+    );
+    let color_theme = matches!(name, "redux-color" | "redux-dark-color");
+    let neo_theme = matches!(name, "neo" | "neo-dark");
+    let dark_theme = matches!(name, "dark" | "redux-dark" | "redux-dark-color" | "neo-dark");
+    let neo_gen = redux_geometry || neo_theme;
+    let weight = |on: bool| {
+        if on {
+            format!("font-weight:{}", o.s("noteFontWeight"))
+        } else {
+            String::new()
+        }
+    };
+    let git = |p: &str, ci: usize| o.s(&format!("{p}{ci}"));
+    let gradient = |o: &Opts| -> String {
+        let mut s = String::new();
+        if o.get("useGradient") == Some("true") && !o.svg_sel.is_empty() {
+            for i in 0..limit(o) {
+                s += &tpl(o, include_str!("css/gg_grad.css"), &|e| match e {
+                    "i" => Some(i.to_string()),
+                    "svgId" => Some(o.svg_sel.clone()),
+                    _ => None,
+                });
+            }
+        }
+        s
+    };
+    let mut sections = String::new();
+    if !neo_gen {
+        for i in 0..limit(o) {
+            let ci = i % 8;
+            sections += &format!(
+                ".branch-label{i} {{ fill: {}; }}\n\
+                 .commit{i} {{ stroke: {}; fill: {}; }}\n\
+                 .commit-highlight{i} {{ stroke: {}; fill: {}; }}\n\
+                 .label{i}  {{ fill: {}; }}\n\
+                 .arrow{i} {{ stroke: {}; }}\n",
+                git("gitBranchLabel", ci),
+                git("git", ci),
+                git("git", ci),
+                git("gitInv", ci),
+                git("gitInv", ci),
+                git("git", ci),
+                git("git", ci),
+            );
+        }
+    } else if neo_theme {
+        for i in 0..limit(o) {
+            let ci = i % 8;
+            if i == 0 {
+                sections += &tpl(o, include_str!("css/gg_neo0.css"), &|e| match e {
+                    "i" => Some(i.to_string()),
+                    "@1" => Some(gradient(o)),
+                    _ => None,
+                });
+            } else {
+                sections += &tpl(o, include_str!("css/gg_neo.css"), &|e| match e {
+                    "i" => Some(i.to_string()),
+                    "@1" => Some(git("gitBranchLabel", ci)),
+                    "@2" | "@3" | "@6" => Some(git("git", ci)),
+                    "@4" | "@5" => Some(git("gitInv", ci)),
+                    _ => None,
+                });
+            }
+        }
+    } else if !color_theme {
+        for i in 0..limit(o) {
+            sections += &tpl(o, include_str!("css/gg_plain.css"), &|e| match e {
+                "i" => Some(i.to_string()),
+                "@1" | "@2" => Some(weight(redux_geometry)),
+                _ => None,
+            });
+        }
+    } else {
+        let border = o.color_arrays().map(|c| c.0).unwrap_or_default();
+        for i in 0..limit(o) {
+            if i == 0 {
+                sections += &tpl(o, include_str!("css/gg_color0.css"), &|e| match e {
+                    "i" => Some(i.to_string()),
+                    "@1" | "@2" => Some(weight(redux_geometry)),
+                    _ => None,
+                });
+            } else {
+                let b = border
+                    .get(i % border.len().max(1))
+                    .cloned()
+                    .unwrap_or_else(|| "undefined".into());
+                sections += &tpl(o, include_str!("css/gg_color.css"), &|e| match e {
+                    "i" => Some(i.to_string()),
+                    "@1" => Some(weight(redux_geometry)),
+                    "@6" => Some(if dark_theme { o.s("mainBkg") } else { b.clone() }),
+                    "@2" | "@3" | "@4" | "@5" | "@7" | "@8" => Some(b.clone()),
+                    _ => None,
+                });
+            }
+        }
+    }
+    let main_bkg_or_primary = if neo_gen {
+        o.s("mainBkg")
+    } else {
+        o.s("primaryColor")
+    };
+    tpl(o, include_str!("css/gg_main.css"), &|e| match e {
+        "@1" => Some(sections.clone()),
+        "@2" => Some(if neo_gen { "4 2" } else { "2" }.to_string()),
+        "@3" => Some(if neo_gen {
+            o.s("nodeBorder")
+        } else {
+            o.s("commitLabelColor")
+        }),
+        "@4" => Some(if neo_gen {
+            format!("font-weight:{};", o.s("noteFontWeight"))
+        } else {
+            String::new()
+        }),
+        "@5" => Some(if neo_gen {
+            "transparent".to_string()
+        } else {
+            o.s("commitLabelBackground")
+        }),
+        "@6" => Some(if neo_gen { String::new() } else { "0.5".to_string() }),
+        "@7" => Some(if neo_gen {
+            o.s("mainBkg")
+        } else {
+            o.s("tagLabelBackground")
+        }),
+        "@8" => Some(if neo_gen {
+            o.s("nodeBorder")
+        } else {
+            o.s("tagLabelBorder")
+        }),
+        "@9" => Some(if neo_gen {
+            format!("filter:{}", o.s("dropShadow"))
+        } else {
+            String::new()
+        }),
+        "@10" | "@11" | "@12" | "@13" | "@15" | "@16" => Some(main_bkg_or_primary.clone()),
+        "@14" => Some(if neo_gen { o.s("strokeWidth") } else { "3".to_string() }),
+        "@17" => Some(if redux_geometry {
+            o.s("strokeWidth")
+        } else {
+            "8".to_string()
+        }),
         _ => None,
     })
 }

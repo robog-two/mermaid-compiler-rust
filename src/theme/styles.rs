@@ -47,6 +47,8 @@ fn constants(theme: ThemeName) -> Vec<(&'static str, &'static str)> {
         | ThemeName::ReduxDarkColor => ("\"Recursive Variable\", arial, sans-serif", "14px", "2"),
         _ => ("\"trebuchet ms\", verdana, arial, sans-serif", "16px", "1"),
     };
+    v.push(("commitLabelFontSize", "10px"));
+    v.push(("tagLabelFontSize", "10px"));
     v.push(("fontFamily", ff));
     v.push(("fontSize", fs));
     v.push(("strokeWidth", sw));
@@ -66,6 +68,12 @@ fn constants(theme: ThemeName) -> Vec<(&'static str, &'static str)> {
         theme,
         ThemeName::Redux | ThemeName::ReduxDark | ThemeName::ReduxColor | ThemeName::ReduxDarkColor
     );
+    if matches!(
+        theme,
+        ThemeName::Redux | ThemeName::ReduxDark | ThemeName::ReduxColor | ThemeName::ReduxDarkColor
+    ) {
+        v.push(("commitLineColor", "#BDBCCC"));
+    }
     let weight = if redux { "600" } else { "normal" };
     v.push(("fontWeight", weight));
     v.push(("noteFontWeight", weight));
@@ -337,7 +345,7 @@ impl Opts {
         }
         let opt = |k: &str, c: &Option<crate::scene::Color>, add: &mut Vec<(String, String)>| {
             if let Some(c) = c {
-                add.push((k.to_string(), c.css().to_string()));
+                add.push((k.to_string(), respell(c.css())));
             }
         };
         opt("erEdgeLabelBackground", &p.er_edge_label_background, &mut add);
@@ -346,6 +354,11 @@ impl Opts {
             &p.requirement_edge_label_background,
             &mut add,
         );
+        opt("commitLabelColor", &Some(p.commit_label_color.clone()), &mut add);
+        opt("commitLabelBackground", &Some(p.commit_label_bkg.clone()), &mut add);
+        opt("tagLabelColor", &Some(p.tag_label_color.clone()), &mut add);
+        opt("tagLabelBackground", &Some(p.tag_label_bkg.clone()), &mut add);
+        opt("tagLabelBorder", &Some(p.tag_label_border.clone()), &mut add);
         opt("altBackground", &p.alt_background, &mut add);
         opt("stateBorder", &p.state_border, &mut add);
         opt("compositeBackground", &p.composite_background, &mut add);

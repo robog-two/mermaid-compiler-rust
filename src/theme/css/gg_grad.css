@@ -1,0 +1,3 @@
+
+      .label${i}  { fill: ${options.mainBkg}; stroke: url(${svgId}-gradient); stroke-width: ${options.strokeWidth};}
+             

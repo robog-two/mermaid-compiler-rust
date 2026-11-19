@@ -1,0 +1,9 @@
+
+        .branch-label${i} { fill: ${options.nodeBorder}; ${@1} }
+        .commit${i} { stroke: ${options.nodeBorder};   }
+        .commit-highlight${i} { stroke: ${options.nodeBorder}; fill: ${options.nodeBorder}; }
+        .label${i}  { fill: ${options.mainBkg}; stroke: ${options.nodeBorder}; stroke-width: ${options.strokeWidth}; ${@2}}
+        .arrow${i} { stroke: ${options.nodeBorder}; }
+        .commit-bullets { fill: ${options.nodeBorder}; }
+        .commit-cherry-pick${i} { stroke: ${options.nodeBorder}; }
+        

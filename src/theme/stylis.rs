@@ -296,7 +296,8 @@ impl Parser<'_> {
 fn declaration(text: &str) -> Option<String> {
     let text = text.trim();
     let colon = text.find(':')?;
-    if colon == 0 {
+    // A declaration without a property or a value is dropped.
+    if colon == 0 || text[colon + 1..].trim().is_empty() {
         return None;
     }
     let mut s = text.to_string();

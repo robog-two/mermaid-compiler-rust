@@ -1,0 +1,7 @@
+
+        .branch-label${i} { fill: ${options.nodeBorder}; ${@1} }
+        .commit${i} { stroke: ${@2}; fill: ${@3}; }
+        .commit-highlight${i} { stroke: ${@4}; fill: ${@5}; }
+        .label${i}  { fill: ${@6}; stroke: ${@7};  stroke-width: ${options.strokeWidth}; }
+        .arrow${i} { stroke: ${@8}; }
+        

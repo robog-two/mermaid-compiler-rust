@@ -1,0 +1,6 @@
+
+        .branch-label${i} { fill: ${@1}; }
+        .commit${i} { stroke: ${@2}; fill: ${@3}; }
+        .commit-highlight${i} { stroke: ${@4}; fill: ${@5}; }
+        .arrow${i} { stroke: ${@6}; }
+        

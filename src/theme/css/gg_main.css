@@ -1,0 +1,50 @@
+
+  .commit-id,
+  .commit-msg,
+  .branch-label {
+    fill: lightgrey;
+    color: lightgrey;
+    font-family: 'trebuchet ms', verdana, arial, sans-serif;
+    font-family: var(--mermaid-font-family);
+  }
+  
+  ${@1}
+
+  .branch {
+    stroke-width: ${options.strokeWidth};
+    stroke: ${options.commitLineColor ?? options.lineColor};
+    stroke-dasharray:  ${@2};
+  }
+  .commit-label { font-size: ${options.commitLabelFontSize}; fill: ${@3}; ${@4}}
+  .commit-label-bkg { font-size: ${options.commitLabelFontSize}; fill: ${@5}; opacity: ${@6};  }
+  .tag-label { font-size: ${options.tagLabelFontSize}; fill: ${options.tagLabelColor};}
+  .tag-label-bkg { fill: ${@7}; stroke: ${@8}; ${@9}  }
+  .tag-hole { fill: ${options.textColor}; }
+
+  .commit-merge {
+    stroke: ${@10};
+    fill: ${@11};
+  }
+  .commit-reverse {
+    stroke: ${@12};
+    fill: ${@13};
+    stroke-width: ${@14};
+  }
+  .commit-highlight-outer {
+  }
+  .commit-highlight-inner {
+    stroke: ${@15};
+    fill: ${@16};
+  }
+
+  .arrow {
+    /* Intentional: neo themes keep the bold 8px arrow (like classic themes); only redux-geometry themes use the thinner options.strokeWidth. */
+    stroke-width: ${@17};
+    stroke-linecap: round;
+    fill: none
+  }
+  .gitTitleText {
+    text-anchor: middle;
+    font-size: 18px;
+    fill: ${options.textColor};
+  }
