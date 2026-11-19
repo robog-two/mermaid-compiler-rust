@@ -876,6 +876,7 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
         view_box: Rect::new(0.0, 0.0, width, height),
         elements: vec![Element::Markup {
             svg: m,
+            svg_view_box: None,
             children: vec![Element::group("main", els)],
         }],
         acc_title: None,
@@ -1075,7 +1076,7 @@ mod tests {
         let css = |c: &Color| c.css().to_ascii_lowercase();
         let cfg = MermaidConfig::default();
         let pal = crate::theme::palette(crate::theme::ThemeName::Default, &[]);
-        let q = colors(&cfg, &pal);
+        let q = colors(&cfg, &pal, false);
         // adjust(primaryColor #ECECFF, { r, g, b: +5 }), adjust(#131300, -5).
         assert_eq!(css(&q.fills[1]), "#f1f1ff");
         assert_eq!(css(&q.texts[3]), "#040400");
@@ -1083,7 +1084,7 @@ mod tests {
         assert_eq!(css(&q.point), "#333");
         assert_eq!(css(&q.external), "hsl(240, 60%, 86.2745098039%)");
         let rc = crate::theme::palette(crate::theme::ThemeName::ReduxColor, &[]);
-        let q = colors(&cfg, &rc);
+        let q = colors(&cfg, &rc, false);
         assert_eq!(css(&q.fills[0]), "#ececfe");
         // hsl(247.5, 0%, 9.2156862745%), which the browser paints #181818.
         assert_eq!(
