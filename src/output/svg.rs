@@ -904,7 +904,7 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 num(rect.y)
             );
         }
-        Element::Markup { svg, children } => {
+        Element::Markup { svg, children, .. } => {
             if fx.raster_scale.is_some() {
                 children.iter().for_each(|c| write_element(out, c, fx));
             } else {
@@ -1014,7 +1014,18 @@ pub fn to_svg(scene: &Scene, opt: &SvgOptions) -> String {
 }
 
 fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
-    let vb = scene.view_box;
+    let vb = match (opt.raster_scale, scene.elements.as_slice()) {
+        (
+            None,
+            [
+                Element::Markup {
+                    svg_view_box: Some(v),
+                    ..
+                },
+            ],
+        ) => *v,
+        _ => scene.view_box,
+    };
     let id = esc(opt.id);
     let mut out = String::with_capacity(4096 + scene.element_count() * 96);
     let _ = write!(out, "<svg id=\"{id}\"");

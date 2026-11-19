@@ -176,9 +176,24 @@ fn tree_view_and_usecase_icons() {
     let s = svg(
         "treeView-beta\n├── src/\n│   ├── a.ts icon(tst:box)\n│   └── b.ts icon(tst:arrow-down)\n└── c.md icon(tst:missing)\n",
     );
+    // mermaid writes the group's own class and transform, then the icon's `<svg>`.
+    let mut found = Vec::new();
+    let mut rest = s.as_str();
+    while let Some(i) = rest.find("treeView-node-icon\" transform=\"translate(") {
+        rest = &rest[i + 41..];
+        let t = rest[..rest.find(')').unwrap()].to_string();
+        let svg = &rest[rest.find("<svg ").unwrap()..];
+        let vb = &svg[svg.find("viewBox=\"").unwrap() + 9..];
+        found.push((t, vb[..vb.find('"').unwrap()].to_string()));
+    }
     assert_eq!(
-        icons(&s),
-        pairs(&[("35,59.031", "0 0 16 12"), ("35,86.047", "1 -2 14 18")])
+        found,
+        pairs(&[
+            ("35, 59.03125", "0 0 16 12"),
+            ("35, 86.046875", "1 -2 14 18"),
+            // `c.md`'s unknown icon
+            ("20, 113.0625", "0 0 80 80")
+        ])
     );
     // An icon no pack has is mermaid's unknownIcon.
     assert!(s.contains("#087ebf"));
