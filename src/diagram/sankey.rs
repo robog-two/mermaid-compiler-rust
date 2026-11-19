@@ -1112,7 +1112,9 @@ mod tests {
         fn walk(els: &[Element], f: &mut Vec<String>, st: &mut Vec<Paint>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => walk(children, f, st),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, f, st)
+                    }
                     Element::Shape { paint, class, .. } if class.as_deref() == Some("node") => {
                         f.push(paint.fill.css().to_string())
                     }
@@ -1157,7 +1159,9 @@ mod tests {
         fn labels(els: &[Element], out: &mut Vec<crate::scene::Text>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => labels(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        labels(children, out)
+                    }
                     Element::Text {
                         text,
                         class: Some(c),
