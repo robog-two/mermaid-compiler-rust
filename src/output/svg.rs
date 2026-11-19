@@ -1050,9 +1050,10 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
         .style
         .and_then(|spec| crate::theme::styles::style_text(spec, &id));
     match faithful {
-        Some(css) => {
+        Some(crate::theme::styles::Sheet::Text(css)) => {
             let _ = write!(out, "<style>{}</style>", esc_text(&css));
         }
+        Some(crate::theme::styles::Sheet::Omit) => {}
         None => {
             let _ = write!(
                 out,

@@ -384,8 +384,26 @@ fn base(o: &Opts, id_sel: &str, diagram: &str, user: &str) -> String {
     s
 }
 
-/// The first `<style>`'s text for `spec`, `None` where it is not transcribed.
-pub fn style_text(spec: &StyleSpec, id: &str) -> Option<String> {
+/// What the diagram's first `<style>` element is.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Sheet {
+    /// Element text (unescaped).
+    Text(String),
+    /// mermaid writes no `<style>` for the diagram.
+    Omit,
+}
+
+/// The first `<style>` for `spec`, `None` where it is not transcribed.
+pub fn style_text(spec: &StyleSpec, id: &str) -> Option<Sheet> {
+    match spec.kind {
+        // Drawn by the wardley renderer without mermaid's stylesheet.
+        DiagramKind::Wardley => return Some(Sheet::Omit),
+        // The first style of a ZenUML svg is the plugin's own, a fixed text.
+        DiagramKind::ZenUml => {
+            return Some(Sheet::Text(include_str!("css/zenuml.css").to_string()));
+        }
+        _ => {}
+    }
     let o = Opts::new(spec.theme, spec.look, &spec.theme_variables);
     let diagram_css = super::diagram_styles::diagram(spec.kind, &o)?;
     let id_sel = format!("#{id}");
@@ -394,8 +412,8 @@ pub fn style_text(spec: &StyleSpec, id: &str) -> Option<String> {
         .clone()
         .unwrap_or_else(|| "\"trebuchet ms\", verdana, arial, sans-serif".into());
     let user = format!(":root {{ --mermaid-font-family: {root_ff}}}");
-    Some(stylis::compile(
+    Some(Sheet::Text(stylis::compile(
         &id_sel,
         &base(&o, &id_sel, &diagram_css, &user),
-    ))
+    )))
 }
