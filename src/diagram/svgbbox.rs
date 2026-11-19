@@ -23,7 +23,7 @@ pub struct RelArc {
 
 /// A number as mermaid writes it into the path (JavaScript's shortest
 /// round-trip form) and Chromium reads it back (single precision).
-fn js_f32(v: f64) -> f32 {
+pub(crate) fn js_f32(v: f64) -> f32 {
     let s = if v != 0.0 && (v.abs() < 1e-6 || v.abs() >= 1e21) {
         format!("{v:e}")
     } else {
@@ -722,7 +722,7 @@ pub fn cubic_group_box(paths: &[Vec<crate::geom::PathCmd>]) -> Option<[f64; 4]> 
             Some(a) => {
                 let (x, y) = (a.0.min(b.0), a.1.min(b.1));
                 let (r, bt) = ((a.0 + a.2).max(b.0 + b.2), (a.1 + a.3).max(b.1 + b.3));
-                (x, y, span(x, r), span(y, bt))
+                (x, y, r - x, bt - y)
             }
         });
     }

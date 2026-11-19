@@ -263,10 +263,10 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Kanban> {
 /// (`gfx::RectF::Union`: the smaller origin, the larger far edge, each edge
 /// a float sum).
 #[derive(Default)]
-struct Box32(Option<(f32, f32, f32, f32)>);
+pub(crate) struct Box32(Option<(f32, f32, f32, f32)>);
 
 impl Box32 {
-    fn add(&mut self, r: Rect) {
+    pub(crate) fn add(&mut self, r: Rect) {
         let (x, y) = (r.x as f32, r.y as f32);
         let (right, bottom) = (x + r.w as f32, y + r.h as f32);
         self.0 = Some(match self.0 {
@@ -276,7 +276,7 @@ impl Box32 {
     }
 
     /// The box as origin and size, as a group reports it.
-    fn rect(&self) -> Rect {
+    pub(crate) fn rect(&self) -> Rect {
         let (x, y, right, bottom) = self.0.unwrap_or_default();
         Rect::new(
             f64::from(x),
@@ -288,7 +288,7 @@ impl Box32 {
 
     /// The union of two groups' boxes, each reduced to origin and size first as
     /// a group's `getBBox()` is.
-    fn join(&self, other: &Box32) -> Box32 {
+    pub(crate) fn join(&self, other: &Box32) -> Box32 {
         let mut out = Box32::default();
         for b in [self, other] {
             if let Some((x, y, right, bottom)) = b.0 {
@@ -304,7 +304,7 @@ impl Box32 {
     }
 
     /// `setupGraphViewbox`: the box grown by `padding` on every side.
-    fn view_box(&self, padding: f64) -> Option<Rect> {
+    pub(crate) fn view_box(&self, padding: f64) -> Option<Rect> {
         let (x, y, right, bottom) = self.0?;
         Some(
             Rect::new(
@@ -319,7 +319,7 @@ impl Box32 {
 }
 
 /// An attribute value as `XMLSerializer` writes it.
-fn attr(s: &str) -> String {
+pub(crate) fn attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

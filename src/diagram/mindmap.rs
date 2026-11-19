@@ -23,6 +23,8 @@ use crate::scene::{Color, DiagramKind, Element, Geometry, Gradient, Paint, Scene
 use crate::text::{BreakRule, TextBlock, line_width};
 use crate::theme::Palette;
 
+mod dom;
+
 /// Node shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeShape {
@@ -428,7 +430,7 @@ fn layout_with(
     if let Some(st) = hand {
         for (nd, p) in mm.nodes.iter().zip(placed.iter_mut()) {
             if let Some(hn) = hand_node(nd.shape, p.label, padding, st) {
-                p.bbox = hn.bbox;
+                p.bbox = hand_group_box(&hn, p.label).unwrap_or(hn.bbox);
             }
         }
     }
@@ -453,6 +455,31 @@ fn layout_with(
         p.center = Point::new(x, y);
     }
     placed
+}
+
+/// `getBBox()` of a hand-drawn node's group as Chromium joins it: the rough
+/// paths' group box moved by the shape's translation, then joined with the
+/// label's box, every edge a single-precision sum.
+fn hand_group_box(hn: &HandNode, label: (f64, f64)) -> Option<Rect> {
+    let mut b = crate::diagram::kanban::Box32::default();
+    for pc in hn.pieces.iter().filter(|pc| pc.measured) {
+        let paths: Vec<Vec<PathCmd>> = pc
+            .drawable
+            .sets
+            .iter()
+            .filter(|s| !s.ops.is_empty())
+            .map(|s| hand::set_cmds(&s.ops, Point::default()))
+            .collect();
+        let [x, y, w, h] = crate::diagram::svgbbox::cubic_group_box(&paths)?;
+        b.add(Rect::new(
+            f64::from(x as f32 + pc.at.x as f32),
+            f64::from(y as f32 + pc.at.y as f32),
+            w,
+            h,
+        ));
+    }
+    b.add(Rect::new(-label.0 / 2.0, -label.1 / 2.0, label.0, label.1));
+    Some(b.rect())
 }
 
 /// The rough.js drawing of a node of `shape` around a `label`-sized label
@@ -601,6 +628,7 @@ pub fn render(
         underlines(cfg, pal),
         hand.as_ref(),
         neo.as_ref(),
+        widths,
     ))
 }
 
@@ -737,6 +765,7 @@ pub fn draw(
     underline: bool,
     hand: Option<&HandStyle>,
     neo: Option<&Neo>,
+    widths: Widths,
 ) -> Scene {
     let font = pal.font_size;
     let mut bounds = Bounds::default();
@@ -868,11 +897,29 @@ pub fn draw(
             "mindmapTitle",
         ));
     }
+    // Plain SVG output is mermaid's own markup (which has no title).
+    let dom = dom::Dom {
+        look: match (hand.is_some(), neo.is_some()) {
+            (true, _) => "handDrawn",
+            (_, true) => "neo",
+            _ => "classic",
+        },
+        pal,
+        padding,
+        widths,
+        hand,
+        neo: neo.is_some(),
+    };
+    let (svg, svg_view_box) = dom::markup(mm, placed, &dom, padding);
     Scene {
         kind: DiagramKind::Mindmap,
         // setupViewPortForSVG: the drawing's bounding box plus `mindmap.padding`.
         view_box: bounds.rect().pad(padding),
-        elements: els,
+        elements: vec![Element::Markup {
+            svg,
+            children: els,
+            svg_view_box,
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -1330,7 +1377,9 @@ line\"(";
         fn lines(els: &[Element]) -> usize {
             els.iter()
                 .map(|e| match e {
-                    Element::Group { children, .. } => lines(children),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        lines(children)
+                    }
                     Element::Shape {
                         geom: Geometry::Line { .. },
                         class: None,
@@ -1370,7 +1419,9 @@ line\"(";
         fn walk(els: &[Element], out: &mut Vec<String>) {
             for el in els {
                 match el {
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, out)
+                    }
                     Element::Shape {
                         geom: Geometry::Path(cmds),
                         ..
