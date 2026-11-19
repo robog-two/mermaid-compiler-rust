@@ -6,8 +6,10 @@
 //! diagonal sub-bones. Geometry is a port of mermaid's `ishikawaRenderer.ts`.
 
 use crate::config::MermaidConfig;
+use crate::diagram::wardley::ID_MARK;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, PathCmd, Point, Rect};
+use crate::output::svg::{esc, esc_text, js_num as n};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::{Baseline as TextBaseline, baseline_shift, line_width};
 use crate::theme::Palette;
@@ -240,9 +242,18 @@ impl Label {
     /// united with its glyphs' ink rounded out to whole pixels
     /// ([`crate::text::svg_bbox_extent_styled`]).
     pub fn bbox(&self) -> Rect {
+        self.bbox_impl(false)
+    }
+
+    /// [`Label::bbox`]; with `quantised`, the line's advance is rounded up to
+    /// 1/64 px as the browser's inline size is, which moves a centred line.
+    fn bbox_impl(&self, quantised: bool) -> Rect {
         let (mut x0, mut x1) = (f64::INFINITY, f64::NEG_INFINITY);
         for l in &self.lines {
-            let adv = line_width(l, self.font_size, self.bold);
+            let mut adv = line_width(l, self.font_size, self.bold);
+            if quantised {
+                adv = (adv * 64.0 - 1e-6).ceil() / 64.0;
+            }
             let start = match self.anchor {
                 Anchor::Start => self.x,
                 Anchor::Middle => self.x - adv / 2.0,
@@ -265,6 +276,15 @@ impl Label {
         let top = self.first_baseline() - crate::text::ascent_px(fs);
         let h = (self.lines.len() as f64 - 1.0) * self.line_height + th;
         Rect::new(x, top, w, h)
+    }
+
+    /// [`Label::bbox`] as `getBBox()` reports it: single-precision floats,
+    /// the far edges summed in single precision too.
+    fn bbox_f32(&self) -> Rect {
+        let r = self.bbox_impl(true);
+        let (x, y) = (r.x as f32, r.y as f32);
+        let (w, h) = (((x + r.w as f32) - x), ((y + r.h as f32) - y));
+        Rect::new(f64::from(x), f64::from(y), f64::from(w), f64::from(h))
     }
 
     /// Baseline of the first line.
@@ -301,6 +321,12 @@ pub enum Mark {
         w: f64,
         h: f64,
         label: Label,
+        /// The label's own `y` before its `translate(tx, ty)`.
+        attr_y: f64,
+        tx: f64,
+        ty: f64,
+        /// The label's own box (`getBBox()`, before its translate).
+        tb: Rect,
     },
     /// A bone with an arrowhead at `from` (pointing at its parent).
     Bone {
@@ -398,9 +424,28 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a + (b - a) * t
 }
 
+/// The bones' angle in radians. mermaid writes `82 * Math.PI / 180`; the
+/// scene keeps `to_radians`, whose last bit differs.
+fn angle(exact: bool) -> f64 {
+    if exact {
+        ANGLE_DEG * std::f64::consts::PI / 180.0
+    } else {
+        ANGLE_DEG.to_radians()
+    }
+}
+
 /// mermaid's `drawBranch`; returns the marks and the labels' left-most x.
-fn branch(node: &Cause, start: Point, dir: f64, length: f64, fs: f64, out: &mut Vec<Mark>) -> f64 {
-    let (sin_a, cos_a) = ANGLE_DEG.to_radians().sin_cos();
+fn branch(
+    node: &Cause,
+    start: Point,
+    dir: f64,
+    length: f64,
+    fs: f64,
+    exact: bool,
+    out: &mut Vec<Mark>,
+) -> f64 {
+    let (sin_a, cos_a) = angle(exact).sin_cos();
+    let bbox = |l: &Label| if exact { l.bbox_f32() } else { l.bbox() };
     let mut left = f64::INFINITY;
     let line_len = length * if node.children.is_empty() { 0.2 } else { 1.0 };
     let dx = -cos_a * line_len;
@@ -419,7 +464,7 @@ fn branch(node: &Cause, start: Point, dir: f64, length: f64, fs: f64, out: &mut 
         Baseline::Middle,
         fs,
     );
-    let tb = label.bbox();
+    let tb = bbox(&label);
     left = left.min(tb.x);
     out.push(Mark::Category {
         rect: Rect::new(tb.x - 20.0, tb.y - 2.0, tb.w + 40.0, tb.h + 4.0),
@@ -487,7 +532,7 @@ fn branch(node: &Cause, start: Point, dir: f64, length: f64, fs: f64, out: &mut 
             from: Point::new(bx0, by0),
             to: Point::new(bx1, y),
         });
-        left = left.min(label.bbox().x);
+        left = left.min(bbox(&label).x);
         out.push(Mark::SubLabel(label));
         if e.child_count > 0 {
             bones[i + 1] = Some(Bone {
@@ -505,6 +550,13 @@ fn branch(node: &Cause, start: Point, dir: f64, length: f64, fs: f64, out: &mut 
 
 /// mermaid's `draw` geometry. `fs` is the configured `fontSize`.
 pub fn layout(root: &Cause, fs: f64) -> Layout {
+    layout_with(root, fs, false)
+}
+
+/// [`layout`]; with `exact`, mermaid's own operation order and the
+/// browser's single-precision `getBBox()` numbers (what the SVG markup
+/// writes), not the scene's.
+fn layout_with(root: &Cause, fs: f64, exact: bool) -> Layout {
     let mut marks = Vec::new();
     // Head.
     let max_chars = ((110.0 / (fs * 0.6)).floor() as usize).max(6);
@@ -519,17 +571,28 @@ pub fn layout(root: &Cause, fs: f64) -> Layout {
     head_label.line_height = fs * 1.05;
     head_label.bold = true;
     head_label.y = -(head_label.lines.len() as f64 - 1.0) * head_label.line_height / 2.0;
-    let mut tb = head_label.bbox();
+    let attr_y = head_label.y;
+    let mut tb = head_label.bbox_impl(exact);
     // drawHead measures the label before the svg is sized, where Chromium's text
     // box is the rounded ascent plus descent (16px at 14px, as `svg_line_box`).
     let last = head_label.lines.last().map_or("", String::as_str);
     tb.h = (head_label.lines.len() as f64 - 1.0) * head_label.line_height
         + crate::text::svg_line_box(HEAD_FONT, last);
+    if exact {
+        tb = Rect::new(
+            f64::from(tb.x as f32),
+            f64::from(tb.y as f32),
+            f64::from(tb.w as f32),
+            f64::from(tb.h as f32),
+        );
+    }
     let w = (tb.w + 6.0).max(60.0);
     let h = (tb.h * 2.0 + 40.0).max(40.0);
     // translate((w - tb.width) / 2 - tb.x + 3): the label was laid out at x 0.
-    head_label.x = (w - tb.w) / 2.0 - tb.x + 3.0;
+    let tx = (w - tb.w) / 2.0 - tb.x + 3.0;
     // Centre the block vertically on the spine (mermaid's -tb.y - tb.height/2).
+    let ty = -tb.y - tb.h / 2.0;
+    head_label.x = tx;
     head_label.y -= tb.y + tb.h / 2.0;
 
     let causes = &root.children;
@@ -565,6 +628,7 @@ pub fn layout(root: &Cause, fs: f64) -> Layout {
                     dir,
                     len,
                     fs,
+                    exact,
                     &mut pair_marks,
                 );
                 left = left.min(l);
@@ -582,6 +646,10 @@ pub fn layout(root: &Cause, fs: f64) -> Layout {
         w,
         h,
         label: head_label,
+        attr_y,
+        tx,
+        ty,
+        tb,
     });
     marks.extend(pair_marks);
 
@@ -592,7 +660,7 @@ pub fn layout(root: &Cause, fs: f64) -> Layout {
                 b.add_point(*from);
                 b.add_point(*to);
             }
-            Mark::Head { y, w, h, label } => {
+            Mark::Head { y, w, h, label, .. } => {
                 b.add_rect(Rect::new(0.0, y - h / 2.0, 1.2 * w, *h));
                 b.add_rect(label.bbox());
             }
@@ -659,27 +727,50 @@ fn rough_els(d: &crate::rough::Drawable, at: Point) -> (Vec<Element>, Option<Rec
     (els, b)
 }
 
-/// The handDrawn look: every mark drawn by rough.js (mermaid's
-/// `roughContext`), the spine last; and the box of the strokes as drawn.
-fn draw_hand(lay: &Layout, seed: f64, pal: &Palette) -> (Vec<Element>, Bounds) {
-    use crate::rough::{self, Options};
-    let line = pal.line_color.0.clone();
-    let bkg = pal.main_bkg.0.clone();
-    let text = &pal.text_color;
-    let stroke2 = || Options {
+/// `drawLine`'s rough.js options.
+fn stroke2_options(seed: f64, line: &str) -> crate::rough::Options {
+    crate::rough::Options {
         roughness: 1.5,
         seed,
-        stroke: line.clone(),
+        stroke: line.to_string(),
         stroke_width: 2.0,
-        ..Options::default()
-    };
-    let boxed = || Options {
-        fill: Some(bkg.clone()),
+        ..Default::default()
+    }
+}
+
+/// The head's and the label boxes' rough.js options.
+fn boxed_options(seed: f64, line: &str, bkg: &str) -> crate::rough::Options {
+    crate::rough::Options {
+        fill: Some(bkg.to_string()),
         fill_style: "hachure".into(),
         fill_weight: 2.5,
         hachure_gap: 5.0,
-        ..stroke2()
-    };
+        ..stroke2_options(seed, line)
+    }
+}
+
+/// `drawArrowMarker`'s rough.js options.
+fn arrow_options(seed: f64, line: &str) -> crate::rough::Options {
+    crate::rough::Options {
+        roughness: 1.0,
+        seed,
+        fill: Some(line.to_string()),
+        fill_style: "solid".into(),
+        stroke: line.to_string(),
+        stroke_width: 1.0,
+        ..Default::default()
+    }
+}
+
+/// The handDrawn look: every mark drawn by rough.js (mermaid's
+/// `roughContext`), the spine last; and the box of the strokes as drawn.
+fn draw_hand(lay: &Layout, seed: f64, pal: &Palette) -> (Vec<Element>, Bounds) {
+    use crate::rough;
+    let line = pal.line_color.0.clone();
+    let bkg = pal.main_bkg.0.clone();
+    let text = &pal.text_color;
+    let stroke2 = || stroke2_options(seed, &line);
+    let boxed = || boxed_options(seed, &line, &bkg);
     let mut els = Vec::new();
     let mut b = Bounds::default();
     let add =
@@ -694,7 +785,7 @@ fn draw_hand(lay: &Layout, seed: f64, pal: &Palette) -> (Vec<Element>, Bounds) {
     for m in &lay.marks {
         match m {
             Mark::Spine { from, to } => spine = Some((*from, *to)),
-            Mark::Head { y, w, h, label } => {
+            Mark::Head { y, w, h, label, .. } => {
                 let d = format!(
                     "M 0 {} L 0 {} Q {} 0 0 {} Z",
                     -h / 2.0,
@@ -743,15 +834,7 @@ fn draw_hand(lay: &Layout, seed: f64, pal: &Palette) -> (Vec<Element>, Bounds) {
                         tx - ux * s * 2.0 - px,
                         ty - uy * s * 2.0 - py
                     );
-                    let o = Options {
-                        roughness: 1.0,
-                        seed,
-                        fill: Some(line.clone()),
-                        fill_style: "solid".into(),
-                        stroke: line.clone(),
-                        stroke_width: 1.0,
-                        ..Options::default()
-                    };
+                    let o = arrow_options(seed, &line);
                     add(&mut els, &mut b, rough::path(&d, o), Point::default(), "");
                 }
             }
@@ -811,7 +894,7 @@ pub fn draw(lay: &Layout, padding: f64, pal: &Palette, hand: Option<f64>) -> Sce
                 Paint::stroke(line, 2.0),
                 "ishikawa-spine",
             )),
-            Mark::Head { y, w, h, label } => {
+            Mark::Head { y, w, h, label, .. } => {
                 // M 0 -h/2 L 0 h/2 Q 2.4w 0 0 -h/2 Z, with the quadratic as a cubic.
                 let p0 = Point::new(0.0, y + h / 2.0);
                 let q = Point::new(2.4 * w, *y);
@@ -884,6 +967,412 @@ pub fn draw(lay: &Layout, padding: f64, pal: &Palette, hand: Option<f64>) -> Sce
     }
 }
 
+// ───────────────────────────── mermaid's markup ─────────────────────────────
+
+/// The rough.js `<g>` of `d` (`RoughSVG.draw`), with `class` when set.
+fn rough_g(d: &crate::rough::Drawable, class: Option<&str>) -> String {
+    use crate::rough::{Op, SetKind};
+    let o = &d.options;
+    let mut s = match class {
+        Some(c) => format!("<g class=\"{c}\">"),
+        None => "<g>".to_string(),
+    };
+    for set in &d.sets {
+        let mut data = String::new();
+        for op in &set.ops {
+            match op {
+                Op::Move(p) => data.push_str(&format!("M{} {} ", n(p[0]), n(p[1]))),
+                Op::BCurveTo(p) => data.push_str(&format!(
+                    "C{} {}, {} {}, {} {} ",
+                    n(p[0]),
+                    n(p[1]),
+                    n(p[2]),
+                    n(p[3]),
+                    n(p[4]),
+                    n(p[5])
+                )),
+                Op::LineTo(p) => data.push_str(&format!("L{} {} ", n(p[0]), n(p[1]))),
+            }
+        }
+        let data = data.trim();
+        let fill = o.fill.clone().unwrap_or_default();
+        match set.kind {
+            SetKind::Path => s.push_str(&format!(
+                "<path d=\"{data}\" stroke=\"{}\" stroke-width=\"{}\" fill=\"none\"/>",
+                esc(&o.stroke),
+                n(o.stroke_width)
+            )),
+            SetKind::FillPath => s.push_str(&format!(
+                "<path d=\"{data}\" stroke=\"none\" stroke-width=\"0\" fill=\"{}\"/>",
+                esc(&fill)
+            )),
+            SetKind::FillSketch => s.push_str(&format!(
+                "<path d=\"{data}\" stroke=\"{}\" stroke-width=\"{}\" fill=\"none\"/>",
+                esc(&fill),
+                n(d.fill_weight())
+            )),
+        }
+    }
+    s.push_str("</g>");
+    s
+}
+
+/// `drawMultilineText`: the `<text>` and its `<tspan>`s. Text is DOMPurify's
+/// output, which `.text()` escapes once more.
+fn text_markup(l: &Label, class: &str, anchor: &str, transform: Option<(f64, f64)>) -> String {
+    let mut s = format!(
+        "<text class=\"{class}\" text-anchor=\"{anchor}\" x=\"{}\" y=\"{}\"",
+        n(l.x),
+        n(l.y)
+    );
+    if let Some((tx, ty)) = transform {
+        s.push_str(&format!(" transform=\"translate({},{})\"", n(tx), n(ty)));
+    }
+    s.push('>');
+    for (i, line) in l.lines.iter().enumerate() {
+        let dy = if i == 0 { 0.0 } else { l.line_height };
+        s.push_str(&format!(
+            "<tspan x=\"{}\" dy=\"{}\">{}</tspan>",
+            n(l.x),
+            n(dy),
+            esc_text(&esc_text(line))
+        ));
+    }
+    s.push_str("</text>");
+    s
+}
+
+/// A box's size from its edges, in single precision: the difference, one
+/// float step wider when `lo + size` would fall short of `hi`.
+fn span(lo: f32, hi: f32) -> f32 {
+    let w = hi - lo;
+    if lo + w < hi {
+        f32::from_bits(w.to_bits() + 1)
+    } else {
+        w
+    }
+}
+
+/// A single-precision box, as the browser's `getBBox()` holds and joins them.
+#[derive(Clone, Copy)]
+struct R32 {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl R32 {
+    fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
+        R32 {
+            x: x as f32,
+            y: y as f32,
+            w: w as f32,
+            h: h as f32,
+        }
+    }
+    /// A box from its four edges (a path's bounds).
+    fn edges(l: f64, t: f64, r: f64, b: f64) -> Self {
+        let (l, t, r, b) = (l as f32, t as f32, r as f32, b as f32);
+        R32 {
+            x: l,
+            y: t,
+            w: span(l, r),
+            h: span(t, b),
+        }
+    }
+    fn union(self, o: R32) -> R32 {
+        let (x, y) = (self.x.min(o.x), self.y.min(o.y));
+        let (r, b) = (
+            (self.x + self.w).max(o.x + o.w),
+            (self.y + self.h).max(o.y + o.h),
+        );
+        R32 {
+            x,
+            y,
+            w: span(x, r),
+            h: span(y, b),
+        }
+    }
+    /// Through `translate(dx, dy)`: the origin moves, the size stays.
+    fn moved(self, dx: f64, dy: f64) -> R32 {
+        R32 {
+            x: self.x + dx as f32,
+            y: self.y + dy as f32,
+            ..self
+        }
+    }
+    fn rect(self) -> Rect {
+        Rect::new(
+            f64::from(self.x),
+            f64::from(self.y),
+            f64::from(self.w),
+            f64::from(self.h),
+        )
+    }
+}
+
+/// Join `r` into an accumulated box.
+fn join(acc: &mut Option<R32>, r: Option<R32>) {
+    if let Some(r) = r {
+        *acc = Some(acc.map_or(r, |a| a.union(r)));
+    }
+}
+
+/// A rough.js drawing's markup and the box of its group.
+fn rough_part(d: &crate::rough::Drawable, class: Option<&str>) -> (String, Option<R32>) {
+    let b = super::hand::drawable_bbox(d).map(|b| R32::new(b.x, b.y, b.w, b.h));
+    (rough_g(d, class), b)
+}
+
+/// `drawArrowMarker`'s rough triangle at `(x, y)`, pointing along `(dx, dy)`.
+fn rough_arrow(x: f64, y: f64, dx: f64, dy: f64, seed: f64, line: &str) -> (String, Option<R32>) {
+    let len = (dx * dx + dy * dy).sqrt();
+    if len == 0.0 {
+        return (String::new(), None);
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let s = 6.0;
+    let (px, py) = (-uy * s, ux * s);
+    let d = format!(
+        "M {} {} L {} {} L {} {} Z",
+        n(x),
+        n(y),
+        n(x - ux * s * 2.0 + px),
+        n(y - uy * s * 2.0 + py),
+        n(x - ux * s * 2.0 - px),
+        n(y - uy * s * 2.0 - py)
+    );
+    rough_part(&crate::rough::path(&d, arrow_options(seed, line)), None)
+}
+
+fn line_markup(class: &str, from: Point, to: Point, marker: bool) -> String {
+    let marker = if marker {
+        format!(" marker-start=\"url(#ishikawa-arrow-{ID_MARK})\"")
+    } else {
+        String::new()
+    };
+    format!(
+        "<line class=\"{class}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"{marker}/>",
+        n(from.x),
+        n(from.y),
+        n(to.x),
+        n(to.y)
+    )
+}
+
+/// A `<line>`'s box.
+fn line_box(from: Point, to: Point) -> R32 {
+    R32::edges(
+        from.x.min(to.x),
+        from.y.min(to.y),
+        from.x.max(to.x),
+        from.y.max(to.y),
+    )
+}
+
+/// mermaid's DOM for the drawing (inside the root, after its `<style>`) and
+/// the `getBBox()` of the whole.
+fn markup(lay: &Layout, hand: Option<f64>, pal: &Palette) -> (String, Rect) {
+    use crate::rough;
+    let line = pal.line_color.0.as_str();
+    let bkg = pal.main_bkg.0.as_str();
+    let mut s = String::from("<g/><g class=\"ishikawa\">");
+    // The boxes, joined as the DOM nests them.
+    let mut all: Option<R32> = None;
+    let mut pair: Option<R32> = None;
+    if hand.is_none() {
+        s.push_str(&format!(
+            "<defs><marker id=\"ishikawa-arrow-{ID_MARK}\" viewBox=\"0 0 10 10\" refX=\"0\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto\"><path d=\"M 10 0 L 0 5 L 10 10 Z\" class=\"ishikawa-arrow\"/></marker></defs>"
+        ));
+    }
+    let mut spine = None;
+    let mut open_pair = false;
+    let mut branches = 0usize;
+    let mut i = 0;
+    while i < lay.marks.len() {
+        match &lay.marks[i] {
+            Mark::Spine { from, to } => {
+                spine = Some((*from, *to));
+                if hand.is_none() {
+                    s.push_str(&line_markup("ishikawa-spine", *from, *to, false));
+                    join(&mut all, Some(line_box(*from, *to)));
+                }
+            }
+            Mark::Head {
+                y,
+                w,
+                h,
+                label,
+                attr_y,
+                tx,
+                ty,
+                tb,
+            } => {
+                let mut hg: Option<R32> = None;
+                s.push_str(&format!(
+                    "<g class=\"ishikawa-head-group\" transform=\"translate(0,{})\">",
+                    n(*y)
+                ));
+                let d = format!(
+                    "M 0 {} L 0 {} Q {} 0 0 {} Z",
+                    n(-h / 2.0),
+                    n(h / 2.0),
+                    n(w * 2.4),
+                    n(-h / 2.0)
+                );
+                match hand {
+                    Some(seed) => {
+                        let dr = rough::path(&d, boxed_options(seed, line, bkg));
+                        let (m, b) = rough_part(&dr, Some("ishikawa-head"));
+                        s.push_str(&m);
+                        join(&mut hg, b);
+                    }
+                    None => {
+                        s.push_str(&format!("<path class=\"ishikawa-head\" d=\"{d}\"/>"));
+                        // A quadratic's extreme x is half its control point's.
+                        let right = f64::from((w * 2.4) as f32 / 2.0);
+                        join(&mut hg, Some(R32::edges(0.0, -h / 2.0, right, h / 2.0)));
+                    }
+                }
+                let mut l = label.clone();
+                l.y = *attr_y;
+                l.x = 0.0;
+                s.push_str(&text_markup(
+                    &l,
+                    "ishikawa-head-label",
+                    "start",
+                    Some((*tx, *ty)),
+                ));
+                join(
+                    &mut hg,
+                    Some(R32::new(tb.x, tb.y, tb.w, tb.h).moved(*tx, *ty)),
+                );
+                s.push_str("</g>");
+                join(&mut all, hg.map(|b| b.moved(0.0, *y)));
+            }
+            Mark::Bone {
+                kind: BoneKind::Branch,
+                from,
+                to,
+            } => {
+                if branches % 2 == 0 {
+                    if open_pair {
+                        s.push_str("</g>");
+                        join(&mut all, pair.take());
+                    }
+                    s.push_str("<g class=\"ishikawa-pair\">");
+                    open_pair = true;
+                }
+                branches += 1;
+                match hand {
+                    Some(seed) => {
+                        let dr =
+                            rough::line(from.x, from.y, to.x, to.y, stroke2_options(seed, line));
+                        let (m, b) = rough_part(&dr, Some("ishikawa-branch"));
+                        s.push_str(&m);
+                        join(&mut pair, b);
+                        let (m, b) =
+                            rough_arrow(from.x, from.y, from.x - to.x, from.y - to.y, seed, line);
+                        s.push_str(&m);
+                        join(&mut pair, b);
+                    }
+                    None => {
+                        s.push_str(&line_markup("ishikawa-branch", *from, *to, true));
+                        join(&mut pair, Some(line_box(*from, *to)));
+                    }
+                }
+            }
+            Mark::Bone { from, to, .. } => {
+                // A sub-group: the bone and its label.
+                let mut sg: Option<R32> = None;
+                s.push_str("<g class=\"ishikawa-sub-group\">");
+                match hand {
+                    Some(seed) => {
+                        let dr =
+                            rough::line(from.x, from.y, to.x, to.y, stroke2_options(seed, line));
+                        let (m, b) = rough_part(&dr, Some("ishikawa-sub-branch"));
+                        s.push_str(&m);
+                        join(&mut sg, b);
+                        let (dx, dy) = if from.y == to.y {
+                            (1.0, 0.0)
+                        } else {
+                            (from.x - to.x, from.y - to.y)
+                        };
+                        let (m, b) = rough_arrow(from.x, from.y, dx, dy, seed, line);
+                        s.push_str(&m);
+                        join(&mut sg, b);
+                    }
+                    None => {
+                        s.push_str(&line_markup("ishikawa-sub-branch", *from, *to, true));
+                        join(&mut sg, Some(line_box(*from, *to)));
+                    }
+                }
+                if let Some(Mark::SubLabel(l)) = lay.marks.get(i + 1) {
+                    let class = match l.baseline {
+                        Baseline::Middle => "ishikawa-label align",
+                        Baseline::Alphabetic => "ishikawa-label up",
+                        Baseline::Hanging => "ishikawa-label down",
+                    };
+                    s.push_str(&text_markup(l, class, "end", None));
+                    let t = l.bbox_f32();
+                    join(&mut sg, Some(R32::new(t.x, t.y, t.w, t.h)));
+                    i += 1;
+                }
+                s.push_str("</g>");
+                join(&mut pair, sg);
+            }
+            Mark::Category { label, rect } => {
+                let mut lg: Option<R32> = None;
+                s.push_str("<g class=\"ishikawa-label-group\">");
+                match hand {
+                    Some(seed) => {
+                        let dr = rough::rectangle(
+                            rect.x,
+                            rect.y,
+                            rect.w,
+                            rect.h,
+                            boxed_options(seed, line, bkg),
+                        );
+                        let (m, b) = rough_part(&dr, Some("ishikawa-label-box"));
+                        s.push_str(&m);
+                        join(&mut lg, b);
+                    }
+                    None => {
+                        s.push_str(&format!(
+                            "<rect class=\"ishikawa-label-box\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
+                            n(rect.x),
+                            n(rect.y),
+                            n(rect.w),
+                            n(rect.h)
+                        ));
+                        join(&mut lg, Some(R32::new(rect.x, rect.y, rect.w, rect.h)));
+                    }
+                }
+                s.push_str(&text_markup(label, "ishikawa-label cause", "middle", None));
+                let t = label.bbox_f32();
+                join(&mut lg, Some(R32::new(t.x, t.y, t.w, t.h)));
+                s.push_str("</g>");
+                join(&mut pair, lg);
+            }
+            Mark::SubLabel(_) => {}
+        }
+        i += 1;
+    }
+    if open_pair {
+        s.push_str("</g>");
+        join(&mut all, pair.take());
+    }
+    if let (Some(seed), Some((from, to))) = (hand, spine) {
+        let dr = rough::line(from.x, from.y, to.x, to.y, stroke2_options(seed, line));
+        let (m, b) = rough_part(&dr, Some("ishikawa-spine"));
+        s.push_str(&m);
+        join(&mut all, b);
+    }
+    s.push_str("</g>");
+    (s, all.map_or(Rect::new(0.0, 0.0, 0.0, 0.0), R32::rect))
+}
+
 /// Parse, lay out and draw a `ishikawa` diagram.
 pub fn render(
     body: &str,
@@ -901,7 +1390,26 @@ pub fn render(
         },
     };
     let hand = (cfg.look == crate::config::Look::HandDrawn).then(|| cfg.hand_drawn_seed());
-    Ok(draw(&lay, padding, pal, hand))
+    let mut scene = draw(&lay, padding, pal, hand);
+    if let Some(r) = &root {
+        // The plain SVG is mermaid's own DOM, from the exact layout; the
+        // rasterisers keep the scene.
+        let exact = layout_with(r, pal.font_size, true);
+        let (svg, b) = markup(&exact, hand, pal);
+        let pad = cfg.section_f64("ishikawa", "diagramPadding", 20.0);
+        let svg_view_box = Some(Rect::new(
+            b.x - pad,
+            b.y - pad,
+            b.w + pad * 2.0,
+            b.h + pad * 2.0,
+        ));
+        scene.elements = vec![Element::Markup {
+            svg,
+            children: std::mem::take(&mut scene.elements),
+            svg_view_box,
+        }];
+    }
+    Ok(scene)
 }
 
 #[cfg(test)]
@@ -922,7 +1430,9 @@ mod tests {
         fn walk(els: &[Element], out: &mut Vec<String>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, out)
+                    }
                     Element::Shape {
                         geom: Geometry::Path(cmds),
                         ..
@@ -1077,9 +1587,9 @@ mod tests {
         fn walk(els: &[Element], out: &mut Vec<(Option<String>, Option<u16>)>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        walk(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Markup { children, .. }
+                    | Element::Rotated { children, .. } => walk(children, out),
                     Element::Text { text, class } => out.push((class.clone(), text.weight)),
                     _ => {}
                 }
@@ -1121,7 +1631,9 @@ mod tests {
         fn rects(els: &[Element], out: &mut Vec<f64>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => rects(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        rects(children, out)
+                    }
                     Element::Shape {
                         geom: Geometry::Rect { rect, .. },
                         class: Some(c),

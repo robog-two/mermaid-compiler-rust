@@ -1053,6 +1053,9 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
     let vb_num = |v: f64| match opt.sizing {
         SvgSizing::Fixed { .. } if kind != DiagramKind::Timeline => num(v),
         SvgSizing::Fixed { .. } => crate::diagram::xychart::js_num(v),
+        // ishikawa's box is single-precision numbers plus its padding, summed
+        // in doubles: written as they are.
+        _ if kind == DiagramKind::Ishikawa => crate::diagram::xychart::js_num(v),
         // A board's box is a float's plus the padding: a double, in full.
         _ if matches!(kind, DiagramKind::Kanban | DiagramKind::Mindmap)
             && opt.raster_scale.is_none() =>
