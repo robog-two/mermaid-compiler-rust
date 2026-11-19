@@ -126,6 +126,7 @@ fn walk(els: &[Element], root: &str, used: &mut Used) {
             | Element::Faded { children, .. }
             | Element::Clipped { children, .. }
             | Element::Shadowed { children, .. }
+            | Element::Markup { children, .. }
             | Element::Brightened { children, .. } => walk(children, root, used),
             Element::Text { text, .. } | Element::OutlinedText { text, .. } => {
                 if text.lines.iter().any(|l| !l.is_empty()) {

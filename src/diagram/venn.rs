@@ -2234,6 +2234,7 @@ fn translate_element(e: Element, dy: f64) -> Element {
         | Element::Clipped { .. }
         | Element::Faded { .. }
         | Element::Brightened { .. }
+        | Element::Markup { .. }
         | Element::Shadowed { .. }
         | Element::Image { .. }
         | Element::Icon { .. }

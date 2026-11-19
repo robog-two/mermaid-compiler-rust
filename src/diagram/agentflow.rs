@@ -2169,6 +2169,7 @@ linkStyle 0 stroke:#00f");
             | Element::Clipped { children, .. }
             | Element::Faded { children, .. }
             | Element::Brightened { children, .. }
+            | Element::Markup { children, .. }
             | Element::Shadowed { children, .. } => children.iter().for_each(|c| bbox(c, out)),
             Element::Shape { geom, .. } => match geom {
                 Geometry::Rect { rect, .. } => {

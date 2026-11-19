@@ -663,6 +663,7 @@ impl Ctx {
             Element::Shadowed { shadow, children } => children
                 .iter()
                 .for_each(|c| self.element(&c.with_shape_shadows(shadow))),
+            Element::Markup { children, .. } => children.iter().for_each(|c| self.element(c)),
             Element::Shape { geom, paint, .. } => self.shape(geom, paint),
             Element::Image { rect, href, inline } => {
                 let src = inline.as_deref().unwrap_or(href);

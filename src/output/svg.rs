@@ -242,6 +242,7 @@ impl Filters<'_> {
                 | Element::Rotated { children, .. }
                 | Element::Translated { children, .. }
                 | Element::Faded { children, .. }
+                | Element::Markup { children, .. }
                 | Element::Clipped { children, .. } => {
                     self.collect(children);
                 }
@@ -903,6 +904,13 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
                 num(rect.y)
             );
         }
+        Element::Markup { svg, children } => {
+            if fx.raster_scale.is_some() {
+                children.iter().for_each(|c| write_element(out, c, fx));
+            } else {
+                out.push_str(svg);
+            }
+        }
         Element::Brightened {
             factor,
             class,
@@ -1144,6 +1152,12 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
         }
     }
     out.push_str(&fx.defs());
+    if let (None, [Element::Markup { svg, .. }]) = (opt.raster_scale, scene.elements.as_slice()) {
+        // A drawing whose markup is mermaid's own: no wrapper of ours.
+        out.push_str(svg);
+        out.push_str("</svg>");
+        return out;
+    }
     out.push_str("<g>");
     for el in &scene.elements {
         write_element(&mut out, el, &fx);

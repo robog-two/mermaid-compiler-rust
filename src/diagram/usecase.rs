@@ -5301,6 +5301,7 @@ mod tests {
                     | Element::Clipped { children, .. }
                     | Element::Faded { children, .. }
                     | Element::Brightened { children, .. }
+                    | Element::Markup { children, .. }
                     | Element::Shadowed { children, .. } => dashes(children, out),
                     Element::Text { .. }
                     | Element::OutlinedText { .. }

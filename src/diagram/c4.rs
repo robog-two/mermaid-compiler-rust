@@ -2760,6 +2760,7 @@ UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")"#);
                     | Element::Clipped { children, .. }
                     | Element::Faded { children, .. }
                     | Element::Brightened { children, .. }
+                    | Element::Markup { children, .. }
                     | Element::Shadowed { children, .. } => walk(children, out),
                     Element::Shape { .. } | Element::Image { .. } | Element::Icon { .. } => {}
                 }

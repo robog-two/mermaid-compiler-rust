@@ -522,6 +522,15 @@ pub enum Element {
         class: String,
         children: Vec<Element>,
     },
+    /// `children` as the rasterisers and PDF draw them, with `svg` the exact
+    /// markup mermaid's own renderer writes for the whole drawing (classes and
+    /// CSS instead of presentation attributes). Plain SVG output writes `svg`
+    /// after the `<style>` in place of the usual `<g>` wrapper; output that
+    /// is rasterised from SVG text writes `children` as for any group.
+    Markup {
+        svg: String,
+        children: Vec<Element>,
+    },
 }
 
 impl Element {
@@ -585,6 +594,7 @@ impl Element {
                 | Element::Translated { children, .. }
                 | Element::Faded { children, .. }
                 | Element::Shadowed { children, .. }
+                | Element::Markup { children, .. }
                 | Element::Brightened { children, .. } => {
                     children.iter_mut().for_each(|c| walk(c, sh))
                 }
@@ -616,6 +626,11 @@ impl Element {
             ..t.clone()
         };
         match self {
+            Element::Markup { children, .. } => Element::Group {
+                id: None,
+                class: None,
+                children: all(children),
+            },
             Element::Group {
                 id,
                 class,
@@ -713,6 +728,12 @@ impl Element {
             } => Element::Group {
                 id,
                 class,
+                children: all(children),
+            },
+            // The markup is for the drawing where it was made.
+            Element::Markup { children, .. } => Element::Group {
+                id: None,
+                class: None,
                 children: all(children),
             },
             Element::Clipped { rect, children } => Element::Clipped {
@@ -978,6 +999,7 @@ impl Scene {
                     Element::Group { children, .. }
                     | Element::Rotated { children, .. }
                     | Element::Brightened { children, .. }
+                    | Element::Markup { children, .. }
                     | Element::Shadowed { children, .. }
                     | Element::Translated { children, .. } => 1 + count(children),
                     _ => 1,

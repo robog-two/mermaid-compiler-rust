@@ -4,6 +4,7 @@
 use crate::config::PieConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, PathCmd, Point, Rect};
+use crate::output::svg::{esc, esc_text, js_num};
 use crate::scene::{Anchor, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::{decode_entities, svg_bbox_width};
 use crate::theme::Palette;
@@ -121,6 +122,217 @@ fn slice_path(c: Point, r0: f64, r1: f64, a0: f64, a1: f64) -> Vec<PathCmd> {
     }
     cmds.push(PathCmd::Close);
     cmds
+}
+
+/// d3-path's number formatting (`digits` 3): `Math.round(x * 1000) / 1000`.
+fn d3n(v: f64) -> String {
+    js_num((v * 1000.0 + 0.5).floor() / 1000.0)
+}
+
+/// d3-shape's `arc()` for a slice with the given inner and outer radii and
+/// angles (clockwise from 12 o'clock): the path string d3-path writes.
+fn d3_arc(r0: f64, r1: f64, start: f64, end: f64) -> String {
+    use std::f64::consts::{PI, TAU};
+    const EPS: f64 = 1e-6;
+    // d3-path state: the current point, as `arc` compares against it.
+    struct Path {
+        d: String,
+        at: Option<(f64, f64)>,
+        start: (f64, f64),
+    }
+    impl Path {
+        fn move_to(&mut self, x: f64, y: f64) {
+            self.d += &format!("M{},{}", d3n(x), d3n(y));
+            self.at = Some((x, y));
+            self.start = (x, y);
+        }
+        fn line_to(&mut self, x: f64, y: f64) {
+            self.d += &format!("L{},{}", d3n(x), d3n(y));
+            self.at = Some((x, y));
+        }
+        fn arc(&mut self, r: f64, a0: f64, a1: f64, ccw: bool) {
+            let (dx, dy) = (r * a0.cos(), r * a0.sin());
+            let cw = if ccw { 0 } else { 1 };
+            let mut da = if ccw { a0 - a1 } else { a1 - a0 };
+            match self.at {
+                None => self.move_to(dx, dy),
+                Some((x1, y1)) if (x1 - dx).abs() > EPS || (y1 - dy).abs() > EPS => {
+                    self.line_to(dx, dy)
+                }
+                _ => {}
+            }
+            if r == 0.0 {
+                return;
+            }
+            if da < 0.0 {
+                da = da % TAU + TAU;
+            }
+            if da > TAU - EPS {
+                self.d += &format!(
+                    "A{0},{0},0,1,{cw},{1},{2}A{0},{0},0,1,{cw},{3},{4}",
+                    d3n(r),
+                    d3n(-dx),
+                    d3n(-dy),
+                    d3n(dx),
+                    d3n(dy)
+                );
+                self.at = Some((dx, dy));
+            } else if da > EPS {
+                let (x, y) = (r * a1.cos(), r * a1.sin());
+                self.d += &format!(
+                    "A{0},{0},0,{1},{cw},{2},{3}",
+                    d3n(r),
+                    u8::from(da >= PI),
+                    d3n(x),
+                    d3n(y)
+                );
+                self.at = Some((x, y));
+            }
+        }
+    }
+    let (r0, r1) = if r1 < r0 { (r1, r0) } else { (r0, r1) };
+    let (a0, a1) = (start - PI / 2.0, end - PI / 2.0);
+    let da = (a1 - a0).abs();
+    let cw = a1 > a0;
+    let mut p = Path {
+        d: String::new(),
+        at: None,
+        start: (0.0, 0.0),
+    };
+    if r1 <= EPS {
+        p.move_to(0.0, 0.0);
+    } else if da > TAU - EPS {
+        p.move_to(r1 * a0.cos(), r1 * a0.sin());
+        p.arc(r1, a0, a1, !cw);
+        if r0 > EPS {
+            p.move_to(r0 * a1.cos(), r0 * a1.sin());
+            p.arc(r0, a1, a0, cw);
+        }
+    } else {
+        p.move_to(r1 * a0.cos(), r1 * a0.sin());
+        p.arc(r1, a0, a1, !cw);
+        if r0 <= EPS || da <= EPS {
+            p.line_to(r0 * a1.cos(), r0 * a1.sin());
+        } else {
+            p.arc(r0, a1, a0, cw);
+        }
+    }
+    if p.at.is_some() {
+        p.d.push('Z');
+        p.at = Some(p.start);
+    }
+    p.d
+}
+
+/// A colour as the CSSOM serialises it in an element's `style`.
+fn css_rgb(c: &str) -> String {
+    match crate::color::parse(c) {
+        Some(k) if k.a < 1.0 => format!("rgba({}, {}, {}, {})", k.r, k.g, k.b, js_num(k.a)),
+        Some(k) => format!("rgb({}, {}, {})", k.r, k.g, k.b),
+        None => c.to_string(),
+    }
+}
+
+/// The DOM `pieRenderer.ts` builds, as mermaid's SVG serialises it: the
+/// classes and the stylesheet carry the look, as in the browser. Layout
+/// values come from [`render`], which also draws the same chart for the
+/// rasterisers.
+struct Markup<'a> {
+    chart: &'a PieChart,
+    cfg: &'a PieConfig,
+    pal: &'a Palette,
+    radius: f64,
+    inner: f64,
+    outer_stroke: f64,
+    /// The pie group's own transform, as mermaid writes it.
+    pie_transform: Option<String>,
+    legend_transforms: Vec<String>,
+    entries: &'a [String],
+    sum: f64,
+}
+
+impl Markup<'_> {
+    fn write(&self) -> String {
+        use std::fmt::Write;
+        let tau = std::f64::consts::TAU;
+        let (chart, pal) = (self.chart, self.pal);
+        let color_of = |i: usize| pal.pie_colors[i % pal.pie_colors.len()].css().to_string();
+        let mut o = String::from("<g/><g transform=\"translate(225,225)\"><g");
+        if let Some(t) = &self.pie_transform {
+            let _ = write!(o, " transform=\"{t}\"");
+        }
+        let _ = write!(
+            o,
+            "><circle cx=\"0\" cy=\"0\" r=\"{}\" class=\"pieOuterCircle\"/>",
+            js_num(self.radius + self.outer_stroke / 2.0)
+        );
+        // d3.pie over the slices of at least 1%: angles from `k = τ / sum`.
+        let shown: Vec<(usize, f64)> = chart
+            .sections
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, v))| self.sum > 0.0 && v / self.sum * 100.0 >= 1.0)
+            .map(|(i, (_, v))| (i, *v))
+            .collect();
+        let shown_sum: f64 = shown.iter().map(|s| s.1).sum();
+        let k = if shown_sum > 0.0 {
+            tau / shown_sum
+        } else {
+            0.0
+        };
+        let mut a0 = 0.0;
+        let mut arcs = Vec::new();
+        for &(i, v) in &shown {
+            let a1 = a0 + if v > 0.0 { v * k } else { 0.0 };
+            arcs.push((i, v, a0, a1));
+            a0 = a1;
+        }
+        for &(i, _, s, e) in &arcs {
+            let mut class = String::from("pieCircle");
+            if self.cfg.highlight_slice == "hover" {
+                class += " highlightedOnHover";
+            } else if self.cfg.highlight_slice == chart.sections[i].0 {
+                class += " highlighted";
+            }
+            let _ = write!(
+                o,
+                "<path d=\"{}\" fill=\"{}\" class=\"{class}\"/>",
+                d3_arc(self.inner, self.radius, s, e),
+                esc(&color_of(i))
+            );
+        }
+        let rc =
+            (self.radius * self.cfg.text_position + self.radius * self.cfg.text_position) / 2.0;
+        for &(_, v, s, e) in &arcs {
+            let a = (s + e) / 2.0 - std::f64::consts::FRAC_PI_2;
+            let _ = write!(
+                o,
+                "<text transform=\"translate({},{})\" class=\"slice\" style=\"text-anchor: middle;\">{}%</text>",
+                js_num(a.cos() * rc),
+                js_num(a.sin() * rc),
+                percent_label(v / self.sum * 100.0)
+            );
+        }
+        o.push_str("</g>");
+        let title = chart.title.clone().unwrap_or_default();
+        let _ = write!(o, "<text x=\"0\" y=\"-200\" class=\"pieTitleText\"");
+        if title.is_empty() {
+            o.push_str("/>");
+        } else {
+            let _ = write!(o, ">{}</text>", esc_text(&title));
+        }
+        for (i, text) in self.entries.iter().enumerate() {
+            let c = css_rgb(&color_of(i));
+            let _ = write!(
+                o,
+                "<g class=\"legend\" transform=\"{}\"><rect width=\"18\" height=\"18\" style=\"fill: {c}; stroke: {c};\"/><text x=\"22\" y=\"14\">{}</text></g>",
+                self.legend_transforms[i],
+                esc_text(text)
+            );
+        }
+        o.push_str("</g>");
+        o
+    }
 }
 
 /// Render a pie chart (`pieRenderer.ts`).
@@ -303,7 +515,7 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
         ));
     }
 
-    for (i, text) in entries.into_iter().enumerate() {
+    for (i, text) in entries.iter().cloned().enumerate() {
         let (dx, dy) = legend_at(i as f64);
         let (lx, ly) = (origin.x + dx, origin.y + dy);
         els.push(Element::rect(
@@ -330,10 +542,41 @@ pub fn render(chart: &PieChart, cfg: &PieConfig, pal: &Palette) -> Scene {
     // The viewBox grows to the title when it is wider than the chart.
     let left = (HEIGHT / 2.0 - title_w / 2.0).min(0.0);
     let right = width.max(HEIGHT / 2.0 + title_w / 2.0);
+    let top = cfg.legend_position == "top";
+    let sep = if top { ", " } else { "," };
+    let markup = Markup {
+        chart,
+        cfg,
+        pal,
+        radius,
+        inner,
+        outer_stroke: pal.pie_outer_stroke_width,
+        pie_transform: match cfg.legend_position.as_str() {
+            "top" => Some(format!("translate(0, {})", js_num(total_legend + legend_h))),
+            // `longestTextWidth + LEGEND_RECT_SIZE + LEGEND_SPACING`, left to right.
+            "left" => Some(format!(
+                "translate({}, 0)",
+                js_num(longest + LEGEND_RECT + LEGEND_SPACING)
+            )),
+            _ => None,
+        },
+        legend_transforms: (0..entries.len())
+            .map(|i| {
+                let (dx, dy) = legend_at(i as f64);
+                format!("translate({}{sep}{})", js_num(dx), js_num(dy))
+            })
+            .collect(),
+        entries: &entries,
+        sum,
+    }
+    .write();
     Scene {
         kind: DiagramKind::Pie,
         view_box: Rect::new(left, 0.0, right - left, height),
-        elements: vec![Element::group("pie", els)],
+        elements: vec![Element::Markup {
+            svg: markup,
+            children: vec![Element::group("pie", els)],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -378,7 +621,9 @@ mod tests {
             for e in els {
                 match e {
                     Element::Text { text, .. } => out.push(text.clone()),
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, out)
+                    }
                     _ => {}
                 }
             }
