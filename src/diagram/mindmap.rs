@@ -458,10 +458,19 @@ fn layout_with(
 }
 
 /// `getBBox()` of a hand-drawn node's group as Chromium joins it: the rough
-/// paths' group box moved by the shape's translation, then joined with the
-/// label's box, every edge a single-precision sum.
+/// paths' group box (see [`crate::diagram::svgbbox::cubic_group_box`]) moved
+/// by the shape's translation, then joined with the label's box
+/// (`gfx::RectF::Union`: single-precision edges, the width their plain
+/// difference).
 fn hand_group_box(hn: &HandNode, label: (f64, f64)) -> Option<Rect> {
-    let mut b = crate::diagram::kanban::Box32::default();
+    let mut acc: Option<(f32, f32, f32, f32)> = None;
+    let mut add = |x: f32, y: f32, w: f32, h: f32| {
+        let (r, b) = (x + w, y + h);
+        acc = Some(match acc {
+            None => (x, y, r, b),
+            Some((a, c, d, e)) => (a.min(x), c.min(y), d.max(r), e.max(b)),
+        });
+    };
     for pc in hn.pieces.iter().filter(|pc| pc.measured) {
         let paths: Vec<Vec<PathCmd>> = pc
             .drawable
@@ -471,15 +480,26 @@ fn hand_group_box(hn: &HandNode, label: (f64, f64)) -> Option<Rect> {
             .map(|s| hand::set_cmds(&s.ops, Point::default()))
             .collect();
         let [x, y, w, h] = crate::diagram::svgbbox::cubic_group_box(&paths)?;
-        b.add(Rect::new(
-            f64::from(x as f32 + pc.at.x as f32),
-            f64::from(y as f32 + pc.at.y as f32),
-            w,
-            h,
-        ));
+        add(
+            x as f32 + pc.at.x as f32,
+            y as f32 + pc.at.y as f32,
+            w as f32,
+            h as f32,
+        );
     }
-    b.add(Rect::new(-label.0 / 2.0, -label.1 / 2.0, label.0, label.1));
-    Some(b.rect())
+    add(
+        (-label.0 / 2.0) as f32,
+        (-label.1 / 2.0) as f32,
+        label.0 as f32,
+        label.1 as f32,
+    );
+    let (x, y, r, b) = acc?;
+    Some(Rect::new(
+        f64::from(x),
+        f64::from(y),
+        f64::from(r - x),
+        f64::from(b - y),
+    ))
 }
 
 /// The rough.js drawing of a node of `shape` around a `label`-sized label
@@ -757,6 +777,7 @@ fn section_colors(pal: &Palette, section: Option<usize>) -> (Color, Color, Color
 /// Draw a laid-out mindmap.
 ///
 /// `underline` draws the line under default-shape nodes (see `underlines`).
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     mm: &Mindmap,
     placed: &[Placed],

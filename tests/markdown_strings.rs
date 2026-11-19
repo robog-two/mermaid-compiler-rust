@@ -71,15 +71,14 @@ Unicode works too: 🤓`\"]
       id2[\"`The dog in **the** hog... a *very long text* that wraps to a new line`\"]
       id3[Regular labels still works]
 ");
-    assert!(s.contains("<tspan font-weight=\"bold\">Root</tspan> with"));
-    // (A label with a line that broke at a space is drawn one `<text>` per line.)
-    let line =
-        |l: &str| s.contains(&format!(">{l}</tspan>")) || s.contains(&format!(">{l}</text>"));
-    assert!(line("a second line"));
+    // The labels are mermaid's HTML ones: one paragraph, lines joined by `<br/>`.
+    assert!(
+        s.contains("<p><strong>Root</strong> with<br/>a second line<br/>Unicode works too: 🤓</p>")
+    );
     // Rect nodes wrap at `flowchart.wrappingWidth` (120) as mermaid 12.3 does.
-    assert!(line("Unicode works"));
-    assert!(line("Regular labels"));
-    assert!(s.contains("<tspan font-style=\"italic\">very</tspan>"));
+    assert!(s.contains("max-width: 120px; text-align: center; width: 120px;"));
+    assert!(s.contains("<p>Regular labels still works</p>"));
+    assert!(s.contains("<em>very long text</em>"));
     assert!(!s.contains("**") && !s.contains('`'));
 }
 

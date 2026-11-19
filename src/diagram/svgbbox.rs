@@ -669,8 +669,10 @@ fn cubic_eval(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
 
 /// `getBBox()` of a group of paths made of moves, lines and cubics (as
 /// rough.js writes them, every number in JavaScript's shortest form): each
-/// path's `SkPath::computeTightBounds()` in single precision, joined the way
-/// `gfx::RectF::Union` joins them. Empty paths are passed over. Returns
+/// path's `SkPath::computeTightBounds()` in single precision (its width as
+/// [`span`] has it), joined the way `gfx::RectF::Union` joins them: the far
+/// edges are float sums, the width their plain difference (checked against
+/// mermaid's hand-drawn mindmap nodes). Empty paths are passed over. Returns
 /// `[x, y, width, height]`.
 pub fn cubic_group_box(paths: &[Vec<crate::geom::PathCmd>]) -> Option<[f64; 4]> {
     use crate::geom::PathCmd;

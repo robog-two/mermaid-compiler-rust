@@ -23,7 +23,9 @@ fn shapes(s: &Scene) -> Vec<(Geometry, Paint, bool)> {
     fn walk(els: &[Element], shadowed: bool, out: &mut Vec<(Geometry, Paint, bool)>) {
         for e in els {
             match e {
-                Element::Group { children, .. } => walk(children, shadowed, out),
+                Element::Group { children, .. } | Element::Markup { children, .. } => {
+                    walk(children, shadowed, out)
+                }
                 Element::Shadowed { children, .. } => walk(children, true, out),
                 Element::Shape { geom, paint, .. } => {
                     out.push((geom.clone(), paint.clone(), shadowed))
@@ -117,8 +119,8 @@ fn neo_nodes_are_outlined_and_cast_the_themes_shadow() {
         &render::render(&with("  look: neo", SMALL), &MermaidConfig::default()).unwrap(),
         &EncodeOptions::default(),
     );
-    assert!(svg.contains("style=\"filter:drop-shadow(1px 2px 2px rgba(185, 185, 185, 1))\""));
-    assert!(svg.contains("stroke=\"hsl(60, 100%, 73.5294117647%)\" stroke-width=\"1\""));
+    assert!(svg.contains("filter:drop-shadow(1px 2px 2px rgba(185, 185, 185, 1))"));
+    assert!(svg.contains("stroke:hsl(60, 100%, 73.5294117647%);stroke-width:1px;"));
     // Default nodes: square bottom corners under neo, quadratic ones otherwise.
     let flat = |src: &str| {
         shapes(&scene(src))

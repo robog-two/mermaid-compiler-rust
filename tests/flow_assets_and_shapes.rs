@@ -138,7 +138,7 @@ flowchart LR
     let s = svg(src);
     assert_eq!(
         view_box(&s),
-        "4.098236083984375 3.864215850830078 722.7797241210938 111.054443359375"
+        "4.098236083984375 3.864215850830078 722.7796630859375 111.054443359375"
     );
     // The rough-node misses `.node .collapsed-separator`: 1px, not 0.75.
     assert!(!s.contains("stroke-width=\"0.75\""));
