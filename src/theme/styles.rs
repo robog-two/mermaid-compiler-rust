@@ -23,6 +23,8 @@ pub struct StyleSpec {
     pub theme_variables: Vec<(String, String)>,
     /// The config's top-level `fontFamily` (`--mermaid-font-family`).
     pub font_family: Option<String>,
+    /// The config's `themeCSS` (`--cssFile`), the first of the user styles.
+    pub theme_css: Option<String>,
 }
 
 /// The `options` object of `getStyles`.
@@ -334,7 +336,10 @@ impl Opts {
                         && matches!(i, 0 | 3)
                         && matches!(
                             self.theme,
-                            ThemeName::Default | ThemeName::Null | ThemeName::Forest | ThemeName::Dark
+                            ThemeName::Default
+                                | ThemeName::Null
+                                | ThemeName::Forest
+                                | ThemeName::Dark
                         ))
                     || (classic_default && name == "cScaleLabel" && matches!(i, 0 | 3));
                 let text = if derived {
@@ -353,17 +358,37 @@ impl Opts {
                 add.push((k.to_string(), respell(c.css())));
             }
         };
-        opt("erEdgeLabelBackground", &p.er_edge_label_background, &mut add);
+        opt(
+            "erEdgeLabelBackground",
+            &p.er_edge_label_background,
+            &mut add,
+        );
         opt(
             "requirementEdgeLabelBackground",
             &p.requirement_edge_label_background,
             &mut add,
         );
-        opt("commitLabelColor", &Some(p.commit_label_color.clone()), &mut add);
-        opt("commitLabelBackground", &Some(p.commit_label_bkg.clone()), &mut add);
+        opt(
+            "commitLabelColor",
+            &Some(p.commit_label_color.clone()),
+            &mut add,
+        );
+        opt(
+            "commitLabelBackground",
+            &Some(p.commit_label_bkg.clone()),
+            &mut add,
+        );
         opt("tagLabelColor", &Some(p.tag_label_color.clone()), &mut add);
-        opt("tagLabelBackground", &Some(p.tag_label_bkg.clone()), &mut add);
-        opt("tagLabelBorder", &Some(p.tag_label_border.clone()), &mut add);
+        opt(
+            "tagLabelBackground",
+            &Some(p.tag_label_bkg.clone()),
+            &mut add,
+        );
+        opt(
+            "tagLabelBorder",
+            &Some(p.tag_label_border.clone()),
+            &mut add,
+        );
         opt("altBackground", &p.alt_background, &mut add);
         opt("stateBorder", &p.state_border, &mut add);
         opt("compositeBackground", &p.composite_background, &mut add);
@@ -402,12 +427,7 @@ impl Opts {
 
     /// `${options[k]}`.
     pub fn s(&self, k: &str) -> String {
-        self.get(k).unwrap_or_else(|| {
-            if std::env::var_os("MMDC_STYLE_DEBUG").is_some() {
-                eprintln!("undefined option {k} ({:?})", self.theme);
-            }
-            "undefined"
-        }).to_string()
+        self.get(k).unwrap_or("undefined").to_string()
     }
 
     /// `a || b` over variable names (the first truthy one).
@@ -574,7 +594,13 @@ pub fn style_text(spec: &StyleSpec, id: &str) -> Option<Sheet> {
         .font_family
         .clone()
         .unwrap_or_else(|| "\"trebuchet ms\", verdana, arial, sans-serif".into());
-    let user = format!(":root {{ --mermaid-font-family: {root_ff}}}");
+    let user = format!(
+        "{}\n:root {{ --mermaid-font-family: {root_ff}}}",
+        spec.theme_css
+            .as_ref()
+            .map(|c| format!("\n{c}"))
+            .unwrap_or_default()
+    );
     Some(Sheet::Text(stylis::compile(
         &id_sel,
         &base(&o, &id_sel, &diagram_css, &user),

@@ -362,6 +362,7 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
             look: cfg.look,
             theme_variables: cfg.theme_variables.clone(),
             font_family: cfg.font_family.clone(),
+            theme_css: cfg.theme_css.clone(),
         }),
     })
 }

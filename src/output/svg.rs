@@ -52,7 +52,9 @@ fn max_width(w: f64) -> String {
 /// XML-escape text content and attribute values.
 /// Character data as `XMLSerializer` writes it: only `&`, `<` and `>` escaped.
 pub fn esc_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 pub fn esc(s: &str) -> String {
@@ -1186,7 +1188,6 @@ mod tests {
             gradients: Vec::new(),
             brightness: Vec::new(),
             raster_scale: None,
-            style: None,
             local: Default::default(),
         };
         fx.collect(&els);

@@ -2381,6 +2381,7 @@ mod tests {
             sizing: crate::output::svg::SvgSizing::MaxWidth,
             theme_css: None,
             raster_scale: None,
+            style: None,
         };
         let svg = crate::output::svg::to_svg(&r.scene, &opt);
         assert!(

@@ -1,0 +1,8 @@
+
+
+    ${sel} rect,
+    ${sel} path,
+    ${sel} polygon {
+      stroke: ${@1};
+      ${@2}
+    }

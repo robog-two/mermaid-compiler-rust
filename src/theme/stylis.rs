@@ -11,12 +11,18 @@
 /// One flattened output item, in stylis's emission order.
 enum Item {
     /// `selectors{decls}` (selectors already resolved against the parents).
-    Rule { selectors: Vec<String>, decls: Vec<String> },
+    Rule {
+        selectors: Vec<String>,
+        decls: Vec<String>,
+    },
     /// `@media ...{` / `@keyframes ...{` and its closing brace.
     Open(String),
     Close,
     /// A rule inside `@keyframes`: its selectors are not namespaced.
-    Frame { selector: String, decls: Vec<String> },
+    Frame {
+        selector: String,
+        decls: Vec<String>,
+    },
 }
 
 /// `compile("#id", css)`: `serialize(compile("#id{css}"))` with mermaid's

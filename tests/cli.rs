@@ -230,7 +230,7 @@ fn svg_options_id_background_size_css_theme() {
     assert!(svg.starts_with("<svg id=\"custom-id\""));
     assert!(svg.contains("background-color: transparent;"));
     assert!(svg.contains("max-width: 1200px;") && svg.contains("max-height: 1200px;"));
-    assert!(svg.contains(".node rect { fill: hotpink; }"));
+    assert!(svg.contains("#custom-id .node rect{fill:hotpink;}"));
     assert!(svg.contains("#1f2020"), "dark theme node fill");
 }
 

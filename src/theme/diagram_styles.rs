@@ -85,6 +85,11 @@ pub(super) fn diagram(kind: DiagramKind, o: &Opts) -> Option<String> {
         DiagramKind::Requirement => requirement(o),
         DiagramKind::Class => class(o),
         DiagramKind::Flowchart => flowchart(o),
+        DiagramKind::Agentflow => agentflow(o),
+        DiagramKind::Railroad
+        | DiagramKind::RailroadEbnf
+        | DiagramKind::RailroadAbnf
+        | DiagramKind::RailroadPeg => railroad(o),
         DiagramKind::State => state(o),
         DiagramKind::Block => block(o),
         DiagramKind::Gantt => t(o, include_str!("css/gantt.css")),
@@ -338,7 +343,10 @@ div.mermaidTooltip {
     )
     .replace("@FACE", &face);
     for i in 0..8 {
-        s += &format!(".task-type-{i}, .section-type-{i}  {{ {}; }}\n", fill_type(i));
+        s += &format!(
+            ".task-type-{i}, .section-type-{i}  {{ {}; }}\n",
+            fill_type(i)
+        );
     }
     for i in 0..6 {
         s += &format!(".actor-{i} {{ {}; }}\n", actor(i));
@@ -491,9 +499,11 @@ fn er(o: &Opts) -> String {
 
 fn requirement(o: &Opts) -> String {
     let neo = o.look == crate::config::Look::Neo;
-    let colors = gen_color(o, include_str!("css/requirement_color.css"), &|e, _, _, fill| {
-        (e == "@1").then(|| fill.to_string())
-    });
+    let colors = gen_color(
+        o,
+        include_str!("css/requirement_color.css"),
+        &|e, _, _, fill| (e == "@1").then(|| fill.to_string()),
+    );
     let width = if neo {
         o.s("strokeWidth")
     } else {
@@ -523,43 +533,193 @@ fn class(o: &Opts) -> String {
 
 fn flowchart(o: &Opts) -> String {
     let bkg = o.color_arrays().map(|c| c.1).unwrap_or_default();
-    let colors = gen_color(
-        o,
-        include_str!("css/flowchart_color.css"),
-        &|e, i, _, _| {
-            let look = look_name(o);
-            let slot = format!("[data-look=\"{look}\"][data-color-id=\"color-{i}\"]");
-            let lane = |suffix: &str| {
+    let colors = gen_color(o, include_str!("css/flowchart_color.css"), &|e, i, _, _| {
+        let look = look_name(o);
+        let slot = format!("[data-look=\"{look}\"][data-color-id=\"color-{i}\"]");
+        let lane = |suffix: &str| {
+            format!(
+                "{slot}.swimlane.cluster .swimlane-title{suffix}, {slot}.swimlane.cluster .swimlane-body{suffix}"
+            )
+        };
+        let collapsed = |suffix: &str| format!("{slot}.node {suffix}, {slot}.rough-node {suffix}");
+        match e {
+            "@1" => Some(lane(" path:nth-of-type(2)")),
+            "@2" => Some(if bkg.is_empty() {
+                String::new()
+            } else {
                 format!(
-                    "{slot}.swimlane.cluster .swimlane-title{suffix}, {slot}.swimlane.cluster .swimlane-body{suffix}"
+                    "{} {{ stroke: {}; }}",
+                    lane(" path:first-of-type"),
+                    bkg[i % bkg.len()]
                 )
-            };
-            let collapsed =
-                |suffix: &str| format!("{slot}.node {suffix}, {slot}.rough-node {suffix}");
-            match e {
-                "@1" => Some(lane(" path:nth-of-type(2)")),
-                "@2" => Some(if bkg.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "{} {{ stroke: {}; }}",
-                        lane(" path:first-of-type"),
-                        bkg[i % bkg.len()]
-                    )
-                }),
-                "@3" => Some(collapsed(".collapsed-group")),
-                "@4" => Some(collapsed(".collapsed-group path")),
-                "@5" => Some(collapsed(".collapsed-indicator")),
-                "@6" => Some(collapsed(".collapsed-separator")),
-                _ => None,
-            }
-        },
-    );
+            }),
+            "@3" => Some(collapsed(".collapsed-group")),
+            "@4" => Some(collapsed(".collapsed-group path")),
+            "@5" => Some(collapsed(".collapsed-indicator")),
+            "@6" => Some(collapsed(".collapsed-separator")),
+            _ => None,
+        }
+    });
     tpl(o, include_str!("css/flowchart.css"), &|e| match e {
         "@1" => Some(colors.clone()),
         "@2" => Some(fade(&o.s("edgeLabelBackground"), 0.5)),
         "@3" => Some(icon_styles()),
         _ => None,
+    })
+}
+
+/// Agentflow's `styles.ts`: per-kind and per-container palette slots, then
+/// the flowchart-like base.
+fn agentflow(o: &Opts) -> String {
+    const KINDS: [&str; 7] = [
+        "tool",
+        "task",
+        "decision",
+        "input",
+        "refdoc",
+        "connector",
+        "action",
+    ];
+    let mut sections = String::new();
+    if let Some((border, bkg)) = o.color_arrays() {
+        let n = border.len();
+        let look = look_name(o);
+        let b = |slot: usize| border[slot % n].clone();
+        let fill = |slot: usize| {
+            if bkg.is_empty() {
+                String::new()
+            } else {
+                format!("fill: {};", bkg[slot % bkg.len()])
+            }
+        };
+        for (slot, kind) in KINDS.iter().enumerate() {
+            let sel = tpl(o, include_str!("css/agentflow_g1.css"), &|e| match e {
+                "look" => Some(look.to_string()),
+                "@1" => Some(format!("af-kind-{kind}")),
+                _ => None,
+            });
+            sections += &tpl(o, include_str!("css/agentflow_g2.css"), &|e| match e {
+                "sel" => Some(sel.clone()),
+                "@1" => Some(b(slot)),
+                "@2" => Some(fill(slot)),
+                _ => None,
+            });
+        }
+        let count = n.saturating_sub(KINDS.len()).max(1);
+        for i in 0..count {
+            let slot = (KINDS.len() + i % count) % n;
+            let sub = |t: &str| {
+                tpl(o, t, &|e| match e {
+                    "look" => Some(look.to_string()),
+                    "slot" => Some(slot.to_string()),
+                    _ => None,
+                })
+            };
+            let expanded = sub(include_str!("css/agentflow_g3.css"));
+            let collapsed = sub(include_str!("css/agentflow_g4.css"));
+            let rule = |suffix: &str| {
+                tpl(o, include_str!("css/agentflow_g5.css"), &|e| match e {
+                    "expanded" => Some(expanded.clone()),
+                    "collapsed" => Some(collapsed.clone()),
+                    "suffix" => Some(suffix.to_string()),
+                    _ => None,
+                })
+            };
+            sections += &tpl(o, include_str!("css/agentflow_g6.css"), &|e| match e {
+                "@1" => Some(rule("rect")),
+                "@2" => Some(rule("path")),
+                "@3" => Some(b(slot)),
+                "@4" => Some(fill(slot)),
+                _ => None,
+            });
+        }
+    }
+    tpl(o, include_str!("css/agentflow.css"), &|e| match e {
+        "@1" => Some(sections.clone()),
+        "@2" => Some(fade(&o.s("edgeLabelBackground"), 0.5)),
+        "@3" => Some(icon_styles()),
+        _ => None,
+    })
+}
+
+/// Railroad's `styles.ts`: the theme variables, sanitised, over its own
+/// defaults (`buildRailroadStyleOptions`; the `railroad` config block is not
+/// read here).
+fn railroad(o: &Opts) -> String {
+    // `COLOR_VALUE_PATTERN`.
+    fn color_ok(v: &str) -> bool {
+        let lower = v.to_ascii_lowercase();
+        let hex =
+            |h: &str| h.chars().all(|c| c.is_ascii_hexdigit()) && matches!(h.len(), 3 | 4 | 6 | 8);
+        if let Some(h) = lower.strip_prefix('#') {
+            return hex(h);
+        }
+        for f in [
+            "rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch",
+        ] {
+            if let Some(inner) = lower
+                .strip_prefix(f)
+                .and_then(|r| r.strip_prefix('('))
+                .and_then(|r| r.strip_suffix(')'))
+            {
+                return !inner.is_empty()
+                    && inner
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c.is_whitespace() || "%+,./-".contains(c));
+            }
+        }
+        !lower.is_empty() && lower.chars().all(|c| c.is_ascii_lowercase())
+    }
+    // `sanitizeColorValue(first defined of keys, fallback)`.
+    let color = |keys: &[&str], fallback: &str| -> String {
+        keys.iter()
+            .find_map(|k| o.get(k))
+            .map(str::trim)
+            .filter(|v| color_ok(v))
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    let font_family = o
+        .get("fontFamily")
+        .map(str::trim)
+        .filter(|v| {
+            !v.is_empty()
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || " _\"',.-".contains(c))
+        })
+        .unwrap_or("monospace")
+        .to_string();
+    let font_size = o
+        .get("fontSize")
+        .and_then(|v| {
+            let t = v.trim();
+            let end = t
+                .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .unwrap_or(t.len());
+            t[..end].parse::<f64>().ok()
+        })
+        .filter(|n| *n > 0.0)
+        .unwrap_or(14.0);
+    tpl(o, include_str!("css/railroad.css"), &|e| {
+        Some(match e {
+            "fontFamily" => font_family.clone(),
+            "fontSize" => font_size.to_string(),
+            "strokeWidth" => "2".to_string(),
+            "terminalFill" => color(&["secondBkg", "secondaryColor"], "#FFFFC0"),
+            "terminalStroke" => color(&["secondaryBorderColor", "lineColor"], "#000000"),
+            "terminalTextColor" => color(&["secondaryTextColor", "textColor"], "#000000"),
+            "nonTerminalFill" => color(&["mainBkg", "background"], "#FFFFFF"),
+            "nonTerminalStroke" => color(&["primaryBorderColor", "lineColor"], "#000000"),
+            "nonTerminalTextColor" => color(&["primaryTextColor", "textColor"], "#000000"),
+            "lineColor" | "markerFill" => color(&["lineColor"], "#000000"),
+            "commentFill" => color(&["labelBackground", "tertiaryColor"], "#E8E8E8"),
+            "commentStroke" => color(&["tertiaryBorderColor", "lineColor"], "#888888"),
+            "commentTextColor" => color(&["tertiaryTextColor", "textColor"], "#666666"),
+            "specialFill" => color(&["tertiaryColor", "secondaryColor"], "#F0E0FF"),
+            "specialStroke" => color(&["tertiaryBorderColor", "secondaryBorderColor"], "#8800CC"),
+            "ruleNameColor" => color(&["titleColor", "textColor"], "#000066"),
+            _ => return None,
+        })
     })
 }
 
@@ -759,7 +919,10 @@ fn gitgraph(o: &Opts) -> String {
     );
     let color_theme = matches!(name, "redux-color" | "redux-dark-color");
     let neo_theme = matches!(name, "neo" | "neo-dark");
-    let dark_theme = matches!(name, "dark" | "redux-dark" | "redux-dark-color" | "neo-dark");
+    let dark_theme = matches!(
+        name,
+        "dark" | "redux-dark" | "redux-dark-color" | "neo-dark"
+    );
     let neo_gen = redux_geometry || neo_theme;
     let weight = |on: bool| {
         if on {
@@ -845,7 +1008,11 @@ fn gitgraph(o: &Opts) -> String {
                 sections += &tpl(o, include_str!("css/gg_color.css"), &|e| match e {
                     "i" => Some(i.to_string()),
                     "@1" => Some(weight(redux_geometry)),
-                    "@6" => Some(if dark_theme { o.s("mainBkg") } else { b.clone() }),
+                    "@6" => Some(if dark_theme {
+                        o.s("mainBkg")
+                    } else {
+                        b.clone()
+                    }),
                     "@2" | "@3" | "@4" | "@5" | "@7" | "@8" => Some(b.clone()),
                     _ => None,
                 });
@@ -875,7 +1042,11 @@ fn gitgraph(o: &Opts) -> String {
         } else {
             o.s("commitLabelBackground")
         }),
-        "@6" => Some(if neo_gen { String::new() } else { "0.5".to_string() }),
+        "@6" => Some(if neo_gen {
+            String::new()
+        } else {
+            "0.5".to_string()
+        }),
         "@7" => Some(if neo_gen {
             o.s("mainBkg")
         } else {
@@ -892,7 +1063,11 @@ fn gitgraph(o: &Opts) -> String {
             String::new()
         }),
         "@10" | "@11" | "@12" | "@13" | "@15" | "@16" => Some(main_bkg_or_primary.clone()),
-        "@14" => Some(if neo_gen { o.s("strokeWidth") } else { "3".to_string() }),
+        "@14" => Some(if neo_gen {
+            o.s("strokeWidth")
+        } else {
+            "3".to_string()
+        }),
         "@17" => Some(if redux_geometry {
             o.s("strokeWidth")
         } else {

@@ -1,0 +1,85 @@
+
+  .railroad-diagram {
+    font-family: ${fontFamily};
+    font-size: ${fontSize}px;
+  }
+
+  .railroad-terminal rect {
+    fill: ${terminalFill};
+    stroke: ${terminalStroke};
+    stroke-width: ${strokeWidth}px;
+  }
+
+  .railroad-terminal text {
+    fill: ${terminalTextColor};
+    font-family: ${fontFamily};
+    font-size: ${fontSize}px;
+    text-anchor: middle;
+    dominant-baseline: middle;
+  }
+
+  .railroad-nonterminal rect {
+    fill: ${nonTerminalFill};
+    stroke: ${nonTerminalStroke};
+    stroke-width: ${strokeWidth}px;
+  }
+
+  .railroad-nonterminal text {
+    fill: ${nonTerminalTextColor};
+    font-family: ${fontFamily};
+    font-size: ${fontSize}px;
+    text-anchor: middle;
+    dominant-baseline: middle;
+  }
+
+  .railroad-line {
+    stroke: ${lineColor};
+    stroke-width: ${strokeWidth}px;
+    fill: none;
+  }
+
+  .railroad-start circle,
+  .railroad-end circle {
+    fill: ${markerFill};
+  }
+
+  .railroad-comment ellipse {
+    fill: ${commentFill};
+    stroke: ${commentStroke};
+    stroke-width: ${strokeWidth}px;
+  }
+
+  .railroad-comment text {
+    fill: ${commentTextColor};
+    font-style: italic;
+    font-family: ${fontFamily};
+    font-size: ${fontSize}px;
+    text-anchor: middle;
+    dominant-baseline: middle;
+  }
+
+  .railroad-special rect {
+    fill: ${specialFill};
+    stroke: ${specialStroke};
+    stroke-width: ${strokeWidth}px;
+    stroke-dasharray: 5,3;
+  }
+
+  .railroad-special text {
+    fill: ${nonTerminalTextColor};
+    font-family: ${fontFamily};
+    font-size: ${fontSize}px;
+    text-anchor: middle;
+    dominant-baseline: middle;
+  }
+
+  .railroad-rule-name {
+    font-weight: bold;
+    fill: ${ruleNameColor};
+    font-family: ${fontFamily};
+    font-size: ${fontSize}px;
+  }
+
+  .railroad-group {
+    /* Grouping container, no specific styles */
+  }

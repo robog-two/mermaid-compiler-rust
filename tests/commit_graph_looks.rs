@@ -75,10 +75,15 @@ fn neo_branch_labels_cast_the_themes_shadow() {
     // `style="filter:drop-shadow(1px 2px 2px rgba(185, 185, 185, 1))"`, and
     // under redux `filter:url(#{id}-drop-shadow)` (feDropShadow 4 4, 6%).
     let svg = |look: &str, theme: &str| {
-        encode_svg(
+        let full = encode_svg(
             &render::render(&source(look, theme), &MermaidConfig::default()).unwrap(),
             &EncodeOptions::default(),
-        )
+        );
+        // Not mermaid's own stylesheet, which spells the neo rules in any look.
+        match (full.find("<style>"), full.find("</style>")) {
+            (Some(a), Some(b)) if a < b => format!("{}{}", &full[..a], &full[b..]),
+            _ => full,
+        }
     };
     let s = svg("neo", "default");
     assert!(s.contains("style=\"filter:drop-shadow(1px 2px 2px rgba(185, 185, 185, 1))\""));

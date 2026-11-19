@@ -22,7 +22,12 @@ fn svg(src: &str) -> String {
 }
 
 fn check(src: &str, clusters: &[&str]) {
-    let out = svg(src);
+    let full = svg(src);
+    // mermaid's own stylesheet spells words such as `infinite`.
+    let out = match (full.find("<style>"), full.find("</style>")) {
+        (Some(a), Some(b)) if a < b => format!("{}{}", &full[..a], &full[b..]),
+        _ => full,
+    };
     assert!(
         !out.contains("NaN") && !out.contains("inf"),
         "non-finite coordinate"

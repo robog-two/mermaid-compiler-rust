@@ -1,12 +1,12 @@
 //! mermaid themes and `themeVariables`.
 
 mod classic;
+mod diagram_styles;
 pub(crate) mod khroma;
 mod neo;
-mod diagram_styles;
-mod tpl;
 pub mod styles;
 pub mod stylis;
+mod tpl;
 mod vars;
 
 use crate::color::{self, Rgba};

@@ -38,11 +38,7 @@ pub fn tpl(o: &Opts, t: &str, extra: &dyn Fn(&str) -> Option<String>) -> String 
 fn operand(o: &Opts, e: &str) -> Option<String> {
     let e = e.trim();
     if let Some(name) = e.strip_prefix("options.") {
-        let v = o.get(name).map(str::to_string);
-        if v.is_none() && std::env::var_os("MMDC_STYLE_DEBUG").is_some() {
-            eprintln!("undefined option {name} ({:?})", o.theme);
-        }
-        return v;
+        return o.get(name).map(str::to_string);
     }
     let quoted = |q: char| e.strip_prefix(q).and_then(|x| x.strip_suffix(q));
     if let Some(l) = quoted('\'').or_else(|| quoted('"')) {
