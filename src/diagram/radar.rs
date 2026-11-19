@@ -497,15 +497,188 @@ pub fn draw(radar: &Radar, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         els.push(Element::classed_text(txt, "radarTitle"));
     }
 
+    let svg = markup(
+        radar,
+        center,
+        width,
+        height,
+        mt,
+        mr,
+        axis_scale,
+        label_factor,
+        tension,
+    );
     Scene {
         kind: DiagramKind::Radar,
         view_box: Rect::new(0.0, 0.0, total_w, total_h),
-        elements: vec![Element::group("main", els)],
+        elements: vec![Element::Markup {
+            svg,
+            svg_view_box: None,
+            children: vec![Element::group("main", els)],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
         css: String::new(),
     }
+}
+
+/// The DOM `radar/renderer.ts` builds (attributes in its order, numbers as
+/// JavaScript prints them), written out for plain SVG output.
+#[allow(clippy::too_many_arguments)]
+fn markup(
+    radar: &Radar,
+    center: Point,
+    width: f64,
+    height: f64,
+    mt: f64,
+    mr: f64,
+    axis_scale: f64,
+    label_factor: f64,
+    tension: f64,
+) -> String {
+    use crate::output::svg::{esc_text, js_num as n};
+    use std::f64::consts::PI;
+    use std::fmt::Write;
+    let pi2 = PI / 2.0;
+    let mut m = String::from("<g/>");
+    let _ = write!(
+        m,
+        "<g transform=\"translate({}, {})\">",
+        n(center.x),
+        n(center.y)
+    );
+    let radius = width.min(height) / 2.0;
+    let numaxes = radar.axes.len() as f64;
+    let ticks = radar.ticks;
+    for i in 0..ticks {
+        let r = radius * (i + 1) as f64 / ticks as f64;
+        match radar.graticule {
+            Graticule::Circle => {
+                let _ = write!(m, "<circle r=\"{}\" class=\"radarGraticule\"/>", n(r));
+            }
+            Graticule::Polygon => {
+                let pts: Vec<String> = (0..radar.axes.len())
+                    .map(|j| {
+                        let a = 2.0 * j as f64 * PI / numaxes - pi2;
+                        format!("{},{}", n(r * a.cos()), n(r * a.sin()))
+                    })
+                    .collect();
+                let _ = write!(
+                    m,
+                    "<polygon points=\"{}\" class=\"radarGraticule\"/>",
+                    pts.join(" ")
+                );
+            }
+        }
+    }
+    for (i, a) in radar.axes.iter().enumerate() {
+        let ang = 2.0 * i as f64 * PI / numaxes - pi2;
+        let (c, s) = (ang.cos(), ang.sin());
+        let anchor = if c > 0.01 {
+            "start"
+        } else if c < -0.01 {
+            "end"
+        } else {
+            "middle"
+        };
+        let base = if s > 0.01 {
+            "hanging"
+        } else if s < -0.01 {
+            "auto"
+        } else {
+            "central"
+        };
+        let _ = write!(
+            m,
+            "<line x1=\"0\" y1=\"0\" x2=\"{}\" y2=\"{}\" class=\"radarAxisLine\"/><text x=\"{}\" y=\"{}\" text-anchor=\"{anchor}\" dominant-baseline=\"{base}\" class=\"radarAxisLabel\">{}</text>",
+            n(radius * axis_scale * c),
+            n(radius * axis_scale * s),
+            n(radius * label_factor * c + 4.0 * c),
+            n(radius * label_factor * s + 4.0 * s),
+            esc_text(&a.label)
+        );
+    }
+    let max = radar.max_value();
+    let min = radar.min;
+    for (ci, c) in radar.curves.iter().enumerate() {
+        let values = radar.values_of(c);
+        if values.len() != radar.axes.len() {
+            continue;
+        }
+        let pts: Vec<Point> = values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let ang = 2.0 * PI * i as f64 / numaxes - pi2;
+                let r = radius * (v.max(min).min(max) - min) / (max - min);
+                Point::new(r * ang.cos(), r * ang.sin())
+            })
+            .collect();
+        match radar.graticule {
+            Graticule::Circle => {
+                let k = pts.len();
+                let mut d = format!("M{},{}", n(pts[0].x), n(pts[0].y));
+                for i in 0..k {
+                    let p0 = pts[(i + k - 1) % k];
+                    let p1 = pts[i];
+                    let p2 = pts[(i + 1) % k];
+                    let p3 = pts[(i + 2) % k];
+                    let _ = write!(
+                        d,
+                        " C{},{} {},{} {},{}",
+                        n(p1.x + (p2.x - p0.x) * tension),
+                        n(p1.y + (p2.y - p0.y) * tension),
+                        n(p2.x - (p3.x - p1.x) * tension),
+                        n(p2.y - (p3.y - p1.y) * tension),
+                        n(p2.x),
+                        n(p2.y)
+                    );
+                }
+                d.push_str(" Z");
+                let _ = write!(m, "<path d=\"{d}\" class=\"radarCurve-{ci}\"/>");
+            }
+            Graticule::Polygon => {
+                let pts: Vec<String> = pts
+                    .iter()
+                    .map(|p| format!("{},{}", n(p.x), n(p.y)))
+                    .collect();
+                let _ = write!(
+                    m,
+                    "<polygon points=\"{}\" class=\"radarCurve-{ci}\"/>",
+                    pts.join(" ")
+                );
+            }
+        }
+    }
+    if radar.show_legend {
+        let lx = (width / 2.0 + mr) * 3.0 / 4.0;
+        let ly = -(height / 2.0 + mt) * 3.0 / 4.0;
+        for (i, c) in radar.curves.iter().enumerate() {
+            let _ = write!(
+                m,
+                "<g transform=\"translate({}, {})\"><rect width=\"12\" height=\"12\" class=\"radarLegendBox-{i}\"/><text x=\"16\" y=\"0\" class=\"radarLegendText\">{}</text></g>",
+                n(lx),
+                n(ly + i as f64 * 20.0),
+                esc_text(&c.label)
+            );
+        }
+    }
+    let ty = n(-height / 2.0 - mt);
+    match radar.title.as_deref().filter(|t| !t.is_empty()) {
+        Some(t) => {
+            let _ = write!(
+                m,
+                "<text class=\"radarTitle\" x=\"0\" y=\"{ty}\">{}</text>",
+                esc_text(t)
+            );
+        }
+        None => {
+            let _ = write!(m, "<text class=\"radarTitle\" x=\"0\" y=\"{ty}\"/>");
+        }
+    }
+    m.push_str("</g>");
+    m
 }
 
 #[cfg(test)]
