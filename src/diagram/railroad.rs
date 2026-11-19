@@ -2650,7 +2650,9 @@ mod tests {
         fn rects(els: &[Element], out: &mut Vec<Rect>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => rects(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        rects(children, out)
+                    }
                     Element::Shape {
                         geom: Geometry::Rect { rect, .. },
                         ..
