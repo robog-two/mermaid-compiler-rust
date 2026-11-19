@@ -31,6 +31,16 @@ impl ThemeVars {
         self.map.get(k).map(String::as_str)
     }
 
+    /// Runs more statements of the same language over the variables.
+    pub(crate) fn extend(&mut self, program: &str) {
+        self.run(program);
+    }
+
+    /// Every defined variable.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.map.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    }
+
     fn truthy(&self, k: &str) -> bool {
         self.get(k)
             .is_some_and(|v| !v.is_empty() && v != "false" && v != "0")

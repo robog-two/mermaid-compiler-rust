@@ -28,6 +28,10 @@ pub struct SvgOptions<'a> {
     /// (PNG): text Chromium paints off its layout position is written where
     /// it paints at that scale, rather than in mermaid's markup.
     pub raster_scale: Option<f64>,
+    /// mermaid's own stylesheet for the diagram. Only the SVG file carries it:
+    /// the PNG and PDF paths leave it out and keep the hand-written rules their
+    /// output was built against.
+    pub style: Option<&'a crate::theme::styles::StyleSpec>,
 }
 
 /// Compact, deterministic number formatting.
@@ -46,6 +50,11 @@ fn max_width(w: f64) -> String {
 }
 
 /// XML-escape text content and attribute values.
+/// Character data as `XMLSerializer` writes it: only `&`, `<` and `>` escaped.
+pub fn esc_text(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
 pub fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1037,15 +1046,25 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
         local: Default::default(),
     };
     fx.collect(&scene.elements);
-    let _ = write!(
-        out,
-        "<style>#{id}{{font-family:{};font-size:16px;}}#{id} text{{font-family:{};}}{}{}{}</style>",
-        esc(&scene.font_family),
-        esc(&scene.font_family),
-        esc(&scene.css),
-        fx.css(),
-        opt.theme_css.map(esc).unwrap_or_default()
-    );
+    let faithful = opt
+        .style
+        .and_then(|spec| crate::theme::styles::style_text(spec, &id));
+    match faithful {
+        Some(css) => {
+            let _ = write!(out, "<style>{}</style>", esc_text(&css));
+        }
+        None => {
+            let _ = write!(
+                out,
+                "<style>#{id}{{font-family:{};font-size:16px;}}#{id} text{{font-family:{};}}{}{}{}</style>",
+                esc(&scene.font_family),
+                esc(&scene.font_family),
+                esc(&scene.css),
+                fx.css(),
+                opt.theme_css.map(esc).unwrap_or_default()
+            );
+        }
+    }
     out.push_str(&fx.defs());
     out.push_str("<g>");
     for el in &scene.elements {
@@ -1166,6 +1185,7 @@ mod tests {
             gradients: Vec::new(),
             brightness: Vec::new(),
             raster_scale: None,
+            style: None,
             local: Default::default(),
         };
         fx.collect(&els);
@@ -1227,6 +1247,7 @@ mod tests {
             },
             theme_css: None,
             raster_scale,
+            style: None,
         }
     }
 

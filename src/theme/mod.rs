@@ -3,6 +3,10 @@
 mod classic;
 pub(crate) mod khroma;
 mod neo;
+mod diagram_styles;
+mod tpl;
+pub mod styles;
+pub mod stylis;
 mod vars;
 
 use crate::color::{self, Rgba};

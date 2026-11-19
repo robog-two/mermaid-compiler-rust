@@ -1326,6 +1326,7 @@ mod tests {
                 },
                 theme_css: None,
                 raster_scale: None,
+                style: None,
             },
         );
         assert!(svg.contains("<text class=\"sankey-label-bg\""), "{svg}");

@@ -153,6 +153,7 @@ pub fn encode_svg(r: &Rendered, opt: &EncodeOptions) -> String {
             sizing,
             theme_css: r.theme_css.as_deref(),
             raster_scale: None,
+            style: r.style.as_ref(),
         },
     );
     #[cfg(feature = "font-embed")]
@@ -251,6 +252,7 @@ pub fn encode_png(
             },
             theme_css: r.theme_css.as_deref(),
             raster_scale: Some(l.scale),
+            style: None,
         },
     );
     // Puppeteer paints the page white unless the background is transparent.

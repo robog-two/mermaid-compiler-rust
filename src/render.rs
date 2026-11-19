@@ -16,6 +16,8 @@ pub struct Rendered {
     /// The `height` attribute of a fixed-size (`useMaxWidth: false`) svg where
     /// it is not the viewBox's height (a sequence diagram's).
     pub svg_height: Option<f64>,
+    /// What mermaid's own stylesheet of this diagram depends on.
+    pub style: Option<crate::theme::styles::StyleSpec>,
 }
 
 impl Rendered {
@@ -346,6 +348,7 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
         scene.elements =
             crate::icons::place_pack_icons(std::mem::take(&mut scene.elements), &cfg.icon_packs);
     }
+    let scene_kind = scene.kind;
     scene.acc_title = pre.acc_title;
     scene.acc_descr = pre.acc_descr;
     Ok(Rendered {
@@ -353,5 +356,12 @@ fn render_source(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<
         theme_css: cfg.theme_css.clone(),
         use_max_width,
         svg_height,
+        style: Some(crate::theme::styles::StyleSpec {
+            kind: scene_kind,
+            theme: cfg.theme,
+            look: cfg.look,
+            theme_variables: cfg.theme_variables.clone(),
+            font_family: cfg.font_family.clone(),
+        }),
     })
 }
