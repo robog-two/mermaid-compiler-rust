@@ -19,9 +19,11 @@ use crate::color::{self, Rgba};
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{PathCmd, Point, Rect, arc_cubics};
+use crate::output::svg::{esc_text, js_num as n};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::svg_bbox_width;
 use crate::theme::{Palette, ThemeName};
+use std::fmt::Write;
 
 // ───────────────────────────── AST ─────────────────────────────
 
@@ -1726,6 +1728,330 @@ fn draw_prim(p: &Prim, st: &Style, m: &Metrics) -> Element {
     }
 }
 
+// ───────────────────────────── mermaid's markup ─────────────────────────────
+
+/// `PathBuilder` of `railroadRenderer.ts`: `M x y L x y A ...` joined by spaces.
+#[derive(Default)]
+struct PathB(String);
+
+impl PathB {
+    fn move_to(mut self, x: f64, y: f64) -> Self {
+        let _ = write!(self.0, "M {} {} ", n(x), n(y));
+        self
+    }
+    fn line_to(mut self, x: f64, y: f64) -> Self {
+        let _ = write!(self.0, "L {} {} ", n(x), n(y));
+        self
+    }
+    fn arc_to(mut self, r: f64, sweep: bool, x: f64, y: f64) -> Self {
+        let _ = write!(
+            self.0,
+            "A {} {} 0 0 {} {} {} ",
+            n(r),
+            n(r),
+            u8::from(sweep),
+            n(x),
+            n(y)
+        );
+        self
+    }
+    fn build(self) -> String {
+        self.0.trim().to_string()
+    }
+}
+
+/// A rendered expression: its group's class and content (the parent adds any
+/// `transform`), and the box it occupies.
+struct Rendered {
+    class: &'static str,
+    inner: String,
+    width: f64,
+    height: f64,
+    up: f64,
+}
+
+impl Rendered {
+    fn down(&self) -> f64 {
+        self.height - self.up
+    }
+    /// The group as it ends up in the document, placed at `at` if given.
+    fn group(&self, at: Option<(f64, f64)>) -> String {
+        match at {
+            Some((x, y)) => format!(
+                "<g class=\"{}\" transform=\"translate({}, {})\">{}</g>",
+                self.class,
+                n(x),
+                n(y),
+                self.inner
+            ),
+            None => format!("<g class=\"{}\">{}</g>", self.class, self.inner),
+        }
+    }
+}
+
+fn rail(d: PathB) -> String {
+    format!("<path class=\"railroad-line\" d=\"{}\"/>", d.build())
+}
+
+/// `measureText`: `getBBox()` sizes are single precision.
+fn measure32(m: &Metrics, text: &str) -> (f64, f64) {
+    let (w, h) = m.measure(text);
+    (f64::from(w as f32), f64::from(h as f32))
+}
+
+fn render_box(m: &Metrics, class: &'static str, rx: bool, text: &str) -> Rendered {
+    let (tw, th) = measure32(m, text);
+    let width = tw + m.padding * 2.0;
+    let height = th + m.padding * 2.0;
+    let round = if rx { " rx=\"10\" ry=\"10\"" } else { "" };
+    let label = if text.is_empty() {
+        format!("<text x=\"{}\" y=\"{}\"/>", n(width / 2.0), n(height / 2.0))
+    } else {
+        format!(
+            "<text x=\"{}\" y=\"{}\">{}</text>",
+            n(width / 2.0),
+            n(height / 2.0),
+            esc_text(text)
+        )
+    };
+    Rendered {
+        class,
+        inner: format!(
+            "<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\"{round}/>{label}",
+            n(width),
+            n(height)
+        ),
+        width,
+        height,
+        up: height / 2.0,
+    }
+}
+
+fn render_expr(m: &Metrics, e: &Expr) -> Rendered {
+    let r = m.arc_radius;
+    match e {
+        Expr::Terminal(v) => render_box(m, "railroad-terminal", true, v),
+        Expr::NonTerminal(v) => render_box(m, "railroad-nonterminal", false, v),
+        Expr::Special(t) => render_box(m, "railroad-special", false, &format!("? {t} ?")),
+        Expr::Sequence(es) => {
+            let kids: Vec<Rendered> = es.iter().map(|e| render_expr(m, e)).collect();
+            let mut max_up: f64 = 0.0;
+            let mut max_down: f64 = 0.0;
+            let mut total = 0.0;
+            for k in &kids {
+                total += k.width;
+                max_up = max_up.max(k.up);
+                max_down = max_down.max(k.down());
+            }
+            total += (kids.len() as f64 - 1.0) * m.horizontal_separation;
+            let mut inner = String::new();
+            let mut x = 0.0;
+            for (i, k) in kids.iter().enumerate() {
+                inner.push_str(&k.group(Some((x, max_up - k.up))));
+                if i + 1 < kids.len() {
+                    let x1 = x + k.width;
+                    let x2 = x1 + m.horizontal_separation;
+                    inner.push_str(&rail(
+                        PathB::default().move_to(x1, max_up).line_to(x2, max_up),
+                    ));
+                }
+                x += k.width + m.horizontal_separation;
+            }
+            Rendered {
+                class: "railroad-sequence",
+                inner,
+                width: total,
+                height: max_up + max_down,
+                up: max_up,
+            }
+        }
+        Expr::Choice(alts) => {
+            let kids: Vec<Rendered> = alts.iter().map(|e| render_expr(m, e)).collect();
+            let mut max_w: f64 = 0.0;
+            let mut total_h = 0.0;
+            for k in &kids {
+                max_w = max_w.max(k.width);
+                total_h += k.height;
+            }
+            total_h += (kids.len() as f64 - 1.0) * m.vertical_separation;
+            let total_w = max_w + r * 4.0;
+            let cy = total_h / 2.0;
+            let mut inner = String::new();
+            let mut y = 0.0;
+            for k in &kids {
+                let ecy = y + k.up;
+                let ex = r * 2.0 + (max_w - k.width) / 2.0;
+                inner.push_str(&k.group(Some((ex, y))));
+                let below = ecy > cy;
+                let left = if ecy == cy {
+                    PathB::default().move_to(0.0, cy).line_to(ex, ecy)
+                } else {
+                    PathB::default()
+                        .move_to(0.0, cy)
+                        .arc_to(r, below, r, cy + if below { r } else { -r })
+                        .line_to(r, ecy - if below { r } else { -r })
+                        .arc_to(r, !below, r * 2.0, ecy)
+                        .line_to(ex, ecy)
+                };
+                inner.push_str(&rail(left));
+                let start = ex + k.width;
+                let lane = total_w - r * 2.0;
+                let right = if ecy == cy {
+                    PathB::default().move_to(start, ecy).line_to(total_w, cy)
+                } else {
+                    PathB::default()
+                        .move_to(start, ecy)
+                        .line_to(lane, ecy)
+                        .arc_to(r, !below, total_w - r, ecy + if below { -r } else { r })
+                        .line_to(total_w - r, cy + if below { r } else { -r })
+                        .arc_to(r, below, total_w, cy)
+                };
+                inner.push_str(&rail(right));
+                y += k.height + m.vertical_separation;
+            }
+            Rendered {
+                class: "railroad-choice",
+                inner,
+                width: total_w,
+                height: total_h,
+                up: cy,
+            }
+        }
+        Expr::Optional(e) => {
+            let k = render_expr(m, e);
+            let arc_h = r * 2.0;
+            let total_w = k.width + r * 4.0;
+            let total_h = k.height + arc_h;
+            let (ex, ey) = (r * 2.0, arc_h);
+            let cy = ey + k.up;
+            let mut inner = k.group(Some((ex, ey)));
+            inner.push_str(&rail(
+                PathB::default().move_to(0.0, cy).line_to(r * 2.0, cy),
+            ));
+            inner.push_str(&rail(
+                PathB::default()
+                    .move_to(ex + k.width, cy)
+                    .line_to(total_w, cy),
+            ));
+            inner.push_str(&rail(bypass_path(r, total_w, cy)));
+            Rendered {
+                class: "railroad-optional",
+                inner,
+                width: total_w,
+                height: total_h,
+                up: cy,
+            }
+        }
+        Expr::Repetition { element, min, .. } => {
+            let k = render_expr(m, element);
+            let arc_h = r * 2.0;
+            let total_w = k.width + r * 4.0;
+            let has_bypass = *min == 0;
+            let total_h = k.height + arc_h + if has_bypass { arc_h } else { 0.0 };
+            let ex = r * 2.0;
+            let ey = if has_bypass { arc_h } else { 0.0 };
+            let cy = ey + k.up;
+            let mut inner = k.group(Some((ex, ey)));
+            inner.push_str(&rail(
+                PathB::default().move_to(0.0, cy).line_to(r * 2.0, cy),
+            ));
+            inner.push_str(&rail(
+                PathB::default()
+                    .move_to(ex + k.width, cy)
+                    .line_to(total_w, cy),
+            ));
+            let loop_y = ey + k.height + r;
+            inner.push_str(&rail(
+                PathB::default()
+                    .move_to(ex + k.width, cy)
+                    .arc_to(r, true, ex + k.width + r, cy + r)
+                    .line_to(ex + k.width + r, loop_y)
+                    .arc_to(r, true, ex + k.width, loop_y + r)
+                    .line_to(r * 2.0, loop_y + r)
+                    .arc_to(r, true, r, loop_y)
+                    .line_to(r, cy + r)
+                    .arc_to(r, true, r * 2.0, cy),
+            ));
+            if has_bypass {
+                inner.push_str(&rail(bypass_path(r, total_w, cy)));
+            }
+            Rendered {
+                class: "railroad-repetition",
+                inner,
+                width: total_w,
+                height: total_h,
+                up: cy,
+            }
+        }
+    }
+}
+
+/// The path over an optional or zero-or-more element.
+fn bypass_path(r: f64, total_w: f64, cy: f64) -> PathB {
+    PathB::default()
+        .move_to(0.0, cy)
+        .arc_to(r, false, r, cy - r)
+        .line_to(r, r)
+        .arc_to(r, true, r * 2.0, 0.0)
+        .line_to(total_w - r * 2.0, 0.0)
+        .arc_to(r, true, total_w - r, r)
+        .line_to(total_w - r, cy - r)
+        .arc_to(r, false, total_w, cy)
+}
+
+/// The drawing as mermaid's `railroadRenderer` leaves it.
+fn markup(g: &Grammar, m: &Metrics) -> String {
+    let mut out = String::from("<g/>");
+    let mut y = m.padding;
+    for rule in &g.rules {
+        let label = format!("{} =", rule.name);
+        let name_w = f64::from(m.measure(&label).0 as f32) + 20.0;
+        let def_x = name_w + 20.0;
+        let def = render_expr(m, &rule.definition);
+        let baseline = def.up.max(20.0);
+        let def_y = baseline - def.up;
+        let mr = m.marker_radius;
+        let _ = write!(
+            out,
+            "<g class=\"railroad-rule\" transform=\"translate(0, {})\"><g transform=\"translate({}, {})\">{}</g>",
+            n(y),
+            n(def_x),
+            n(def_y),
+            def.group(None)
+        );
+        let _ = write!(
+            out,
+            "<g class=\"railroad-rule-name-group\"><text class=\"railroad-rule-name\" x=\"0\" y=\"{}\">{}</text></g>",
+            n(baseline),
+            esc_text(&label)
+        );
+        let _ = write!(
+            out,
+            "<g class=\"railroad-start\"><circle cx=\"{}\" cy=\"{}\" r=\"{}\"/></g><g class=\"railroad-end\"><circle cx=\"{}\" cy=\"{}\" r=\"{}\"/></g>",
+            n(name_w),
+            n(baseline),
+            n(mr),
+            n(def_x + def.width + 10.0),
+            n(baseline),
+            n(mr)
+        );
+        out.push_str(&rail(
+            PathB::default()
+                .move_to(name_w + mr, baseline)
+                .line_to(def_x, baseline),
+        ));
+        out.push_str(&rail(
+            PathB::default()
+                .move_to(def_x + def.width, baseline)
+                .line_to(def_x + def.width + 10.0 - mr, baseline),
+        ));
+        out.push_str("</g>");
+        let h = (def_y + def.height + m.padding * 2.0).max(40.0);
+        y += h + m.vertical_separation;
+    }
+    out
+}
+
 /// Draw a parsed grammar.
 pub fn draw(g: &Grammar, m: &Metrics, st: &Style) -> Scene {
     let (rules, width, height) = layout_diagram(&g.rules, m);
@@ -1770,7 +2096,11 @@ pub fn draw(g: &Grammar, m: &Metrics, st: &Style) -> Scene {
     Scene {
         kind: g.syntax.kind(),
         view_box: Rect::new(0.0, 0.0, width, height),
-        elements: els,
+        elements: vec![Element::Markup {
+            svg: markup(g, m),
+            children: els,
+            svg_view_box: None,
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: st.font_family.clone(),
