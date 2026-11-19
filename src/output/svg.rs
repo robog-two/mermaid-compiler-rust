@@ -1056,6 +1056,10 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
         // ishikawa's box is single-precision numbers plus its padding, summed
         // in doubles: written as they are.
         _ if kind == DiagramKind::Ishikawa => crate::diagram::xychart::js_num(v),
+        // A board's box is a float's plus the padding: a double, in full.
+        _ if kind == DiagramKind::Kanban && opt.raster_scale.is_none() => {
+            crate::diagram::xychart::js_num(v)
+        }
         _ => crate::diagram::xychart::js_num(f64::from(v as f32)),
     };
     let viewbox = format!(

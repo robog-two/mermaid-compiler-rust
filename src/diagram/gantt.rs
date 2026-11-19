@@ -21,6 +21,8 @@ use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, 
 use crate::text::{line_width, normalize_label};
 use crate::theme::Palette;
 
+mod dom;
+
 pub const SECOND_MS: i64 = 1_000;
 pub const MINUTE_MS: i64 = 60 * SECOND_MS;
 pub const HOUR_MS: i64 = 60 * MINUTE_MS;
@@ -772,6 +774,8 @@ pub fn ticks(t0: i64, t1: i64, step: i64, unit: TickUnit, week_start: u32) -> Ve
 pub struct Task {
     pub id: String,
     pub label: String,
+    /// The task text as the lexer takes it: trailing blanks kept.
+    pub raw_label: String,
     pub section: usize,
     pub start: i64,
     /// Logical end (what `after` refers to).
@@ -805,6 +809,10 @@ pub struct Gantt {
     /// reads them as 1970-01-01.
     pub now: Option<i64>,
     pub sections: Vec<String>,
+    /// `sections` as the lexer takes them (`section\s[^\n]+`.substr(8)): blanks kept.
+    pub section_text: Vec<String>,
+    /// The title as the lexer takes it (`title\s[^\n]+`.substr(6)).
+    pub title_text: Option<String>,
     pub tasks: Vec<Task>,
 }
 
@@ -824,8 +832,11 @@ enum EndSpec {
 
 #[derive(Debug, Clone)]
 struct RawTask {
+    /// The id was not given: `resolve` names it `task<n>`.
+    auto_id: bool,
     line: usize,
     label: String,
+    raw_label: String,
     id: String,
     section: usize,
     start: StartSpec,
@@ -838,6 +849,19 @@ fn weekday_index(name: &str) -> Option<u32> {
         .iter()
         .position(|w| w.eq_ignore_ascii_case(name))
         .map(|i| i as u32)
+}
+
+/// What follows `kw` and the one blank after it in the raw line `l`, as the
+/// lexer's `kw\s[^\n]+` token (cut by `substr`) leaves it; `fallback` when
+/// the keyword is not followed by a blank.
+fn lexed_tail(l: &str, kw: &str, fallback: &str) -> String {
+    let t = l.trim_start();
+    t.strip_prefix(kw)
+        .and_then(|rest| {
+            let c = rest.chars().next().filter(|c| c.is_whitespace())?;
+            Some(rest[c.len_utf8()..].to_string())
+        })
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn keyword<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
@@ -859,6 +883,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Gantt> {
 /// `dateFormat` lacks.
 pub fn parse_at(body: &str, title: Option<String>, now: Option<i64>) -> Result<Gantt> {
     let mut g = Gantt {
+        title_text: title.clone(),
         title,
         date_format: "YYYY-MM-DD".into(),
         axis_format: None,
@@ -872,11 +897,12 @@ pub fn parse_at(body: &str, title: Option<String>, now: Option<i64>) -> Result<G
         today_marker: None,
         now,
         sections: Vec::new(),
+        section_text: Vec::new(),
         tasks: Vec::new(),
     };
     let mut header = false;
     // Raw lines are kept: date parsing depends on the final `dateFormat`.
-    let mut raw: Vec<(usize, usize, String, String)> = Vec::new(); // line, section, label, data
+    let mut raw: Vec<(usize, usize, String, String, String)> = Vec::new(); // line, section, label, raw label, data
     for (i, l) in body.lines().enumerate() {
         let line_no = i + 1;
         let line = l.trim();
@@ -938,8 +964,10 @@ pub fn parse_at(body: &str, title: Option<String>, now: Option<i64>) -> Result<G
             g.top_axis = true;
         } else if let Some(v) = keyword(line, "title") {
             g.title = Some(v.to_string());
+            g.title_text = Some(lexed_tail(l, "title", v));
         } else if let Some(v) = keyword(line, "section") {
             g.sections.push(v.to_string());
+            g.section_text.push(lexed_tail(l, "section", v));
         } else if keyword(line, "click").is_some() {
             // Interactivity (href/call) has no meaning in a static image.
         } else if let Some(colon) = line.find(':') {
@@ -952,11 +980,15 @@ pub fn parse_at(body: &str, title: Option<String>, now: Option<i64>) -> Result<G
             }
             if g.sections.is_empty() {
                 g.sections.push(String::new());
+                g.section_text.push(String::new());
             }
+            // The lexer skips the blanks before a task text and keeps those after.
+            let raw_label = l.trim_start()[..colon].to_string();
             raw.push((
                 line_no,
                 g.sections.len() - 1,
                 label,
+                raw_label,
                 line[colon + 1..].to_string(),
             ));
         } else {
@@ -969,11 +1001,18 @@ pub fn parse_at(body: &str, title: Option<String>, now: Option<i64>) -> Result<G
     if !header {
         return Err(Error::parse(1, "Expecting 'gantt'"));
     }
-    let raws = raw
-        .iter()
-        .enumerate()
-        .map(|(n, (line, sec, label, data))| parse_task(&g, *line, *sec, label, data, n + 1))
-        .collect::<Result<Vec<_>>>()?;
+    // `parseId` numbers only the tasks without an id of their own.
+    let mut auto_ids = 0;
+    let mut raws = Vec::new();
+    for (line, sec, label, raw_label, data) in &raw {
+        let mut t = parse_task(&g, *line, *sec, label, data, 0)?;
+        t.raw_label = raw_label.clone();
+        if t.auto_id {
+            auto_ids += 1;
+            t.id = format!("task{auto_ids}");
+        }
+        raws.push(t);
+    }
     g.tasks = resolve(&g, raws)?;
     Ok(g)
 }
@@ -1041,8 +1080,10 @@ fn parse_task(
         unit: DurUnit::Millisecond,
     }));
     Ok(RawTask {
+        auto_id: id.is_none(),
         line,
         label: label.to_string(),
+        raw_label: label.to_string(),
         id: id.map_or_else(|| format!("task{n}"), str::to_string),
         section,
         start,
@@ -1177,6 +1218,7 @@ fn resolve(g: &Gantt, raws: Vec<RawTask>) -> Result<Vec<Task>> {
             done[i] = Some(Task {
                 id: r.id.clone(),
                 label: r.label.clone(),
+                raw_label: r.raw_label.clone(),
                 section: r.section,
                 start,
                 end,
@@ -1971,14 +2013,18 @@ pub fn draw(g: &Gantt, cfg: &MermaidConfig, pal: &Palette, now: Option<i64>) -> 
         ));
     }
 
-    let els = vec![
-        Element::group("sections", bands),
-        Element::group("excludes", excl),
-        Element::group("grid", grid),
-        Element::group("tasks", bars),
-        Element::group("labels", labels),
-        Element::group("overlay", overlay),
-    ];
+    let els = vec![Element::Markup {
+        svg: dom::dom(g, cfg, now),
+        svg_view_box: None,
+        children: vec![
+            Element::group("sections", bands),
+            Element::group("excludes", excl),
+            Element::group("grid", grid),
+            Element::group("tasks", bars),
+            Element::group("labels", labels),
+            Element::group("overlay", overlay),
+        ],
+    }];
     Scene {
         kind: DiagramKind::Gantt,
         // `viewBox="0 0 w h"`.
@@ -2171,7 +2217,7 @@ mod tests {
         assert_eq!(t[0].end, d(2014, 1, 31));
         assert_eq!(t[1].start, d(2014, 1, 31));
         assert_eq!(t[1].end, d(2014, 2, 20));
-        assert_eq!(t[1].id, "task2");
+        assert_eq!(t[1].id, "task1");
         assert_eq!(t[3].start, d(2014, 1, 24)); // previous task's end
         assert!(t[4].done && t[4].crit && !t[4].active);
         assert_eq!(t[4].end, d(2014, 1, 8));
@@ -2215,7 +2261,9 @@ mod tests {
         fn walk<'a>(els: &'a [Element], v: &mut Option<Rect>, l: &mut Option<&'a Text>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => walk(children, v, l),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, v, l)
+                    }
                     Element::Shape {
                         geom: Geometry::Rect { rect, .. },
                         class: Some(c),
@@ -2332,7 +2380,9 @@ mod tests {
         fn walk(els: &[Element], out: &mut Vec<(f64, f64, f64, Paint)>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, out)
+                    }
                     Element::Shape {
                         geom: Geometry::Line { a, b },
                         paint,
@@ -2386,7 +2436,7 @@ mod tests {
         let svg = crate::output::svg::to_svg(&r.scene, &opt);
         assert!(
             svg.contains(
-                "<line class=\"today\" x1=\"15234843269\" y1=\"25\" x2=\"15234843269\" y2=\"195\""
+                "<line x1=\"15234843269\" x2=\"15234843269\" y1=\"25\" y2=\"195\" class=\"today\""
             ),
             "{svg}"
         );
