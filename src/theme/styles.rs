@@ -62,6 +62,13 @@ fn constants(theme: ThemeName) -> Vec<(&'static str, &'static str)> {
         ThemeName::NeoDark => ("true", "drop-shadow( 1px 2px 2px rgba(185,185,185,0.2))"),
         _ => ("false", "url(#drop-shadow)"),
     };
+    let redux = matches!(
+        theme,
+        ThemeName::Redux | ThemeName::ReduxDark | ThemeName::ReduxColor | ThemeName::ReduxDarkColor
+    );
+    let weight = if redux { "600" } else { "normal" };
+    v.push(("fontWeight", weight));
+    v.push(("noteFontWeight", weight));
     v.push(("useGradient", grad));
     v.push(("dropShadow", shadow));
     match theme {
@@ -310,7 +317,12 @@ impl Opts {
                 // Copies of a literal keep its spelling; derived colours (`invert`,
                 // `adjust`, ...) print as khroma does, whichever literal they equal.
                 let derived = matches!(name, "gitInv" | "cScaleInv" | "cScalePeer")
-                    || (name == "gitBranchLabel" && matches!(i, 0 | 3))
+                    || (name == "gitBranchLabel"
+                        && matches!(i, 0 | 3)
+                        && matches!(
+                            self.theme,
+                            ThemeName::Default | ThemeName::Null | ThemeName::Forest | ThemeName::Dark
+                        ))
                     || (classic_default && name == "cScaleLabel" && matches!(i, 0 | 3));
                 let text = if derived {
                     c.css().to_string()
