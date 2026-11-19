@@ -28,6 +28,7 @@ fn shapes(s: &Scene) -> Vec<(String, Geometry, Paint)> {
         for e in els {
             match e {
                 Element::Group { children, .. }
+                | Element::Markup { children, .. }
                 | Element::Rotated { children, .. }
                 | Element::Translated { children, .. } => walk(children, out),
                 Element::Shape { geom, paint, class } => out.push((
@@ -92,10 +93,11 @@ fn neo_branch_labels_cast_the_themes_shadow() {
     assert!(s.contains("<feDropShadow dx=\"4\" dy=\"4\" stdDeviation=\"0\" flood-opacity=\"0.06\" flood-color=\"#000000\"/>"));
     let (_, p) = main_label_box(&scene(&source("neo", "redux")));
     assert!(p.shadow.as_ref().is_some_and(|sh| sh.linear_rgb));
-    // The neo themes' tags: `.tag-label-bkg { filter: dropShadow }` in any
-    // look; their label boxes outlined with the gradient.
+    // The neo themes' tags take `.tag-label-bkg { filter: dropShadow }` from
+    // the stylesheet in any look (no style attribute); their label boxes are
+    // outlined with the gradient.
     let s = svg("classic", "neo");
-    assert!(s.contains("style=\"filter:drop-shadow(0px 1px 2px rgba(0, 0, 0, 0.25))\""));
+    assert!(!s.contains("style=\"filter"));
     let (_, p) = main_label_box(&scene(&source("classic", "neo")));
     assert!(p.stroke_gradient.is_some());
 }

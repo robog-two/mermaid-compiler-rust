@@ -355,11 +355,11 @@ fn vertical_git_graph_labels_follow_get_bbox() {
     let svg = output::encode_svg(&r, &EncodeOptions::default());
     // `init`: 7.005 of ink, 11 tall; `api`: 12 tall (its descender).
     assert!(
-        svg.contains("x=\"-34.005\" y=\"28\" width=\"17.005\" height=\"15\""),
+        svg.contains("x=\"-34.0048828125\" y=\"28\" width=\"17.0048828125\" height=\"15\""),
         "{svg}"
     );
     assert!(
-        svg.contains("x=\"72.984\" y=\"128\" width=\"17.359\" height=\"16\""),
+        svg.contains("x=\"72.984375\" y=\"128\" width=\"17.359375\" height=\"16\""),
         "{svg}"
     );
 }

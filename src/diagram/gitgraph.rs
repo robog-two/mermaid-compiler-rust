@@ -2001,6 +2001,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
 /// `drawCommitLabel`: the id on a half-transparent box below the commit (TB/BT:
 /// left of it), sized by the text's `getBBox()`, and with `rotateCommitLabel`
 /// turned -45°.
+#[allow(clippy::too_many_arguments)]
 fn commit_label(
     c: &Commit,
     pl: &Placed,
@@ -2111,6 +2112,7 @@ fn commit_label(
 
 /// `drawCommitTags`: newest tag first, stacked away from the commit, every tag
 /// of a commit as wide and tall as the largest `getBBox()` among them.
+#[allow(clippy::too_many_arguments)]
 fn commit_tags(
     c: &Commit,
     pl: &Placed,
