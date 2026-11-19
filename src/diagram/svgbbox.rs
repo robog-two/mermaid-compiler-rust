@@ -642,7 +642,7 @@ fn conic_eval(p0: f32, p1: f32, p2: f32, w: f32, t: f32) -> f32 {
 /// Width of a box from its edges the way Chromium reports it: the
 /// difference, one float step wider whenever `left + width` does not land
 /// exactly on `right` (measured on 425 single-line paths).
-fn span(lo: f32, hi: f32) -> f32 {
+pub fn span(lo: f32, hi: f32) -> f32 {
     let w = hi - lo;
     if lo + w != hi {
         f32::from_bits(w.to_bits() + 1)

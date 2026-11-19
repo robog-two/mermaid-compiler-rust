@@ -8,11 +8,15 @@
 
 use super::timeline::{shade, wrap_text};
 use crate::config::MermaidConfig;
+use crate::diagram::svgbbox::span;
+use crate::diagram::wardley::ID_MARK;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, Point, Rect};
+use crate::output::svg::{esc_text, js_num as n};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::{line_width, normalize_label};
 use crate::theme::Palette;
+use std::fmt::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
@@ -52,6 +56,9 @@ pub struct Item {
     pub ticket: Option<String>,
     pub assigned: Option<String>,
     pub priority: Option<Priority>,
+    /// Any `priority` value was given: `kanbanItem` then draws the stripe, in
+    /// `colorFromPriority`'s colour, or with no stroke attribute for the rest.
+    pub priority_given: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -226,6 +233,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Kanban> {
             ticket: None,
             assigned: None,
             priority: None,
+            priority_given: false,
         };
         for (key, v) in meta {
             match key.as_str() {
@@ -233,7 +241,10 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Kanban> {
                 "assigned" => item.assigned = Some(v),
                 // kanbanItem.ts colorFromPriority: an unknown (or differently cased)
                 // value draws no stripe.
-                "priority" => item.priority = Priority::parse(&v),
+                "priority" => {
+                    item.priority = Priority::parse(&v);
+                    item.priority_given = !v.is_empty();
+                }
                 "label" => item.label = v,
                 _ => {}
             }
@@ -248,14 +259,176 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Kanban> {
     Ok(k)
 }
 
+/// The drawing's `getBBox()` as Chromium joins single-precision rectangles
+/// (`gfx::RectF::Union`: the smaller origin, the larger far edge, each edge
+/// a float sum).
+#[derive(Default)]
+struct Box32(Option<(f32, f32, f32, f32)>);
+
+impl Box32 {
+    fn add(&mut self, r: Rect) {
+        let (x, y) = (r.x as f32, r.y as f32);
+        let (right, bottom) = (x + r.w as f32, y + r.h as f32);
+        self.0 = Some(match self.0 {
+            None => (x, y, right, bottom),
+            Some((a, b, c, d)) => (a.min(x), b.min(y), c.max(right), d.max(bottom)),
+        });
+    }
+
+    /// The box as origin and size, as a group reports it.
+    fn rect(&self) -> Rect {
+        let (x, y, right, bottom) = self.0.unwrap_or_default();
+        Rect::new(
+            f64::from(x),
+            f64::from(y),
+            f64::from(span(x, right)),
+            f64::from(span(y, bottom)),
+        )
+    }
+
+    /// The union of two groups' boxes, each reduced to origin and size first as
+    /// a group's `getBBox()` is.
+    fn join(&self, other: &Box32) -> Box32 {
+        let mut out = Box32::default();
+        for b in [self, other] {
+            if let Some((x, y, right, bottom)) = b.0 {
+                out.add(Rect::new(
+                    f64::from(x),
+                    f64::from(y),
+                    f64::from(span(x, right)),
+                    f64::from(span(y, bottom)),
+                ));
+            }
+        }
+        out
+    }
+
+    /// `setupGraphViewbox`: the box grown by `padding` on every side.
+    fn view_box(&self, padding: f64) -> Option<Rect> {
+        let (x, y, right, bottom) = self.0?;
+        Some(
+            Rect::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(span(x, right)),
+                f64::from(span(y, bottom)),
+            )
+            .pad(padding),
+        )
+    }
+}
+
+/// An attribute value as `XMLSerializer` writes it.
+fn attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\n', "&#10;")
+}
+
+/// One `createText` HTML label (`addHtmlSpan`) as mermaid writes it, with its
+/// measured box.
+struct HtmlLabel {
+    /// The `<foreignObject>`.
+    markup: String,
+    w: f64,
+    h: f64,
+    /// The display lines, wrapped as laid out.
+    lines: Vec<String>,
+}
+
+/// `text` laid out in a div of `max-width` `width`. `section`: a cluster label
+/// (`display` first, `text-align` last) rather than a node label.
+fn html_label(text: &str, width: f64, font: f64, span_class: &str, section: bool) -> HtmlLabel {
+    let lh = font * 1.5;
+    let raw = crate::text::label_lines(&normalize_label(text));
+    let empty = raw.iter().all(|l| l.trim().is_empty());
+    let (w, h, table, lines) = if empty {
+        (0.0, 0.0, false, raw.clone())
+    } else {
+        let natural = raw
+            .iter()
+            .map(|l| crate::text::html_line_width(l, font, false))
+            .fold(0.0, f64::max);
+        if natural >= width {
+            let lines =
+                crate::text::wrap_lines(&raw, width, font, false, crate::text::BreakRule::Browser);
+            let w = crate::text::html_wrap_width(&raw, width, font, false);
+            let h = lines.len() as f64 * lh;
+            (w, h, true, lines)
+        } else {
+            (natural, raw.len() as f64 * lh, false, raw.clone())
+        }
+    };
+    let (display, space, tail) = if table {
+        ("table", "break-spaces", format!(" width: {}px;", n(width)))
+    } else {
+        ("table-cell", "nowrap", String::new())
+    };
+    let body = if empty {
+        String::new()
+    } else {
+        let p = raw
+            .iter()
+            .map(|l| esc_text(l))
+            .collect::<Vec<_>>()
+            .join("<br/>");
+        format!("<p>{p}</p>")
+    };
+    let div = if section {
+        format!(
+            "<div xmlns=\"http://www.w3.org/1999/xhtml\" style=\"display: {display}; white-space: {space}; line-height: 1.5; max-width: {}px; text-align: center;{tail}\">",
+            n(width)
+        )
+    } else {
+        format!(
+            "<div style=\"text-align: center; display: {display}; white-space: {space}; line-height: 1.5; max-width: {}px;{tail}\" xmlns=\"http://www.w3.org/1999/xhtml\">",
+            n(width)
+        )
+    };
+    let span = if section {
+        format!("<span class=\"{span_class}\">")
+    } else {
+        format!("<span style=\"text-align:left !important\" class=\"{span_class}\">")
+    };
+    HtmlLabel {
+        markup: format!(
+            "<foreignObject width=\"{}\" height=\"{}\">{div}{span}{body}</span></div></foreignObject>",
+            n(w),
+            n(h)
+        ),
+        w,
+        h,
+        lines,
+    }
+}
+
+/// `labelHelper` / `insertLabel`'s `<g class="label">` round a label.
+fn label_group(x: f64, y: f64, l: &HtmlLabel) -> String {
+    format!(
+        "<g class=\"label\" style=\"text-align:left !important\" transform=\"translate({}, {})\"><rect/>{}</g>",
+        n(x),
+        n(y),
+        l.markup
+    )
+}
+
 /// Lay out and draw a parsed board: a port of `kanbanRenderer.ts` and the
 /// `kanbanItem` shape.
 pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let col_w = cfg.section_f64("kanban", "sectionWidth", 200.0);
-    let linked_tickets = cfg
+    let ticket_base = cfg
         .section("kanban", "ticketBaseUrl")
         .and_then(|j| j.as_str())
-        .is_some_and(|u| !u.is_empty());
+        .filter(|u| !u.is_empty())
+        .map(str::to_string);
+    let linked_tickets = ticket_base.is_some();
+    let look_name = match cfg.look {
+        crate::config::Look::Classic => "classic",
+        crate::config::Look::Neo => "neo",
+        crate::config::Look::HandDrawn => "handDrawn",
+    };
     let font = pal.font_size;
     let lh = font * 1.5;
     let padding = 10.0;
@@ -263,17 +436,18 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let item_w = col_w - 1.5 * padding;
     let text_w = item_w - 10.0;
 
-    let col_titles: Vec<Vec<String>> = k
+    let col_labels: Vec<HtmlLabel> = k
         .columns
         .iter()
-        .map(|c| crate::text::label_lines(&normalize_label(&c.label)))
+        .map(|c| html_label(&c.label, col_w, font, "nodeLabel", true))
         .collect();
-    let max_label_h = col_titles
-        .iter()
-        .map(|l| l.len() as f64 * lh)
-        .fold(25.0, f64::max);
+    let col_titles: Vec<Vec<String>> = col_labels.iter().map(|l| l.lines.clone()).collect();
+    let max_label_h = col_labels.iter().map(|l| l.h).fold(25.0, f64::max);
+    let mut sections_mk = String::new();
+    let mut items_mk = String::new();
 
     let mut bounds = Bounds::default();
+    let (mut sec32, mut item32) = (Box32::default(), Box32::default());
     let mut els = Vec::new();
     let card_fill = pal.background.clone();
     let dark_mode = cfg
@@ -292,13 +466,74 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let mut y = top;
         for item in &col.items {
             let lines = wrap_text(&item.label, text_w, font, false);
-            let bh = lines.len().max(1) as f64 * lh;
-            let has_footer = item.ticket.is_some() || item.assigned.is_some();
-            let adj = if has_footer { lh / 2.0 } else { 0.0 };
+            let ticket_txt = item.ticket.as_deref().filter(|t| !t.is_empty());
+            let assigned_txt = item.assigned.as_deref().filter(|t| !t.is_empty());
+            let title_l = html_label(
+                &item.label,
+                text_w,
+                font,
+                "nodeLabel markdown-node-label",
+                false,
+            );
+            let ticket_l = html_label(ticket_txt.unwrap_or(""), text_w, font, "nodeLabel", false);
+            let assigned_l =
+                html_label(assigned_txt.unwrap_or(""), text_w, font, "nodeLabel", false);
+            let bh = title_l.h;
+            let adj = ticket_l.h.max(assigned_l.h) / 2.0;
             let h = bh + 2.0 * padding + adj;
             let cy = y + h / 2.0;
+            // The node: card, ticket link, title, ticket, assignee, stripe.
+            let id = attr(&item.id);
+            let _ = write!(
+                items_mk,
+                "<g class=\"node undefined\" id=\"{ID_MARK}-{id}\" transform=\"translate({}, {})\"><rect class=\"basic label-container __APA__\" style=\"\" rx=\"5\" ry=\"5\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
+                n(cx),
+                n(cy),
+                n(-item_w / 2.0),
+                n(-h / 2.0),
+                n(item_w),
+                n(h),
+            );
+            let lx_rel = padding - item_w / 2.0;
+            let title_mk = label_group(lx_rel, -adj - bh / 2.0, &title_l);
+            let ticket_mk = label_group(lx_rel, -adj + bh / 2.0, &ticket_l);
+            let assigned_mk = label_group(
+                padding + item_w / 2.0 - assigned_l.w - 2.0 * padding,
+                -adj + bh / 2.0,
+                &assigned_l,
+            );
+            match (&ticket_base, ticket_txt) {
+                (Some(base), Some(t)) => {
+                    let url = base.replacen("#TICKET#", t, 1);
+                    let _ = write!(
+                        items_mk,
+                        "<a class=\"kanban-ticket-link\" xlink:href=\"{}\">{ticket_mk}</a>{title_mk}{assigned_mk}",
+                        attr(&url)
+                    );
+                }
+                _ => {
+                    let _ = write!(items_mk, "{title_mk}{ticket_mk}{assigned_mk}");
+                }
+            }
+            if item.priority_given {
+                let stroke = item
+                    .priority
+                    .and_then(Priority::color)
+                    .map(|c| format!(" stroke=\"{}\"", c.css()))
+                    .unwrap_or_default();
+                let _ = write!(
+                    items_mk,
+                    "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke-width=\"4\"{stroke}/>",
+                    n(-item_w / 2.0 + 2.0),
+                    n(-h / 2.0 + 2.0),
+                    n(-item_w / 2.0 + 2.0),
+                    n(h / 2.0 - 2.0),
+                );
+            }
+            items_mk.push_str("</g>");
             let r = Rect::new(cx - item_w / 2.0, y, item_w, h);
             bounds.add_rect(r);
+            item32.add(r);
             g.push(Element::classed_shape(
                 Geometry::Rect { rect: r, rx: 5.0 },
                 Paint::both(&card_fill, &pal.node_border, 1.0),
@@ -356,6 +591,7 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 let tw = line_width(&a, font, false);
                 let ax = padding + r.right() - tw - 2.0 * padding;
                 bounds.add_rect(Rect::new(ax, fy - lh / 2.0, tw, lh));
+                item32.add(Rect::new(ax, fy - lh / 2.0, tw, lh));
                 g.push(Element::classed_text(
                     Text::centered(Point::new(0.0, fy), &[a], font, lh, &card_text)
                         .anchored(Anchor::Start, ax),
@@ -372,10 +608,38 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         let fill = shade(pal.scale_color(ci + 2), !dark_mode, 10.0);
         let frame = hand_seed.map(|seed| hand_section(cx, col_w, seed, pal, &fill));
         match &frame {
-            Some((_, b)) => bounds.add_rect(*b),
-            None => bounds.add_rect(cr),
+            Some((_, b, _)) => {
+                bounds.add_rect(*b);
+                // The cluster's own box: the drawing's, joined with its label's.
+                let mut cluster = Box32::default();
+                cluster.add(*b);
+                sec32.add(cluster.rect());
+            }
+            None => {
+                bounds.add_rect(cr);
+                sec32.add(cr);
+            }
         }
-        let title_h = col_titles[ci].len() as f64 * lh;
+        let frame_mk = match &frame {
+            Some((_, _, mk)) => mk.clone(),
+            None => format!(
+                "<rect style=\"\" rx=\"5\" ry=\"5\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
+                n(cr.x),
+                n(cr.y),
+                n(cr.w),
+                n(cr.h)
+            ),
+        };
+        let _ = write!(
+            sections_mk,
+            "<g class=\"cluster undefined section-{}\" id=\"{ID_MARK}-{}\" data-look=\"{look_name}\">{frame_mk}<g class=\"cluster-label\" transform=\"translate({}, {})\">{}</g></g>",
+            ci + 1,
+            attr(&col.id),
+            n(cx - col_labels[ci].w / 2.0),
+            n(-col_w * 3.0 / 2.0),
+            col_labels[ci].markup,
+        );
+        let title_h = col_labels[ci].h;
         g.insert(
             0,
             Element::classed_text(
@@ -390,7 +654,7 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             ),
         );
         let section = match frame {
-            Some((el, _)) => el,
+            Some((el, _, _)) => el,
             None => Element::classed_shape(
                 Geometry::Rect { rect: cr, rx: 5.0 },
                 Paint::both(&fill, &fill, 1.0),
@@ -402,10 +666,17 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     }
     // setupGraphViewbox with the (mindmap) padding, 10.
     let pad = cfg.section_f64("mindmap", "padding", 10.0);
+    // mermaid's own markup: an empty `<g/>`, the sections, then the items.
+    let svg =
+        format!("<g/><g class=\"sections\">{sections_mk}</g><g class=\"items\">{items_mk}</g>");
     Scene {
         kind: DiagramKind::Kanban,
         view_box: bounds.rect().pad(pad),
-        elements: vec![Element::group("kanban", els)],
+        elements: vec![Element::Markup {
+            svg,
+            svg_view_box: sec32.join(&item32).view_box(pad),
+            children: vec![Element::group("kanban", els)],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -419,7 +690,13 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
 /// looks for a `rect` to shorten and finds none), hachured at `fillWeight`
 /// 4; the section stylesheet fills and strokes both paths in its colour.
 /// Returns the element and the drawing's box.
-fn hand_section(cx: f64, w: f64, seed: f64, pal: &Palette, fill: &Color) -> (Element, Rect) {
+fn hand_section(
+    cx: f64,
+    w: f64,
+    seed: f64,
+    pal: &Palette,
+    fill: &Color,
+) -> (Element, Rect, String) {
     let h = w * 3.0;
     let (x, y) = (cx - w / 2.0, 0.0 - h / 2.0);
     let o = crate::rough::Options {
@@ -436,12 +713,43 @@ fn hand_section(cx: f64, w: f64, seed: f64, pal: &Palette, fill: &Color) -> (Ele
     let d = crate::rough::path(&super::hand::rounded_rect_path(x, y, w, h, 5.0), o);
     let mut kids = Vec::new();
     let mut paths = Vec::new();
+    let mut mk = String::from("<g>");
     for set in d.sets.iter().filter(|s| !s.ops.is_empty()) {
         let cmds = super::hand::set_cmds(&set.ops, Point::default());
-        let width = match set.kind {
-            crate::rough::SetKind::FillSketch => d.fill_weight(),
-            _ => d.options.stroke_width,
+        let (width, colour) = match set.kind {
+            crate::rough::SetKind::FillSketch => (d.fill_weight(), pal.cluster_bkg.css()),
+            _ => (d.options.stroke_width, pal.cluster_border.css()),
         };
+        let mut dd = String::new();
+        for op in &set.ops {
+            match op {
+                crate::rough::Op::Move(p) => {
+                    let _ = write!(dd, "M{} {} ", n(p[0]), n(p[1]));
+                }
+                crate::rough::Op::LineTo(p) => {
+                    let _ = write!(dd, "L{} {} ", n(p[0]), n(p[1]));
+                }
+                crate::rough::Op::BCurveTo(p) => {
+                    let _ = write!(
+                        dd,
+                        "C{} {}, {} {}, {} {} ",
+                        n(p[0]),
+                        n(p[1]),
+                        n(p[2]),
+                        n(p[3]),
+                        n(p[4]),
+                        n(p[5])
+                    );
+                }
+            }
+        }
+        let _ = write!(
+            mk,
+            "<path d=\"{}\" stroke=\"{}\" stroke-width=\"{}\" fill=\"none\" stroke-dasharray=\"0 0\" style=\"\"/>",
+            attr(dd.trim()),
+            attr(colour),
+            n(width)
+        );
         paths.push(cmds.clone());
         kids.push(Element::shape(
             Geometry::Path(cmds),
@@ -450,7 +758,8 @@ fn hand_section(cx: f64, w: f64, seed: f64, pal: &Palette, fill: &Color) -> (Ele
     }
     let b = super::svgbbox::cubic_group_box(&paths)
         .map_or(Rect::new(x, y, w, h), |[x, y, w, h]| Rect::new(x, y, w, h));
-    (Element::group("kanban-section", kids), b)
+    mk.push_str("</g>");
+    (Element::group("kanban-section", kids), b, mk)
 }
 
 /// Parse and render a `kanban` diagram body (already preprocessed).
@@ -536,7 +845,11 @@ mod tests {
         let pal = cfg.palette();
         let k = parse(SRC, None).unwrap();
         let s = draw(&k, &cfg, &pal);
-        let heights: Vec<f64> = match &s.elements[0] {
+        let top = match &s.elements[0] {
+            Element::Markup { children, .. } => &children[0],
+            other => other,
+        };
+        let heights: Vec<f64> = match top {
             Element::Group { children, .. } => children
                 .iter()
                 .filter_map(|c| match c {
@@ -567,6 +880,7 @@ mod tests {
             for e in els {
                 match e {
                     crate::scene::Element::Group { children, .. }
+                    | crate::scene::Element::Markup { children, .. }
                     | crate::scene::Element::Rotated { children, .. } => walk(children, out),
                     other => out.push(other.clone()),
                 }
