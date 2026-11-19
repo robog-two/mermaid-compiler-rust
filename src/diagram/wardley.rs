@@ -1370,6 +1370,918 @@ fn unit(a: Point, b: Point) -> Point {
     }
 }
 
+// ---------------------------------------------------------------- mermaid's DOM
+
+/// Stands for the svg's id in the markup; the writer puts the real one in.
+pub const ID_MARK: &str = "\u{1}SVGID\u{1}";
+
+/// An attribute value as `XMLSerializer` writes it.
+fn attr_esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\t' => out.push_str("&#9;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A number as JavaScript prints it.
+fn jn(v: f64) -> String {
+    crate::output::svg::js_num(v)
+}
+
+type Attrs<'a> = &'a [(&'a str, String)];
+
+/// `<tag a="v" ...>`, or `<tag .../>` when `close`.
+fn open(o: &mut String, tag: &str, attrs: Attrs, close: bool) {
+    o.push('<');
+    o.push_str(tag);
+    for (k, v) in attrs {
+        o.push(' ');
+        o.push_str(k);
+        o.push_str("=\"");
+        o.push_str(v);
+        o.push('"');
+    }
+    o.push_str(if close { "/>" } else { ">" });
+}
+
+/// A childless element, or one holding `text` (an empty text is no child).
+fn leaf(o: &mut String, tag: &str, attrs: Attrs, text: &str) {
+    if text.is_empty() {
+        open(o, tag, attrs, true);
+    } else {
+        open(o, tag, attrs, false);
+        o.push_str(&crate::output::svg::esc_text(text));
+        o.push_str("</");
+        o.push_str(tag);
+        o.push('>');
+    }
+}
+
+/// A `<g class=...>` around what `f` writes (`<g class=.../>` when nothing).
+fn group(o: &mut String, class: &str, f: impl FnOnce(&mut String)) {
+    let at = [("class", attr_esc(class))];
+    let mut inner = String::new();
+    f(&mut inner);
+    if inner.is_empty() {
+        open(o, "g", &at, true);
+    } else {
+        open(o, "g", &at, false);
+        o.push_str(&inner);
+        o.push_str("</g>");
+    }
+}
+
+fn s(v: &str) -> String {
+    v.to_string()
+}
+
+fn css(v: &Color) -> String {
+    attr_esc(v.css())
+}
+
+/// The DOM `wardleyRenderer.ts` builds, as mmdc serialises it (d3 `attr`
+/// order, JavaScript's arithmetic order and number text). [`draw`] builds
+/// the same map as scene elements for the rasterisers.
+fn markup(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> String {
+    use std::f64::consts::PI;
+    let (width, height) = w.size.unwrap_or((wc.width, wc.height));
+    let pad = wc.padding;
+    let r = wc.node_radius;
+    let square = r * 1.6;
+    let cw = width - pad * 2.0;
+    let ch = height - pad * 2.0;
+    let px = |v: f64| pad + (v / 100.0) * cw;
+    let py = |v: f64| height - pad - (v / 100.0) * ch;
+    let id = ID_MARK;
+    let mut o = String::new();
+
+    group(&mut o, "wardley-map", |o| {
+        open(
+            o,
+            "rect",
+            &[
+                ("class", s("wardley-background")),
+                ("width", jn(width)),
+                ("height", jn(height)),
+                ("fill", css(&col.background)),
+            ],
+            true,
+        );
+        if let Some(t) = w.title.as_ref().filter(|t| !t.is_empty()) {
+            leaf(
+                o,
+                "text",
+                &[
+                    ("class", s("wardley-title")),
+                    ("x", jn(width / 2.0)),
+                    ("y", jn(pad / 2.0)),
+                    ("fill", css(&col.axis_text)),
+                    ("font-size", jn(wc.axis_font_size * 1.05)),
+                    ("font-weight", s("bold")),
+                    ("text-anchor", s("middle")),
+                    ("dominant-baseline", s("middle")),
+                ],
+                t,
+            );
+        }
+
+        // Axes.
+        group(o, "wardley-axes", |o| {
+            for (x1, x2, y1, y2) in [
+                (pad, width - pad, height - pad, height - pad),
+                (pad, pad, pad, height - pad),
+            ] {
+                open(
+                    o,
+                    "line",
+                    &[
+                        ("x1", jn(x1)),
+                        ("x2", jn(x2)),
+                        ("y1", jn(y1)),
+                        ("y2", jn(y2)),
+                        ("stroke", css(&col.axis)),
+                        ("stroke-width", s("1")),
+                    ],
+                    true,
+                );
+            }
+            let (yx, yy) = (pad / 3.0, pad + ch / 2.0);
+            leaf(
+                o,
+                "text",
+                &[
+                    ("class", s("wardley-axis-label wardley-axis-label-x")),
+                    ("x", jn(pad + cw / 2.0)),
+                    ("y", jn(height - pad / 4.0)),
+                    ("fill", css(&col.axis_text)),
+                    ("font-size", jn(wc.axis_font_size)),
+                    ("font-weight", s("bold")),
+                    ("text-anchor", s("middle")),
+                ],
+                "Evolution",
+            );
+            leaf(
+                o,
+                "text",
+                &[
+                    ("class", s("wardley-axis-label wardley-axis-label-y")),
+                    ("x", jn(yx)),
+                    ("y", jn(yy)),
+                    ("fill", css(&col.axis_text)),
+                    ("font-size", jn(wc.axis_font_size)),
+                    ("font-weight", s("bold")),
+                    ("text-anchor", s("middle")),
+                    ("transform", format!("rotate(-90 {} {})", jn(yx), jn(yy))),
+                ],
+                "Visibility",
+            );
+        });
+
+        // Evolution stages.
+        let stages: Vec<String> = if w.stages.is_empty() {
+            DEFAULT_STAGES.iter().map(|s| s.to_string()).collect()
+        } else {
+            w.stages.clone()
+        };
+        let spans: Vec<(f64, f64)> = if w.stage_boundaries.len() == stages.len() {
+            let mut prev = 0.0;
+            w.stage_boundaries
+                .iter()
+                .map(|&b| {
+                    let s = (prev, b);
+                    prev = b;
+                    s
+                })
+                .collect()
+        } else {
+            let sw = 1.0 / stages.len() as f64;
+            (0..stages.len())
+                .map(|i| (i as f64 * sw, (i + 1) as f64 * sw))
+                .collect()
+        };
+        group(o, "wardley-stages", |o| {
+            for (i, (stage, (a, b))) in stages.iter().zip(&spans).enumerate() {
+                let sx = pad + a * cw;
+                let ex = pad + b * cw;
+                if i > 0 {
+                    open(
+                        o,
+                        "line",
+                        &[
+                            ("x1", jn(sx)),
+                            ("x2", jn(sx)),
+                            ("y1", jn(pad)),
+                            ("y2", jn(height - pad)),
+                            ("stroke", s("#000")),
+                            ("stroke-width", s("1")),
+                            ("stroke-dasharray", s("5 5")),
+                            ("opacity", s("0.8")),
+                        ],
+                        true,
+                    );
+                }
+                leaf(
+                    o,
+                    "text",
+                    &[
+                        ("class", s("wardley-stage-label")),
+                        ("x", jn((sx + ex) / 2.0)),
+                        ("y", jn(height - pad / 1.5)),
+                        ("fill", css(&col.axis_text)),
+                        ("font-size", jn(wc.axis_font_size - 2.0)),
+                        ("text-anchor", s("middle")),
+                    ],
+                    stage,
+                );
+            }
+        });
+
+        if wc.show_grid {
+            group(o, "wardley-grid", |o| {
+                for i in 1..4 {
+                    let ratio = i as f64 / 4.0;
+                    let x = pad + cw * ratio;
+                    let y = height - pad - ch * ratio;
+                    for (x1, x2, y1, y2) in [(x, x, pad, height - pad), (pad, width - pad, y, y)] {
+                        open(
+                            o,
+                            "line",
+                            &[
+                                ("x1", jn(x1)),
+                                ("x2", jn(x2)),
+                                ("y1", jn(y1)),
+                                ("y2", jn(y2)),
+                                ("stroke", css(&col.grid)),
+                                ("stroke-dasharray", s("2 6")),
+                            ],
+                            true,
+                        );
+                    }
+                }
+            });
+        }
+
+        // Projected positions (pipeline parents move onto their box below).
+        let mut pos: Vec<(f64, f64)> = w.nodes.iter().map(|k| (px(k.x), py(k.y))).collect();
+        let index = |id: &str| w.nodes.iter().position(|k| k.id == id);
+
+        if !w.pipelines.is_empty() {
+            let mut boxes = String::new();
+            let mut plinks = String::new();
+            for p in &w.pipelines {
+                if p.component_ids.is_empty() {
+                    continue;
+                }
+                let mut comps: Vec<usize> =
+                    p.component_ids.iter().filter_map(|k| index(k)).collect();
+                comps.sort_by(|a, b| w.nodes[*a].x.total_cmp(&w.nodes[*b].x));
+                for pair in comps.windows(2) {
+                    let (a, b) = (pos[pair[0]], pos[pair[1]]);
+                    open(
+                        &mut plinks,
+                        "line",
+                        &[
+                            ("class", s("wardley-pipeline-evolution-link")),
+                            ("x1", jn(a.0)),
+                            ("y1", jn(a.1)),
+                            ("x2", jn(b.0)),
+                            ("y2", jn(b.1)),
+                            ("stroke", css(&col.link)),
+                            ("stroke-width", s("1")),
+                            ("stroke-dasharray", s("4 4")),
+                        ],
+                        true,
+                    );
+                }
+                let mut min_x = f64::INFINITY;
+                let mut max_x = f64::NEG_INFINITY;
+                let mut y = 0.0;
+                for k in &p.component_ids {
+                    if let Some(i) = index(k) {
+                        min_x = min_x.min(pos[i].0);
+                        max_x = max_x.max(pos[i].0);
+                        y = pos[i].1;
+                    }
+                }
+                if min_x != f64::INFINITY && max_x != f64::NEG_INFINITY {
+                    let bpad = 15.0;
+                    let bh = r * 4.0;
+                    let top = y - bh / 2.0;
+                    if let Some(pi) = index(&p.node_id) {
+                        pos[pi] = ((min_x + max_x) / 2.0, top - square / 6.0);
+                    }
+                    open(
+                        &mut boxes,
+                        "rect",
+                        &[
+                            ("class", s("wardley-pipeline-box")),
+                            ("x", jn(min_x - bpad)),
+                            ("y", jn(top)),
+                            ("width", jn(max_x - min_x + bpad * 2.0)),
+                            ("height", jn(bh)),
+                            ("fill", s("none")),
+                            ("stroke", css(&col.axis)),
+                            ("stroke-width", s("1.5")),
+                            ("rx", s("4")),
+                            ("ry", s("4")),
+                        ],
+                        true,
+                    );
+                }
+            }
+            group(o, "wardley-pipelines", |o| o.push_str(&boxes));
+            group(o, "wardley-pipeline-links", |o| o.push_str(&plinks));
+        }
+
+        // Links (minus pipeline component -> own parent), then their labels.
+        group(o, "wardley-links", |o| {
+            let mut labels = String::new();
+            for l in &w.links {
+                let (Some(si), Some(ti)) = (index(&l.source), index(&l.target)) else {
+                    continue;
+                };
+                if w.pipelines
+                    .iter()
+                    .any(|p| p.node_id == l.target && p.component_ids.contains(&l.source))
+                {
+                    continue;
+                }
+                let (sp, tp) = (pos[si], pos[ti]);
+                let rad = |i: usize| {
+                    if w.nodes[i].pipeline_parent {
+                        square / 2f64.sqrt()
+                    } else {
+                        r
+                    }
+                };
+                let (dx, dy) = (tp.0 - sp.0, tp.1 - sp.1);
+                let dist = (dx * dx + dy * dy).sqrt();
+                let (bx, by) = (sp.0 - tp.0, sp.1 - tp.1);
+                let bdist = (bx * bx + by * by).sqrt();
+                let mut a = vec![
+                    (
+                        "class",
+                        if l.dashed {
+                            s("wardley-link wardley-link--dashed")
+                        } else {
+                            s("wardley-link")
+                        },
+                    ),
+                    ("x1", jn(sp.0 + (dx / dist) * rad(si))),
+                    ("y1", jn(sp.1 + (dy / dist) * rad(si))),
+                    ("x2", jn(tp.0 + (bx / bdist) * rad(ti))),
+                    ("y2", jn(tp.1 + (by / bdist) * rad(ti))),
+                    ("stroke", css(&col.link)),
+                    ("stroke-width", s("1")),
+                ];
+                if l.dashed {
+                    a.push(("stroke-dasharray", s("6 6")));
+                }
+                if matches!(l.flow, Some(Flow::Forward | Flow::Bidirectional)) {
+                    a.push(("marker-end", format!("url(#link-arrow-end-{id})")));
+                }
+                if matches!(l.flow, Some(Flow::Backward | Flow::Bidirectional)) {
+                    a.push(("marker-start", format!("url(#link-arrow-start-{id})")));
+                }
+                open(o, "line", &a, true);
+                if let Some(label) = l.label.as_ref().filter(|t| !t.is_empty()) {
+                    let mid = ((sp.0 + tp.0) / 2.0, (sp.1 + tp.1) / 2.0);
+                    let lx = mid.0 + (dy / dist) * 8.0;
+                    let ly = mid.1 + (-dx / dist) * 8.0;
+                    let mut angle = (dy.atan2(dx) * 180.0) / PI;
+                    if !(-90.0..=90.0).contains(&angle) {
+                        angle += 180.0;
+                    }
+                    leaf(
+                        &mut labels,
+                        "text",
+                        &[
+                            ("class", s("wardley-link-label")),
+                            ("x", jn(lx)),
+                            ("y", jn(ly)),
+                            ("fill", css(&col.axis_text)),
+                            ("font-size", jn(wc.label_font_size)),
+                            ("text-anchor", s("middle")),
+                            ("dominant-baseline", s("middle")),
+                            (
+                                "transform",
+                                format!("rotate({} {} {})", jn(angle), jn(lx), jn(ly)),
+                            ),
+                        ],
+                        label,
+                    );
+                }
+            }
+            o.push_str(&labels);
+        });
+
+        // Evolve trends.
+        group(o, "wardley-trends", |o| {
+            for t in &w.trends {
+                let Some(i) = index(&t.node_id) else { continue };
+                let origin = pos[i];
+                let (tx, ty) = (px(t.target_x), py(t.target_y));
+                let (dx, dy) = (tx - origin.0, ty - origin.1);
+                let dist = (dx * dx + dy * dy).sqrt();
+                let shorten = r + 2.0;
+                let (ex, ey) = if dist > shorten {
+                    (tx - (dx / dist) * shorten, ty - (dy / dist) * shorten)
+                } else {
+                    (tx, ty)
+                };
+                open(
+                    o,
+                    "line",
+                    &[
+                        ("class", s("wardley-trend")),
+                        ("x1", jn(origin.0)),
+                        ("y1", jn(origin.1)),
+                        ("x2", jn(ex)),
+                        ("y2", jn(ey)),
+                        ("stroke", css(&col.evolution)),
+                        ("stroke-width", s("1")),
+                        ("stroke-dasharray", s("4 4")),
+                        ("marker-end", format!("url(#arrow-{id})")),
+                    ],
+                    true,
+                );
+            }
+        });
+
+        // Nodes.
+        group(o, "wardley-nodes", |o| {
+            for (i, k) in w.nodes.iter().enumerate() {
+                let (x, y) = pos[i];
+                let class = format!("wardley-node wardley-node--{}", k.kind.class());
+                group(o, &class, |o| {
+                    let ring = |o: &mut String, cls: &str, fill: &str, stroke: String| {
+                        open(
+                            o,
+                            "circle",
+                            &[
+                                ("class", s(cls)),
+                                ("cx", jn(x)),
+                                ("cy", jn(y)),
+                                ("r", jn(r * 2.0)),
+                                ("fill", s(fill)),
+                                ("stroke", stroke),
+                                ("stroke-width", s("1")),
+                            ],
+                            true,
+                        );
+                    };
+                    match k.strategy {
+                        Some(Strategy::Outsource) => ring(
+                            o,
+                            "wardley-outsource-overlay",
+                            "#666",
+                            css(&col.component_stroke),
+                        ),
+                        Some(Strategy::Buy) => {
+                            ring(o, "wardley-buy-overlay", "#ccc", css(&col.component_stroke))
+                        }
+                        Some(Strategy::Build) => {
+                            ring(o, "wardley-build-overlay", "#eee", s("#000"))
+                        }
+                        Some(Strategy::Market) => ring(
+                            o,
+                            "wardley-market-overlay",
+                            "white",
+                            css(&col.component_stroke),
+                        ),
+                        None => {}
+                    }
+                    if !k.pipeline_parent
+                        && k.strategy != Some(Strategy::Market)
+                        && k.kind != NodeKind::Anchor
+                    {
+                        open(
+                            o,
+                            "circle",
+                            &[
+                                ("cx", jn(x)),
+                                ("cy", jn(y)),
+                                ("r", jn(r)),
+                                ("fill", css(&col.component_fill)),
+                                ("stroke", css(&col.component_stroke)),
+                                ("stroke-width", s("1")),
+                            ],
+                            true,
+                        );
+                    }
+                    if k.strategy == Some(Strategy::Market) {
+                        let tr = r * 1.2;
+                        let (cos30, sin30) = ((PI / 6.0).cos(), (PI / 6.0).sin());
+                        let top = (x, y - tr);
+                        let bl = (x - tr * cos30, y + tr * sin30);
+                        let br = (x + tr * cos30, y + tr * sin30);
+                        for (a, b) in [(top, bl), (bl, br), (br, top)] {
+                            open(
+                                o,
+                                "line",
+                                &[
+                                    ("class", s("wardley-market-line")),
+                                    ("x1", jn(a.0)),
+                                    ("y1", jn(a.1)),
+                                    ("x2", jn(b.0)),
+                                    ("y2", jn(b.1)),
+                                    ("stroke", css(&col.component_stroke)),
+                                    ("stroke-width", s("1")),
+                                ],
+                                true,
+                            );
+                        }
+                        for d in [top, bl, br] {
+                            open(
+                                o,
+                                "circle",
+                                &[
+                                    ("class", s("wardley-market-dot")),
+                                    ("cx", jn(d.0)),
+                                    ("cy", jn(d.1)),
+                                    ("r", jn(r * 0.7)),
+                                    ("fill", s("white")),
+                                    ("stroke", css(&col.component_stroke)),
+                                    ("stroke-width", s("2")),
+                                ],
+                                true,
+                            );
+                        }
+                    }
+                    if k.pipeline_parent {
+                        open(
+                            o,
+                            "rect",
+                            &[
+                                ("x", jn(x - square / 2.0)),
+                                ("y", jn(y - square / 2.0)),
+                                ("width", jn(square)),
+                                ("height", jn(square)),
+                                ("fill", css(&col.component_fill)),
+                                ("stroke", css(&col.component_stroke)),
+                                ("stroke-width", s("1")),
+                            ],
+                            true,
+                        );
+                    }
+                    if k.inertia {
+                        let mut off = if k.pipeline_parent {
+                            square / 2.0 + 15.0
+                        } else {
+                            r + 15.0
+                        };
+                        if k.strategy.is_some() {
+                            off += r + 10.0;
+                        }
+                        let lh = if k.pipeline_parent { square } else { r * 2.0 };
+                        open(
+                            o,
+                            "line",
+                            &[
+                                ("class", s("wardley-inertia")),
+                                ("x1", jn(x + off)),
+                                ("y1", jn(y - lh / 2.0)),
+                                ("x2", jn(x + off)),
+                                ("y2", jn(y + lh / 2.0)),
+                                ("stroke", css(&col.component_stroke)),
+                                ("stroke-width", s("6")),
+                            ],
+                            true,
+                        );
+                    }
+                    let anchor = k.kind == NodeKind::Anchor;
+                    let lx = if anchor {
+                        k.label_offset_x.map_or(x, |d| x + d)
+                    } else {
+                        let mut d = wc.node_label_offset;
+                        if k.strategy.is_some() && k.label_offset_x.is_none() {
+                            d += 10.0;
+                        }
+                        x + k.label_offset_x.unwrap_or(d)
+                    };
+                    let ly = if anchor {
+                        k.label_offset_y.map_or(y - 3.0, |d| y + d)
+                    } else {
+                        let mut d = -wc.node_label_offset;
+                        if k.strategy.is_some() && k.label_offset_y.is_none() {
+                            d -= 10.0;
+                        }
+                        y + k.label_offset_y.unwrap_or(d)
+                    };
+                    leaf(
+                        o,
+                        "text",
+                        &[
+                            ("x", jn(lx)),
+                            ("y", jn(ly)),
+                            ("class", s("wardley-node-label")),
+                            (
+                                "fill",
+                                if anchor {
+                                    s("#000")
+                                } else {
+                                    css(&col.component_label)
+                                },
+                            ),
+                            ("font-size", jn(wc.label_font_size)),
+                            ("font-weight", s(if anchor { "bold" } else { "normal" })),
+                            ("text-anchor", s(if anchor { "middle" } else { "start" })),
+                            (
+                                "dominant-baseline",
+                                s(if anchor { "middle" } else { "auto" }),
+                            ),
+                        ],
+                        &k.label,
+                    );
+                });
+            }
+        });
+
+        // Numbered annotations and their legend box.
+        if !w.annotations.is_empty() {
+            group(o, "wardley-annotations", |o| {
+                for a in &w.annotations {
+                    let (x, y) = (px(a.x), py(a.y));
+                    group(o, "wardley-annotation", |o| {
+                        open(
+                            o,
+                            "circle",
+                            &[
+                                ("cx", jn(x)),
+                                ("cy", jn(y)),
+                                ("r", s("10")),
+                                ("fill", s("white")),
+                                ("stroke", css(&col.axis)),
+                                ("stroke-width", s("1.5")),
+                            ],
+                            true,
+                        );
+                        leaf(
+                            o,
+                            "text",
+                            &[
+                                ("x", jn(x)),
+                                ("y", jn(y)),
+                                ("text-anchor", s("middle")),
+                                ("dominant-baseline", s("central")),
+                                ("font-size", s("10")),
+                                ("fill", css(&col.axis_text)),
+                                ("font-weight", s("bold")),
+                            ],
+                            &a.number.to_string(),
+                        );
+                    });
+                }
+                if let Some((bx, by)) = w.annotations_box {
+                    group(o, "wardley-annotations-box", |o| {
+                        let mut sorted: Vec<&Annotation> = w
+                            .annotations
+                            .iter()
+                            .filter(|a| !a.text.is_empty())
+                            .collect();
+                        sorted.sort_by_key(|a| a.number);
+                        if sorted.is_empty() {
+                            return;
+                        }
+                        let (bpad, lh, fs) = (10.0, 16.0, 11.0);
+                        let lines: Vec<String> = sorted
+                            .iter()
+                            .map(|a| format!("{}. {}", a.number, a.text))
+                            .collect();
+                        let (max_w, max_h) = annotation_text_metrics(&lines, fs, wc, width, height);
+                        let bw = max_w + bpad * 2.0 + 105.0;
+                        let bh = sorted.len() as f64 * lh + bpad * 2.0 + max_h / 2.0;
+                        let x = px(bx).min(width - pad - bw).max(pad);
+                        let y = py(by).min(height - pad - bh).max(pad);
+                        open(
+                            o,
+                            "rect",
+                            &[
+                                ("x", jn(x)),
+                                ("y", jn(y)),
+                                ("width", jn(bw)),
+                                ("height", jn(bh)),
+                                ("fill", s("white")),
+                                ("stroke", css(&col.axis)),
+                                ("stroke-width", s("1.5")),
+                                ("rx", s("4")),
+                                ("ry", s("4")),
+                            ],
+                            true,
+                        );
+                        for (k, l) in lines.iter().enumerate() {
+                            leaf(
+                                o,
+                                "text",
+                                &[
+                                    ("x", jn(x + bpad)),
+                                    ("y", jn(y + bpad + (k + 1) as f64 * lh)),
+                                    ("font-size", jn(fs)),
+                                    ("fill", css(&col.axis_text)),
+                                    ("text-anchor", s("start")),
+                                    ("dominant-baseline", s("middle")),
+                                ],
+                                l,
+                            );
+                        }
+                    });
+                }
+            });
+        }
+
+        if !w.notes.is_empty() {
+            group(o, "wardley-notes", |o| {
+                for nt in &w.notes {
+                    leaf(
+                        o,
+                        "text",
+                        &[
+                            ("x", jn(px(nt.x))),
+                            ("y", jn(py(nt.y))),
+                            ("text-anchor", s("start")),
+                            ("font-size", s("11")),
+                            ("fill", css(&col.axis_text)),
+                            ("font-weight", s("bold")),
+                        ],
+                        &nt.text,
+                    );
+                }
+            });
+        }
+
+        // Accelerator (right) and deaccelerator (left) arrows.
+        let force = |o: &mut String, ms: &[Marker], right: bool| {
+            for m in ms {
+                let (x, y) = (px(m.x), py(m.y));
+                let (aw, ah, head) = (60.0, 30.0, 20.0);
+                let p = |a: f64, b: f64| format!("{} {}", jn(a), jn(b));
+                let pts = if right {
+                    [
+                        p(x, y - ah / 2.0),
+                        p(x + aw - head, y - ah / 2.0),
+                        p(x + aw - head, y - ah / 2.0 - 8.0),
+                        p(x + aw, y),
+                        p(x + aw - head, y + ah / 2.0 + 8.0),
+                        p(x + aw - head, y + ah / 2.0),
+                        p(x, y + ah / 2.0),
+                    ]
+                } else {
+                    [
+                        p(x + aw, y - ah / 2.0),
+                        p(x + head, y - ah / 2.0),
+                        p(x + head, y - ah / 2.0 - 8.0),
+                        p(x, y),
+                        p(x + head, y + ah / 2.0 + 8.0),
+                        p(x + head, y + ah / 2.0),
+                        p(x + aw, y + ah / 2.0),
+                    ]
+                };
+                // The template literal's own line breaks and indentation.
+                let d = format!(
+                    "\n        M {}\n        L {}\n        L {}\n        L {}\n        L {}\n        L {}\n        L {}\n        Z\n      ",
+                    pts[0], pts[1], pts[2], pts[3], pts[4], pts[5], pts[6]
+                );
+                open(
+                    o,
+                    "path",
+                    &[
+                        ("d", attr_esc(&d)),
+                        ("fill", s("white")),
+                        ("stroke", css(&col.component_stroke)),
+                        ("stroke-width", s("1")),
+                    ],
+                    true,
+                );
+                leaf(
+                    o,
+                    "text",
+                    &[
+                        ("x", jn(x + aw / 2.0)),
+                        ("y", jn(y + ah / 2.0 + 15.0)),
+                        ("text-anchor", s("middle")),
+                        ("font-size", s("10")),
+                        ("fill", css(&col.axis_text)),
+                        ("font-weight", s("bold")),
+                    ],
+                    &m.text,
+                );
+            }
+        };
+        if !w.accelerators.is_empty() {
+            group(o, "wardley-accelerators", |o| {
+                force(o, &w.accelerators, true)
+            });
+        }
+        if !w.deaccelerators.is_empty() {
+            group(o, "wardley-deaccelerators", |o| {
+                force(o, &w.deaccelerators, false)
+            });
+        }
+    });
+
+    // Arrow markers.
+    let marker = |o: &mut String,
+                  mid: String,
+                  ref_x: &str,
+                  size: &str,
+                  orient: &str,
+                  d: &str,
+                  fill: &Color| {
+        open(
+            o,
+            "marker",
+            &[
+                ("id", mid),
+                ("viewBox", s("0 0 10 10")),
+                ("refX", s(ref_x)),
+                ("refY", s("5")),
+                ("markerWidth", s(size)),
+                ("markerHeight", s(size)),
+                ("orient", s(orient)),
+            ],
+            false,
+        );
+        open(
+            o,
+            "path",
+            &[("d", s(d)), ("fill", css(fill)), ("stroke", s("none"))],
+            true,
+        );
+        o.push_str("</marker>");
+    };
+    o.push_str("<defs>");
+    marker(
+        &mut o,
+        format!("arrow-{id}"),
+        "9",
+        "6",
+        "auto-start-reverse",
+        "M 0 0 L 10 5 L 0 10 z",
+        &col.evolution,
+    );
+    marker(
+        &mut o,
+        format!("link-arrow-end-{id}"),
+        "9",
+        "5",
+        "auto",
+        "M 0 0 L 10 5 L 0 10 z",
+        &col.link,
+    );
+    marker(
+        &mut o,
+        format!("link-arrow-start-{id}"),
+        "1",
+        "5",
+        "auto",
+        "M 10 0 L 0 5 L 10 10 z",
+        &col.link,
+    );
+    o.push_str("</defs>");
+    o
+}
+
+/// `getComputedTextLength()` and `getBBox()` of the annotation box's lines,
+/// as `(widest, tallest)` in svg units. They run while the texts still
+/// inherit the container's "trebuchet ms", verdana, arial (Arial) family,
+/// before they end up in the serif face they are drawn in, and at the svg's
+/// screen scale: Chromium lays the text out at the screen size cut to 26.6
+/// fixed point, its advance rounded up to 1/64 screen px, its box the rounded
+/// ascent and descent.
+fn annotation_text_metrics(
+    lines: &[String],
+    fs: f64,
+    wc: &WardleyConfig,
+    width: f64,
+    height: f64,
+) -> (f64, f64) {
+    let scale = if wc.use_max_width {
+        crate::text::mmdc_page_scale(width, height)
+    } else {
+        1.0
+    };
+    let size = crate::text::shaping_size(fs * scale);
+    let max_w = lines
+        .iter()
+        .map(|l| crate::text::layout_unit_ceil(line_width(l, size, false)) / scale)
+        .fold(0.0, f64::max);
+    let max_h = lines
+        .iter()
+        .map(|l| crate::text::svg_line_box(size, l) / scale)
+        .fold(0.0, f64::max);
+    (max_w, max_h)
+}
+
 /// Lay out and draw a parsed map.
 pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
     let (width, height) = w.size.unwrap_or((wc.width, wc.height));
@@ -1844,26 +2756,7 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
                     .iter()
                     .map(|a| format!("{}. {}", a.number, a.text))
                     .collect();
-                // getComputedTextLength() and getBBox() run while the texts still
-                // inherit the container's "trebuchet ms", verdana, arial (Arial)
-                // family, before they end up in the serif face they are drawn in,
-                // and at the svg's screen scale: Chromium lays the text out at the
-                // screen size cut to 26.6 fixed point, its advance rounded up to
-                // 1/64 screen px, its box the rounded ascent and descent.
-                let scale = if wc.use_max_width {
-                    crate::text::mmdc_page_scale(width, height)
-                } else {
-                    1.0
-                };
-                let size = crate::text::shaping_size(fs * scale);
-                let max_w = lines
-                    .iter()
-                    .map(|l| crate::text::layout_unit_ceil(line_width(l, size, false)) / scale)
-                    .fold(0.0, f64::max);
-                let max_h = lines
-                    .iter()
-                    .map(|l| crate::text::svg_line_box(size, l) / scale)
-                    .fold(0.0, f64::max);
+                let (max_w, max_h) = annotation_text_metrics(&lines, fs, wc, width, height);
                 let bw = max_w + bpad * 2.0 + 105.0;
                 let bh = sorted.len() as f64 * lh + bpad * 2.0 + max_h / 2.0;
                 let x = px(bx).min(width - pad - bw).max(pad);
@@ -1965,7 +2858,10 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
     Scene {
         kind: DiagramKind::Wardley,
         view_box: Rect::new(0.0, 0.0, width, height),
-        elements: vec![Element::group("wardley-map", root)],
+        elements: vec![Element::Markup {
+            svg: markup(w, wc, col),
+            children: vec![Element::group("wardley-map", root)],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: FONT_FAMILY.to_string(),
@@ -2223,9 +3119,9 @@ component A [0.6, 0.7]");
         fn flatten(els: &[Element], out: &mut Vec<Element>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        flatten(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Markup { children, .. }
+                    | Element::Rotated { children, .. } => flatten(children, out),
                     other => out.push(other.clone()),
                 }
             }

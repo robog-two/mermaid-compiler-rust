@@ -908,7 +908,7 @@ fn write_element(out: &mut String, el: &Element, fx: &Filters) {
             if fx.raster_scale.is_some() {
                 children.iter().for_each(|c| write_element(out, c, fx));
             } else {
-                out.push_str(svg);
+                out.push_str(&svg.replace(crate::diagram::wardley::ID_MARK, &esc(fx.id)));
             }
         }
         Element::Brightened {
@@ -1154,7 +1154,7 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
     out.push_str(&fx.defs());
     if let (None, [Element::Markup { svg, .. }]) = (opt.raster_scale, scene.elements.as_slice()) {
         // A drawing whose markup is mermaid's own: no wrapper of ours.
-        out.push_str(svg);
+        out.push_str(&svg.replace(crate::diagram::wardley::ID_MARK, &id));
         out.push_str("</svg>");
         return out;
     }
