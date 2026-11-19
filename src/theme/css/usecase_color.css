@@ -1,0 +1,10 @@
+
+
+    & ${slot}.system-boundary rect.boundary-body,
+    & ${slot}.system-boundary rect.boundary-tab,
+    & ${slot}.system-boundary .boundary-body path,
+    & ${slot}.system-boundary .boundary-tab path {
+      stroke: ${borderColor};
+      ${fill}
+    }
+    

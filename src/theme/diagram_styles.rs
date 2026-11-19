@@ -43,6 +43,16 @@ pub(super) fn diagram(kind: DiagramKind, o: &Opts) -> Option<String> {
         DiagramKind::Journey => journey(o),
         DiagramKind::Kanban => kanban(o),
         DiagramKind::Sequence => sequence(o),
+        DiagramKind::Usecase => usecase(o),
+        DiagramKind::Swimlane => {
+            // The flowchart styles plus the lane rule.
+            flowchart(o)
+                + &t(
+                    o,
+                    ".swimlane.cluster:not([data-color-id]) rect { stroke: ${options.clusterBorder} !important; }\n\
+                     [data-look=\"neo\"].cluster rect { filter: none; }\n",
+                )
+        }
         DiagramKind::GitGraph => gitgraph(o),
         DiagramKind::Mindmap => mindmap(o),
         DiagramKind::Timeline => timeline(o),
@@ -863,6 +873,62 @@ fn gitgraph(o: &Opts) -> String {
         } else {
             "8".to_string()
         }),
+        _ => None,
+    })
+}
+
+/// `a ?? b ?? c` over option names.
+fn nullish(o: &Opts, ks: &[&str]) -> String {
+    for k in ks {
+        if let Some(v) = o.get(k) {
+            return v.to_string();
+        }
+    }
+    "undefined".to_string()
+}
+
+fn usecase(o: &Opts) -> String {
+    let actor_bkg = nullish(o, &["usecaseActorBkg", "actorBkg", "mainBkg"]);
+    let actor_border = nullish(o, &["usecaseActorBorder", "actorBorder", "primaryColor"]);
+    let bkg = nullish(o, &["usecaseBkg", "mainBkg"]);
+    let border = nullish(o, &["usecaseBorder", "nodeBorder", "primaryColor"]);
+    let boundary_bkg = nullish(o, &["usecaseBoundaryBkg", "clusterBkg"]);
+    let boundary_border = nullish(o, &["usecaseBoundaryBorder", "clusterBorder"]);
+    let include_line = nullish(o, &["usecaseIncludeLine", "lineColor"]);
+    let extend_line = nullish(o, &["usecaseExtendLine", "lineColor"]);
+    let hand = o.look == crate::config::Look::HandDrawn;
+    let look = look_name(o);
+    let colors = gen_color(
+        o,
+        "& ${slot}.system-boundary rect.boundary-body, & ${slot}.system-boundary rect.boundary-tab, \
+         & ${slot}.system-boundary .boundary-body path, & ${slot}.system-boundary .boundary-tab path { \
+         stroke: ${borderColor}; ${fill} }\n",
+        &|_, _, _, _| None,
+    );
+    tpl(o, include_str!("css/usecase.css"), &|e| match e {
+        "@1" => Some(colors.clone()),
+        "@2" => Some(actor_bkg.clone()),
+        "@3" => Some(actor_border.clone()),
+        "@4" => Some(if hand {
+            String::new()
+        } else {
+            format!(
+                "& .node.usecase-actor .usecase-actor-glyph path, & .node.usecase-actor .usecase-actor-glyph circle {{ stroke: {actor_border}; }}"
+            )
+        }),
+        "@5" => Some(bkg.clone()),
+        "@6" | "@8" => Some(border.clone()),
+        "@7" => Some(if hand {
+            String::new()
+        } else {
+            format!(
+                "& [data-look=\"{look}\"].node.usecase-element ellipse, & [data-look=\"{look}\"].node.usecase-element rect {{ fill: {bkg}; stroke: {border}; }} & [data-look=\"{look}\"].node.usecase-element .usecase-business-marker {{ stroke: {border}; }}"
+            )
+        }),
+        "@9" => Some(boundary_bkg.clone()),
+        "@10" => Some(boundary_border.clone()),
+        "@11" => Some(include_line.clone()),
+        "@12" => Some(extend_line.clone()),
         _ => None,
     })
 }

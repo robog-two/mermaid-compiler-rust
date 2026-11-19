@@ -1,0 +1,37 @@
+
+
+    /* Use case bodies -- \`.usecase-element\` covers the ellipse form, the \`[Rect]\` form and
+       the business variant.
+
+       Element selectors only, never a bare \`path\`. Under the handDrawn look roughjs draws
+       the body as a *pair* of paths, an outline stroked in the border colour and a hachure
+       fill stroked in the background colour, with no class to tell them apart. Stroking
+       both repaints the fill lines as border colour and the shape collapses into a solid
+       block -- which is what \`.usecase-element path\` did. So handDrawn bodies keep the
+       theme's uniform colours, exactly as handDrawn flowchart nodes do. */
+    & ${slot}.usecase-element ellipse,
+    & ${slot}.usecase-element rect {
+      stroke: ${borderColor};
+      ${fill}
+    }
+
+    /* The business marker is a single classed path, so it can be reached safely by name --
+       without it the marker keeps the uniform border beside a palette-coloured body. No
+       \`fill\`: the marker is drawn with \`fill="none"\` and has to stay that way. */
+    & ${slot}.usecase-element .usecase-business-marker {
+      stroke: ${borderColor};
+    }
+
+    /* Actor glyphs, mirroring the uniform rule further down. The fill goes on the glyph
+       group, never on its children, so the hollow variant's own \`fill="none"\` keeps
+       winning and a hollow actor stays hollow. Same reason as above for not descending
+       into the handDrawn paths. */
+    & ${slot}.usecase-actor .usecase-actor-shape,
+    & ${slot}.usecase-actor .usecase-actor-hollow,
+    & ${slot}.usecase-actor .usecase-actor-awesome,
+    & ${slot}.usecase-actor .usecase-actor-icon {
+      stroke: ${borderColor};
+      ${fill}
+    }
+${@1}
+    
