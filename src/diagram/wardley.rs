@@ -2275,7 +2275,9 @@ fn annotation_text_metrics(
     let size = crate::text::shaping_size(fs * scale);
     let max_w = lines
         .iter()
-        .map(|l| f64::from((crate::text::layout_unit_ceil(line_width(l, size, false)) / scale) as f32))
+        .map(|l| {
+            f64::from((crate::text::layout_unit_ceil(line_width(l, size, false)) / scale) as f32)
+        })
         .fold(0.0, f64::max);
     let max_h = lines
         .iter()
