@@ -2146,9 +2146,10 @@ fn markup(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> String {
                         p(x + aw, y + ah / 2.0),
                     ]
                 };
-                // The template literal's own line breaks and indentation.
+                // The template literal's own line breaks and indentation,
+                // trimmed at both ends as mermaid's `.trim()` leaves it.
                 let d = format!(
-                    "\n        M {}\n        L {}\n        L {}\n        L {}\n        L {}\n        L {}\n        L {}\n        Z\n      ",
+                    "M {}\n        L {}\n        L {}\n        L {}\n        L {}\n        L {}\n        L {}\n        Z",
                     pts[0], pts[1], pts[2], pts[3], pts[4], pts[5], pts[6]
                 );
                 open(
@@ -2257,7 +2258,8 @@ fn markup(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> String {
 /// before they end up in the serif face they are drawn in, and at the svg's
 /// screen scale: Chromium lays the text out at the screen size cut to 26.6
 /// fixed point, its advance rounded up to 1/64 screen px, its box the rounded
-/// ascent and descent.
+/// ascent and descent. Both come back as single precision (`SVGRect` and
+/// `getComputedTextLength` are `float`s).
 fn annotation_text_metrics(
     lines: &[String],
     fs: f64,
@@ -2273,11 +2275,13 @@ fn annotation_text_metrics(
     let size = crate::text::shaping_size(fs * scale);
     let max_w = lines
         .iter()
-        .map(|l| crate::text::layout_unit_ceil(line_width(l, size, false)) / scale)
+        .map(|l| {
+            f64::from((crate::text::layout_unit_ceil(line_width(l, size, false)) / scale) as f32)
+        })
         .fold(0.0, f64::max);
     let max_h = lines
         .iter()
-        .map(|l| crate::text::svg_line_box(size, l) / scale)
+        .map(|l| f64::from((crate::text::svg_line_box(size, l) / scale) as f32))
         .fold(0.0, f64::max);
     (max_w, max_h)
 }
