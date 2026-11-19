@@ -12,6 +12,7 @@ use crate::color::{self, Rgba};
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{PathCmd, Point, Rect};
+use crate::output::svg::{esc, esc_text, js_num};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::theme::{Palette, ThemeName};
 use std::collections::HashMap;
@@ -1979,6 +1980,228 @@ fn style_get<'a>(
         .filter(|v| !v.is_empty())
 }
 
+// ---------------------------------------------------------------------------
+// mermaid's DOM, as its serialiser writes it (see `Element::Markup`)
+// ---------------------------------------------------------------------------
+
+/// A colour as the CSSOM serialises it in an element's `style`: hex and
+/// functional notations as `rgb()` / `rgba()`, keywords unchanged.
+fn css_color(c: &str) -> String {
+    let t = c.trim();
+    let lower = t.to_ascii_lowercase();
+    if t.starts_with('#') || lower.starts_with("rgb") || lower.starts_with("hsl") {
+        return match color::parse(t) {
+            Some(k) if k.a < 1.0 => {
+                format!("rgba({}, {}, {}, {})", k.r, k.g, k.b, js_num(k.a))
+            }
+            Some(k) => format!("rgb({}, {}, {})", k.r, k.g, k.b),
+            None => t.to_string(),
+        };
+    }
+    lower
+}
+
+/// V8's `Math.hypot(a, b)`: scaled by the larger magnitude, squares summed
+/// with Kahan compensation.
+fn js_hypot(a: f64, b: f64) -> f64 {
+    let (a, b) = (a.abs(), b.abs());
+    let max = a.max(b);
+    if max == 0.0 || !max.is_finite() {
+        return max;
+    }
+    let (mut sum, mut comp) = (0.0f64, 0.0f64);
+    for v in [a, b] {
+        let n = v / max;
+        let summand = n * n - comp;
+        let prelim = sum + summand;
+        comp = (prelim - sum) - summand;
+        sum = prelim;
+    }
+    sum.sqrt() * max
+}
+
+/// khroma's 10-place `round`.
+fn khroma_round(v: f64) -> f64 {
+    (v * 1e10).round() / 1e10
+}
+
+/// khroma `transparentize(c, amount)` as the string it returns: an `hsla()`
+/// of the input's own channels for an `hsl()` input (alpha as computed),
+/// otherwise `rgba()` with the alpha rounded.
+fn transparentize(c: &str, amount: f64) -> String {
+    let t = c.trim();
+    if t.to_ascii_lowercase().starts_with("hsl")
+        && let (Some(a), Some(b)) = (t.find('('), t.rfind(')'))
+    {
+        let nums: Vec<f64> = t[a + 1..b]
+            .split([',', ' ', '/'])
+            .filter(|x| !x.is_empty())
+            .filter_map(|x| x.trim_end_matches('%').trim_end_matches("deg").parse().ok())
+            .collect();
+        if nums.len() >= 3 {
+            let alpha = nums.get(3).copied().unwrap_or(1.0) + -amount;
+            return format!(
+                "hsla({}, {}%, {}%, {})",
+                js_num(khroma_round(nums[0])),
+                js_num(khroma_round(nums[1])),
+                js_num(khroma_round(nums[2])),
+                js_num(alpha.clamp(0.0, 1.0))
+            );
+        }
+    }
+    match color::parse(t) {
+        Some(k) => format!(
+            "rgba({}, {}, {}, {})",
+            k.r,
+            k.g,
+            k.b,
+            js_num(khroma_round((k.a + -amount).clamp(0.0, 1.0)))
+        ),
+        None => t.to_string(),
+    }
+}
+
+/// rough.js's `opsToPath` (JS number text, trailing space trimmed).
+fn rough_ops_path(ops: &[crate::rough::Op]) -> String {
+    use crate::rough::Op;
+    let mut s = String::new();
+    for op in ops {
+        match op {
+            Op::Move(d) => s.push_str(&format!("M{} {} ", js_num(d[0]), js_num(d[1]))),
+            Op::BCurveTo(d) => s.push_str(&format!(
+                "C{} {}, {} {}, {} {} ",
+                js_num(d[0]),
+                js_num(d[1]),
+                js_num(d[2]),
+                js_num(d[3]),
+                js_num(d[4]),
+                js_num(d[5])
+            )),
+            Op::LineTo(d) => s.push_str(&format!("L{} {} ", js_num(d[0]), js_num(d[1]))),
+        }
+    }
+    s.trim().to_string()
+}
+
+/// The `<g>` `rough.svg(..)` returns for `d`: one `<path>` per op set, with
+/// the fill and stroke strings the renderer passed to rough.js.
+fn rough_group_markup(d: &crate::rough::Drawable, fill: &str, stroke: &str) -> String {
+    use crate::rough::SetKind;
+    let o = &d.options;
+    let mut out = String::from("<g>");
+    for set in &d.sets {
+        if set.ops.is_empty() {
+            continue;
+        }
+        let path = esc(&rough_ops_path(&set.ops));
+        match set.kind {
+            SetKind::Path => out.push_str(&format!(
+                "<path d=\"{path}\" stroke=\"{}\" stroke-width=\"{}\" fill=\"none\"/>",
+                esc(stroke),
+                js_num(o.stroke_width)
+            )),
+            SetKind::FillPath => out.push_str(&format!(
+                "<path d=\"{path}\" stroke=\"none\" stroke-width=\"0\" fill=\"{}\"{}/>",
+                esc(fill),
+                if matches!(d.shape, "curve" | "polygon") {
+                    " fill-rule=\"evenodd\""
+                } else {
+                    ""
+                }
+            )),
+            SetKind::FillSketch => out.push_str(&format!(
+                "<path d=\"{path}\" stroke=\"{}\" stroke-width=\"{}\" fill=\"none\"/>",
+                esc(fill),
+                js_num(d.fill_weight())
+            )),
+        }
+    }
+    out.push_str("</g>");
+    out
+}
+
+/// venn.js's path data (`arcsToPath`): its commands on lines of their own,
+/// the leading line break dropped as the attribute value reads back.
+fn venn_js_path(cmds: &[PathCmd]) -> String {
+    if cmds.is_empty() {
+        return "M 0 0".into();
+    }
+    let parts: Vec<String> = cmds
+        .iter()
+        .map(|c| match *c {
+            PathCmd::MoveTo(p) => format!("M {} {}", js_num(p.x), js_num(p.y)),
+            PathCmd::MoveBy(p) => format!("m {} {}", js_num(p.x), js_num(p.y)),
+            PathCmd::ArcTo {
+                rx,
+                ry,
+                large,
+                sweep,
+                to,
+                rel,
+            } => format!(
+                "{} {} {} 0 {} {} {} {}",
+                if rel { 'a' } else { 'A' },
+                js_num(rx),
+                js_num(ry),
+                u8::from(large),
+                u8::from(sweep),
+                js_num(to.x),
+                js_num(to.y)
+            ),
+            _ => String::new(),
+        })
+        .collect();
+    parts.join(" \n").replace('\n', "&#10;")
+}
+
+/// A `<text class="label">` as venn.js writes it and mermaid styles it: the
+/// label in one `<tspan>` at the (floored) centre, or bare at the canvas
+/// centre when the area has none. (`getComputedTextLength` is 0 on the
+/// detached tree, so `wrapText` never starts a second line.)
+fn label_markup(
+    label: &str,
+    centre: Option<Point>,
+    canvas: (f64, f64),
+    font_px: &str,
+    fill: &str,
+) -> String {
+    // `split(/\s+/)` joined by single spaces: a leading space is an empty
+    // first word, a trailing one an empty last word that ends the loop.
+    let words = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = if label.starts_with(char::is_whitespace) && !words.is_empty() {
+        format!(" {words}")
+    } else {
+        words
+    };
+    let (x, y, inner) = match centre {
+        Some(c) => {
+            let (x, y) = (js_num(c.x.floor()), js_num(c.y.floor()));
+            let inner = if text.is_empty() {
+                format!("<tspan x=\"{x}\" y=\"{y}\" dy=\"0.35em\"/>")
+            } else {
+                format!(
+                    "<tspan x=\"{x}\" y=\"{y}\" dy=\"0.35em\">{}</tspan>",
+                    esc_text(&text)
+                )
+            };
+            (x, y, inner)
+        }
+        None => (
+            js_num(canvas.0 / 2.0),
+            js_num(canvas.1 / 2.0),
+            esc_text(&text),
+        ),
+    };
+    let head = format!(
+        "<text class=\"label\" text-anchor=\"middle\" dy=\".35em\" x=\"{x}\" y=\"{y}\" style=\"fill: {fill}; font-size: {font_px}px;\""
+    );
+    if inner.is_empty() {
+        format!("{head}/>")
+    } else {
+        format!("{head}>{inner}</text>")
+    }
+}
+
 /// Parse, lay out and draw a `venn` diagram.
 pub fn render(
     body: &str,
@@ -2028,7 +2251,16 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let text_layout = solution.scaled(width, canvas_h, padding);
 
     let mut els = Vec::new();
+    let font_px = js_num(48.0 * scale);
+    let mut title_mk = String::new();
     if let Some(t) = title {
+        title_mk = format!(
+            "<text class=\"venn-title\" font-size=\"{}px\" text-anchor=\"middle\" dominant-baseline=\"middle\" x=\"50%\" y=\"{}\" style=\"fill: {};\">{}</text>",
+            js_num(32.0 * scale),
+            js_num(32.0 * scale),
+            esc(&css_color(title_color.css())),
+            esc_text(t)
+        );
         els.push(Element::classed_text(
             Text::middle(Point::new(width / 2.0, 32.0 * scale), t, 32.0, &title_color),
             "venn-title",
@@ -2038,6 +2270,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let label_font = 48.0 * scale;
     let hand = (cfg.look == crate::config::Look::HandDrawn).then(|| cfg.hand_drawn_seed());
     let mut areas_els = Vec::new();
+    let mut areas_mk = String::new();
     let mut circle_index = 0;
     for (k, d) in data.iter().enumerate() {
         let key = d.sets.join("|");
@@ -2046,9 +2279,12 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             continue;
         }
         let mut group = Vec::new();
+        let mut group_mk = String::new();
+        let mut set_class = String::new();
         let text_fill = if d.sets.len() == 1 {
             let i = circle_index;
             circle_index += 1;
+            set_class = format!(" venn-set-{}", i % 8);
             let base = style_get(&styles, &key, "fill")
                 .map(Color::new)
                 .or_else(|| (!palette.is_empty()).then(|| palette[i % palette.len()].clone()))
@@ -2078,14 +2314,25 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                         stroke_width: stroke_w,
                         ..crate::rough::Options::default()
                     };
-                    group.extend(rough_elements(&crate::rough::circle(
-                        c.x,
-                        c.y,
-                        c.radius * 2.0,
-                        o,
-                    )));
+                    let drawn = crate::rough::circle(c.x, c.y, c.radius * 2.0, o);
+                    group.extend(rough_elements(&drawn));
+                    group_mk.push_str(&rough_group_markup(
+                        &drawn,
+                        &transparentize(base.css(), 0.7),
+                        stroke.css(),
+                    ));
                 }
                 _ => {
+                    group_mk.push_str(&format!(
+                        "<path d=\"{}\" style=\"fill-opacity: {}; fill: {}; stroke: {}; stroke-width: {}; stroke-opacity: 0.95;\"/>",
+                        venn_js_path(&circle_path(&circles[0])),
+                        style_get(&styles, &key, "fill-opacity")
+                            .map_or_else(|| "0.1".to_string(), |v| parse_num(v).map_or_else(|| v.to_string(), js_num)),
+                        esc(&css_color(base.css())),
+                        esc(&css_color(stroke.css())),
+                        style_get(&styles, &key, "stroke-width")
+                            .map_or_else(|| js_num(5.0 * scale), str::to_string),
+                    ));
                     // One path, filled and stroked, as venn.js draws it.
                     let mut paint = Paint::fill(&with_alpha(&base, fill_opacity));
                     paint.stroke = with_alpha(&stroke, 0.95);
@@ -2101,8 +2348,21 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                 Color::new,
             )
         } else {
-            if let Some(fill) = style_get(&styles, &key, "fill") {
-                let path = intersection_path(&circles);
+            let path = intersection_path(&circles);
+            let fill_style = style_get(&styles, &key, "fill");
+            if !(hand.is_some() && fill_style.is_some() && !path.is_empty()) {
+                group_mk.push_str(&format!(
+                    "<path d=\"{}\" style=\"{}\"/>",
+                    venn_js_path(&path),
+                    match (hand.is_some(), fill_style) {
+                        (true, _) => "fill-opacity: 0;".to_string(),
+                        (false, Some(f)) =>
+                            format!("fill-opacity: 1; fill: {};", esc(&css_color(f))),
+                        (false, None) => "fill-opacity: 0; fill: transparent;".to_string(),
+                    }
+                ));
+            }
+            if let Some(fill) = fill_style {
                 match hand {
                     // Under handDrawn: venn.js's path data redrawn by rough.js,
                     // cross-hatched in the fill at 70%, unstroked.
@@ -2118,10 +2378,13 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
                             stroke: "none".into(),
                             ..crate::rough::Options::default()
                         };
-                        group.extend(rough_elements(&crate::rough::path(
-                            &venn_path_data(&path),
-                            o,
-                        )));
+                        let drawn = crate::rough::path(&venn_path_data(&path), o);
+                        group.extend(rough_elements(&drawn));
+                        group_mk.push_str(&rough_group_markup(
+                            &drawn,
+                            &transparentize(fill, 0.3),
+                            "none",
+                        ));
                     }
                     _ if !path.is_empty() => {
                         group.push(Element::path(path, Paint::fill(&Color::new(fill))))
@@ -2136,6 +2399,13 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             .clone()
             .filter(|l| !l.is_empty())
             .or_else(|| (d.sets.len() == 1).then(|| d.sets[0].clone()));
+        group_mk.push_str(&label_markup(
+            label.as_deref().unwrap_or(""),
+            chart.text_centres.get(k).copied().flatten(),
+            (width, canvas_h),
+            &font_px,
+            &esc(&css_color(text_fill.css())),
+        ));
         if let (Some(label), Some(Some(c))) = (label, chart.text_centres.get(k)) {
             // venn.js floors the centre and offsets the baseline by `dy=.35em`.
             group.push(Element::text(Text {
@@ -2159,11 +2429,33 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             "venn-area venn-intersection"
         };
         areas_els.push(Element::group(class, group));
+        areas_mk.push_str(&format!(
+            "<g class=\"{}{set_class}\" data-venn-sets=\"{}\">{group_mk}</g>",
+            class,
+            esc(&d.sets.join("_"))
+        ));
     }
-    let text_nodes = draw_text_nodes(venn, &data, &text_layout, scale, &styles, &set_text, debug);
+    let (text_nodes, text_nodes_mk) =
+        draw_text_nodes(venn, &data, &text_layout, scale, &styles, &set_text, debug);
     if !text_nodes.is_empty() {
         areas_els.push(Element::group("venn-text-nodes", text_nodes));
     }
+    if !venn.texts.is_empty() {
+        areas_mk.push_str(&if text_nodes_mk.is_empty() {
+            "<g class=\"venn-text-nodes\"/>".to_string()
+        } else {
+            format!("<g class=\"venn-text-nodes\">{text_nodes_mk}</g>")
+        });
+    }
+    let group_open = format!("<g transform=\"translate(0, {})\"", js_num(title_height));
+    let markup = format!(
+        "<g/>{title_mk}{group_open}{}",
+        if areas_mk.is_empty() {
+            "/>".to_string()
+        } else {
+            format!(">{areas_mk}</g>")
+        }
+    );
     let shifted: Vec<Element> = areas_els
         .into_iter()
         .map(|e| translate_element(e, title_height))
@@ -2173,7 +2465,10 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     Scene {
         kind: DiagramKind::Venn,
         view_box: Rect::new(0.0, 0.0, width, height),
-        elements: vec![Element::group("venn", els)],
+        elements: vec![Element::Markup {
+            svg: markup,
+            children: vec![Element::group("venn", els)],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -2342,7 +2637,7 @@ fn draw_text_nodes(
     styles: &HashMap<String, Vec<(String, String)>>,
     set_text: &Color,
     debug: bool,
-) -> Vec<Element> {
+) -> (Vec<Element>, String) {
     let mut groups: Vec<(String, Vec<&TextNode>)> = Vec::new();
     for n in &venn.texts {
         let key = n.sets.join("|");
@@ -2355,6 +2650,7 @@ fn draw_text_nodes(
     // The span's `line-height: normal`.
     let line_h = crate::text::normal_line_height(font);
     let mut out = Vec::new();
+    let mut mk = String::new();
     for (key, nodes) in groups {
         // Later areas with the same key win (a Map built in data order).
         let Some(k) = data.iter().rposition(|d| d.sets.join("|") == key) else {
@@ -2377,7 +2673,7 @@ fn draw_text_nodes(
             .fold(f64::INFINITY, f64::min);
         let raw = circles
             .iter()
-            .map(|c| c.radius - dist(*centre, c.center()))
+            .map(|c| c.radius - js_hypot(centre.x - c.center().x, centre.y - c.center().y))
             .fold(f64::INFINITY, f64::min);
         let mut inner = if raw.is_finite() { raw.max(0.0) } else { 0.0 };
         if inner == 0.0 && min_r.is_finite() {
@@ -2399,7 +2695,17 @@ fn draw_text_nodes(
         let cell_w = inner_w / cols as f64;
         let cell_h = inner_h / rows as f64;
         let mut area = Vec::new();
+        let mut area_mk = String::new();
         if debug {
+            area_mk.push_str(&format!(
+                "<circle class=\"venn-text-debug-circle\" cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"none\" stroke=\"purple\" stroke-width=\"{}\" stroke-dasharray=\"{} {}\"/>",
+                js_num(centre.x),
+                js_num(centre.y),
+                js_num(inner),
+                js_num(1.5 * scale),
+                js_num(6.0 * scale),
+                js_num(4.0 * scale)
+            ));
             area.push(Element::shape(
                 Geometry::Circle {
                     c: *centre,
@@ -2414,6 +2720,16 @@ fn draw_text_nodes(
             let x = start_x + cell_w * (col as f64 + 0.5);
             let y = start_y + cell_h * (row as f64 + 0.5);
             if debug {
+                area_mk.push_str(&format!(
+                    "<rect class=\"venn-text-debug-cell\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"none\" stroke=\"teal\" stroke-width=\"{}\" stroke-dasharray=\"{} {}\"/>",
+                    js_num(start_x + cell_w * col as f64),
+                    js_num(start_y + cell_h * row as f64),
+                    js_num(cell_w),
+                    js_num(cell_h),
+                    js_num(scale),
+                    js_num(4.0 * scale),
+                    js_num(3.0 * scale)
+                ));
                 area.push(Element::rect(
                     Rect::new(
                         start_x + cell_w * col as f64,
@@ -2427,6 +2743,18 @@ fn draw_text_nodes(
                 ));
             }
             let label = node.label.clone().unwrap_or_else(|| node.id.clone());
+            let (box_w, box_h) = (cell_w * 0.9, cell_h * 0.9);
+            area_mk.push_str(&format!(
+                "<foreignObject class=\"venn-text-node-fo\" width=\"{}\" height=\"{}\" x=\"{}\" y=\"{}\" overflow=\"visible\"><span class=\"venn-text-node\" xmlns=\"http://www.w3.org/1999/xhtml\" style=\"display: flex; width: 100%; height: 100%; white-space: normal; align-items: center; justify-content: center; text-align: center; overflow-wrap: normal; word-break: normal;{}\">{}</span></foreignObject>",
+                js_num(box_w),
+                js_num(box_h),
+                js_num(x - box_w / 2.0),
+                js_num(y - box_h / 2.0),
+                style_get(styles, &node.id, "color")
+                    .map(|c| format!(" color: {};", esc(&css_color(c))))
+                    .unwrap_or_default(),
+                esc_text(&label)
+            ));
             let lines = crate::diagram::timeline::wrap_text(&label, cell_w * 0.9, font, false);
             let fill =
                 style_get(styles, &node.id, "color").map_or_else(|| set_text.clone(), Color::new);
@@ -2446,8 +2774,12 @@ fn draw_text_nodes(
             ));
         }
         out.push(Element::group("venn-text-area", area));
+        mk.push_str(&format!(
+            "<g class=\"venn-text-area\" font-size=\"{}px\">{area_mk}</g>",
+            js_num(font)
+        ));
     }
-    out
+    (out, mk)
 }
 
 #[cfg(test)]
@@ -2468,9 +2800,9 @@ mod tests {
         fn walk(els: &[Element], out: &mut Vec<String>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } | Element::Translated { children, .. } => {
-                        walk(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Translated { children, .. }
+                    | Element::Markup { children, .. } => walk(children, out),
                     Element::Shape {
                         geom: Geometry::Path(cmds),
                         ..
@@ -2838,7 +3170,9 @@ mod tests {
     fn texts(els: &[Element], out: &mut Vec<Text>) {
         for e in els {
             match e {
-                Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                Element::Group { children, .. }
+                | Element::Rotated { children, .. }
+                | Element::Markup { children, .. } => {
                     texts(children, out);
                 }
                 Element::Text { text, .. } => out.push(text.clone()),
