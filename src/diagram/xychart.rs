@@ -398,6 +398,9 @@ pub struct AxisConfig {
     /// Screen pixels per user unit while mermaid measures texts (see
     /// [`XyConfig::measure_scale`]).
     pub measure_scale: f64,
+    /// Measure and compute as mermaid's JavaScript does (single precision
+    /// text boxes, d3's operation order), for the markup mermaid writes.
+    pub exact: bool,
 }
 
 impl Default for AxisConfig {
@@ -416,6 +419,7 @@ impl Default for AxisConfig {
             axis_line_width: 2.0,
             label_rotation: 0.0,
             measure_scale: 1.0,
+            exact: false,
         }
     }
 }
@@ -445,6 +449,7 @@ impl AxisConfig {
                 0.0
             },
             measure_scale: 1.0,
+            exact: false,
         }
     }
 }
@@ -471,6 +476,8 @@ pub struct XyConfig {
     /// already maps `width` onto the page. With `useMaxWidth` that is mmdc's
     /// 784px container, so a chart wider than it measures its texts shrunk.
     pub measure_scale: f64,
+    /// See [`AxisConfig::exact`].
+    pub exact: bool,
 }
 
 /// The width of the element mmdc renders into: its 800px page less the body's
@@ -495,6 +502,7 @@ impl Default for XyConfig {
             x_axis: AxisConfig::default(),
             y_axis: AxisConfig::default(),
             measure_scale: 1.0,
+            exact: false,
         }
     }
 }
@@ -524,12 +532,21 @@ impl XyConfig {
             x_axis: AxisConfig::from_config(cfg, "xAxis"),
             y_axis: AxisConfig::from_config(cfg, "yAxis"),
             measure_scale: 1.0,
+            exact: false,
         }
         .measured_at(if cfg.use_max_width("xyChart") {
             (CONTAINER_WIDTH / cfg.section_f64(s, "width", d.width)).min(1.0)
         } else {
             1.0
         })
+    }
+
+    /// The config computing as mermaid's JavaScript does.
+    pub fn exact(mut self) -> Self {
+        self.exact = true;
+        self.x_axis.exact = true;
+        self.y_axis.exact = true;
+        self
     }
 
     /// The config measuring texts at `scale` (see [`XyConfig::measure_scale`]).
@@ -846,13 +863,24 @@ pub(crate) fn tspan_height(s: &str, font_size: f64) -> f64 {
 /// tspans' `getBoundingClientRect` (ink boxes rounded out to screen pixels),
 /// divided by the screen CTM's scale: drawn at `font_size · scale` (see
 /// [`XyConfig::measure_scale`]), measured, and scaled back.
-fn max_dimension<S: AsRef<str>>(texts: &[S], font_size: f64, scale: f64) -> (f64, f64) {
+fn max_dimension<S: AsRef<str>>(
+    texts: &[S],
+    font_size: f64,
+    scale: f64,
+    exact: bool,
+) -> (f64, f64) {
     let fs = font_size * scale;
     texts.iter().fold((0.0, 0.0), |(w, h), t| {
         let t = t.as_ref();
+        let mut th = tspan_height(t, fs);
+        if exact && !t.is_empty() && fs == 16.0 {
+            // Chromium's page-space rect of a 16px tspan comes out one
+            // single-precision step (2^-19) taller than its whole pixels.
+            th += f64::from(2.0f32.powi(-19));
+        }
         (
             f64::max(w, crate::text::svg_bbox_width(t, fs) / scale),
-            f64::max(h, tspan_height(t, fs) / scale),
+            f64::max(h, th / scale),
         )
     })
 }
@@ -984,6 +1012,8 @@ pub(crate) fn d3_ticks(start: f64, stop: f64, count: f64) -> Vec<f64> {
         .collect()
 }
 
+mod markup;
+
 // --- Axes ------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1058,7 +1088,11 @@ impl Axis {
             show_axis_line: false,
             outer_padding: 0.0,
             title_text_height: 0.0,
-            rot: cfg.label_rotation.to_radians(),
+            rot: if cfg.exact {
+                cfg.label_rotation * std::f64::consts::PI / 180.0
+            } else {
+                cfg.label_rotation.to_radians()
+            },
         }
     }
 
@@ -1148,6 +1182,24 @@ impl Axis {
         let Some((d0, d1)) = self.linear_domain() else {
             return self.scale_cat(&js_num(v));
         };
+        if self.cfg.exact {
+            // d3's `bimap`: normalise against the lower end of the domain and
+            // interpolate from the range end it maps to.
+            let (lo, hi, a, b) = if d1 < d0 {
+                (d1, d0, r1, r0)
+            } else {
+                (d0, d1, r0, r1)
+            };
+            let span = hi - lo;
+            let t = if span != 0.0 {
+                (v - lo) / span
+            } else if span.is_nan() {
+                f64::NAN
+            } else {
+                0.5
+            };
+            return a * (1.0 - t) + b * t;
+        }
         let span = d1 - d0;
         let t = if span != 0.0 && span.is_finite() {
             (v - d0) / span
@@ -1174,6 +1226,7 @@ impl Axis {
             &self.tick_labels(),
             self.cfg.label_font,
             self.cfg.measure_scale,
+            self.cfg.exact,
         )
     }
 
@@ -1209,7 +1262,7 @@ impl Axis {
             avail -= c.tick_length;
         }
         if c.show_title && !self.title.is_empty() {
-            let (_, th) = max_dimension(&[&self.title], c.title_font, c.measure_scale);
+            let (_, th) = max_dimension(&[&self.title], c.title_font, c.measure_scale, c.exact);
             let need = th + c.title_padding * 2.0;
             self.title_text_height = th;
             if need <= avail {
@@ -1242,7 +1295,7 @@ impl Axis {
             avail -= c.tick_length;
         }
         if c.show_title && !self.title.is_empty() {
-            let (_, th) = max_dimension(&[&self.title], c.title_font, c.measure_scale);
+            let (_, th) = max_dimension(&[&self.title], c.title_font, c.measure_scale, c.exact);
             let need = th + c.title_padding * 2.0;
             self.title_text_height = th;
             if need <= avail {
@@ -1516,7 +1569,7 @@ struct ChartTitle {
 
 impl ChartTitle {
     fn calculate_space(&mut self, data: &ChartData, c: &XyConfig, aw: f64, ah: f64) -> (f64, f64) {
-        let (tw, th) = max_dimension(&[&data.title], c.title_font, c.measure_scale);
+        let (tw, th) = max_dimension(&[&data.title], c.title_font, c.measure_scale, c.exact);
         let need_h = th + 2.0 * c.title_padding;
         if need_h <= ah && c.show_title && !data.title.is_empty() {
             self.bbox.w = tw.max(aw);
@@ -1567,7 +1620,7 @@ impl Legend {
             .iter()
             .map(|&i| data.plots[i].title.as_str())
             .collect();
-        let (tw, _) = max_dimension(&titles, fs, c.measure_scale);
+        let (tw, _) = max_dimension(&titles, fs, c.measure_scale, c.exact);
         let n = self.visible.len() as f64;
         let w = c.legend_padding * 2.0
             + fs * LEGEND_MARKER_TO_FONT_RATIO
@@ -1731,22 +1784,21 @@ pub fn layout(data: &ChartData, c: &XyConfig, theme: &XyTheme, horizontal: bool)
 
 // --- Plots -----------------------------------------------------------------
 
-/// `xychartRenderer`'s data labels for one bar plot (values of the first plot,
-/// as mermaid does).
-fn bar_data_labels(
-    rects: &[(Rect, usize)],
-    labels: &[Option<f64>],
-    c: &XyConfig,
-    theme: &XyTheme,
-    horizontal: bool,
-) -> Vec<Element> {
-    const CHAR_W: f64 = 0.7;
-    const MARGIN: f64 = 10.0;
-    let valid: Vec<(Rect, String)> = rects
+/// The bars that get a data label (non-empty ones with a value of the first
+/// plot at their index) and the label text.
+fn valid_labels(rects: &[(Rect, usize)], labels: &[Option<f64>]) -> Vec<(Rect, String)> {
+    rects
         .iter()
         .filter(|(r, _)| r.w > 0.0 && r.h > 0.0)
         .filter_map(|(r, i)| Some((*r, js_num(labels.get(*i).copied().flatten()?))))
-        .collect();
+        .collect()
+}
+
+/// The one font size `xychartRenderer` picks for all of a plot's data labels:
+/// the smallest each bar's label fits at, floored.
+fn uniform_font_size(valid: &[(Rect, String)], horizontal: bool) -> f64 {
+    const CHAR_W: f64 = 0.7;
+    const MARGIN: f64 = 10.0;
     let len = |s: &str| s.encode_utf16().count() as f64;
     let sizes = valid.iter().map(|(r, s)| {
         let n = len(s);
@@ -1769,7 +1821,21 @@ fn bar_data_labels(
             fs
         }
     });
-    let fs = sizes.fold(f64::INFINITY, f64::min).floor();
+    sizes.fold(f64::INFINITY, f64::min).floor()
+}
+
+/// `xychartRenderer`'s data labels for one bar plot (values of the first plot,
+/// as mermaid does).
+fn bar_data_labels(
+    rects: &[(Rect, usize)],
+    labels: &[Option<f64>],
+    c: &XyConfig,
+    theme: &XyTheme,
+    horizontal: bool,
+) -> Vec<Element> {
+    const MARGIN: f64 = 10.0;
+    let valid = valid_labels(rects, labels);
+    let fs = uniform_font_size(&valid, horizontal);
     if !(fs > 0.0 && fs.is_finite()) {
         return Vec::new();
     }
@@ -1942,6 +2008,11 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, theme: &XyTheme, font_family: &str) 
     let horizontal = chart.orientation == Orientation::Horizontal;
     let data = chart_data(chart, &theme.plot_colors);
     let l = layout(&data, xc, theme, horizontal);
+    let svg = {
+        let exact = xc.clone().exact();
+        let l = layout(&data, &exact, theme, horizontal);
+        markup::markup(&data, &l, &exact, theme, horizontal)
+    };
     let mut els = vec![Element::classed_shape(
         crate::scene::Geometry::Rect {
             rect: Rect::new(0.0, 0.0, xc.width, xc.height),
@@ -1976,7 +2047,11 @@ pub fn draw(chart: &XyChart, xc: &XyConfig, theme: &XyTheme, font_family: &str) 
     Scene {
         kind: DiagramKind::XyChart,
         view_box: Rect::new(0.0, 0.0, xc.width, xc.height),
-        elements: vec![Element::group("main", els)],
+        elements: vec![Element::Markup {
+            svg,
+            svg_view_box: None,
+            children: vec![Element::group("main", els)],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: font_family.to_string(),
@@ -2208,7 +2283,9 @@ mod tests {
     fn bar_groups(els: &[Element]) -> Vec<(String, Vec<Rect>)> {
         let mut out = Vec::new();
         for e in els {
-            if let Element::Group {
+            if let Element::Markup { children, .. } = e {
+                out.extend(bar_groups(children));
+            } else if let Element::Group {
                 class, children, ..
             } = e
             {
@@ -2343,7 +2420,9 @@ mod tests {
         let mut out = Vec::new();
         for e in els {
             match e {
-                Element::Group { children, .. } => out.extend(rotated_texts(children)),
+                Element::Group { children, .. } | Element::Markup { children, .. } => {
+                    out.extend(rotated_texts(children))
+                }
                 Element::Rotated {
                     deg,
                     about,
