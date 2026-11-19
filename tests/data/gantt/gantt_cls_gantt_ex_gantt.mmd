@@ -1,0 +1,27 @@
+gantt
+    title Product launch plan
+    dateFormat YYYY-MM-DD
+    axisFormat %b %e
+    excludes weekends, 2024-01-15
+    %% todayMarker is accepted but never drawn (output must be deterministic)
+    todayMarker off
+
+    section Research
+    Market analysis        :done, res1, 2024-01-02, 5d
+    User interviews        :done, res2, after res1, 4d
+    Competitor teardown    :active, res3, 2024-01-08, 2024-01-19
+
+    section Design
+    Wireframes             :crit, des1, after res2, 6d
+    Visual design          :des2, after des1, 1w
+    Design review          :milestone, m1, after des2, 0d
+
+    section Build
+    Backend API            :crit, active, dev1, 2024-01-22, 12d
+    Frontend               :dev2, after des2, 10d
+    Integration            :dev3, after dev1 dev2, 3d
+    Docs                   :doc1, 2024-01-25, until rel
+
+    section Launch
+    Release                :milestone, crit, rel, after dev3, 0d
+    Code freeze            :vert, v1, 2024-02-05, 0d
