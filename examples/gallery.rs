@@ -64,11 +64,14 @@ fn main() {
             }
         };
         let took = t.elapsed();
-        std::fs::write(
-            out_dir.join(format!("{name}.svg")),
-            output::encode_svg(&rendered, &enc),
-        )
-        .expect("write svg");
+        // The SVG is written as the CLI writes it: every number as JavaScript
+        // prints it (render and encode both inside `with_js_numbers`).
+        let svg = output::svg::with_js_numbers(|| {
+            render::render_with_env(&source, &cfg, &env)
+                .map(|r| output::encode_svg(&r, &enc))
+                .expect("rendered once already")
+        });
+        std::fs::write(out_dir.join(format!("{name}.svg")), svg).expect("write svg");
         #[cfg(feature = "png")]
         {
             let png = output::encode_png(&rendered, &enc, &rast).expect("png");
