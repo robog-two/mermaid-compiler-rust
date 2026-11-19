@@ -150,6 +150,21 @@ pub fn used(scene: &Scene) -> Used {
     let mut used = Used::default();
     let mut texts = Used::default();
     walk(&scene.elements, &scene.font_family, &mut used);
+    // A journey's task and section labels are `<text>` in the task font (Open
+    // Sans by default), which only the markup records.
+    if scene.kind == DiagramKind::Journey {
+        for el in &scene.elements {
+            if let Element::Markup { svg, .. } = el {
+                for part in svg.split("<text ").skip(1) {
+                    let tag = part.split('>').next().unwrap_or("").replace("&quot;", "\"");
+                    if let Some(at) = tag.find("font-family: ") {
+                        let v = tag[at + "font-family: ".len()..].split(';').next();
+                        note_family(&mut used, v.unwrap_or(""));
+                    }
+                }
+            }
+        }
+    }
     // A flowchart's nodes have HTML labels even when empty (`A@{ shape: sm-circ }`),
     // and those carry the root family.
     if used == texts && scene.kind == DiagramKind::Flowchart && !scene.elements.is_empty() {

@@ -1,0 +1,209 @@
+<svg id="my-svg" width="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" style="max-width: 1700px; background-color: white;" viewBox="0 -25 1700 540" preserveAspectRatio="xMinYMin meet" height="565" role="graphics-document document" aria-roledescription="journey"><style>#my-svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;fill:#333;}@keyframes edge-animation-frame{from{stroke-dashoffset:0;}}@keyframes dash{to{stroke-dashoffset:0;}}#my-svg .edge-animation-slow{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 50s linear infinite;stroke-linecap:round;}#my-svg .edge-animation-fast{stroke-dasharray:9,5!important;stroke-dashoffset:900;animation:dash 20s linear infinite;stroke-linecap:round;}#my-svg .error-icon{fill:#552222;}#my-svg .error-text{fill:#552222;stroke:#552222;}#my-svg .edge-thickness-normal{stroke-width:1px;}#my-svg .edge-thickness-thick{stroke-width:3.5px;}#my-svg .edge-pattern-solid{stroke-dasharray:0;}#my-svg .edge-thickness-invisible{stroke-width:0;fill:none;}#my-svg .edge-pattern-dashed{stroke-dasharray:3;}#my-svg .edge-pattern-dotted{stroke-dasharray:2;}#my-svg .marker{fill:#333333;stroke:#333333;}#my-svg .marker.cross{stroke:#333333;}#my-svg svg{font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:16px;}#my-svg p{margin:0;}#my-svg .label{font-family:"trebuchet ms",verdana,arial,sans-serif;color:#333;}#my-svg .mouth{stroke:#666;}#my-svg line{stroke:#333;}#my-svg .legend{fill:#333;font-family:"trebuchet ms",verdana,arial,sans-serif;}#my-svg .label text{fill:#333;}#my-svg .label{color:#333;}#my-svg .face{fill:#FFF8DC;stroke:#999;}#my-svg .node rect,#my-svg .node circle,#my-svg .node ellipse,#my-svg .node polygon,#my-svg .node path{fill:#ECECFF;stroke:#9370DB;stroke-width:1px;}#my-svg .node .label{text-align:center;}#my-svg .node.clickable{cursor:pointer;}#my-svg .arrowheadPath{fill:#333333;}#my-svg .edgePaths .path{stroke:#333333;stroke-width:1.5px;}#my-svg .flowchart-link{stroke:#333333;fill:none;}#my-svg .edgeLabel{background-color:rgba(232,232,232, 0.8);text-align:center;}#my-svg .edgeLabel rect{opacity:0.5;}#my-svg .cluster text{fill:#333;}#my-svg div.mermaidTooltip{position:absolute;text-align:center;max-width:200px;padding:2px;font-family:"trebuchet ms",verdana,arial,sans-serif;font-size:12px;background:hsl(80, 100%, 96.2745098039%);border:1px solid #aaaa33;border-radius:2px;pointer-events:none;z-index:100;}#my-svg .task-type-0,#my-svg .section-type-0{fill:#ECECFF;}#my-svg .task-type-1,#my-svg .section-type-1{fill:#ffffde;}#my-svg .task-type-2,#my-svg .section-type-2{fill:hsl(304, 100%, 96.2745098039%);}#my-svg .task-type-3,#my-svg .section-type-3{fill:hsl(124, 100%, 93.5294117647%);}#my-svg .task-type-4,#my-svg .section-type-4{fill:hsl(176, 100%, 96.2745098039%);}#my-svg .task-type-5,#my-svg .section-type-5{fill:hsl(-4, 100%, 93.5294117647%);}#my-svg .task-type-6,#my-svg .section-type-6{fill:hsl(8, 100%, 96.2745098039%);}#my-svg .task-type-7,#my-svg .section-type-7{fill:hsl(188, 100%, 93.5294117647%);}#my-svg .label-icon{display:inline-block;height:1em;overflow:visible;vertical-align:-0.125em;}#my-svg .node .label-icon path{fill:currentColor;stroke:revert;stroke-width:revert;}#my-svg .node .neo-node{stroke:#9370DB;}#my-svg [data-look="neo"].node rect,#my-svg [data-look="neo"].cluster rect,#my-svg [data-look="neo"].node polygon{stroke:#9370DB;filter:drop-shadow(1px 2px 2px rgba(185, 185, 185, 1));}#my-svg [data-look="neo"].swimlane.cluster rect{filter:none;}#my-svg [data-look="neo"].node path{stroke:#9370DB;stroke-width:1px;}#my-svg [data-look="neo"].node .outer-path{filter:drop-shadow(1px 2px 2px rgba(185, 185, 185, 1));}#my-svg [data-look="neo"].node .neo-line path{stroke:#9370DB;filter:none;}#my-svg [data-look="neo"].node circle{stroke:#9370DB;filter:drop-shadow(1px 2px 2px rgba(185, 185, 185, 1));}#my-svg [data-look="neo"].node circle .state-start{fill:#000000;}#my-svg [data-look="neo"].icon-shape .icon{fill:#9370DB;filter:drop-shadow(1px 2px 2px rgba(185, 185, 185, 1));}#my-svg [data-look="neo"].icon-shape .icon-neo path{stroke:#9370DB;filter:drop-shadow(1px 2px 2px rgba(185, 185, 185, 1));}#my-svg :root{--mermaid-font-family:"trebuchet ms",verdana,arial,sans-serif;}</style><style>/* Copyright 2020 The Open Sans Project Authors (https://github.com/googlefonts/opensans) OpenSans-Italic[wdth,wght].ttf: Copyright 2020 The Open Sans Project Authors (https://github.com/googlefonts/opensans)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+http://scripts.sil.org/OFL
+
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded,
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION &amp; CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
+ */
+
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+460-52F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F; }
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+301, U+400-45F, U+490-491, U+4B0-4B1, U+2116; }
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+1F00-1FFF; }
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+370-377, U+37A-37F, U+384-38A, U+38C, U+38E-3A1, U+3A3-3FF; }
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+307-308, U+590-5FF, U+200C-2010, U+20AA, U+25CC, U+FB1D-FB4F; }
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+302-303, U+305, U+307-308, U+310, U+312, U+315, U+31A, U+326-327, U+32C, U+32F-330, U+332-333, U+338, U+33A, U+346, U+34D, U+391-3A1, U+3A3-3A9, U+3B1-3C9, U+3D1, U+3D5-3D6, U+3F0-3F1, U+3F4-3F5, U+2016-2017, U+2034-2038, U+203C, U+2040, U+2043, U+2047, U+2050, U+2057, U+205F, U+2070-2071, U+2074-208E, U+2090-209C, U+20D0-20DC, U+20E1, U+20E5-20EF, U+2100-2112, U+2114-2115, U+2117-2121, U+2123-214F, U+2190, U+2192, U+2194-21AE, U+21B0-21E5, U+21F1-21F2, U+21F4-2211, U+2213-2214, U+2216-22FF, U+2308-230B, U+2310, U+2319, U+231C-2321, U+2336-237A, U+237C, U+2395, U+239B-23B7, U+23D0, U+23DC-23E1, U+2474-2475, U+25AF, U+25B3, U+25B7, U+25BD, U+25C1, U+25CA, U+25CC, U+25FB, U+266D-266F, U+27C0-27FF, U+2900-2AFF, U+2B0E-2B11, U+2B30-2B4C, U+2BFE, U+3030, U+FF5B, U+FF5D, U+1D400-1D7FF, U+1EE00-1EEFF; }
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+1-C, U+E-1F, U+7F-9F, U+20DD-20E0, U+20E2-20E4, U+2150-218F, U+2190, U+2192, U+2194-2199, U+21AF, U+21E6-21F0, U+21F3, U+2218-2219, U+2299, U+22C4-22C6, U+2300-243F, U+2440-244A, U+2460-24FF, U+25A0-27BF, U+2800-28FF, U+2921-2922, U+2981, U+29BF, U+29EB, U+2B00-2BFF, U+4DC0-4DFF, U+FFF9-FFFB, U+10140-1018E, U+10190-1019C, U+101A0, U+101D0-101FD, U+102E0-102FB, U+10E60-10E7E, U+1D2C0-1D2D3, U+1D2E0-1D37F, U+1F000-1F0FF, U+1F100-1F1AD, U+1F1E6-1F1FF, U+1F30D-1F30F, U+1F315, U+1F31C, U+1F31E, U+1F320-1F32C, U+1F336, U+1F378, U+1F37D, U+1F382, U+1F393-1F39F, U+1F3A7-1F3A8, U+1F3AC-1F3AF, U+1F3C2, U+1F3C4-1F3C6, U+1F3CA-1F3CE, U+1F3D4-1F3E0, U+1F3ED, U+1F3F1-1F3F3, U+1F3F5-1F3F7, U+1F408, U+1F415, U+1F41F, U+1F426, U+1F43F, U+1F441-1F442, U+1F444, U+1F446-1F449, U+1F44C-1F44E, U+1F453, U+1F46A, U+1F47D, U+1F4A3, U+1F4B0, U+1F4B3, U+1F4B9, U+1F4BB, U+1F4BF, U+1F4C8-1F4CB, U+1F4D6, U+1F4DA, U+1F4DF, U+1F4E3-1F4E6, U+1F4EA-1F4ED, U+1F4F7, U+1F4F9-1F4FB, U+1F4FD-1F4FE, U+1F503, U+1F507-1F50B, U+1F50D, U+1F512-1F513, U+1F53E-1F54A, U+1F54F-1F5FA, U+1F610, U+1F650-1F67F, U+1F687, U+1F68D, U+1F691, U+1F694, U+1F698, U+1F6AD, U+1F6B2, U+1F6B9-1F6BA, U+1F6BC, U+1F6C6-1F6CF, U+1F6D3-1F6D7, U+1F6E0-1F6EA, U+1F6F0-1F6F3, U+1F6F7-1F6FC, U+1F700-1F7FF, U+1F800-1F80B, U+1F810-1F847, U+1F850-1F859, U+1F860-1F887, U+1F890-1F8AD, U+1F8B0-1F8BB, U+1F8C0-1F8C1, U+1F900-1F90B, U+1F93B, U+1F946, U+1F984, U+1F996, U+1F9E9, U+1FA00-1FA6F, U+1FA70-1FA7C, U+1FA80-1FA89, U+1FA8F-1FAC6, U+1FACE-1FADC, U+1FADF-1FAE9, U+1FAF0-1FAF8, U+1FB00-1FBFF; }
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+102-103, U+110-111, U+128-129, U+168-169, U+1A0-1A1, U+1AF-1B0, U+300-301, U+303-304, U+308-309, U+323, U+329, U+1EA0-1EF9, U+20AB; }
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+100-2BA, U+2BD-2C5, U+2C7-2CC, U+2CE-2D7, U+2DD-2FF, U+304, U+308, U+329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Open Sans"; font-style: italic; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+0-FF, U+131, U+152-153, U+2BB-2BC, U+2C6, U+2DA, U+2DC, U+304, U+308, U+329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }</style><style>/* Copyright 2020 The Open Sans Project Authors (https://github.com/googlefonts/opensans) OpenSans-Italic[wdth,wght].ttf: Copyright 2020 The Open Sans Project Authors (https://github.com/googlefonts/opensans)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+http://scripts.sil.org/OFL
+
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded,
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION &amp; CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
+ */
+
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+460-52F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F; }
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+301, U+400-45F, U+490-491, U+4B0-4B1, U+2116; }
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+1F00-1FFF; }
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+370-377, U+37A-37F, U+384-38A, U+38C, U+38E-3A1, U+3A3-3FF; }
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+307-308, U+590-5FF, U+200C-2010, U+20AA, U+25CC, U+FB1D-FB4F; }
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+302-303, U+305, U+307-308, U+310, U+312, U+315, U+31A, U+326-327, U+32C, U+32F-330, U+332-333, U+338, U+33A, U+346, U+34D, U+391-3A1, U+3A3-3A9, U+3B1-3C9, U+3D1, U+3D5-3D6, U+3F0-3F1, U+3F4-3F5, U+2016-2017, U+2034-2038, U+203C, U+2040, U+2043, U+2047, U+2050, U+2057, U+205F, U+2070-2071, U+2074-208E, U+2090-209C, U+20D0-20DC, U+20E1, U+20E5-20EF, U+2100-2112, U+2114-2115, U+2117-2121, U+2123-214F, U+2190, U+2192, U+2194-21AE, U+21B0-21E5, U+21F1-21F2, U+21F4-2211, U+2213-2214, U+2216-22FF, U+2308-230B, U+2310, U+2319, U+231C-2321, U+2336-237A, U+237C, U+2395, U+239B-23B7, U+23D0, U+23DC-23E1, U+2474-2475, U+25AF, U+25B3, U+25B7, U+25BD, U+25C1, U+25CA, U+25CC, U+25FB, U+266D-266F, U+27C0-27FF, U+2900-2AFF, U+2B0E-2B11, U+2B30-2B4C, U+2BFE, U+3030, U+FF5B, U+FF5D, U+1D400-1D7FF, U+1EE00-1EEFF; }
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+1-C, U+E-1F, U+7F-9F, U+20DD-20E0, U+20E2-20E4, U+2150-218F, U+2190, U+2192, U+2194-2199, U+21AF, U+21E6-21F0, U+21F3, U+2218-2219, U+2299, U+22C4-22C6, U+2300-243F, U+2440-244A, U+2460-24FF, U+25A0-27BF, U+2800-28FF, U+2921-2922, U+2981, U+29BF, U+29EB, U+2B00-2BFF, U+4DC0-4DFF, U+FFF9-FFFB, U+10140-1018E, U+10190-1019C, U+101A0, U+101D0-101FD, U+102E0-102FB, U+10E60-10E7E, U+1D2C0-1D2D3, U+1D2E0-1D37F, U+1F000-1F0FF, U+1F100-1F1AD, U+1F1E6-1F1FF, U+1F30D-1F30F, U+1F315, U+1F31C, U+1F31E, U+1F320-1F32C, U+1F336, U+1F378, U+1F37D, U+1F382, U+1F393-1F39F, U+1F3A7-1F3A8, U+1F3AC-1F3AF, U+1F3C2, U+1F3C4-1F3C6, U+1F3CA-1F3CE, U+1F3D4-1F3E0, U+1F3ED, U+1F3F1-1F3F3, U+1F3F5-1F3F7, U+1F408, U+1F415, U+1F41F, U+1F426, U+1F43F, U+1F441-1F442, U+1F444, U+1F446-1F449, U+1F44C-1F44E, U+1F453, U+1F46A, U+1F47D, U+1F4A3, U+1F4B0, U+1F4B3, U+1F4B9, U+1F4BB, U+1F4BF, U+1F4C8-1F4CB, U+1F4D6, U+1F4DA, U+1F4DF, U+1F4E3-1F4E6, U+1F4EA-1F4ED, U+1F4F7, U+1F4F9-1F4FB, U+1F4FD-1F4FE, U+1F503, U+1F507-1F50B, U+1F50D, U+1F512-1F513, U+1F53E-1F54A, U+1F54F-1F5FA, U+1F610, U+1F650-1F67F, U+1F687, U+1F68D, U+1F691, U+1F694, U+1F698, U+1F6AD, U+1F6B2, U+1F6B9-1F6BA, U+1F6BC, U+1F6C6-1F6CF, U+1F6D3-1F6D7, U+1F6E0-1F6EA, U+1F6F0-1F6F3, U+1F6F7-1F6FC, U+1F700-1F7FF, U+1F800-1F80B, U+1F810-1F847, U+1F850-1F859, U+1F860-1F887, U+1F890-1F8AD, U+1F8B0-1F8BB, U+1F8C0-1F8C1, U+1F900-1F90B, U+1F93B, U+1F946, U+1F984, U+1F996, U+1F9E9, U+1FA00-1FA6F, U+1FA70-1FA7C, U+1FA80-1FA89, U+1FA8F-1FAC6, U+1FACE-1FADC, U+1FADF-1FAE9, U+1FAF0-1FAF8, U+1FB00-1FBFF; }
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+102-103, U+110-111, U+128-129, U+168-169, U+1A0-1A1, U+1AF-1B0, U+300-301, U+303-304, U+308-309, U+323, U+329, U+1EA0-1EF9, U+20AB; }
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+100-2BA, U+2BD-2C5, U+2C7-2CC, U+2CE-2D7, U+2DD-2FF, U+304, U+308, U+329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF; }
+@font-face { font-family: "Open Sans"; font-style: normal; font-display: swap; font-weight: 400; src: url("data:font/woff2;base64,FONTDATA") format("woff2"); unicode-range: U+0-FF, U+131, U+152-153, U+2BB-2BC, U+2C6, U+2DA, U+2DC, U+304, U+308, U+329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }</style><g/><defs><marker id="my-svg-arrowhead" refX="5" refY="2" markerWidth="6" markerHeight="4" orient="auto"><path d="M 0,0 V 4 L6,2 Z"/></marker></defs><circle cx="20" cy="60" class="actor-0" fill="#8FBC8F" stroke="#000" r="7"/><text x="40" y="67" class="legend"><tspan x="50">Cat</tspan></text><circle cx="20" cy="80" class="actor-1" fill="#7CFC00" stroke="#000" r="7"/><text x="40" y="87" class="legend"><tspan x="50">Colleague</tspan></text><circle cx="20" cy="100" class="actor-2" fill="#00FFFF" stroke="#000" r="7"/><text x="40" y="107" class="legend"><tspan x="50">Me</tspan></text><g><rect x="150" y="50" fill="#191970" stroke="#666" width="550" height="50" rx="3" ry="3" class="journey-section section-type-0"/><switch><foreignObject x="150" y="50" width="550" height="50"><div class="journey-section section-type-0" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Go to work</div></div></foreignObject><text x="425" y="75" dominant-baseline="central" alignment-baseline="central" class="journey-section section-type-0" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="425" dy="0">Go to work</tspan></text></switch></g><g><line id="my-svg-task0" x1="225" y1="110" x2="225" y2="450" class="task-line" stroke-width="1px" stroke-dasharray="4 2" stroke="#666"/><circle cx="225" cy="300" class="face" r="15" stroke-width="2" overflow="visible"/><g><circle cx="220" cy="295" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><circle cx="230" cy="295" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><path class="mouth" d="M7.5,0A7.5,7.5,0,1,1,-7.5,0L-6.818,0A6.818,6.818,0,1,0,6.818,0Z" transform="translate(225,302)"/></g><rect x="150" y="110" fill="#191970" stroke="#666" width="150" height="50" rx="3" ry="3" class="task task-type-0"/><circle cx="164" cy="110" class="actor-2" fill="#00FFFF" stroke="#000" r="7"><title>Me</title></circle><switch><foreignObject x="150" y="110" width="150" height="50"><div class="task" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Make tea</div></div></foreignObject><text x="225" y="135" dominant-baseline="central" alignment-baseline="central" class="task" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="225" dy="0">Make tea</tspan></text></switch></g><g><line id="my-svg-task1" x1="425" y1="110" x2="425" y2="450" class="task-line" stroke-width="1px" stroke-dasharray="4 2" stroke="#666"/><circle cx="425" cy="360" class="face" r="15" stroke-width="2" overflow="visible"/><g><circle cx="420" cy="355" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><circle cx="430" cy="355" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><line class="mouth" stroke="#666" x1="420" y1="367" x2="430" y2="367" stroke-width="1px"/></g><rect x="350" y="110" fill="#191970" stroke="#666" width="150" height="50" rx="3" ry="3" class="task task-type-0"/><circle cx="364" cy="110" class="actor-2" fill="#00FFFF" stroke="#000" r="7"><title>Me</title></circle><switch><foreignObject x="350" y="110" width="150" height="50"><div class="task" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Go upstairs</div></div></foreignObject><text x="425" y="135" dominant-baseline="central" alignment-baseline="central" class="task" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="425" dy="0">Go upstairs</tspan></text></switch></g><g><line id="my-svg-task2" x1="625" y1="110" x2="625" y2="450" class="task-line" stroke-width="1px" stroke-dasharray="4 2" stroke="#666"/><circle cx="625" cy="420" class="face" r="15" stroke-width="2" overflow="visible"/><g><circle cx="620" cy="415" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><circle cx="630" cy="415" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><path class="mouth" d="M-7.5,0A7.5,7.5,0,1,1,7.5,0L6.818,0A6.818,6.818,0,1,0,-6.818,0Z" transform="translate(625,427)"/></g><rect x="550" y="110" fill="#191970" stroke="#666" width="150" height="50" rx="3" ry="3" class="task task-type-0"/><circle cx="564" cy="110" class="actor-2" fill="#00FFFF" stroke="#000" r="7"><title>Me</title></circle><circle cx="574" cy="110" class="actor-0" fill="#8FBC8F" stroke="#000" r="7"><title>Cat</title></circle><switch><foreignObject x="550" y="110" width="150" height="50"><div class="task" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Do work</div></div></foreignObject><text x="625" y="135" dominant-baseline="central" alignment-baseline="central" class="task" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="625" dy="0">Do work</tspan></text></switch></g><g><rect x="750" y="50" fill="#8B008B" stroke="#666" width="350" height="50" rx="3" ry="3" class="journey-section section-type-1"/><switch><foreignObject x="750" y="50" width="350" height="50"><div class="journey-section section-type-1" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Lunch</div></div></foreignObject><text x="925" y="75" dominant-baseline="central" alignment-baseline="central" class="journey-section section-type-1" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="925" dy="0">Lunch</tspan></text></switch></g><g><line id="my-svg-task3" x1="825" y1="110" x2="825" y2="450" class="task-line" stroke-width="1px" stroke-dasharray="4 2" stroke="#666"/><circle cx="825" cy="390" class="face" r="15" stroke-width="2" overflow="visible"/><g><circle cx="820" cy="385" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><circle cx="830" cy="385" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><path class="mouth" d="M-7.5,0A7.5,7.5,0,1,1,7.5,0L6.818,0A6.818,6.818,0,1,0,-6.818,0Z" transform="translate(825,397)"/></g><rect x="750" y="110" fill="#8B008B" stroke="#666" width="150" height="50" rx="3" ry="3" class="task task-type-1"/><circle cx="764" cy="110" class="actor-2" fill="#00FFFF" stroke="#000" r="7"><title>Me</title></circle><circle cx="774" cy="110" class="actor-1" fill="#7CFC00" stroke="#000" r="7"><title>Colleague</title></circle><switch><foreignObject x="750" y="110" width="150" height="50"><div class="task" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Find a table in the crowded canteen</div></div></foreignObject><text x="825" y="135" dominant-baseline="central" alignment-baseline="central" class="task" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="825" dy="0">Find a table in the crowded canteen</tspan></text></switch></g><g><line id="my-svg-task4" x1="1025" y1="110" x2="1025" y2="450" class="task-line" stroke-width="1px" stroke-dasharray="4 2" stroke="#666"/><circle cx="1025" cy="330" class="face" r="15" stroke-width="2" overflow="visible"/><g><circle cx="1020" cy="325" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><circle cx="1030" cy="325" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><path class="mouth" d="M7.5,0A7.5,7.5,0,1,1,-7.5,0L-6.818,0A6.818,6.818,0,1,0,6.818,0Z" transform="translate(1025,332)"/></g><rect x="950" y="110" fill="#8B008B" stroke="#666" width="150" height="50" rx="3" ry="3" class="task task-type-1"/><circle cx="964" cy="110" class="actor-2" fill="#00FFFF" stroke="#000" r="7"><title>Me</title></circle><circle cx="974" cy="110" class="actor-1" fill="#7CFC00" stroke="#000" r="7"><title>Colleague</title></circle><circle cx="984" cy="110" class="actor-0" fill="#8FBC8F" stroke="#000" r="7"><title>Cat</title></circle><switch><foreignObject x="950" y="110" width="150" height="50"><div class="task" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Eat</div></div></foreignObject><text x="1025" y="135" dominant-baseline="central" alignment-baseline="central" class="task" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="1025" dy="0">Eat</tspan></text></switch></g><g><rect x="1150" y="50" fill="#4B0082" stroke="#666" width="350" height="50" rx="3" ry="3" class="journey-section section-type-2"/><switch><foreignObject x="1150" y="50" width="350" height="50"><div class="journey-section section-type-2" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Go home</div></div></foreignObject><text x="1325" y="75" dominant-baseline="central" alignment-baseline="central" class="journey-section section-type-2" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="1325" dy="0">Go home</tspan></text></switch></g><g><line id="my-svg-task5" x1="1225" y1="110" x2="1225" y2="450" class="task-line" stroke-width="1px" stroke-dasharray="4 2" stroke="#666"/><circle cx="1225" cy="300" class="face" r="15" stroke-width="2" overflow="visible"/><g><circle cx="1220" cy="295" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><circle cx="1230" cy="295" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><path class="mouth" d="M7.5,0A7.5,7.5,0,1,1,-7.5,0L-6.818,0A6.818,6.818,0,1,0,6.818,0Z" transform="translate(1225,302)"/></g><rect x="1150" y="110" fill="#4B0082" stroke="#666" width="150" height="50" rx="3" ry="3" class="task task-type-2"/><circle cx="1164" cy="110" class="actor-2" fill="#00FFFF" stroke="#000" r="7"><title>Me</title></circle><switch><foreignObject x="1150" y="110" width="150" height="50"><div class="task" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Go downstairs</div></div></foreignObject><text x="1225" y="135" dominant-baseline="central" alignment-baseline="central" class="task" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="1225" dy="0">Go downstairs</tspan></text></switch></g><g><line id="my-svg-task6" x1="1425" y1="110" x2="1425" y2="450" class="task-line" stroke-width="1px" stroke-dasharray="4 2" stroke="#666"/><circle cx="1425" cy="300" class="face" r="15" stroke-width="2" overflow="visible"/><g><circle cx="1420" cy="295" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><circle cx="1430" cy="295" r="1.5" stroke-width="2" fill="#666" stroke="#666"/><path class="mouth" d="M7.5,0A7.5,7.5,0,1,1,-7.5,0L-6.818,0A6.818,6.818,0,1,0,6.818,0Z" transform="translate(1425,302)"/></g><rect x="1350" y="110" fill="#4B0082" stroke="#666" width="150" height="50" rx="3" ry="3" class="task task-type-2"/><circle cx="1364" cy="110" class="actor-2" fill="#00FFFF" stroke="#000" r="7"><title>Me</title></circle><circle cx="1374" cy="110" class="actor-0" fill="#8FBC8F" stroke="#000" r="7"><title>Cat</title></circle><switch><foreignObject x="1350" y="110" width="150" height="50"><div class="task" xmlns="http://www.w3.org/1999/xhtml" style="display: table; height: 100%; width: 100%;"><div class="label" style="display: table-cell; text-align: center; vertical-align: middle;">Sit down</div></div></foreignObject><text x="1425" y="135" dominant-baseline="central" alignment-baseline="central" class="task" style="text-anchor: middle; font-size: 14px; font-family: &quot;Open Sans&quot;, sans-serif;"><tspan x="1425" dy="0">Sit down</tspan></text></switch></g><text x="150" font-size="4ex" font-weight="bold" y="25" fill="" font-family="&quot;trebuchet ms&quot;, verdana, arial, sans-serif">My working day</text><line x1="150" y1="200" x2="1546" y2="200" stroke-width="4" stroke="black" marker-end="url(#my-svg-arrowhead)"/></svg>
