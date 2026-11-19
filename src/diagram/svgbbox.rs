@@ -23,7 +23,7 @@ pub struct RelArc {
 
 /// A number as mermaid writes it into the path (JavaScript's shortest
 /// round-trip form) and Chromium reads it back (single precision).
-fn js_f32(v: f64) -> f32 {
+pub fn js_f32(v: f64) -> f32 {
     let s = if v != 0.0 && (v.abs() < 1e-6 || v.abs() >= 1e21) {
         format!("{v:e}")
     } else {

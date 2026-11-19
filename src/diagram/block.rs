@@ -16,11 +16,12 @@
 //! wider container stretches its children. `space:N` is N one-slot spaces.
 //! Edges are straight lines between block centres clipped to the outlines.
 
+mod dom;
+
 use crate::config::MermaidConfig;
 use crate::diagram::graph::StyleOverrides;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
-use crate::layout::boxes::Placed;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::TextBlock;
 use crate::theme::Palette;
@@ -154,6 +155,10 @@ pub struct BlockDiagram {
     pub children: Vec<Block>,
     pub edges: Vec<Edge>,
     pub class_defs: Vec<(String, StyleOverrides)>,
+    /// `classDef` bodies as `blockDB` stores them (`styles`, split on commas).
+    pub raw_class_defs: Vec<(String, Vec<String>)>,
+    /// `style` bodies as `addStyle2Node` stores them: the latest per block.
+    pub raw_styles: Vec<(String, Vec<String>)>,
     /// Per-block classes and inline styles.
     pub classes: Vec<(String, String)>,
     pub styles: Vec<(String, StyleOverrides)>,
@@ -428,6 +433,8 @@ pub fn parse(body: &str, title: Option<String>) -> Result<BlockDiagram> {
         children: Vec::new(),
         edges: Vec::new(),
         class_defs: Vec::new(),
+        raw_class_defs: Vec::new(),
+        raw_styles: Vec::new(),
         classes: Vec::new(),
         styles: Vec::new(),
     };
@@ -516,6 +523,20 @@ pub fn parse(body: &str, title: Option<String>) -> Result<BlockDiagram> {
                     name.to_string(),
                     StyleOverrides::parse(css.trim().trim_end_matches(';')),
                 ));
+                // `addStyleClass`: each comma-separated attribute, its first
+                // `;`-terminated run trimmed.
+                let styles = css
+                    .trim()
+                    .split(',')
+                    .map(|a| match a.find(';') {
+                        Some(i) => format!("{}{}", &a[..i], &a[i + 1..]).trim().to_string(),
+                        None => a.trim().to_string(),
+                    })
+                    .collect();
+                match d.raw_class_defs.iter_mut().find(|(n, _)| n == name) {
+                    Some((_, v)) => v.extend::<Vec<String>>(styles),
+                    None => d.raw_class_defs.push((name.to_string(), styles)),
+                }
                 continue;
             }
             "class" => {
@@ -535,6 +556,13 @@ pub fn parse(body: &str, title: Option<String>) -> Result<BlockDiagram> {
                 let st = StyleOverrides::parse(css.trim().trim_end_matches(';'));
                 for id in ids.split(',') {
                     d.styles.push((id.trim().to_string(), st.clone()));
+                    // `addStyle2Node` replaces the block's styles.
+                    let raw: Vec<String> = css.trim().split(',').map(str::to_string).collect();
+                    let id = id.trim().to_string();
+                    match d.raw_styles.iter_mut().find(|(n, _)| *n == id) {
+                        Some((_, v)) => *v = raw,
+                        None => d.raw_styles.push((id, raw)),
+                    }
                 }
                 continue;
             }
@@ -723,6 +751,36 @@ pub struct Metrics {
     /// Under the handDrawn look: rough.js's options for the nodes (each
     /// block's own style applied in [`hand_style`]).
     pub hand: Option<super::hand::HandStyle>,
+    /// What plain SVG output writes besides the geometry.
+    pub dom: DomEnv,
+}
+
+/// The look-dependent values of mermaid's own markup.
+#[derive(Debug, Clone)]
+pub struct DomEnv {
+    pub look: crate::config::Look,
+    /// `themeVariables.radius`, of a rounded block.
+    pub radius: f64,
+    /// `handDrawnSeed`, for rough.js's drawings in every look.
+    pub seed: f64,
+    /// A dark theme, whose drop shadow is white.
+    pub dark: bool,
+    /// Sizes and positions as the browser measures them: every `getBBox()` in
+    /// single precision (the markup's numbers; the drawing itself keeps
+    /// doubles).
+    pub exact: bool,
+}
+
+impl Default for DomEnv {
+    fn default() -> Self {
+        DomEnv {
+            look: crate::config::Look::Classic,
+            radius: 5.0,
+            seed: 0.0,
+            dark: false,
+            exact: false,
+        }
+    }
 }
 
 /// The primitive a block shape draws, around the node centre.
@@ -772,6 +830,49 @@ struct NodeGeom {
     clipped: bool,
     /// What the shape's handDrawn branch draws (`None`: no rough variant).
     rough: Option<super::hand::Sized>,
+    /// The label's `display: table` form, and the width it was laid out in.
+    table: bool,
+    limit: f64,
+    /// What the shape function writes in the classic and neo looks.
+    dom: Dom,
+}
+
+/// The outline element(s) mermaid's shape function writes (classic and neo
+/// looks), in the numbers it computes them from.
+#[derive(Debug, Clone, PartialEq)]
+enum Dom {
+    /// `drawRect`'s `<rect>` (`rx` as drawn; a rounded one takes the theme's
+    /// radius).
+    Rect {
+        w: f64,
+        h: f64,
+        rx: f64,
+    },
+    /// `insertPolygonShape`: the points as written (about the bottom-left
+    /// corner) and the `translate` that centres them; `spaced` writes it with
+    /// a space after the comma.
+    Polygon {
+        points: Vec<(f64, f64)>,
+        translate: (f64, f64),
+        spaced: bool,
+    },
+    Circle(f64),
+    DoubleCircle {
+        inner: f64,
+        outer: f64,
+    },
+    /// `createCylinderPathD` about the corner, moved by `translate(-w / 2, -(h / 2 + ry))`.
+    Cylinder {
+        w: f64,
+        h: f64,
+        rx: f64,
+        ry: f64,
+    },
+    /// A rough.js path (roughness 0, solid fill) of `d`, moved by `shift`.
+    Rough {
+        d: String,
+        shift: Option<(f64, f64)>,
+    },
 }
 
 /// A block label laid out in at most `limit` pixels (`createText`'s
@@ -781,6 +882,11 @@ struct Fitted {
     w: f64,
     h: f64,
     clipped: bool,
+    /// The box's `display: table` / `break-spaces` form (its measured width
+    /// equals the width it was given).
+    table: bool,
+    /// The width the label was laid out in (its `max-width`).
+    limit: f64,
 }
 
 /// `addHtmlSpan`: a label wider than `limit` gets `max-width: limit`. Its box
@@ -795,6 +901,8 @@ fn fit_label(tb: &TextBlock, limit: f64) -> Fitted {
             w: tb.width,
             h: tb.height,
             clipped: false,
+            table: tb.width == limit,
+            limit,
         };
     }
     let snapped = (limit * 64.0).floor() / 64.0;
@@ -804,6 +912,8 @@ fn fit_label(tb: &TextBlock, limit: f64) -> Fitted {
             w: snapped.max(0.0),
             h: tb.height,
             clipped: true,
+            table: false,
+            limit,
         };
     }
     let lines = crate::text::wrap_lines(
@@ -819,6 +929,8 @@ fn fit_label(tb: &TextBlock, limit: f64) -> Fitted {
         h: wrapped.height,
         lines: wrapped.lines,
         clipped: false,
+        table: true,
+        limit,
     }
 }
 
@@ -851,7 +963,7 @@ fn node_geom(
     let mut label_off = Point::new(0.0, 0.0);
     use super::hand::Sized;
     let mut rough = None;
-    let (prim, fitted) = match shape {
+    let (prim, fitted, dom) = match shape {
         BlockShape::Rect | BlockShape::Rounded => {
             // squareRect / drawRect: labelPaddingX = 2p, labelPaddingY = p (neo:
             // 16 and 12), each side; a rounded one is `roundedRect`, p each
@@ -866,7 +978,7 @@ fn node_geom(
             let w = (lw + 2.0 * pad_x).max(nw);
             let h = (lh + 2.0 * pad_y).max(nh);
             rough = Some(Sized::Rect { w, h, rx });
-            (Prim::Rect { w, h, rx }, f)
+            (Prim::Rect { w, h, rx }, f, Dom::Rect { w, h, rx })
         }
         BlockShape::Diamond => {
             // question: a square diamond of side (label + padding) summed, its
@@ -886,7 +998,18 @@ fn node_geom(
                 .iter()
                 .map(|&(x, y)| Point::new(x - s / 2.0 + 0.5, y + s / 2.0))
                 .collect();
-            (Prim::Poly(pts), f)
+            let raw = vec![
+                (s / 2.0, 0.0),
+                (s, -s / 2.0),
+                (s / 2.0, -s),
+                (0.0, -s / 2.0),
+            ];
+            let dom = Dom::Polygon {
+                points: raw,
+                translate: (-s / 2.0 + 0.5, s / 2.0),
+                spaced: true,
+            };
+            (Prim::Poly(pts), f, dom)
         }
         BlockShape::Hexagon => {
             // hexagon (f = 4, neo 3.5): a laid-out hexagon fills its cell, the
@@ -916,7 +1039,12 @@ fn node_geom(
                 (m, -h),
                 (0.0, -h / 2.0),
             ];
-            (Prim::Poly(shift(&pts, w, h)), f)
+            let dom = Dom::Polygon {
+                points: pts.to_vec(),
+                translate: (-w / 2.0, h / 2.0),
+                spaced: false,
+            };
+            (Prim::Poly(shift(&pts, w, h)), f, dom)
         }
         BlockShape::Arrow(dirs) => {
             let f = fit_label(label, wrap(nw));
@@ -929,7 +1057,12 @@ fn node_geom(
                 natural
             };
             let r = Rect::new(-w / 2.0, -h / 2.0, w, h);
-            (Prim::Poly(block_arrow(r, dirs, p)), f)
+            let dom = Dom::Polygon {
+                points: block_arrow_points(w, h, dirs, p),
+                translate: (-w / 2.0, h / 2.0),
+                spaced: false,
+            };
+            (Prim::Poly(block_arrow(r, dirs, p)), f, dom)
         }
         BlockShape::Asymmetric => {
             // rect_left_inv_arrow: the notch is a quarter of the height; polygon
@@ -948,8 +1081,9 @@ fn node_geom(
                 Point::new(w / 2.0, h / 2.0),
                 Point::new(w / 2.0, -h / 2.0),
             ];
+            let d = super::hand::path_from_points(&local);
             rough = Some(Sized::Path {
-                d: super::hand::path_from_points(&local),
+                d: d.clone(),
                 at: Point::new(dx, 0.0),
             });
             let pts = vec![
@@ -960,7 +1094,11 @@ fn node_geom(
                 Point::new(w / 2.0 + dx, -h / 2.0),
             ];
             label_off = Point::new(dx, 0.0);
-            (Prim::Poly(pts), f)
+            let dom = Dom::Rough {
+                d,
+                shift: Some((dx, 0.0)),
+            };
+            (Prim::Poly(pts), f, dom)
         }
         BlockShape::LeanRight
         | BlockShape::LeanLeft
@@ -989,14 +1127,19 @@ fn node_geom(
                 d: super::hand::path_from_points(&local),
                 at: Point::new(-w / 2.0, h / 2.0),
             });
-            (Prim::Poly(shift(&pts, w, h)), f)
+            let dom = Dom::Polygon {
+                points: pts.to_vec(),
+                translate: (-w / 2.0, h / 2.0),
+                spaced: false,
+            };
+            (Prim::Poly(shift(&pts, w, h)), f, dom)
         }
         BlockShape::Circle => {
             let f = fit_label(label, wrap(nw));
             let (lw, lh) = (f.w, f.h);
             let r = lw.hypot(lh) / 2.0 + pick(p / 2.0, 16.0);
             rough = Some(Sized::Circle(r));
-            (Prim::Circle(r), f)
+            (Prim::Circle(r), f, Dom::Circle(r))
         }
         BlockShape::DoubleCircle => {
             // doublecircle: a laid-out one takes half the cell width as its
@@ -1011,7 +1154,11 @@ fn node_geom(
             } + pick(p, 16.0);
             let outer = inner + pick(5.0, 12.0);
             rough = Some(Sized::DoubleCircle { inner, outer });
-            (Prim::DoubleCircle(inner, outer), f)
+            (
+                Prim::DoubleCircle(inner, outer),
+                f,
+                Dom::DoubleCircle { inner, outer },
+            )
         }
         BlockShape::Stadium => {
             // stadiumDimensions: the arc is a 50-point polygon, so the caps are a
@@ -1025,11 +1172,12 @@ fn node_geom(
             let w = (lw + h / 4.0 + px)
                 .max(1.5 * h + (h - inscribed))
                 .max(lw + px + h - cap);
+            let d = super::hand::path_from_points(&stadium_points(w, h));
             rough = Some(Sized::Path {
-                d: super::hand::path_from_points(&stadium_points(w, h)),
+                d: d.clone(),
                 at: Point::default(),
             });
-            (Prim::Stadium { w, h }, f)
+            (Prim::Stadium { w, h }, f, Dom::Rough { d, shift: None })
         }
         BlockShape::Subroutine => {
             let f = fit_label(label, wrap(nw));
@@ -1038,7 +1186,24 @@ fn node_geom(
             let w = (lw + 2.0 * SUBROUTINE_FRAME + pick(p, 28.0)).max(nw);
             let h = (lh + pick(p, 12.0)).max(nh);
             rough = Some(Sized::Subroutine { w, h });
-            (Prim::Subroutine { w, h }, f)
+            let iw = w - 2.0 * SUBROUTINE_FRAME;
+            let dom = Dom::Polygon {
+                points: vec![
+                    (0.0, 0.0),
+                    (iw, 0.0),
+                    (iw, -h),
+                    (0.0, -h),
+                    (0.0, 0.0),
+                    (-8.0, 0.0),
+                    (iw + 8.0, 0.0),
+                    (iw + 8.0, -h),
+                    (-8.0, -h),
+                    (-8.0, 0.0),
+                ],
+                translate: (-iw / 2.0, h / 2.0),
+                spaced: false,
+            };
+            (Prim::Subroutine { w, h }, f, dom)
         }
         BlockShape::Cylinder => {
             // cylinder: a laid-out one gives the label its cell less the padding
@@ -1060,7 +1225,11 @@ fn node_geom(
             let h = min_h.max(lh) + q + ry;
             label_off = Point::new(0.0, p / 1.5);
             rough = Some(Sized::Cylinder { w, h, rx, ry });
-            (Prim::Cylinder { w, h, rx, ry }, f)
+            (
+                Prim::Cylinder { w, h, rx, ry },
+                f,
+                Dom::Cylinder { w, h, rx, ry },
+            )
         }
     };
     NodeGeom {
@@ -1071,6 +1240,9 @@ fn node_geom(
         lines: fitted.lines,
         clipped: fitted.clipped,
         rough,
+        table: fitted.table,
+        limit: fitted.limit,
+        dom,
     }
 }
 
@@ -1127,6 +1299,92 @@ impl NodeGeom {
         }
         let b = self.bbox();
         (b.w, b.h)
+    }
+
+    /// `getBBox()` of the node's group as the browser reports it: the shape
+    /// (rough.js's drawing under the handDrawn look) and the label, in single
+    /// precision.
+    fn box32(&self, hand: Option<&super::hand::HandNode>) -> R32 {
+        let label = R32::attrs(0.0, 0.0, self.label_w, self.label_h).offset(
+            self.label_off.x - self.label_w / 2.0,
+            self.label_off.y - self.label_h / 2.0,
+        );
+        if let Some(hn) = hand {
+            let mut acc: Option<R32> = None;
+            for pc in &hn.pieces {
+                let paths: Vec<Vec<PathCmd>> = pc
+                    .drawable
+                    .sets
+                    .iter()
+                    .filter(|s| !s.ops.is_empty())
+                    .map(|s| super::hand::set_cmds(&s.ops, Point::default()))
+                    .collect();
+                let Some(b) = super::svgbbox::cubic_group_box(&paths) else {
+                    continue;
+                };
+                let b = R32::from_f64(b).offset(pc.at.x, pc.at.y);
+                acc = Some(acc.map_or(b, |a| a.union(b)));
+            }
+            return acc.map_or(label, |a| a.union(label));
+        }
+        let shape = match &self.dom {
+            Dom::Rect { w, h, .. } => R32::attrs(-w / 2.0, -h / 2.0, *w, *h),
+            Dom::Polygon {
+                points, translate, ..
+            } => R32::of_points(points.iter().copied()).offset(translate.0, translate.1),
+            Dom::Circle(r) => {
+                let r = super::svgbbox::js_f32(*r);
+                R32 {
+                    x: -r,
+                    y: -r,
+                    w: 2.0 * r,
+                    h: 2.0 * r,
+                }
+            }
+            Dom::DoubleCircle { outer, .. } => {
+                let r = super::svgbbox::js_f32(*outer);
+                R32 {
+                    x: -r,
+                    y: -r,
+                    w: 2.0 * r,
+                    h: 2.0 * r,
+                }
+            }
+            Dom::Cylinder { w, h, rx, ry } => {
+                return R32::from_f64(super::svgbbox::cylinder_node_box(
+                    *w,
+                    *h,
+                    *rx,
+                    *ry,
+                    [
+                        self.label_off.x - self.label_w / 2.0,
+                        self.label_off.y - self.label_h / 2.0,
+                        self.label_w,
+                        self.label_h,
+                    ],
+                ));
+            }
+            Dom::Rough { d, shift } => {
+                let o = crate::rough::Options {
+                    roughness: 0.0,
+                    fill: Some("none".into()),
+                    fill_style: "solid".into(),
+                    ..crate::rough::Options::default()
+                };
+                let drawn = crate::rough::path(d, o);
+                let paths: Vec<Vec<PathCmd>> = drawn
+                    .sets
+                    .iter()
+                    .filter(|s| !s.ops.is_empty())
+                    .map(|s| super::hand::set_cmds(&s.ops, Point::default()))
+                    .collect();
+                let b = super::svgbbox::cubic_group_box(&paths)
+                    .map_or(R32::attrs(0.0, 0.0, 0.0, 0.0), R32::from_f64);
+                let (dx, dy) = shift.unwrap_or((0.0, 0.0));
+                b.offset(dx, dy)
+            }
+        };
+        shape.union(label)
     }
 
     /// The rough.js drawing of the shape under the handDrawn look.
@@ -1304,7 +1562,101 @@ fn label_box(label: &str, font: f64) -> TextBlock {
 /// `calculateBlockSize`: the bounding box of the block as drawn unpositioned.
 fn node_size(label: &str, shape: BlockShape, span: usize, m: &Metrics) -> (f64, f64) {
     let tb = label_box(label, m.font);
-    node_geom(shape, &tb, None, span, (m.pad, m.neo)).measured_size_in(m.hand.as_ref())
+    let g = node_geom(shape, &tb, None, span, (m.pad, m.neo));
+    if m.dom.exact {
+        return g.box32(g.hand_node(m.hand.as_ref()).as_ref()).size();
+    }
+    g.measured_size_in(m.hand.as_ref())
+}
+
+/// A box as Chromium holds it: origin and size, in single precision.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct R32 {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl R32 {
+    /// From attribute values (read back as floats).
+    fn attrs(x: f64, y: f64, w: f64, h: f64) -> R32 {
+        use super::svgbbox::js_f32 as f;
+        R32 {
+            x: f(x),
+            y: f(y),
+            w: f(w),
+            h: f(h),
+        }
+    }
+
+    /// The bounds of points (a path's tight bounds).
+    fn of_points(pts: impl IntoIterator<Item = (f64, f64)>) -> R32 {
+        use super::svgbbox::js_f32 as f;
+        let (mut lo, mut hi) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+        for (x, y) in pts {
+            let (x, y) = (f(x), f(y));
+            lo = (lo.0.min(x), lo.1.min(y));
+            hi = (hi.0.max(x), hi.1.max(y));
+        }
+        R32 {
+            x: lo.0,
+            y: lo.1,
+            w: super::svgbbox::span(lo.0, hi.0),
+            h: super::svgbbox::span(lo.1, hi.1),
+        }
+    }
+
+    fn from_f64(b: [f64; 4]) -> R32 {
+        R32 {
+            x: b[0] as f32,
+            y: b[1] as f32,
+            w: b[2] as f32,
+            h: b[3] as f32,
+        }
+    }
+
+    /// Moved by a `translate` (its numbers read back as floats).
+    fn offset(self, dx: f64, dy: f64) -> R32 {
+        use super::svgbbox::js_f32 as f;
+        R32 {
+            x: self.x + f(dx),
+            y: self.y + f(dy),
+            ..self
+        }
+    }
+
+    fn union(self, o: R32) -> R32 {
+        let (x, y) = (self.x.min(o.x), self.y.min(o.y));
+        let (r, b) = (
+            (self.x + self.w).max(o.x + o.w),
+            (self.y + self.h).max(o.y + o.h),
+        );
+        // `gfx::RectF::Union`: the plain differences.
+        R32 {
+            x,
+            y,
+            w: r - x,
+            h: b - y,
+        }
+    }
+
+    fn size(self) -> (f64, f64) {
+        (f64::from(self.w), f64::from(self.h))
+    }
+}
+
+/// A union of boxes (`getBBox()` of a group).
+#[derive(Debug, Clone, Copy, Default)]
+struct Bbox32(Option<R32>);
+
+impl Bbox32 {
+    fn add(&mut self, r: R32) {
+        self.0 = Some(match self.0 {
+            None => r,
+            Some(a) => a.union(r),
+        });
+    }
 }
 
 /// Working copy of a block for mermaid's sizing passes (`block.size`).
@@ -1491,9 +1843,21 @@ fn layout_blocks(b: &mut Sized, pad: f64) {
     }
 }
 
+/// A laid-out block: its box, and the centre mermaid's layout gave it (the
+/// box's own centre differs from it in the last bits).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placed {
+    pub rect: Rect,
+    pub cx: f64,
+    pub cy: f64,
+    pub children: Vec<Placed>,
+}
+
 fn to_placed(s: &Sized) -> Placed {
     Placed {
         rect: Rect::centered(Point::new(s.x, s.y), s.w, s.h),
+        cx: s.x,
+        cy: s.y,
         children: s.children.iter().map(to_placed).collect(),
     }
 }
@@ -1526,6 +1890,8 @@ pub fn layout(d: &BlockDiagram, m: &Metrics) -> Placed {
     }
     Placed {
         rect: bounds,
+        cx: bounds.x + bounds.w / 2.0,
+        cy: bounds.y + bounds.h / 2.0,
         children,
     }
 }
@@ -1618,8 +1984,15 @@ impl Outline {
 /// polygon of each direction set is upstream's (some, such as `up`, `down` or
 /// `right|left|down`, are not arrow-like there either).
 fn block_arrow(r: Rect, dirs: ArrowDirs, pad: f64) -> Vec<Point> {
+    block_arrow_points(r.w, r.h, dirs, pad)
+        .into_iter()
+        .map(|(x, y)| Point::new(r.x + x, r.bottom() + y))
+        .collect()
+}
+
+/// `getArrowPoints`: the polygon about the bottom-left corner of a `w` x `h` arrow.
+fn block_arrow_points(w: f64, h: f64, dirs: ArrowDirs, pad: f64) -> Vec<(f64, f64)> {
     let p = pad / 2.0;
-    let (h, w) = (r.h, r.w);
     let m = h / 2.0;
     let key = (dirs.right, dirs.left, dirs.up, dirs.down);
     let pts: Vec<(f64, f64)> = match key {
@@ -1720,9 +2093,7 @@ fn block_arrow(r: Rect, dirs: ArrowDirs, pad: f64) -> Vec<Point> {
         ],
         (false, false, false, false) => vec![(0.0, 0.0)],
     };
-    pts.into_iter()
-        .map(|(x, y)| Point::new(r.x + x, r.bottom() + y))
-        .collect()
+    pts
 }
 
 /// Render a block diagram.
@@ -1750,9 +2121,41 @@ pub fn render(
             horizontal: false,
             state: false,
         }),
+        dom: DomEnv {
+            look: cfg.look,
+            radius: pal.radius.unwrap_or(5.0),
+            seed: cfg.hand_drawn_seed(),
+            dark: cfg.theme.name().contains("dark"),
+            exact: false,
+        },
     };
     let placed = layout(&d, &m);
-    Ok(draw(&d, &placed, &m, pal))
+    let mut scene = draw(&d, &placed, &m, pal);
+    // The markup is written from the browser's single-precision measurements.
+    let exact = Metrics {
+        dom: DomEnv {
+            exact: true,
+            ..m.dom.clone()
+        },
+        ..m.clone()
+    };
+    let placed = layout(&d, &exact);
+    let mut measured = draw(&d, &placed, &exact, pal);
+    if let (
+        Some(Element::Markup {
+            svg, svg_view_box, ..
+        }),
+        Some(Element::Markup {
+            svg: s2,
+            svg_view_box: v2,
+            ..
+        }),
+    ) = (scene.elements.first_mut(), measured.elements.pop())
+    {
+        *svg = s2;
+        *svg_view_box = v2;
+    }
+    Ok(scene)
 }
 
 /// khroma's `fade(c, alpha)`: the colour with its alpha scaled to `alpha`.
@@ -1790,6 +2193,34 @@ struct Drawn {
     outlines: Vec<(String, Outline)>,
 }
 
+/// A block's classes and styles as `blockDB` keeps them: the class names in
+/// the order they were applied, their `classDef` styles, the block's own.
+fn raw_styles(d: &BlockDiagram, id: &str) -> (Vec<String>, dom::Styles) {
+    let classes: Vec<String> = d
+        .classes
+        .iter()
+        .filter(|(b, _)| b == id)
+        .map(|(_, c)| c.clone())
+        .collect();
+    let compiled = classes
+        .iter()
+        .flat_map(|c| {
+            d.raw_class_defs
+                .iter()
+                .find(|(n, _)| n == c)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        })
+        .collect();
+    let own = d
+        .raw_styles
+        .iter()
+        .find(|(b, _)| b == id)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    (classes, dom::Styles { compiled, own })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_blocks(
     d: &BlockDiagram,
@@ -1800,6 +2231,9 @@ fn draw_blocks(
     bounds: &mut Bounds,
     out: &mut Vec<Element>,
     drawn: &mut Drawn,
+    mk: &mut String,
+    env: &dom::Env,
+    bb32: &mut Bbox32,
 ) {
     for (b, p) in blocks.iter().zip(placed) {
         let r = p.rect;
@@ -1824,7 +2258,29 @@ fn draw_blocks(
                     paint,
                     "composite",
                 )];
-                draw_blocks(d, children, &p.children, m, pal, bounds, &mut g, drawn);
+                let (classes, styles) = raw_styles(d, &b.id);
+                bb32.add(R32::attrs(-r.w / 2.0, -r.h / 2.0, r.w, r.h).offset(p.cx, p.cy));
+                mk.push_str(&dom::composite(
+                    env,
+                    b,
+                    &classes,
+                    (-r.w / 2.0, -r.h / 2.0, r.w, r.h),
+                    (p.cx, p.cy),
+                    &styles.own,
+                ));
+                draw_blocks(
+                    d,
+                    children,
+                    &p.children,
+                    m,
+                    pal,
+                    bounds,
+                    &mut g,
+                    drawn,
+                    mk,
+                    env,
+                    bb32,
+                );
                 drawn.outlines.push((b.id.clone(), Outline::Rect(r)));
                 out.push(Element::group(format!("block composite {}", b.id), g));
             }
@@ -1833,7 +2289,13 @@ fn draw_blocks(
                 // their cell, others keep their natural size (or outgrow it).
                 let tb = label_box(label, m.font);
                 let g = node_geom(*shape, &tb, Some((r.w, r.h)), b.span.max(1), (m.pad, m.neo));
-                let c = r.center();
+                // The centre mermaid's layout gave the block (the box's own
+                // differs in the last bits).
+                let c = if m.dom.exact {
+                    Point::new(p.cx, p.cy)
+                } else {
+                    r.center()
+                };
                 let hand = m.hand.as_ref().map(|h| hand_style(h, &st));
                 let rough = g.hand_node(hand.as_ref());
                 let bb = match &rough {
@@ -1936,6 +2398,20 @@ fn draw_blocks(
                     }
                 }
                 drawn.outlines.push((b.id.clone(), outline));
+                let (classes, styles) = raw_styles(d, &b.id);
+                bb32.add(g.box32(rough.as_ref()).offset(p.cx, p.cy));
+                mk.push_str(&dom::node(
+                    env,
+                    &dom::NodeIn {
+                        b,
+                        shape: *shape,
+                        g: &g,
+                        centre: (p.cx, p.cy),
+                        classes,
+                        styles,
+                        hand: rough.as_ref(),
+                    },
+                ));
                 out.push(Element::group(class, els));
             }
         }
@@ -1967,9 +2443,9 @@ fn neo_node(els: &mut Vec<Element>, shape: BlockShape, st: &StyleOverrides, pal:
     fn outlines(els: &mut [Element], f: &mut dyn FnMut(&mut Element)) {
         for el in els {
             match el {
-                Element::Group { children, .. } | Element::Translated { children, .. } => {
-                    outlines(children, f)
-                }
+                Element::Group { children, .. }
+                | Element::Translated { children, .. }
+                | Element::Markup { children, .. } => outlines(children, f),
                 Element::Shape { .. } => f(el),
                 _ => {}
             }
@@ -1984,9 +2460,9 @@ fn neo_node(els: &mut Vec<Element>, shape: BlockShape, st: &StyleOverrides, pal:
             return els;
         }
         match &mut els[0] {
-            Element::Group { children, .. } | Element::Translated { children, .. } => {
-                first_level(children)
-            }
+            Element::Group { children, .. }
+            | Element::Translated { children, .. }
+            | Element::Markup { children, .. } => first_level(children),
             _ => unreachable!("checked above"),
         }
     }
@@ -2038,6 +2514,14 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
     let mut drawn = Drawn {
         outlines: Vec::new(),
     };
+    let env = dom::Env {
+        look: m.dom.look,
+        radius: m.dom.radius,
+        pal,
+        seed: m.dom.seed,
+    };
+    let mut nodes_mk = String::new();
+    let mut bb32 = Bbox32::default();
     draw_blocks(
         d,
         &d.children,
@@ -2047,7 +2531,12 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         &mut bounds,
         &mut blocks,
         &mut drawn,
+        &mut nodes_mk,
+        &env,
+        &mut bb32,
     );
+    let mut edges_mk = String::new();
+    let mut edge_counts: std::collections::HashMap<(String, String), usize> = Default::default();
     let mut edges = Vec::new();
     let mut labels = Vec::new();
     for e in &d.edges {
@@ -2107,6 +2596,56 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
         edges.extend(marker(e.start, line[0], out_a, true, &pal.line_color));
         bounds.add_point(pa);
         bounds.add_point(pb);
+        let count = edge_counts
+            .entry((e.from.clone(), e.to.clone()))
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+        let label_mk = e.label.as_ref().map(|l| {
+            let tb = label_box(l, m.font);
+            let wrapped = tb.width >= 200.0;
+            let lines = if wrapped {
+                crate::text::wrap_lines(
+                    &tb.lines,
+                    200.0,
+                    m.font,
+                    false,
+                    crate::text::BreakRule::Browser,
+                )
+            } else {
+                tb.lines.clone()
+            };
+            let w = if wrapped {
+                crate::text::html_wrap_width(&tb.lines, 200.0, m.font, false)
+            } else {
+                tb.width
+            };
+            let h = lines.len() as f64 * tb.line_height;
+            (lines, w, h, tb.width >= 200.0)
+        });
+        let mid_pt = Point::new(ca.x + (cb.x - ca.x) / 2.0, ca.y + (cb.y - ca.y) / 2.0);
+        let drawn_path = geom::basis_curve(&line);
+        if let Some(b) = super::svgbbox::cubic_group_box(&[dom::d3_cmds(&drawn_path)]) {
+            bb32.add(R32::from_f64(b));
+        }
+        if let Some((_, w, h, _)) = &label_mk {
+            bb32.add(
+                R32::attrs(0.0, 0.0, *w, *h)
+                    .offset(-w / 2.0, -h / 2.0)
+                    .offset(mid_pt.x, mid_pt.y),
+            );
+        }
+        edges_mk.push_str(&dom::edge(&dom::EdgeIn {
+            id: format!("{count}-{}-{}", e.from, e.to),
+            line: e.line,
+            start: e.start,
+            end: e.end,
+            points: [pa, mid, pb],
+            path: &drawn_path,
+            label: label_mk
+                .as_ref()
+                .map(|(lines, w, h, table)| (lines.as_slice(), *w, *h, 200.0, *table)),
+            mid: mid_pt,
+        }));
         if let Some(l) = &e.label {
             // The label sits on the edge's middle point, half-way between the
             // blocks' centres, its `labelBkg` box exactly the label's.
@@ -2140,11 +2679,30 @@ pub fn draw(d: &BlockDiagram, placed: &Placed, m: &Metrics, pal: &Palette) -> Sc
             "blockTitle",
         ));
     }
+    // mermaid's own markup: the look's definitions and the markers, then the
+    // blocks and edges in one group.
+    let svg = format!(
+        "{}<g class=\"block\">{nodes_mk}{edges_mk}</g>",
+        dom::defs(pal, m.dom.dark)
+    );
     Scene {
         kind: DiagramKind::Block,
         // blockRenderer: the rendered bounding box with 5px around it.
         view_box: bounds.rect().pad(5.0),
-        elements: els,
+        elements: vec![Element::Markup {
+            svg,
+            children: els,
+            // blockRenderer: the group's box with 5px around it.
+            svg_view_box: bb32.0.map(|b| {
+                Rect::new(
+                    f64::from(b.x),
+                    f64::from(b.y),
+                    f64::from(b.w),
+                    f64::from(b.h),
+                )
+                .pad(5.0)
+            }),
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -2224,7 +2782,10 @@ mod tests {
     /// Every top-level shape of the edges group.
     fn edge_shapes(src: &str) -> Vec<Element> {
         let r = crate::render::render(src, &MermaidConfig::default()).unwrap();
-        let Element::Group { children, .. } = &r.scene.elements[1] else {
+        let Element::Markup { children, .. } = &r.scene.elements[0] else {
+            panic!()
+        };
+        let Element::Group { children, .. } = &children[1] else {
             panic!()
         };
         children.clone()
@@ -2264,7 +2825,9 @@ mod tests {
         fn walk(els: &[Element], out: &mut Vec<(f64, f64, Vec<PathCmd>)>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, out)
+                    }
                     Element::Translated { dx, dy, children } => {
                         if let Element::Shape {
                             geom: Geometry::Path(c),
@@ -2388,6 +2951,7 @@ class c hot
             pad: 8.0,
             neo: false,
             hand: None,
+            dom: DomEnv::default(),
         }
     }
 
@@ -2780,9 +3344,9 @@ class c hot
         fn walk(els: &[Element], out: &mut Vec<Element>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } | Element::Translated { children, .. } => {
-                        walk(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Translated { children, .. }
+                    | Element::Markup { children, .. } => walk(children, out),
                     other => out.push(other.clone()),
                 }
             }
@@ -2901,9 +3465,9 @@ class c hot
         fn walk(els: &[Element], out: &mut Vec<Element>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } | Element::Translated { children, .. } => {
-                        walk(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Translated { children, .. }
+                    | Element::Markup { children, .. } => walk(children, out),
                     other => out.push(other.clone()),
                 }
             }
@@ -2947,7 +3511,9 @@ class c hot
         fn walk(els: &[Element], out: &mut Vec<String>) {
             for el in els {
                 match el {
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, out)
+                    }
                     Element::Text { text, .. } => out.push(text.fill.css().to_string()),
                     _ => {}
                 }
@@ -2973,7 +3539,9 @@ class c hot
         fn walk(els: &[Element], out: &mut Vec<String>) {
             for el in els {
                 match el {
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, out)
+                    }
                     Element::Shape {
                         geom: Geometry::Path(cmds),
                         ..

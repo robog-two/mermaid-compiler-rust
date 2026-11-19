@@ -29,6 +29,7 @@ fn shapes(s: &Scene) -> Vec<(String, Geometry, Paint)> {
                 }
                 Element::Rotated { children, .. }
                 | Element::Translated { children, .. }
+                | Element::Markup { children, .. }
                 | Element::Clipped { children, .. } => walk(children, group, out),
                 Element::Shape { geom, paint, .. } => {
                     out.push((group.to_string(), geom.clone(), paint.clone()))
