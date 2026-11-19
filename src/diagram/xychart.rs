@@ -2283,7 +2283,9 @@ mod tests {
     fn bar_groups(els: &[Element]) -> Vec<(String, Vec<Rect>)> {
         let mut out = Vec::new();
         for e in els {
-            if let Element::Group {
+            if let Element::Markup { children, .. } = e {
+                out.extend(bar_groups(children));
+            } else if let Element::Group {
                 class, children, ..
             } = e
             {
@@ -2418,7 +2420,9 @@ mod tests {
         let mut out = Vec::new();
         for e in els {
             match e {
-                Element::Group { children, .. } => out.extend(rotated_texts(children)),
+                Element::Group { children, .. } | Element::Markup { children, .. } => {
+                    out.extend(rotated_texts(children))
+                }
                 Element::Rotated {
                     deg,
                     about,
