@@ -13,9 +13,11 @@ use crate::error::{Error, Result};
 use crate::geom::{Point, Rect};
 use crate::json::Json;
 use crate::layout::boxes::{self, BoxNode, taffy};
+use crate::output::svg::{esc_text, js_num as n};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
 use crate::text::decode_entities;
 use crate::theme::{Palette, ThemeName};
+use std::fmt::Write;
 
 /// Mermaid refuses to build more than this many words.
 const MAX_ROWS: usize = 10_000;
@@ -269,6 +271,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
     let rows = rows(p, pc.bits_per_row);
     let rects = layout(&rows, pc);
     let mut els = Vec::new();
+    let mut svg = String::from("<g/>");
     let width = pc.bit_width * pc.bits_per_row as f64 + 2.0;
     // packet/styles.ts: black ink on #efefef blocks, except where a theme
     // sets `packet` (dark: on the background, forest: on mainBkg, both in
@@ -281,6 +284,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
     let stroke = ink.clone();
     for (row, rr) in rows.iter().zip(&rects) {
         let mut g = Vec::new();
+        svg.push_str("<g>");
         for (seg, r) in row.iter().zip(rr) {
             // drawWord: a descending row puts a block's columns mirrored.
             let x = if pc.descending {
@@ -294,6 +298,18 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
             } else {
                 (seg.start, seg.end)
             };
+            let _ = write!(
+                svg,
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" class=\"packetBlock\"/>\
+                 <text x=\"{}\" y=\"{}\" class=\"packetLabel\" dominant-baseline=\"middle\" text-anchor=\"middle\">{}</text>",
+                n(rect.x),
+                n(rect.y),
+                n(rect.w),
+                n(rect.h),
+                n(rect.center().x),
+                n(rect.center().y),
+                esc_text(&seg.label)
+            );
             g.push(Element::classed_shape(
                 crate::scene::Geometry::Rect { rect, rx: 0.0 },
                 Paint::both(&fill, &stroke, 1.0),
@@ -324,8 +340,21 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                     dy_tspans: false,
                     family: None,
                 };
+                let _ = write!(
+                    svg,
+                    "<text x=\"{}\" y=\"{}\" class=\"packetByte start\" dominant-baseline=\"auto\" text-anchor=\"{}\">{leading}</text>",
+                    n(start.x),
+                    n(y),
+                    if single { "middle" } else { "start" }
+                );
                 g.push(Element::classed_text(start, "packetByte start"));
                 if !single {
+                    let _ = write!(
+                        svg,
+                        "<text x=\"{}\" y=\"{}\" class=\"packetByte end\" dominant-baseline=\"auto\" text-anchor=\"end\">{trailing}</text>",
+                        n(rect.right()),
+                        n(y)
+                    );
                     let end = Text {
                         x: rect.right(),
                         y,
@@ -344,6 +373,7 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
                 }
             }
         }
+        svg.push_str("</g>");
         els.push(Element::group("packetRow", g));
     }
     // renderer.ts: a fixed `0 0 W H` viewBox, one row taller than the
@@ -354,15 +384,34 @@ pub fn draw(p: &Packet, pc: &PacketConfig, pal: &Palette) -> Scene {
         total_row * (rows.len() + 1) as f64 - if title.is_some() { 0.0 } else { pc.row_height };
     if let Some(t) = title {
         let c = Point::new(width / 2.0, height - total_row / 2.0);
+        let _ = write!(
+            svg,
+            "<text x=\"{}\" y=\"{}\" dominant-baseline=\"middle\" text-anchor=\"middle\" class=\"packetTitle\">{}</text>",
+            n(c.x),
+            n(c.y),
+            esc_text(t)
+        );
         els.push(Element::classed_text(
             Text::middle(c, t, TITLE_FONT, &ink),
             "packetTitle",
         ));
+    } else {
+        // The title text is always created, empty without a title.
+        let _ = write!(
+            svg,
+            "<text x=\"{}\" y=\"{}\" dominant-baseline=\"middle\" text-anchor=\"middle\" class=\"packetTitle\"/>",
+            n(width / 2.0),
+            n(height - total_row / 2.0)
+        );
     }
     Scene {
         kind: DiagramKind::Packet,
         view_box: Rect::new(0.0, 0.0, width, height),
-        elements: els,
+        elements: vec![Element::Markup {
+            svg,
+            svg_view_box: None,
+            children: els,
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -437,7 +486,9 @@ mod tests {
             let s = render("packet-beta\n0-15: \"A\"", None, &cfg, &cfg.palette()).unwrap();
             fn find(els: &[Element]) -> Option<Paint> {
                 els.iter().find_map(|e| match e {
-                    Element::Group { children, .. } => find(children),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        find(children)
+                    }
                     Element::Shape {
                         paint,
                         class: Some(c),
@@ -461,7 +512,9 @@ mod tests {
     fn texts(els: &[Element], out: &mut Vec<Text>) {
         for e in els {
             match e {
-                Element::Group { children, .. } => texts(children, out),
+                Element::Group { children, .. } | Element::Markup { children, .. } => {
+                    texts(children, out)
+                }
                 Element::Text { text, .. } => out.push(text.clone()),
                 _ => {}
             }
