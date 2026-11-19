@@ -34,12 +34,87 @@ pub struct SvgOptions<'a> {
     pub style: Option<&'a crate::theme::styles::StyleSpec>,
 }
 
-/// Compact, deterministic number formatting.
+thread_local! {
+    /// Whether [`num`] prints numbers as JavaScript does. Only the SVG file
+    /// path turns it on; the raster and PDF paths keep the rounded form their
+    /// output was built against.
+    static JS_NUMBERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with [`num`] printing numbers the way mermaid's SVG does (`js_num`).
+pub fn with_js_numbers<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            JS_NUMBERS.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(JS_NUMBERS.with(|c| c.replace(true)));
+    f()
+}
+
+/// Number formatting for SVG text: JavaScript's within [`with_js_numbers`],
+/// else compact and deterministic (three decimals).
 pub fn num(v: f64) -> String {
+    if JS_NUMBERS.with(|c| c.get()) {
+        return js_num(v);
+    }
     let v = if v.abs() < 5e-4 { 0.0 } else { v };
     let s = format!("{v:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.to_string() }
+}
+
+/// `Number.prototype.toString` (ECMA-262 Number::toString, radix 10): the
+/// shortest digits that read back as `v`, laid out without an exponent for
+/// 1e-7 < |v| < 1e21.
+pub fn js_num(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".into();
+    }
+    if v == 0.0 {
+        return "0".into();
+    }
+    if v.is_infinite() {
+        return if v < 0.0 { "-Infinity" } else { "Infinity" }.into();
+    }
+    let sign = if v < 0.0 { "-" } else { "" };
+    let a = v.abs();
+    // Shortest round-trip digits. Where two shortest strings are equally near
+    // the exact value, JavaScript takes the even one, which is what the
+    // correctly rounded form with as many digits is.
+    let e = format!("{a:e}");
+    let (mant, exp) = e.split_once('e').unwrap_or((&e, "0"));
+    let mut digits: String = mant.chars().filter(|c| *c != '.').collect();
+    let even = format!("{:.*e}", digits.len() - 1, a);
+    if even.parse::<f64>() == Ok(a)
+        && let Some((m2, e2)) = even.split_once('e')
+        && e2 == exp
+    {
+        digits = m2.chars().filter(|c| *c != '.').collect();
+    }
+    let k = digits.len() as i32;
+    let n = exp.parse::<i32>().unwrap_or(0) + 1;
+    let body = if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let es = if e < 0 {
+            format!("-{}", -e)
+        } else {
+            format!("+{e}")
+        };
+        if k == 1 {
+            format!("{digits}e{es}")
+        } else {
+            format!("{}.{}e{es}", &digits[..1], &digits[1..])
+        }
+    };
+    format!("{sign}{body}")
 }
 
 /// The root `max-width` as mmdc writes it: the drawing's width to six
@@ -1123,6 +1198,33 @@ mod tests {
         assert_eq!(num(1.23456), "1.235");
         assert_eq!(num(-0.0001), "0");
         assert_eq!(num(-2.5), "-2.5");
+    }
+
+    #[test]
+    fn js_number_text() {
+        for (v, want) in [
+            (0.0, "0"),
+            (-0.0, "0"),
+            (0.75, "0.75"),
+            (57.34375, "57.34375"),
+            (100.0, "100"),
+            (1e21, "1e+21"),
+            (1e20, "100000000000000000000"),
+            (123456789012345680000.0, "123456789012345680000"),
+            (1.5e-7, "1.5e-7"),
+            (0.000001, "0.000001"),
+            (1e-7, "1e-7"),
+            (-2.5, "-2.5"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (636.2000122070312, "636.2000122070312"),
+            (f64::from(636.2f32), "636.2000122070312"),
+            (5e-324, "5e-324"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+        ] {
+            assert_eq!(js_num(v), want, "{v:e}");
+        }
+        assert_eq!(with_js_numbers(|| num(0.0001234)), "0.0001234");
+        assert_eq!(num(0.0001234), "0");
     }
 
     #[test]

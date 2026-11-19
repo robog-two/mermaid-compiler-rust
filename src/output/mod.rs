@@ -145,17 +145,19 @@ pub fn encode_svg(r: &Rendered, opt: &EncodeOptions) -> String {
             height: r.svg_height.unwrap_or(r.scene.view_box.h),
         },
     };
-    let mut svg = svg::to_svg(
-        &r.scene,
-        &SvgOptions {
-            id: &opt.svg_id,
-            background: &opt.background,
-            sizing,
-            theme_css: r.theme_css.as_deref(),
-            raster_scale: None,
-            style: r.style.as_ref(),
-        },
-    );
+    let mut svg = svg::with_js_numbers(|| {
+        svg::to_svg(
+            &r.scene,
+            &SvgOptions {
+                id: &opt.svg_id,
+                background: &opt.background,
+                sizing,
+                theme_css: r.theme_css.as_deref(),
+                raster_scale: None,
+                style: r.style.as_ref(),
+            },
+        )
+    });
     #[cfg(feature = "font-embed")]
     if opt.font_embed {
         fontembed::embed(&r.scene, &mut svg);

@@ -458,7 +458,15 @@ fn render_one(
     format: Format,
     rast: Option<&Rasterizer>,
 ) -> Result<Rendered, String> {
-    let r = render::render_with_env(def, config, env).map_err(|e| format!("Error: {e}"))?;
+    // Diagram code writes some numbers into the scene as text: for the SVG file
+    // they are written as JavaScript prints them.
+    let render = || render::render_with_env(def, config, env);
+    let r = if format == Format::Svg {
+        output::svg::with_js_numbers(render)
+    } else {
+        render()
+    }
+    .map_err(|e| format!("Error: {e}"))?;
     let bytes = match format {
         Format::Svg => output::encode_svg(&r, enc).into_bytes(),
         Format::Pdf => output::encode_pdf(&r, enc),
