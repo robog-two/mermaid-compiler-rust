@@ -363,7 +363,7 @@ fn sequence(o: &Opts) -> String {
 
 /// khroma `fade`.
 fn fade(c: &str, a: f64) -> String {
-    khroma::with_alpha(c, a)
+    khroma::fade(c, a)
 }
 
 /// `getIconStyles()`.

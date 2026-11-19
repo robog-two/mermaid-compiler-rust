@@ -437,7 +437,18 @@ pub fn invert(c: &str) -> String {
     out.stringify()
 }
 
-/// khroma `rgba(c, a)` (mermaid's `fade`): the colour with its alpha set.
+/// mermaid's styles `fade(color, opacity)`: `rgba(channel r, g, b, opacity)`, the
+/// channels read in RGB whatever the notation of `c` (`hsl(..)` included).
+pub fn fade(c: &str, a: f64) -> String {
+    let Some(mut ch) = parse(c) else {
+        return c.to_string();
+    };
+    let mut out = from_rgb(ch.rgb(0), ch.rgb(1), ch.rgb(2), clamp_a(a), "");
+    out.changed = true;
+    out.stringify()
+}
+
+/// khroma `rgba(c, a)`: the colour with its alpha set.
 pub fn with_alpha(c: &str, a: f64) -> String {
     let Some(mut ch) = parse(c) else {
         return c.to_string();

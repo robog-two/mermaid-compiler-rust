@@ -139,6 +139,78 @@ radar.legendBoxSize ||= "12"
 radar.legendFontSize ||= "12"
 "##;
 
+/// The requirement and state variables of the theme classes (`updateColors()`),
+/// which the ThemeVars port does not carry.
+fn theme_extras(theme: ThemeName) -> String {
+    use ThemeName as T;
+    let relation_bkg = match theme {
+        T::Default | T::Null => "labelBackground",
+        T::Forest | T::Neutral => "edgeLabelBackground",
+        _ => "darkMode ? darken(secondaryColor, 30) : secondaryColor",
+    };
+    let transition = if theme == T::Neutral {
+        "\"#000\""
+    } else {
+        "lineColor"
+    };
+    let inner_end = match theme {
+        T::Dark | T::Forest | T::Neutral => "primaryBorderColor",
+        _ => "nodeBorder",
+    };
+    let composite_bg = match theme {
+        T::ReduxDark | T::ReduxDarkColor => "\"#16141F\"",
+        _ => "background || tertiaryColor",
+    };
+    let composite_title = match theme {
+        T::Redux | T::ReduxColor => "\"#F9F9FB\"",
+        T::ReduxDark | T::ReduxDarkColor => "\"#16141F\"",
+        _ => "mainBkg",
+    };
+    let radius = match theme {
+        T::Neo | T::NeoDark => "3",
+        T::Redux | T::ReduxColor | T::ReduxDark | T::ReduxDarkColor => "12",
+        _ => "5",
+    };
+    let requirement_bkg = match theme {
+        T::Neo | T::Redux | T::ReduxColor => "\"#ECECFE\"",
+        _ => "primaryColor",
+    };
+    let alt = match theme {
+        T::Base => "tertiaryColor",
+        T::Dark => "\"#555\"",
+        T::Neutral => "\"#f4f4f4\"",
+        T::Redux | T::ReduxColor => "\"#F9F9FB\"",
+        T::ReduxDark | T::ReduxDarkColor => "\"#16141F\"",
+        _ => "\"#f0f0f0\"",
+    };
+    let state_border = match theme {
+        T::Neo => "stateBorder ||= \"#000000\"\n",
+        T::Neutral => "stateBorder ||= \"#000\"\n",
+        T::Redux | T::ReduxColor => "stateBorder ||= \"#28253D\"\n",
+        T::ReduxDark | T::ReduxDarkColor => "stateBorder ||= \"#FFFFFF\"\n",
+        _ => "",
+    };
+    format!(
+        "{state_border}requirementBackground ||= {requirement_bkg}\n\
+         altBackground ||= {alt}\n\
+         requirementBorderColor ||= primaryBorderColor\n\
+         requirementBorderSize ||= \"1\"\n\
+         requirementTextColor ||= primaryTextColor\n\
+         relationColor ||= lineColor\n\
+         relationLabelBackground ||= {relation_bkg}\n\
+         relationLabelColor ||= actorTextColor\n\
+         transitionColor ||= {transition}\n\
+         transitionLabelColor ||= textColor\n\
+         stateLabelColor ||= stateBkg || primaryTextColor\n\
+         stateBkg ||= mainBkg\n\
+         labelBackgroundColor ||= stateBkg\n\
+         compositeBackground ||= {composite_bg}\n\
+         compositeTitleBackground ||= {composite_title}\n\
+         innerEndBackground ||= {inner_end}\n\
+         radius ||= \"{radius}\"\n"
+    )
+}
+
 impl Opts {
     /// The palette the options were derived with.
     pub(super) fn pal(&self) -> &super::Palette {
@@ -164,6 +236,7 @@ impl Opts {
                 ThemeName::Dark => "arrowheadColor ||= mainContrastColor",
                 _ => "arrowheadColor ||= invert(background)",
             });
+            tv.extend(&theme_extras(theme));
             for (k, v) in tv.entries() {
                 m.insert(k.into(), v.into());
             }
@@ -287,7 +360,12 @@ impl Opts {
 
     /// `${options[k]}`.
     pub fn s(&self, k: &str) -> String {
-        self.get(k).unwrap_or("undefined").to_string()
+        self.get(k).unwrap_or_else(|| {
+            if std::env::var_os("MMDC_STYLE_DEBUG").is_some() {
+                eprintln!("undefined option {k} ({:?})", self.theme);
+            }
+            "undefined"
+        }).to_string()
     }
 
     /// `a || b` over variable names (the first truthy one).
