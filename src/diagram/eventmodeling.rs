@@ -18,6 +18,7 @@
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, Point, Rect};
+use crate::output::svg::{esc, esc_text, js_num};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::line_width;
 use crate::theme::Palette;
@@ -418,6 +419,8 @@ pub struct BoxModel {
     /// Data lines shown under the name (`wrapLabel`ed; a line may still hold
     /// newlines, which the HTML renders as spaces).
     pub data: Option<Vec<String>>,
+    /// The data came from a `data` block, which appends a trailing `<br/>`.
+    pub data_from_block: bool,
 }
 
 /// The positioned model.
@@ -698,6 +701,7 @@ pub fn position(model: &EventModel) -> State {
             h,
             name: name.to_string(),
             name_lines,
+            data_from_block: data.as_ref().is_some_and(|(_, b)| *b),
             data: data.map(|(d, _)| d),
         });
         previous_lane = Some(lane_index);
@@ -998,9 +1002,14 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
             Paint::fill(&c.arrowhead),
         ));
     }
+    let svg = markup(model, st, &c, &rect_of);
     let mut elements = lanes;
     elements.extend(boxes);
     elements.extend(relations);
+    let elements = vec![Element::Markup {
+        svg,
+        children: elements,
+    }];
     Scene {
         kind: DiagramKind::EventModeling,
         view_box: bounds.rect().pad(padding),
@@ -1011,6 +1020,98 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
         // Data is HTML `<code>`: the browser's monospace font.
         css: "text.em-data{font-family:monospace !important;}".to_string(),
     }
+}
+
+/// Text as the XML serialiser writes it.
+fn xml_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The DOM `renderer.ts` builds: swimlanes, boxes (an XHTML label in a
+/// `foreignObject`), relations, then the arrowhead marker.
+fn markup(
+    model: &EventModel,
+    st: &State,
+    c: &Colors,
+    rect_of: &dyn Fn(&BoxModel) -> Rect,
+) -> String {
+    let mut o = String::from("<g/>");
+    for lane in &st.swimlanes {
+        o += &format!(
+            "<g class=\"em-swimlane\"><rect x=\"0\" y=\"{}\" rx=\"3\" width=\"{}\" height=\"{}\" fill=\"{}\" stroke=\"{}\"/><text font-weight=\"bold\" x=\"30\" y=\"{}\">{}</text></g>",
+            js_num(lane.y),
+            js_num(st.max_r + SWIMLANE_PADDING),
+            js_num(lane.height),
+            esc(c.lane_bg.css()),
+            esc(c.lane_stroke.css()),
+            js_num(lane.y + 30.0),
+            esc_text(&lane.label)
+        );
+    }
+    let join = |lines: &[String], nbsp: bool| {
+        lines
+            .iter()
+            .map(|l| {
+                let t = xml_text(l);
+                if nbsp { t.replace(' ', "\u{a0}") } else { t }
+            })
+            .collect::<Vec<_>>()
+            .join("<br />")
+    };
+    for b in &st.boxes {
+        let k = slot(model.frames[b.frame].entity);
+        let y = rect_of(b).y;
+        let mut html = format!("<b>{}</b>", join(&b.name_lines, false));
+        if let Some(d) = &b.data {
+            html += &format!(
+                "<br /><br /><code style=\"text-align: left; display: block;max-width:{}px\">{}{}</code>",
+                js_num(TEXT_MAX_WIDTH),
+                join(d, true),
+                if b.data_from_block { "<br />" } else { "" }
+            );
+        }
+        o += &format!(
+            "<g class=\"em-box\"><rect x=\"{}\" y=\"{}\" rx=\"3\" width=\"{}\" height=\"{}\" stroke=\"{}\" fill=\"{}\"/><foreignObject x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"><div xmlns=\"http://www.w3.org/1999/xhtml\" style=\"display: table; height: 100%; width: 100%;\"><span style=\"display: table-cell; text-align: center; vertical-align: middle;\">{html}</span></div></foreignObject></g>",
+            js_num(b.x),
+            js_num(y),
+            js_num(b.w),
+            js_num(b.h),
+            esc(c.stroke[k].css()),
+            esc(c.fill[k].css()),
+            js_num(b.x + BOX_PADDING),
+            js_num(y + 10.0),
+            js_num(b.w - 2.0 * BOX_PADDING),
+            js_num(b.h - 2.0 * BOX_PADDING),
+        );
+    }
+    for &(s, t) in &st.relations {
+        let (sb, tb) = (&st.boxes[s], &st.boxes[t]);
+        let (sy0, ty0) = (rect_of(sb).y, rect_of(tb).y);
+        let sx = sb.x + sb.w * 2.0 / 3.0;
+        let tx = tb.x + tb.w / 3.0;
+        let (sy, ty) = if sy0 > ty0 {
+            (sy0, ty0 + tb.h)
+        } else {
+            (sy0 + sb.h, ty0)
+        };
+        o += &format!(
+            "<path class=\"em-relation\" fill=\"none\" stroke=\"{}\" stroke-width=\"1\" marker-end=\"url(#em-arrowhead-{})\" d=\"M{} {} L{} {}\"/>",
+            esc(c.relation.css()),
+            crate::diagram::wardley::ID_MARK,
+            js_num(sx),
+            js_num(sy),
+            js_num(tx),
+            js_num(ty)
+        );
+    }
+    o += &format!(
+        "<defs><marker id=\"em-arrowhead-{}\" markerWidth=\"10\" markerHeight=\"7\" refX=\"10\" refY=\"3.5\" orient=\"auto\"><polygon points=\"0 0, 10 3.5, 0 7\" fill=\"{}\"/></marker></defs>",
+        crate::diagram::wardley::ID_MARK,
+        esc(c.arrowhead.css())
+    );
+    o
 }
 
 #[cfg(test)]
@@ -1173,6 +1274,7 @@ mod tests {
             for e in els {
                 match e {
                     crate::scene::Element::Group { children, .. }
+                    | crate::scene::Element::Markup { children, .. }
                     | crate::scene::Element::Rotated { children, .. } => walk(children, out),
                     other => out.push(other.clone()),
                 }
