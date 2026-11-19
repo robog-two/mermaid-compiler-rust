@@ -1,0 +1,8 @@
+
+    [data-look="neo"].mindmap-node.section-${i - 1} rect, [data-look="neo"].mindmap-node.section-${i - 1} path, [data-look="neo"].mindmap-node.section-${i - 1} circle, [data-look="neo"].mindmap-node.section-${i - 1} polygon {
+      stroke: url(${svgId}-gradient);
+      fill: ${mainBkg};
+    }
+    .section-${i - 1} line {
+      stroke-width: 0;
+    }

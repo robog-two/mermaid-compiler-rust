@@ -1,0 +1,24 @@
+
+  .edge {
+    stroke-width: 3;
+  }
+  ${@1}
+  ${gradientSections}
+  .section-root rect, .section-root path, .section-root circle  {
+    fill: ${options.git0};
+  }
+  .section-root text {
+    fill: ${options.gitBranchLabel0};
+  }
+  .icon-container {
+    height:100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  .edge {
+    fill: none;
+  }
+  .eventWrapper  {
+   filter: brightness(120%);
+  }

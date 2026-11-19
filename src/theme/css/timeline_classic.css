@@ -1,0 +1,33 @@
+
+    .section-${i - 1} rect, .section-${i - 1} path, .section-${i - 1} circle, .section-${i - 1} path  {
+      fill: ${@1};
+    }
+    .section-${i - 1} text {
+     fill: ${@2};
+    }
+    .node-icon-${i - 1} {
+      font-size: 40px;
+      color: ${@3};
+    }
+    .section-edge-${i - 1}{
+      stroke: ${@4};
+    }
+    .edge-depth-${i - 1}{
+      stroke-width: ${sw};
+    }
+    .section-${i - 1} line {
+      stroke: ${@5} ;
+      stroke-width: 3;
+    }
+
+    .lineWrapper line{
+      stroke: ${@6} ;
+    }
+
+    .disabled, .disabled circle, .disabled text {
+      fill: ${options.tertiaryColor ?? 'lightgray'};
+    }
+    .disabled text {
+      fill: ${options.clusterBorder ?? '#efefef'};
+    }
+    

@@ -1,0 +1,12 @@
+
+      .section-${i - 1}[data-look="neo"] rect,
+      .section-${i - 1}[data-look="neo"] path,
+      .section-${i - 1}[data-look="neo"] circle {
+        fill: ${options.mainBkg};
+        stroke: url(#${rawSvgId}-gradient);
+        stroke-width: 2;
+      }
+      .section-${i - 1}[data-look="neo"] line {
+        stroke: url(#${rawSvgId}-gradient);
+        stroke-width: 2;
+      }

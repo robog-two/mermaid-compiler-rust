@@ -43,6 +43,8 @@ pub(super) fn diagram(kind: DiagramKind, o: &Opts) -> Option<String> {
         DiagramKind::Journey => journey(o),
         DiagramKind::Kanban => kanban(o),
         DiagramKind::Sequence => sequence(o),
+        DiagramKind::Mindmap => mindmap(o),
+        DiagramKind::Timeline => timeline(o),
         DiagramKind::Er => er(o),
         DiagramKind::Requirement => requirement(o),
         DiagramKind::Class => class(o),
@@ -554,6 +556,161 @@ fn block(o: &Opts) -> String {
         "@3" => Some(fade(&o.s("clusterBkg"), 0.5)),
         "@4" => Some(fade(&o.s("clusterBorder"), 0.2)),
         "@5" => Some(icon_styles()),
+        _ => None,
+    })
+}
+
+fn theme_is(o: &Opts, names: &[&str]) -> bool {
+    names.contains(&o.theme.name())
+}
+
+fn includes_redux(o: &Opts) -> bool {
+    o.theme.name().contains("redux")
+}
+
+fn indexed(o: &Opts, prefix: &str, i: usize) -> String {
+    o.s(&format!("{prefix}{i}"))
+}
+
+fn mindmap(o: &Opts) -> String {
+    let neo = o.look == crate::config::Look::Neo;
+    let neutral = o.theme == super::ThemeName::Neutral;
+    let mut sections = String::new();
+    for i in 0..limit(o) {
+        let j = i as i64 - 1;
+        let sw = if neo {
+            (10 - j * 2).max(2)
+        } else {
+            17 - 3 * i as i64
+        };
+        let neo_label = if theme_is(o, &["redux", "redux-dark"]) {
+            o.s("nodeBorder")
+        } else {
+            indexed(o, "cScaleLabel", if neutral { 1 } else { i })
+        };
+        sections += &tpl(o, include_str!("css/mindmap_section.css"), &|e| match e {
+            "i - 1" => Some(j.to_string()),
+            "sw" => Some(sw.to_string()),
+            "neoLabel" => Some(neo_label.clone()),
+            "@1" | "@5" => Some(indexed(o, "cScale", i)),
+            "@2" | "@3" | "@4" => Some(indexed(o, "cScaleLabel", i)),
+            "@6" => Some(indexed(o, "cScaleInv", i)),
+            "@7" => Some(if theme_is(o, &["redux", "redux-dark", "neutral"]) {
+                o.s("mainBkg")
+            } else {
+                indexed(o, "cScale", i)
+            }),
+            "@8" => Some(if theme_is(o, &["redux", "redux-dark"]) {
+                o.s("nodeBorder")
+            } else {
+                indexed(o, "cScale", i)
+            }),
+            "@9" => Some(if includes_redux(o) || theme_is(o, &["neo-dark"]) {
+                o.s("nodeBorder")
+            } else {
+                indexed(o, "cScale", i)
+            }),
+            _ => None,
+        });
+    }
+    let neo_root_label = if includes_redux(o) {
+        o.s("nodeBorder")
+    } else {
+        indexed(o, "cScaleLabel", if neutral { 1 } else { 0 })
+    };
+    let gradient = if o.get("useGradient") == Some("true")
+        && o.get("mainBkg").is_some_and(|v| !v.is_empty())
+    {
+        let mut g = String::new();
+        for i in 0..limit(o) {
+            g += &tpl(o, include_str!("css/mindmap_grad.css"), &|e| match e {
+                "i - 1" => Some((i as i64 - 1).to_string()),
+                "svgId" => Some(o.svg_sel.clone()),
+                "mainBkg" => Some(o.s("mainBkg")),
+                _ => None,
+            });
+        }
+        g
+    } else {
+        String::new()
+    };
+    tpl(o, include_str!("css/mindmap.css"), &|e| match e {
+        "@1" => Some(sections.clone()),
+        "@2" => Some(if includes_redux(o) {
+            o.s("nodeBorder")
+        } else {
+            o.s("gitBranchLabel0")
+        }),
+        "@3" => Some(if includes_redux(o) {
+            o.s("mainBkg")
+        } else {
+            o.s("git0")
+        }),
+        "@4" => Some(gradient.clone()),
+        "scopedDropShadow" => Some(scoped_shadow(o)),
+        "neoRootLabel" => Some(neo_root_label.clone()),
+        _ => None,
+    })
+}
+
+fn timeline(o: &Opts) -> String {
+    let redux = includes_redux(o);
+    let neutral = o.theme == super::ThemeName::Neutral;
+    let raw_id = o.svg_sel.trim_start_matches('#').to_string();
+    let colors = o.color_arrays();
+    let dark_theme = o.theme.name().contains("dark");
+    let shadow = if raw_id.is_empty() {
+        o.get("dropShadow").unwrap_or("none").to_string()
+    } else {
+        format!("url(#{raw_id}-drop-shadow)")
+    };
+    let mut sections = String::new();
+    for i in 0..limit(o) {
+        let j = i as i64 - 1;
+        let sw = 17 - 3 * i as i64;
+        if redux {
+            let slot = colors.as_ref().map(|(b, _)| b[i % b.len()].clone());
+            let color = slot.clone().unwrap_or_else(|| o.s("mainBkg"));
+            let stroke = slot.clone().unwrap_or_else(|| o.s("nodeBorder"));
+            sections += &tpl(o, include_str!("css/timeline_redux.css"), &|e| match e {
+                "i - 1" => Some(j.to_string()),
+                "sw" => Some(sw.to_string()),
+                "stroke" => Some(stroke.clone()),
+                "scopedDropShadow" => Some(shadow.clone()),
+                "@1" => Some(if dark_theme && colors.is_some() {
+                    o.s("mainBkg")
+                } else {
+                    color.clone()
+                }),
+                "@2" => Some(indexed(o, "cScaleLabel", i)),
+                "@3" => Some(indexed(o, "cScale", i)),
+                "@4" => Some(indexed(o, "cScaleInv", i)),
+                _ => None,
+            });
+        } else {
+            sections += &tpl(o, include_str!("css/timeline_classic.css"), &|e| match e {
+                "i - 1" => Some(j.to_string()),
+                "sw" => Some(sw.to_string()),
+                "@1" | "@4" => Some(indexed(o, "cScale", i)),
+                "@2" | "@3" | "@6" => Some(indexed(o, "cScaleLabel", i)),
+                "@5" => Some(indexed(o, "cScaleInv", i)),
+                _ => None,
+            });
+        }
+    }
+    let mut gradient = String::new();
+    if o.get("useGradient") == Some("true") && !raw_id.is_empty() && !neutral {
+        for i in 0..limit(o) {
+            gradient += &tpl(o, include_str!("css/timeline_grad.css"), &|e| match e {
+                "i - 1" => Some((i as i64 - 1).to_string()),
+                "rawSvgId" => Some(raw_id.clone()),
+                _ => None,
+            });
+        }
+    }
+    tpl(o, include_str!("css/timeline.css"), &|e| match e {
+        "@1" => Some(sections.clone()),
+        "gradientSections" => Some(gradient.clone()),
         _ => None,
     })
 }

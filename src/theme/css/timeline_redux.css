@@ -1,0 +1,48 @@
+
+    .section-${i - 1} rect,
+    .section-${i - 1} path,
+    .section-${i - 1} circle {
+      fill: ${@1};
+      stroke: ${stroke};
+      stroke-width: ${options.strokeWidth};
+      filter: ${scopedDropShadow};
+    }
+
+    .section-${i - 1} text {
+      fill: ${options.nodeBorder};
+      font-weight: ${options.fontWeight}
+    }
+
+    .node-icon-${i - 1} {
+      font-size: 40px;
+      color: ${@2};
+    }
+
+    .section-edge-${i - 1} {
+      stroke: ${@3};
+    }
+
+    .edge-depth-${i - 1} {
+      stroke-width: ${sw};
+    }
+
+    .section-${i - 1} line {
+      stroke: ${@4};
+      stroke-width: 3;
+    }
+
+    .lineWrapper line {
+      stroke: ${options.nodeBorder};
+      stroke-width:${options.strokeWidth}
+    }
+
+    .disabled,
+    .disabled circle,
+    .disabled text {
+      fill: ${options.tertiaryColor ?? 'lightgray'};
+    }
+
+    .disabled text {
+      fill: ${options.clusterBorder ?? '#efefef'};
+    }
+    

@@ -1,0 +1,44 @@
+
+    .section-${i - 1} rect, .section-${i - 1} path, .section-${i - 1} circle, .section-${i - 1} polygon, .section-${i - 1} path  {
+      fill: ${@1};
+    }
+    .section-${i - 1} text {
+     fill: ${@2};
+    }
+     .section-${i - 1} span {
+     color: ${@3};
+    }
+    .node-icon-${i - 1} {
+      font-size: 40px;
+      color: ${@4};
+    }
+    .section-edge-${i - 1}{
+      stroke: ${@5};
+    }
+    .edge-depth-${i - 1}{
+      stroke-width: ${sw};
+    }
+    .section-${i - 1} line {
+      stroke: ${@6} ;
+      stroke-width: 3;
+    }
+
+    .disabled, .disabled circle, .disabled text {
+      fill: lightgray;
+    }
+    .disabled text {
+      fill: #efefef;
+    }
+    [data-look="neo"].mindmap-node.section-${i - 1} rect, [data-look="neo"].mindmap-node.section-${i - 1} path, [data-look="neo"].mindmap-node.section-${i - 1} circle, [data-look="neo"].mindmap-node.section-${i - 1} polygon {
+      fill: ${@7};
+      stroke: ${@8};
+      stroke-width: ${options.strokeWidth ?? 2}px;
+    }
+    [data-look="neo"].section-edge-${i - 1}{
+      stroke: ${@9};
+    }
+    [data-look="neo"].mindmap-node.section-${i - 1} text, [data-look="neo"].mindmap-node.section-${i - 1} span {
+     fill: ${neoLabel};
+     color: ${neoLabel};
+    }
+    

@@ -39,7 +39,8 @@ pub struct Opts {
 fn constants(theme: ThemeName) -> Vec<(&'static str, &'static str)> {
     let mut v = vec![("THEME_COLOR_LIMIT", "12")];
     let (ff, fs, sw) = match theme {
-        ThemeName::Neo | ThemeName::NeoDark => ("arial, sans-serif", "14px", "2"),
+        ThemeName::Neo => ("arial, sans-serif", "14px", "2"),
+        ThemeName::NeoDark => ("arial, sans-serif", "14px", "1"),
         ThemeName::Redux
         | ThemeName::ReduxDark
         | ThemeName::ReduxColor
@@ -303,9 +304,20 @@ impl Opts {
             ("gitBranchLabel", &p.git_branch_label),
         ];
         let mut add: Vec<(String, String)> = Vec::new();
+        let classic_default = matches!(self.theme, ThemeName::Default | ThemeName::Null);
         for (name, set) in sets {
             for (i, c) in set.iter().enumerate() {
-                add.push((format!("{name}{i}"), respell(c.css())));
+                // Copies of a literal keep its spelling; derived colours (`invert`,
+                // `adjust`, ...) print as khroma does, whichever literal they equal.
+                let derived = matches!(name, "gitInv" | "cScaleInv" | "cScalePeer")
+                    || (name == "gitBranchLabel" && matches!(i, 0 | 3))
+                    || (classic_default && name == "cScaleLabel" && matches!(i, 0 | 3));
+                let text = if derived {
+                    c.css().to_string()
+                } else {
+                    respell(c.css())
+                };
+                add.push((format!("{name}{i}"), text));
             }
         }
         for (i, c) in p.pie_colors.iter().enumerate() {

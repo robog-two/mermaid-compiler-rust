@@ -1,0 +1,41 @@
+
+  .edge {
+    stroke-width: 3;
+  }
+  ${@1}
+  .section-root rect, .section-root path, .section-root circle, .section-root polygon  {
+    fill: ${options.git0};
+  }
+  .section-root text {
+    fill: ${options.gitBranchLabel0};
+  }
+  .section-root span {
+    color: ${@2};
+  }
+  .icon-container {
+    height:100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  .edge {
+    fill: none;
+  }
+  .mindmap-node-label {
+    dy: 1em;
+    alignment-baseline: middle;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    text-align: center;
+  }
+  [data-look="neo"].mindmap-node  {
+    filter: ${scopedDropShadow};
+  }
+  [data-look="neo"].mindmap-node.section-root rect, [data-look="neo"].mindmap-node.section-root path, [data-look="neo"].mindmap-node.section-root circle, [data-look="neo"].mindmap-node.section-root polygon  {
+    fill: ${@3};
+  }
+  [data-look="neo"].mindmap-node.section-root .text-inner-tspan, [data-look="neo"].mindmap-node.section-root span {
+    fill: ${neoRootLabel};
+    color: ${neoRootLabel};
+  }
+  ${@4}
