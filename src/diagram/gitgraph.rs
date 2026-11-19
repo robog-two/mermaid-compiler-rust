@@ -23,8 +23,10 @@
 //! gets 40px extra room; TB/BT tags are always turned +45°.
 
 use crate::config::MermaidConfig;
+use crate::diagram::wardley::ID_MARK;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, PathCmd, Point, Rect};
+use crate::output::svg::{esc_text, js_num as n};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Shadow, Text};
 use crate::text::{line_width, svg_bbox_width, svg_line_box};
 use crate::theme::Palette;
@@ -127,7 +129,14 @@ fn fnv(parts: &[&str]) -> u64 {
 
 fn auto_id(seq: usize, branch: &str, msg: &str) -> String {
     let h = fnv(&[&seq.to_string(), branch, msg]);
-    format!("{seq}-{:07x}", h & 0xfff_ffff)
+    let mut hex = format!("{:07x}", h & 0xfff_ffff).into_bytes();
+    // A random id of mermaid's is almost always a mix of digits and letters.
+    if hex.iter().all(u8::is_ascii_digit) {
+        hex[6] = b'a';
+    } else if hex.iter().all(u8::is_ascii_alphabetic) {
+        hex[6] = b'1';
+    }
+    format!("{seq}-{}", String::from_utf8_lossy(&hex))
 }
 
 /// Key/value attributes of a statement (`id: "x" tag: "v1" type: HIGHLIGHT`).
@@ -470,10 +479,15 @@ pub struct GitConfig {
     pub branch_font: f64,
     /// `look: neo`: branch label boxes cast the theme's drop shadow.
     pub neo: bool,
+    /// The theme's `dropShadow` text (`filter:` value of the neo look's boxes).
+    pub drop_shadow: String,
+    /// The theme's `filterColor` (the redux look's `feDropShadow` flood).
+    pub filter_color: String,
 }
 
 impl GitConfig {
     pub fn from_config(cfg: &MermaidConfig) -> Self {
+        let opts = crate::theme::styles::Opts::new(cfg.theme, cfg.look, &cfg.theme_variables);
         GitConfig {
             show_branches: cfg.section_bool("gitGraph", "showBranches", true),
             show_commit_label: cfg.section_bool("gitGraph", "showCommitLabel", true),
@@ -483,6 +497,14 @@ impl GitConfig {
             diagram_padding: cfg.section_f64("gitGraph", "diagramPadding", 8.0),
             branch_font: cfg.stylesheet_font_size(),
             neo: cfg.look == crate::config::Look::Neo,
+            drop_shadow: opts.get("dropShadow").unwrap_or_default().to_string(),
+            filter_color: opts.get("filterColor").map_or_else(
+                || {
+                    let dark = cfg.theme.name().contains("dark");
+                    if dark { "#FFFFFF" } else { "#000000" }.to_string()
+                },
+                str::to_string,
+            ),
         }
     }
 }
@@ -498,6 +520,8 @@ impl Default for GitConfig {
             diagram_padding: 8.0,
             branch_font: BRANCH_FONT,
             neo: false,
+            drop_shadow: String::new(),
+            filter_color: "#000000".into(),
         }
     }
 }
@@ -1097,6 +1121,434 @@ fn find_lane(lanes: &mut Vec<f64>, y1: f64, y2: f64, depth: usize) -> f64 {
     find_lane(lanes, y1, y2 - diff / 5.0, depth + 1)
 }
 
+/// A `getBBox()` number: single precision.
+fn f32d(v: f64) -> f64 {
+    f64::from(v as f32)
+}
+
+/// An attribute value as `XMLSerializer` writes it.
+fn attr_esc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\t' => out.push_str("&#9;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Text mermaid has run through `sanitizeText` (DOMPurify's HTML output) and
+/// then set as a text node: escaped twice in the serialised document.
+fn dom_text(s: &str) -> String {
+    esc_text(&esc_text(s))
+}
+
+/// `sanitizeText`'s output as an attribute value (class names).
+fn dom_attr(s: &str) -> String {
+    attr_esc(&esc_text(s))
+}
+
+/// The `d` of `drawArrow`. `lanes` holds the free `(lineY, lineX)` of a
+/// rerouted arrow.
+fn arrow_d(
+    o: Orientation,
+    p1: Point,
+    p2: Point,
+    merge_side: bool,
+    lanes: Option<(f64, f64)>,
+) -> String {
+    let (x1, y1, x2, y2) = (n(p1.x), n(p1.y), n(p2.x), n(p2.y));
+    let head = format!("M {x1} {y1}");
+    if let Some((ly, lx)) = lanes {
+        let (arc, arc2) = ("A 10 10, 0, 0, 0,", "A 10 10, 0, 0, 1,");
+        let (r, off) = (10.0, 10.0);
+        return match o {
+            Orientation::TB if p1.x < p2.x => format!(
+                "{head} L {} {y1} {arc2} {} {} L {} {} {arc} {} {y2} L {x2} {y2}",
+                n(lx - r),
+                n(lx),
+                n(p1.y + off),
+                n(lx),
+                n(p2.y - r),
+                n(lx + off)
+            ),
+            Orientation::TB => format!(
+                "{head} L {} {y1} {arc} {} {} L {} {} {arc2} {} {y2} L {x2} {y2}",
+                n(lx + r),
+                n(lx),
+                n(p1.y + off),
+                n(lx),
+                n(p2.y - r),
+                n(lx - off)
+            ),
+            Orientation::BT if p1.x < p2.x => format!(
+                "{head} L {} {y1} {arc} {} {} L {} {} {arc2} {} {y2} L {x2} {y2}",
+                n(lx - r),
+                n(lx),
+                n(p1.y - off),
+                n(lx),
+                n(p2.y + r),
+                n(lx + off)
+            ),
+            Orientation::BT => format!(
+                "{head} L {} {y1} {arc2} {} {} L {} {} {arc} {} {y2} L {x2} {y2}",
+                n(lx + r),
+                n(lx),
+                n(p1.y - off),
+                n(lx),
+                n(p2.y + r),
+                n(lx - off)
+            ),
+            Orientation::LR if p1.y < p2.y => format!(
+                "{head} L {x1} {} {arc} {} {} L {} {} {arc2} {x2} {} L {x2} {y2}",
+                n(ly - r),
+                n(p1.x + off),
+                n(ly),
+                n(p2.x - r),
+                n(ly),
+                n(ly + off)
+            ),
+            Orientation::LR => format!(
+                "{head} L {x1} {} {arc2} {} {} L {} {} {arc} {x2} {} L {x2} {y2}",
+                n(ly + r),
+                n(p1.x + off),
+                n(ly),
+                n(p2.x - r),
+                n(ly),
+                n(ly - off)
+            ),
+        };
+    }
+    let (arc, arc2) = ("A 20 20, 0, 0, 0,", "A 20 20, 0, 0, 1,");
+    let (r, off) = (20.0, 20.0);
+    let straight = format!("{head} L {x2} {y2}");
+    match o {
+        Orientation::TB => {
+            if p1.x < p2.x {
+                if merge_side {
+                    format!(
+                        "{head} L {x1} {} {arc} {} {y2} L {x2} {y2}",
+                        n(p2.y - r),
+                        n(p1.x + off)
+                    )
+                } else {
+                    format!(
+                        "{head} L {} {y1} {arc2} {x2} {} L {x2} {y2}",
+                        n(p2.x - r),
+                        n(p1.y + off)
+                    )
+                }
+            } else if p1.x > p2.x {
+                if merge_side {
+                    format!(
+                        "{head} L {x1} {} {arc2} {} {y2} L {x2} {y2}",
+                        n(p2.y - r),
+                        n(p1.x - off)
+                    )
+                } else {
+                    format!(
+                        "{head} L {} {y1} {arc} {x2} {} L {x2} {y2}",
+                        n(p2.x + r),
+                        n(p1.y + off)
+                    )
+                }
+            } else {
+                straight
+            }
+        }
+        Orientation::BT => {
+            if p1.x < p2.x {
+                if merge_side {
+                    format!(
+                        "{head} L {x1} {} {arc2} {} {y2} L {x2} {y2}",
+                        n(p2.y + r),
+                        n(p1.x + off)
+                    )
+                } else {
+                    format!(
+                        "{head} L {} {y1} {arc} {x2} {} L {x2} {y2}",
+                        n(p2.x - r),
+                        n(p1.y - off)
+                    )
+                }
+            } else if p1.x > p2.x {
+                if merge_side {
+                    format!(
+                        "{head} L {x1} {} {arc} {} {y2} L {x2} {y2}",
+                        n(p2.y + r),
+                        n(p1.x - off)
+                    )
+                } else {
+                    format!(
+                        "{head} L {} {y1} {arc2} {x2} {} L {x2} {y2}",
+                        n(p2.x + r),
+                        n(p1.y - off)
+                    )
+                }
+            } else {
+                straight
+            }
+        }
+        Orientation::LR => {
+            if p1.y < p2.y {
+                if merge_side {
+                    format!(
+                        "{head} L {} {y1} {arc2} {x2} {} L {x2} {y2}",
+                        n(p2.x - r),
+                        n(p1.y + off)
+                    )
+                } else {
+                    format!(
+                        "{head} L {x1} {} {arc} {} {y2} L {x2} {y2}",
+                        n(p2.y - r),
+                        n(p1.x + off)
+                    )
+                }
+            } else if p1.y > p2.y {
+                if merge_side {
+                    format!(
+                        "{head} L {} {y1} {arc} {x2} {} L {x2} {y2}",
+                        n(p2.x - r),
+                        n(p1.y - off)
+                    )
+                } else {
+                    format!(
+                        "{head} L {x1} {} {arc2} {} {y2} L {x2} {y2}",
+                        n(p2.y + r),
+                        n(p1.x + off)
+                    )
+                }
+            } else {
+                straight
+            }
+        }
+    }
+}
+
+/// Mermaid's own markup of the drawing, group by group.
+#[derive(Default)]
+struct Mk {
+    branches: String,
+    arrows: String,
+    bullets: String,
+    labels: String,
+}
+
+/// What `drawBranches` knows of one branch.
+struct BranchMk<'a> {
+    o: Orientation,
+    gc: &'a GitConfig,
+    st: &'a GitStyle<'a>,
+    /// The class index.
+    k: usize,
+    pos: f64,
+    spine: f64,
+    max_pos: f64,
+    /// `labelPaddingX`, `labelPaddingY`.
+    pad: (f64, f64),
+    /// The extra 30px left of the label under `rotateCommitLabel`.
+    rot: f64,
+    /// The label's `getBBox()` size.
+    size: (f64, f64),
+    rows: &'a [String],
+}
+
+/// One branch of `drawBranches`: its line, the label box, the label.
+fn branch_markup(out: &mut String, b: &BranchMk) {
+    use std::fmt::Write as _;
+    let (bw, bh) = b.size;
+    let (pad_x, pad_y) = b.pad;
+    let (pos, spine, max_pos, k) = (b.pos, b.spine, b.max_pos, b.k);
+    let (x1, y1, x2, y2) = match b.o {
+        Orientation::LR => (0.0, spine, max_pos, spine),
+        Orientation::TB => (pos, DEFAULT_POS, pos, max_pos),
+        Orientation::BT => (pos, max_pos, pos, DEFAULT_POS),
+    };
+    let _ = write!(
+        out,
+        "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" class=\"branch branch{k}\"/>",
+        n(x1),
+        n(y1),
+        n(x2),
+        n(y2)
+    );
+    let redux = b.st.redux;
+    let style = if b.gc.neo {
+        if redux {
+            format!("filter:url(#{ID_MARK}-drop-shadow)")
+        } else {
+            format!("filter:{}", b.gc.drop_shadow)
+        }
+    } else {
+        String::new()
+    };
+    let radius = if redux { 0.0 } else { 4.0 };
+    let (x, y, label_at, bkg_at) = match b.o {
+        Orientation::LR => (
+            -bw - 4.0 - b.rot,
+            -bh / 2.0 + 10.0,
+            (-bw - 14.0 - b.rot + pad_x / 2.0, spine - bh / 2.0 - 2.0),
+            Some((-19.0, spine - 12.0 - pad_y / 2.0)),
+        ),
+        Orientation::TB => (
+            pos - bw / 2.0 - 10.0,
+            0.0,
+            (
+                pos - bw / 2.0 - 5.0,
+                if redux { -pad_y * 2.0 + 7.0 } else { 0.0 },
+            ),
+            redux.then_some((-pad_x / 2.0 - 3.0, -pad_y - 10.0)),
+        ),
+        Orientation::BT => (
+            pos - bw / 2.0 - 10.0,
+            max_pos,
+            (
+                pos - bw / 2.0 - 5.0,
+                if redux {
+                    max_pos + pad_y * 2.0 + 4.0
+                } else {
+                    max_pos
+                },
+            ),
+            redux.then_some((-pad_x / 2.0 - 3.0, pad_y + 10.0)),
+        ),
+    };
+    let _ = write!(
+        out,
+        "<rect{} class=\"branchLabelBkg label{k}\" style=\"{}\" rx=\"{}\" ry=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"",
+        if b.gc.neo { " data-look=\"neo\"" } else { "" },
+        attr_esc(&style),
+        n(radius),
+        n(radius),
+        n(x),
+        n(y),
+        n(bw + 18.0 + pad_x),
+        n(bh + 4.0 + pad_y)
+    );
+    if let Some((tx, ty)) = bkg_at {
+        let _ = write!(out, " transform=\"translate({}, {})\"", n(tx), n(ty));
+    }
+    out.push_str("/>");
+    let _ = write!(
+        out,
+        "<g class=\"branchLabel\"><g class=\"label branch-label{k}\" transform=\"translate({}, {})\"><text>",
+        n(label_at.0),
+        n(label_at.1)
+    );
+    for r in b.rows {
+        let _ = write!(
+            out,
+            "<tspan xml:space=\"preserve\" dy=\"1em\" x=\"0\" class=\"row\">{}</tspan>",
+            dom_text(r)
+        );
+    }
+    out.push_str("</text></g></g>");
+}
+/// `drawCommitBullet`.
+fn bullet_markup(out: &mut String, st: &GitStyle, id: &str, p: Point, k: usize, sym: CommitType) {
+    use std::fmt::Write as _;
+    let id = dom_attr(id);
+    let rx = st.redux;
+    let type_class = match sym {
+        CommitType::Normal => "commit-normal",
+        CommitType::Reverse => "commit-reverse",
+        CommitType::Highlight => "commit-highlight",
+        CommitType::Merge => "commit-merge",
+        CommitType::CherryPick => "commit-cherry-pick",
+    };
+    let (x, y) = (p.x, p.y);
+    let pick = |a: f64, b: f64| if rx { a } else { b };
+    match sym {
+        CommitType::Highlight => {
+            let _ = write!(
+                out,
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" class=\"commit {id} commit-highlight{k} {type_class}-outer\"/>",
+                n(x - 10.0 + pick(3.0, 0.0)),
+                n(y - 10.0 + pick(3.0, 0.0)),
+                pick(14.0, 20.0),
+                pick(14.0, 20.0)
+            );
+            let _ = write!(
+                out,
+                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" class=\"commit {id} commit{k} {type_class}-inner\"/>",
+                n(x - 6.0 + pick(2.0, 0.0)),
+                n(y - 6.0 + pick(2.0, 0.0)),
+                pick(8.0, 12.0),
+                pick(8.0, 12.0)
+            );
+        }
+        CommitType::CherryPick => {
+            let mark = if st.dark { "#000000" } else { "#fff" };
+            let r = n(pick(2.5, 2.75));
+            let _ = write!(
+                out,
+                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" class=\"commit {id} {type_class}\"/>",
+                n(x),
+                n(y),
+                pick(7.0, 10.0)
+            );
+            for dx in [-3.0, 3.0] {
+                let _ = write!(
+                    out,
+                    "<circle cx=\"{}\" cy=\"{}\" r=\"{r}\" fill=\"{mark}\" class=\"commit {id} {type_class}\"/>",
+                    n(x + dx),
+                    n(y + 2.0)
+                );
+            }
+            for dx in [3.0, -3.0] {
+                let _ = write!(
+                    out,
+                    "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{mark}\" class=\"commit {id} {type_class}\"/>",
+                    n(x + dx),
+                    n(y + 1.0),
+                    n(x),
+                    n(y - 5.0)
+                );
+            }
+        }
+        _ => {
+            let _ = write!(
+                out,
+                "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" class=\"commit {id} commit{k}\"/>",
+                n(x),
+                n(y),
+                pick(7.0, 10.0)
+            );
+            if sym == CommitType::Merge {
+                let _ = write!(
+                    out,
+                    "<circle cx=\"{}\" cy=\"{}\" r=\"{}\" class=\"commit {type_class} {id} commit{k}\"/>",
+                    n(x),
+                    n(y),
+                    pick(5.0, 6.0)
+                );
+            }
+            if sym == CommitType::Reverse {
+                let c = pick(4.0, 5.0);
+                let _ = write!(
+                    out,
+                    "<path d=\"M {},{}L{},{}M{},{}L{},{}\" class=\"commit {type_class} {id} commit{k}\"/>",
+                    n(x - c),
+                    n(y - c),
+                    n(x + c),
+                    n(y + c),
+                    n(x - c),
+                    n(y + c),
+                    n(x + c),
+                    n(y - c)
+                );
+            }
+        }
+    }
+}
+
 /// Draw a laid-out git graph (`gitGraphRenderer.ts` `draw`).
 pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene {
     let o = g.orientation;
@@ -1114,6 +1566,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
     let ck = |b: usize| st.commit_index(lay.lane_index[b]);
     let max_pos = lay.max_pos;
     let mut lanes: Vec<f64> = Vec::new();
+    let mut mk = Mk::default();
 
     // drawBranches.
     let mut branch_els = Vec::new();
@@ -1144,6 +1597,22 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             let (pad_x, pad_y) = if st.redux { (16.0, 12.0) } else { (0.0, 0.0) };
             let rot = if gc.rotate_commit_label { 30.0 } else { 0.0 };
             let (w, h) = (bw + 18.0 + pad_x, bh + 4.0 + pad_y);
+            branch_markup(
+                &mut mk.branches,
+                &BranchMk {
+                    o,
+                    gc,
+                    st: &st,
+                    k,
+                    pos,
+                    spine,
+                    max_pos,
+                    pad: (pad_x, pad_y),
+                    rot,
+                    size: (f32d(bw), f32d(bh)),
+                    rows: &rows,
+                },
+            );
             // The box (with its transform) and the label group's translation.
             let (rect, label_at) = match o {
                 Orientation::LR => (
@@ -1246,6 +1715,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 let xc = &g.commits[x];
                 xc.seq > a.seq && xc.seq < c.seq && xc.branch == curve_branch
             });
+            let mut lane_xy = None;
             let (pts, r): (Vec<Point>, f64) = if reroute {
                 let line_y = if p1.y < p2.y {
                     find_lane(&mut lanes, p1.y, p2.y, 0)
@@ -1257,6 +1727,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 } else {
                     find_lane(&mut lanes, p2.x, p1.x, 0)
                 };
+                lane_xy = Some((line_y, line_x));
                 let pts = if vertical {
                     if p1.x >= p2.x {
                         color = a.branch;
@@ -1286,6 +1757,10 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
                 bounds.add_point(*p);
             }
             let k = ck(color);
+            mk.arrows.push_str(&format!(
+                "<path d=\"{}\" class=\"arrow arrow{k}\"/>",
+                arrow_d(o, p1, p2, merge_side, lane_xy)
+            ));
             arrow_els.push(Element::classed_shape(
                 Geometry::Path(rounded(&pts, r)),
                 Paint::stroke(&st.lane(k), st.arrow_width()),
@@ -1328,6 +1803,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
         let (col, col_fill) = (st.lane(k), st.commit_fill(k));
         let cls = format!("commit {} commit{k}", c.id);
         let symbol = c.custom_type.unwrap_or(c.kind);
+        bullet_markup(&mut mk.bullets, &st, &c.id, p, k, symbol);
         match symbol {
             CommitType::Highlight => {
                 // `.commit-highlight{k}`.
@@ -1413,7 +1889,16 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             }
         }
         if shown_label(c, gc) {
-            label_els.extend(commit_label(c, pl, o, gc, &st, pal, &mut bounds));
+            label_els.extend(commit_label(
+                c,
+                pl,
+                o,
+                gc,
+                &st,
+                pal,
+                &mut bounds,
+                &mut mk.labels,
+            ));
         }
         label_els.extend(commit_tags(
             c,
@@ -1423,6 +1908,7 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             (&tag_bkg, &tag_border),
             tag_shadow.as_ref(),
             &mut bounds,
+            &mut mk.labels,
         ));
     }
 
@@ -1432,11 +1918,18 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
         Element::group("commit-bullets", bullet_els),
         Element::group("commit-labels", label_els),
     ];
+    let mut title_mk = String::new();
     if let Some(t) = g.title.as_ref().filter(|t| !t.is_empty()) {
         // utils `insertTitle`: centred on the drawing's bounding box, its
         // baseline at y = -titleTopMargin.
         let r = bounds.rect();
         let (x, y) = (r.x + r.w / 2.0, -gc.title_top_margin);
+        title_mk = format!(
+            "<text text-anchor=\"middle\" x=\"{}\" y=\"{}\" class=\"gitTitleText\">{}</text>",
+            n(f32d(r.x) + f32d(r.w) / 2.0),
+            n(y),
+            dom_text(&crate::text::label_lines(t).join(" "))
+        );
         let adv = crate::text::layout_unit_ceil(line_width(t, 18.0, false));
         bounds.add_rect(text_box(x - adv / 2.0, y, t, 18.0));
         els.push(Element::classed_text(
@@ -1457,10 +1950,47 @@ pub fn draw(g: &GitGraph, lay: &Layout, gc: &GitConfig, pal: &Palette) -> Scene 
             "gitTitleText",
         ));
     }
+    // Mermaid's own markup: the gradient and drop shadow definitions, the two
+    // empty groups of the measuring pass, then the drawing.
+    let mut svg = String::from("<g/>");
+    if let Some((a, b)) = pal.node_gradient.as_ref() {
+        svg.push_str(&format!(
+            "<defs><linearGradient id=\"{ID_MARK}-gradient\" gradientUnits=\"objectBoundingBox\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\"><stop offset=\"0%\" stop-color=\"{}\" stop-opacity=\"1\"/><stop offset=\"100%\" stop-color=\"{}\" stop-opacity=\"1\"/></linearGradient></defs>",
+            attr_esc(a.css()),
+            attr_esc(b.css())
+        ));
+    }
+    if gc.neo && st.redux {
+        svg.push_str(&format!(
+            "<defs><filter id=\"{ID_MARK}-drop-shadow\" height=\"130%\" width=\"130%\"><feDropShadow dx=\"4\" dy=\"4\" stdDeviation=\"0\" flood-opacity=\"0.06\" flood-color=\"{}\"/></filter></defs>",
+            attr_esc(&gc.filter_color)
+        ));
+    }
+    let group = |class: Option<&str>, inner: &str| {
+        let attr = class.map_or(String::new(), |c| format!(" class=\"{c}\""));
+        if inner.is_empty() {
+            format!("<g{attr}/>")
+        } else {
+            format!("<g{attr}>{inner}</g>")
+        }
+    };
+    svg.push_str(&group(Some("commit-bullets"), ""));
+    svg.push_str(&group(Some("commit-labels"), ""));
+    if gc.show_branches {
+        svg.push_str(&group(None, &mk.branches));
+    }
+    svg.push_str(&group(Some("commit-arrows"), &mk.arrows));
+    svg.push_str(&group(Some("commit-bullets"), &mk.bullets));
+    svg.push_str(&group(Some("commit-labels"), &mk.labels));
+    svg.push_str(&title_mk);
     Scene {
         kind: DiagramKind::GitGraph,
         view_box: bounds.rect().pad(gc.diagram_padding),
-        elements: els,
+        elements: vec![Element::Markup {
+            svg,
+            children: els,
+            svg_view_box: None,
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -1479,6 +2009,7 @@ fn commit_label(
     st: &GitStyle,
     pal: &Palette,
     bounds: &mut Bounds,
+    mk: &mut String,
 ) -> Vec<Element> {
     let id = c.id.as_str();
     // `.commit-label { font-weight: noteFontWeight }` (600 in the redux
@@ -1542,6 +2073,7 @@ fn commit_label(
         "commit-label",
     );
     let text_rect = Rect::new(tx, ty - ascent, w, h);
+    label_markup(mk, c, pl, o, gc, (f32d(w), f32d(h)));
     if !gc.rotate_commit_label {
         bounds.add_rect(rect);
         bounds.add_rect(text_rect);
@@ -1587,11 +2119,13 @@ fn commit_tags(
     (tag_bkg, tag_border): (&Color, &Color),
     shadow: Option<&Shadow>,
     bounds: &mut Bounds,
+    mk: &mut String,
 ) -> Vec<Element> {
     let mut out = Vec::new();
     if c.tags.is_empty() {
         return out;
     }
+    tags_markup(mk, c, pl, o);
     let ascent = crate::text::ascent_px(TAG_FONT);
     let tag_w = c
         .tags
@@ -1705,6 +2239,145 @@ fn commit_tags(
         out.push(Element::classed_text(text(tx, ty, t), "tag-label"));
     }
     out
+}
+
+/// `drawCommitLabel`'s markup; `size` is the text's `getBBox()` width and height.
+fn label_markup(
+    out: &mut String,
+    c: &Commit,
+    pl: &Placed,
+    o: Orientation,
+    gc: &GitConfig,
+    size: (f64, f64),
+) {
+    use std::fmt::Write as _;
+    let (w, h) = size;
+    let lr = o == Orientation::LR;
+    let (rx, ry, tx, ty) = if lr {
+        (
+            pl.pos_with_offset - w / 2.0 - PY,
+            pl.y + 13.5,
+            pl.pos_with_offset - w / 2.0,
+            pl.y + 25.0,
+        )
+    } else {
+        (
+            pl.x - (w + 4.0 * PX + 5.0),
+            pl.y - 12.0,
+            pl.x - (w + 4.0 * PX),
+            pl.y + h - 12.0,
+        )
+    };
+    let rotate = format!("rotate(-45, {}, {})", n(pl.x), n(pl.y));
+    let (wrapper, own) = match (gc.rotate_commit_label, lr) {
+        (false, _) => (String::new(), String::new()),
+        (true, true) => {
+            let r_x = -7.5 - (w + 10.0) / 25.0 * 9.5;
+            let r_y = 10.0 + w / 25.0 * 8.5;
+            (
+                format!(
+                    " transform=\"translate({}, {}) rotate(-45, {}, {})\"",
+                    n(r_x),
+                    n(r_y),
+                    n(pl.pos),
+                    n(pl.y)
+                ),
+                String::new(),
+            )
+        }
+        (true, false) => (String::new(), format!(" transform=\"{rotate}\"")),
+    };
+    let _ = write!(
+        out,
+        "<g{wrapper}><rect class=\"commit-label-bkg\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"{own}/><text x=\"{}\" y=\"{}\" class=\"commit-label\"{own}>{}</text></g>",
+        n(rx),
+        n(ry),
+        n(w + 2.0 * PY),
+        n(h + 2.0 * PY),
+        n(tx),
+        n(ty),
+        dom_text(&c.id)
+    );
+}
+
+/// `drawCommitTags`' markup: newest tag first, each as wide and tall as the
+/// largest.
+fn tags_markup(out: &mut String, c: &Commit, pl: &Placed, o: Orientation) {
+    use std::fmt::Write as _;
+    let tag_w = c
+        .tags
+        .iter()
+        .map(|t| f32d(svg_bbox_width(t, TAG_FONT)))
+        .fold(0.0, f64::max);
+    let tag_h = c
+        .tags
+        .iter()
+        .map(|t| f32d(svg_line_box(TAG_FONT, t)))
+        .fold(0.0, f64::max);
+    let h2 = tag_h / 2.0;
+    let (pos, wo) = (pl.pos, pl.pos_with_offset);
+    for (i, t) in c.tags.iter().rev().enumerate() {
+        let y_off = i as f64 * 20.0;
+        let w = f32d(svg_bbox_width(t, TAG_FONT));
+        let text = dom_text(t);
+        if o != Orientation::LR {
+            let y = pos + y_off;
+            let x = pl.x;
+            let sp = "\n        ";
+            let points = format!(
+                "{},{}{sp}{},{}{sp}{},{}{sp}{},{}{sp}{},{}{sp}{},{}",
+                n(x),
+                n(y + 2.0),
+                n(x),
+                n(y - 2.0),
+                n(x + LAYOUT_OFFSET),
+                n(y - h2 - 2.0),
+                n(x + LAYOUT_OFFSET + tag_w + 4.0),
+                n(y - h2 - 2.0),
+                n(x + LAYOUT_OFFSET + tag_w + 4.0),
+                n(y + h2 + 2.0),
+                n(x + LAYOUT_OFFSET),
+                n(y + h2 + 2.0)
+            );
+            let rot = format!("rotate(45, {},{})", n(x), n(pos));
+            let _ = write!(
+                out,
+                "<polygon class=\"tag-label-bkg\" points=\"{}\" transform=\"translate(12,12) {rot}\"/><circle cy=\"{}\" cx=\"{}\" r=\"1.5\" class=\"tag-hole\" transform=\"translate(12,12) {rot}\"/><text y=\"{}\" class=\"tag-label\" x=\"{}\" transform=\"translate(14,14) {rot}\">{text}</text>",
+                attr_esc(&points),
+                n(y),
+                n(x + PX / 2.0),
+                n(y + 3.0),
+                n(x + 5.0)
+            );
+            continue;
+        }
+        let ly = pl.y - 19.2 - y_off;
+        let sp = "\n      ";
+        let points = format!(
+            "{},{}  {sp}{},{}{sp}{},{}{sp}{},{}{sp}{},{}{sp}{},{}",
+            n(pos - tag_w / 2.0 - PX / 2.0),
+            n(ly + PY),
+            n(pos - tag_w / 2.0 - PX / 2.0),
+            n(ly - PY),
+            n(wo - tag_w / 2.0 - PX),
+            n(ly - h2 - PY),
+            n(wo + tag_w / 2.0 + PX),
+            n(ly - h2 - PY),
+            n(wo + tag_w / 2.0 + PX),
+            n(ly + h2 + PY),
+            n(wo - tag_w / 2.0 - PX),
+            n(ly + h2 + PY)
+        );
+        let _ = write!(
+            out,
+            "<polygon class=\"tag-label-bkg\" points=\"{}\"/><circle cy=\"{}\" cx=\"{}\" r=\"1.5\" class=\"tag-hole\"/><text y=\"{}\" class=\"tag-label\" x=\"{}\">{text}</text>",
+            attr_esc(&points),
+            n(ly),
+            n(pos - tag_w / 2.0 + PX / 2.0),
+            n(pl.y - 16.0 - y_off),
+            n(wo - w / 2.0)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1821,7 +2494,9 @@ mod tests {
         let mut out = Vec::new();
         for e in els {
             match e {
-                Element::Group { children, .. } => out.extend(rotations(children)),
+                Element::Group { children, .. } | Element::Markup { children, .. } => {
+                    out.extend(rotations(children))
+                }
                 Element::Rotated {
                     deg,
                     about,
@@ -1857,9 +2532,9 @@ mod tests {
         fn polys(els: &[Element], out: &mut Vec<Rect>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        polys(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Markup { children, .. }
+                    | Element::Rotated { children, .. } => polys(children, out),
                     Element::Shape {
                         geom: Geometry::Path(cmds),
                         class: Some(c),
@@ -2004,9 +2679,9 @@ mod tests {
         ) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        walk(children, c, sh, t)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Markup { children, .. }
+                    | Element::Rotated { children, .. } => walk(children, c, sh, t),
                     Element::Shape {
                         geom: Geometry::Circle { r, .. },
                         class: Some(k),
@@ -2171,7 +2846,9 @@ mod tests {
         fn walk<'a>(els: &'a [Element], r: &mut Option<Rect>, t: &mut Option<&'a Text>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => walk(children, r, t),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, r, t)
+                    }
                     Element::Shape {
                         geom: Geometry::Rect { rect, .. },
                         class: Some(c),
@@ -2207,9 +2884,9 @@ mod tests {
             fn walk(els: &[Element], ys: &mut Vec<(String, f64)>) {
                 for e in els {
                     match e {
-                        Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                            walk(children, ys)
-                        }
+                        Element::Group { children, .. }
+                        | Element::Markup { children, .. }
+                        | Element::Rotated { children, .. } => walk(children, ys),
                         Element::Shape {
                             geom: Geometry::Path(p),
                             class: Some(c),
