@@ -7,8 +7,10 @@ use crate::config::MermaidConfig;
 use crate::diagram::xychart::keyword;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, PathCmd, Point, Rect};
+use crate::output::svg::{esc, esc_text, js_num};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Text};
 use crate::theme::Palette;
+use std::fmt::Write as _;
 
 // ---------------------------------------------------------------------------
 // IR + parser
@@ -685,12 +687,28 @@ pub fn render(
         })
         .collect();
 
+    let raw_colors: Vec<String> = colors.iter().map(|c| c.css().to_string()).collect();
+    let mut markup = String::from("<g/>");
+    let mut uid = 0usize;
     let mut bounds = Bounds::default();
     // Nodes.
+    markup.push_str("<g class=\"nodes\">");
     let mut node_els = Vec::new();
     for (i, nd) in lay.nodes.iter().enumerate() {
         let r = Rect::new(nd.x0, nd.y0, nd.x1 - nd.x0, nd.y1 - nd.y0);
         bounds.add_rect(r);
+        uid += 1;
+        let _ = write!(
+            markup,
+            "<g class=\"node\" id=\"node-{uid}\" transform=\"translate({},{})\" x=\"{}\" y=\"{}\"><rect height=\"{}\" width=\"{}\" fill=\"{}\"/></g>",
+            js_num(nd.x0),
+            js_num(nd.y0),
+            js_num(nd.x0),
+            js_num(nd.y0),
+            js_num(nd.y1 - nd.y0),
+            js_num(nd.x1 - nd.x0),
+            esc(&raw_colors[i])
+        );
         node_els.push(Element::classed_shape(
             Geometry::Rect { rect: r, rx: 0.0 },
             Paint::fill(&colors[i]),
@@ -711,6 +729,8 @@ pub fn render(
         }
         layer
     };
+    markup.push_str("</g>");
+    markup.push_str("<g class=\"node-labels\" font-size=\"14\">");
     let mut label_els = Vec::new();
     let classes: &[&str] = if outlined {
         &["sankey-label-bg", "sankey-label-fg"]
@@ -752,6 +772,27 @@ pub fn render(
                 family: None,
             };
             bounds.add_rect(label_box(&t));
+            // `.text()` of the DOMPurify-sanitised id: `&`, `<` and `>` are escaped
+            // twice (once by the sanitiser's HTML output, once by serialisation).
+            let once = esc_text(&raw);
+            let class_attr = if outlined {
+                format!(" class=\"{class}\"")
+            } else {
+                String::new()
+            };
+            let _ = write!(
+                markup,
+                "<text{class_attr} x=\"{}\" y=\"{}\" dy=\"{}em\" text-anchor=\"{}\">{}</text>",
+                js_num(x),
+                js_num((nd.y1 + nd.y0) / 2.0),
+                if show_values { "0" } else { "0.35" },
+                if matches!(anchor, Anchor::Start) {
+                    "start"
+                } else {
+                    "end"
+                },
+                esc_text(&once)
+            );
             label_els.push(if *class == "sankey-label-bg" {
                 // `.sankey-label-bg` in the CSS below; PDF output strokes it itself.
                 Element::OutlinedText {
@@ -768,6 +809,7 @@ pub fn render(
 
     // Links: `sankeyLinkHorizontal()` stroked `max(1, width)` wide at
     // `stroke-opacity: 0.5`, each with its own source-to-target gradient.
+    markup.push_str("</g><g class=\"links\" fill=\"none\" stroke-opacity=\"0.5\">");
     let mut link_els = Vec::new();
     for l in &lay.links {
         let (x0, x1) = (lay.nodes[l.source].x1, lay.nodes[l.target].x0);
@@ -788,6 +830,38 @@ pub fn render(
         ));
         let (sc, tc) = (&colors[l.source], &colors[l.target]);
         let w = l.width.max(1.0);
+        markup.push_str("<g class=\"link\" style=\"mix-blend-mode: multiply;\">");
+        let stroke = match link_color.as_str() {
+            "gradient" => {
+                uid += 1;
+                let _ = write!(
+                    markup,
+                    "<linearGradient id=\"linearGradient-{uid}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" x2=\"{}\"><stop offset=\"0%\" stop-color=\"{}\"/><stop offset=\"100%\" stop-color=\"{}\"/></linearGradient>",
+                    js_num(x0),
+                    js_num(x1),
+                    esc(&raw_colors[l.source]),
+                    esc(&raw_colors[l.target])
+                );
+                format!("url(#linearGradient-{uid})")
+            }
+            "source" => raw_colors[l.source].clone(),
+            "target" => raw_colors[l.target].clone(),
+            other => other.to_string(),
+        };
+        let _ = write!(
+            markup,
+            "<path d=\"M{},{}C{},{},{},{},{},{}\" stroke=\"{}\" stroke-width=\"{}\"/></g>",
+            js_num(x0),
+            js_num(l.y0),
+            js_num(xm),
+            js_num(l.y0),
+            js_num(xm),
+            js_num(l.y1),
+            js_num(x1),
+            js_num(l.y1),
+            esc(&stroke),
+            js_num(w)
+        );
         let paint = match link_color.as_str() {
             "gradient" => Paint::stroke(sc, w).with_stroke_gradient(Gradient {
                 x1: x0,
@@ -815,11 +889,16 @@ pub fn render(
             pal.main_bkg.css()
         ));
     }
-    let els = vec![
-        Element::group("nodes", node_els),
-        Element::group("node-labels", label_els),
-        Element::group("links", link_els),
-    ];
+    markup.push_str("</g>");
+    let els = vec![Element::Markup {
+        svg: markup,
+        svg_view_box: None,
+        children: vec![
+            Element::group("nodes", node_els),
+            Element::group("node-labels", label_els),
+            Element::group("links", link_els),
+        ],
+    }];
     Ok(Scene {
         kind: DiagramKind::Sankey,
         view_box: bounds.rect(),

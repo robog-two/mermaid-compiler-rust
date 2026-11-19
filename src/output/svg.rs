@@ -242,9 +242,15 @@ impl Filters<'_> {
                 | Element::Rotated { children, .. }
                 | Element::Translated { children, .. }
                 | Element::Faded { children, .. }
-                | Element::Markup { children, .. }
                 | Element::Clipped { children, .. } => {
                     self.collect(children);
+                }
+                // Plain SVG writes the markup's own string, with no shared
+                // filters or gradients.
+                Element::Markup { children, .. } => {
+                    if self.raster_scale.is_some() {
+                        self.collect(children);
+                    }
                 }
                 Element::Shadowed { shadow, children } => {
                     if !self.shadows.contains(shadow) {
