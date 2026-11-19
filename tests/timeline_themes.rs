@@ -53,6 +53,7 @@ fn flat(s: &Scene) -> (Vec<(Geometry, Paint, (f64, f64))>, Placed<Text>) {
             match e {
                 Element::Group { children, .. }
                 | Element::Brightened { children, .. }
+                | Element::Markup { children, .. }
                 | Element::Clipped { children, .. } => walk(children, o, shapes, texts),
                 Element::Translated { dx, dy, children } => {
                     walk(children, (o.0 + dx, o.1 + dy), shapes, texts)
@@ -138,16 +139,19 @@ fn node_text_is_written_as_wraps_dy_tspans() {
     // `<g transform="translate(95, 13)"><text dy="1em" … dominant-baseline=
     // "middle"><tspan x="0" dy="1em">…</tspan><tspan x="0" dy="1.1em">…`.
     let s = svg(&with("  theme: redux", HORIZONTAL));
-    assert!(s.contains("<g transform=\"translate(600, 365.8)\">"), "{s}");
+    assert!(
+        s.contains("<g class=\"eventWrapper\" transform=\"translate(600, 365.8)\">"),
+        "{s}"
+    );
+    // The words and the whitespace between them are joined by a space each.
     assert!(s.contains(
-        "<g transform=\"translate(95, 13)\"><text class=\"eventText\" x=\"0\" y=\"0\" dy=\"1em\" \
-         alignment-baseline=\"middle\" dominant-baseline=\"middle\" text-anchor=\"middle\" \
-         font-size=\"14\" fill=\"#28253D\" font-weight=\"600\"><tspan x=\"0\" dy=\"1em\">YouTube \
-         with a much</tspan><tspan x=\"0\" dy=\"1.1em\">longer event label</tspan><tspan \
-         x=\"0\" dy=\"1.1em\">that wraps</tspan></text></g>"
+        "<g transform=\"translate(95, 13)\"><text dy=\"1em\" \
+         alignment-baseline=\"middle\" dominant-baseline=\"middle\" text-anchor=\"middle\">\
+         <tspan x=\"0\" dy=\"1em\">YouTube   with   a   much</tspan><tspan x=\"0\" dy=\"1.1em\">\
+         longer   event   label</tspan><tspan x=\"0\" dy=\"1.1em\">that   wraps</tspan></text></g>"
     ));
     // Section and period labels sit `padding` down, events `padding / 2 + 3`.
-    assert!(s.contains("<g transform=\"translate(195, 20)\"><text class=\"nodeText\""));
+    assert!(s.contains("<g transform=\"translate(195, 20)\"><text dy=\"1em\""));
 }
 
 #[test]
@@ -182,7 +186,7 @@ fn neo_redux_boxes_cast_drawnodes_hard_shadow() {
     // 6% black, or 20% white on a theme with "dark" in its name.
     let s = svg(&with("  look: neo\n  theme: redux", HORIZONTAL));
     assert!(s.contains(
-        "<filter id=\"my-svg-shadow-0\" height=\"130%\" width=\"130%\"><feDropShadow dx=\"4\" \
+        "<filter id=\"my-svg-drop-shadow\" height=\"130%\" width=\"130%\"><feDropShadow dx=\"4\" \
          dy=\"4\" stdDeviation=\"0\" flood-opacity=\"0.06\" flood-color=\"#000000\"/></filter>"
     ));
     let s = svg(&with("  look: neo\n  theme: redux-dark", HORIZONTAL));
