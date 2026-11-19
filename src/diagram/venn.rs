@@ -2431,7 +2431,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         areas_els.push(Element::group(class, group));
         areas_mk.push_str(&format!(
             "<g class=\"{}{set_class}\" data-venn-sets=\"{}\">{group_mk}</g>",
-            &class,
+            class,
             esc(&d.sets.join("_"))
         ));
     }
@@ -3170,7 +3170,9 @@ mod tests {
     fn texts(els: &[Element], out: &mut Vec<Text>) {
         for e in els {
             match e {
-                Element::Group { children, .. } | Element::Rotated { children, .. } => {
+                Element::Group { children, .. }
+                | Element::Rotated { children, .. }
+                | Element::Markup { children, .. } => {
                     texts(children, out);
                 }
                 Element::Text { text, .. } => out.push(text.clone()),
