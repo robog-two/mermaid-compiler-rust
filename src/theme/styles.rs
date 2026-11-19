@@ -206,8 +206,13 @@ fn theme_extras(theme: ThemeName) -> String {
         T::ReduxDark | T::ReduxDarkColor => "stateBorder ||= \"#FFFFFF\"\n",
         _ => "",
     };
+    let req_edge = match theme {
+        T::Redux | T::ReduxColor => "requirementEdgeLabelBackground ||= \"#FFFFFF\"\n",
+        T::ReduxDark | T::ReduxDarkColor => "requirementEdgeLabelBackground ||= \"#16141F\"\n",
+        _ => "",
+    };
     format!(
-        "{state_border}requirementBackground ||= {requirement_bkg}\n\
+        "{state_border}{req_edge}personBorder ||= primaryBorderColor\npersonBkg ||= mainBkg\nrequirementBackground ||= {requirement_bkg}\n\
          altBackground ||= {alt}\n\
          requirementBorderColor ||= primaryBorderColor\n\
          requirementBorderSize ||= \"1\"\n\

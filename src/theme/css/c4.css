@@ -1,0 +1,31 @@
+.person {
+    stroke: ${options.personBorder};
+    fill: ${options.personBkg};
+  }
+${@1}
+
+  /* The element font colour is set inline per element (default white); the
+     label text takes it via currentColor. */
+  .c4-shape .label,
+  .c4-shape .label text {
+    color: inherit;
+    fill: currentColor;
+  }
+  /* Structurizr typography: bold name, smaller stereotype/type and description lines. */
+  .c4-shape .label .c4-name {
+    font-weight: bold;
+  }
+  .c4-shape .label .c4-type {
+    font-size: 0.75em;
+  }
+  .c4-shape .label .c4-descr {
+    font-size: 0.82em;
+  }
+  .c4-shape .basic,
+  .c4-shape rect,
+  .c4-shape path,
+  .c4-shape circle,
+  .c4-shape ellipse,
+  .c4-shape line {
+    stroke-width: 2px;
+  }

@@ -43,6 +43,31 @@ pub(super) fn diagram(kind: DiagramKind, o: &Opts) -> Option<String> {
         DiagramKind::Journey => journey(o),
         DiagramKind::Kanban => kanban(o),
         DiagramKind::Sequence => sequence(o),
+        // `elementFontStyles()` with the c4 config's default fonts (a configured
+        // `<type>FontFamily` / `FontSize` / `FontWeight` is not read here).
+        DiagramKind::C4 => tpl(o, include_str!("css/c4.css"), &|e| {
+            (e == "@1").then(|| {
+                let mut s = String::new();
+                for base in ["person", "system", "container", "component"] {
+                    let kinds: Vec<String> = if base == "person" {
+                        vec!["person".into(), "external_person".into()]
+                    } else {
+                        let mut v = vec![base.to_string(), format!("external_{base}")];
+                        for suffix in ["db", "queue"] {
+                            v.push(format!("{base}_{suffix}"));
+                            v.push(format!("external_{base}_{suffix}"));
+                        }
+                        v
+                    };
+                    for k in kinds {
+                        s += &format!(
+                            ".c4-shape.c4-{k} .label {{ font-family: \"Open Sans\", sans-serif; font-size: 14px; font-weight: normal; }}\n"
+                        );
+                    }
+                }
+                s
+            })
+        }),
         DiagramKind::Usecase => usecase(o),
         DiagramKind::Swimlane => {
             // The flowchart styles plus the lane rule.
