@@ -765,7 +765,7 @@ fn arrow_options(seed: f64, line: &str) -> crate::rough::Options {
 /// The handDrawn look: every mark drawn by rough.js (mermaid's
 /// `roughContext`), the spine last; and the box of the strokes as drawn.
 fn draw_hand(lay: &Layout, seed: f64, pal: &Palette) -> (Vec<Element>, Bounds) {
-    use crate::rough::{self, Options};
+    use crate::rough;
     let line = pal.line_color.0.clone();
     let bkg = pal.main_bkg.0.clone();
     let text = &pal.text_color;
@@ -1430,7 +1430,9 @@ mod tests {
         fn walk(els: &[Element], out: &mut Vec<String>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => walk(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        walk(children, out)
+                    }
                     Element::Shape {
                         geom: Geometry::Path(cmds),
                         ..
@@ -1585,9 +1587,9 @@ mod tests {
         fn walk(els: &[Element], out: &mut Vec<(Option<String>, Option<u16>)>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                        walk(children, out)
-                    }
+                    Element::Group { children, .. }
+                    | Element::Markup { children, .. }
+                    | Element::Rotated { children, .. } => walk(children, out),
                     Element::Text { text, class } => out.push((class.clone(), text.weight)),
                     _ => {}
                 }
@@ -1629,7 +1631,9 @@ mod tests {
         fn rects(els: &[Element], out: &mut Vec<f64>) {
             for e in els {
                 match e {
-                    Element::Group { children, .. } => rects(children, out),
+                    Element::Group { children, .. } | Element::Markup { children, .. } => {
+                        rects(children, out)
+                    }
                     Element::Shape {
                         geom: Geometry::Rect { rect, .. },
                         class: Some(c),
