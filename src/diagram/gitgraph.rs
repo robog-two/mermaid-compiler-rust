@@ -129,14 +129,7 @@ fn fnv(parts: &[&str]) -> u64 {
 
 fn auto_id(seq: usize, branch: &str, msg: &str) -> String {
     let h = fnv(&[&seq.to_string(), branch, msg]);
-    let mut hex = format!("{:07x}", h & 0xfff_ffff).into_bytes();
-    // A random id of mermaid's is almost always a mix of digits and letters.
-    if hex.iter().all(u8::is_ascii_digit) {
-        hex[6] = b'a';
-    } else if hex.iter().all(u8::is_ascii_alphabetic) {
-        hex[6] = b'1';
-    }
-    format!("{seq}-{}", String::from_utf8_lossy(&hex))
+    format!("{seq}-{:07x}", h & 0xfff_ffff)
 }
 
 /// Key/value attributes of a statement (`id: "x" tag: "v1" type: HIGHLIGHT`).
