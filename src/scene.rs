@@ -530,6 +530,9 @@ pub enum Element {
     Markup {
         svg: String,
         children: Vec<Element>,
+        /// The root `viewBox` plain SVG output writes, when it is not the
+        /// scene's (the rasterisers' own size is the scene's).
+        svg_view_box: Option<Rect>,
     },
 }
 

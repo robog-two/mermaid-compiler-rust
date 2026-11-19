@@ -2468,6 +2468,7 @@ pub fn draw(venn: &Venn, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         elements: vec![Element::Markup {
             svg: markup,
             children: vec![Element::group("venn", els)],
+            svg_view_box: None,
         }],
         acc_title: None,
         acc_descr: None,

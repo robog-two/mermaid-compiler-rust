@@ -2865,6 +2865,7 @@ pub fn draw(w: &Wardley, wc: &WardleyConfig, col: &WardleyColors) -> Scene {
         elements: vec![Element::Markup {
             svg: markup(w, wc, col),
             children: vec![Element::group("wardley-map", root)],
+            svg_view_box: None,
         }],
         acc_title: None,
         acc_descr: None,

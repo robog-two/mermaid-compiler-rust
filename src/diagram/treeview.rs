@@ -11,7 +11,6 @@ use crate::error::{Error, Result};
 use crate::geom::{PathCmd, Point, Rect, arc_cubics};
 use crate::json::Json;
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
-use crate::text::line_width;
 use crate::theme::Palette;
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -685,8 +684,17 @@ pub struct Layout {
     pub lines: Vec<(Point, Point)>,
     /// x of the description column, when any node has a description.
     pub desc_x: Option<f64>,
+    /// Rows and lines in mermaid's DOM order.
+    pub seq: Vec<Seq>,
     pub width: f64,
     pub height: f64,
+}
+
+/// One drawn item: a row (index into `rows`) or a line (index into `lines`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seq {
+    Row(usize),
+    Line(usize),
 }
 
 /// Browser `getBBox().height` of one line of text: 17.02px at 16px, one pixel more
@@ -701,12 +709,30 @@ pub fn text_height(s: &str, font_size: f64) -> f64 {
     font_size * (17.015625 + if desc { 0.984375 } else { 0.0 }) / 16.0
 }
 
+/// A description's `getBBox().width` (single precision).
+fn desc_width(d: &str, font_size: f64) -> f64 {
+    let (l, r) = crate::text::svg_bbox_extent(d, font_size, true);
+    (r - l) as f32 as f64
+}
+
 /// mermaid's `drawTree`: one row per node in pre-order.
 pub fn layout(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
+    layout_with(tv, cfg, false)
+}
+
+/// [`layout`] with the text measured as the browser's `getBBox()` reports it
+/// (single precision, as mermaid's SVG writes them).
+pub fn layout_exact(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
+    layout_with(tv, cfg, true)
+}
+
+fn layout_with(tv: &TreeView, cfg: &LayoutConfig, exact: bool) -> Layout {
     struct St<'a> {
+        exact: bool,
         cfg: &'a LayoutConfig,
         rows: Vec<Row>,
         lines: Vec<(Point, Point)>,
+        seq: Vec<Seq>,
         total_w: f64,
         total_h: f64,
     }
@@ -721,8 +747,21 @@ pub fn layout(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
             0.0
         };
         let is_dir = node.node_type == NodeType::Directory;
-        let label_w = line_width(&node.name, c.font_size, is_dir);
-        let h = text_height(&node.name, c.font_size) + c.padding_y * 2.0;
+        // `getBBox()` is single precision.
+        let (label_w, text_h) = if st.exact {
+            let (l, r) =
+                crate::text::svg_bbox_extent_styled(&node.name, c.font_size, is_dir, false);
+            (
+                (r - l) as f32 as f64,
+                text_height(&node.name, c.font_size) as f32 as f64,
+            )
+        } else {
+            (
+                crate::text::line_width(&node.name, c.font_size, is_dir),
+                text_height(&node.name, c.font_size),
+            )
+        };
+        let h = text_h + c.padding_y * 2.0;
         let label_x = x + c.padding_x + icon_off;
         let w = label_w + c.padding_x * 2.0 + icon_off;
         let classes: Vec<String> = node
@@ -731,6 +770,7 @@ pub fn layout(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
             .map(|s| s.split_whitespace().map(str::to_string).collect())
             .unwrap_or_default();
         let cy = y + h / 2.0;
+        st.seq.push(Seq::Row(st.rows.len()));
         st.rows.push(Row {
             depth,
             name: node.name.clone(),
@@ -747,6 +787,7 @@ pub fn layout(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
             label_right: label_x + label_w,
             center_y: cy,
         });
+        st.seq.push(Seq::Line(st.lines.len()));
         st.lines
             .push((Point::new(x - c.row_indent, cy), Point::new(x, cy)));
         st.total_w = st.total_w.max(x + w);
@@ -759,6 +800,7 @@ pub fn layout(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
         }
         if let Some(end) = last {
             let lx = x + c.padding_x;
+            st.seq.push(Seq::Line(st.lines.len()));
             st.lines.push((
                 Point::new(lx, y + h),
                 Point::new(lx, end.y + end.h / 2.0 + c.line_thickness / 2.0),
@@ -766,9 +808,11 @@ pub fn layout(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
         }
     }
     let mut st = St {
+        exact,
         cfg,
         rows: Vec::new(),
         lines: Vec::new(),
+        seq: Vec::new(),
         total_w: 0.0,
         total_h: 0.0,
     };
@@ -790,7 +834,11 @@ pub fn layout(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
                     // the italic text's `getBBox()`, whose last glyph's ink leans
                     // past its advance
                     .max(
-                        dx + crate::text::svg_bbox_extent(d, cfg.font_size, true).1 + cfg.padding_x,
+                        dx + if exact {
+                            desc_width(d, cfg.font_size)
+                        } else {
+                            crate::text::svg_bbox_extent(d, cfg.font_size, true).1
+                        } + cfg.padding_x,
                     );
             }
         }
@@ -805,6 +853,7 @@ pub fn layout(tv: &TreeView, cfg: &LayoutConfig) -> Layout {
         rows: st.rows,
         lines: st.lines,
         desc_x,
+        seq: st.seq,
         width: st.total_w,
         height: st.total_h,
     }
@@ -980,9 +1029,122 @@ fn icon_elements(
     }
 }
 
+/// The built-in pack's icon data (mermaid's `treeViewIcons`).
+fn builtin_icon_data(kind: &IconRef) -> crate::iconify::IconData {
+    let body = if *kind == IconRef::Folder {
+        r#"<path fill="currentColor" d="M10.59 4.59A2 2 0 0 0 9.17 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.17z"/>"#
+    } else {
+        r#"<path fill="currentColor" fill-rule="evenodd" d="M6 2a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8.83a2 2 0 0 0-.59-1.42l-4.82-4.82A2 2 0 0 0 13.17 2H6Zm7.5 1.9l4.6 4.6h-3.6a1 1 0 0 1-1-1V3.9Z" clip-rule="evenodd"/>"#
+    };
+    crate::iconify::IconData {
+        body: body.into(),
+        left: 0.0,
+        top: 0.0,
+        width: 24.0,
+        height: 24.0,
+        rotate: 0,
+        h_flip: false,
+        v_flip: false,
+    }
+}
+
+/// mermaid's `unknownIcon`, as it serialises.
+const UNKNOWN_ICON: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 80 80\"><g><rect width=\"80\" height=\"80\" style=\"fill: #087ebf; stroke-width: 0px;\"/><text transform=\"translate(21.16 64.67)\" style=\"fill: #fff; font-family: ArialMT, Arial; font-size: 67.75px;\"><tspan x=\"0\" y=\"0\">?</tspan></text></g></svg>";
+
+/// The DOM `treeView/renderer.ts` builds, as mermaid's SVG serialises it.
+fn markup(lay: &Layout, cfg: &LayoutConfig, packs: &crate::iconify::IconPacks) -> String {
+    use crate::output::svg::{esc, esc_text, js_num};
+    use std::fmt::Write;
+    let mut o = String::from("<g/><g class=\"tree-view\">");
+    let thick = js_num(cfg.line_thickness);
+    for item in &lay.seq {
+        match *item {
+            Seq::Line(i) => {
+                let (a, b) = lay.lines[i];
+                let _ = write!(
+                    o,
+                    "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke-width=\"{thick}\" class=\"treeView-node-line\"/>",
+                    js_num(a.x),
+                    js_num(a.y),
+                    js_num(b.x),
+                    js_num(b.y)
+                );
+            }
+            Seq::Row(i) => {
+                let row = &lay.rows[i];
+                o.push_str("<g>");
+                if let Some(hl) = row.highlight {
+                    let _ = write!(
+                        o,
+                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"3\" class=\"treeView-highlight-bg\"/>",
+                        js_num(hl.x),
+                        js_num(hl.y),
+                        js_num(hl.w),
+                        js_num(hl.h)
+                    );
+                }
+                if let Some(icon) = &row.icon {
+                    let (x, y) = (row.bbox.x + cfg.padding_x, row.bbox.y + cfg.padding_y);
+                    let data = match icon {
+                        IconRef::File | IconRef::Folder => Some(builtin_icon_data(icon)),
+                        IconRef::External(n) => packs.lookup(n, None),
+                    };
+                    let inner = match data {
+                        Some(d) => {
+                            crate::iconify::icon_svg(
+                                &d,
+                                ICON_SIZE,
+                                &format!("tree-{}-{}", js_num(x), js_num(y)),
+                            )
+                            .markup
+                        }
+                        None => UNKNOWN_ICON.to_string(),
+                    };
+                    let _ = write!(
+                        o,
+                        "<g class=\"treeView-node-icon\" transform=\"translate({}, {})\">{inner}</g>",
+                        js_num(x),
+                        js_num(y)
+                    );
+                }
+                let mut class = String::from("treeView-node-label");
+                if row.is_dir {
+                    class.push_str(" treeView-node-dir");
+                }
+                // mermaid appends the raw `cssClass` string
+                for c in &row.classes {
+                    class.push(' ');
+                    class.push_str(c);
+                }
+                let _ = write!(
+                    o,
+                    "<text dominant-baseline=\"middle\" class=\"{}\" x=\"{}\" y=\"{}\">{}</text>",
+                    esc(&class),
+                    js_num(row.label_x),
+                    js_num(row.center_y),
+                    esc_text(&row.name)
+                );
+                if let (Some(d), Some(dx)) = (&row.description, lay.desc_x) {
+                    let _ = write!(
+                        o,
+                        "<text dominant-baseline=\"middle\" class=\"treeView-node-description\" x=\"{}\" y=\"{}\">{}</text>",
+                        js_num(dx),
+                        js_num(row.center_y),
+                        esc_text(d)
+                    );
+                }
+                o.push_str("</g>");
+            }
+        }
+    }
+    o.push_str("</g>");
+    o
+}
+
 /// Draw a laid-out tree.
 pub fn draw(
     lay: &Layout,
+    exact: &Layout,
     cfg: &LayoutConfig,
     colors: &Colors,
     pal: &Palette,
@@ -1064,7 +1226,16 @@ pub fn draw(
             lay.width.max(1.0),
             lay.height.max(1.0),
         ),
-        elements: vec![Element::group("tree-view", els)],
+        elements: vec![Element::Markup {
+            svg: markup(exact, cfg, packs),
+            svg_view_box: Some(Rect::new(
+                -cfg.line_thickness / 2.0,
+                0.0,
+                exact.width.max(1.0),
+                exact.height.max(1.0),
+            )),
+            children: vec![Element::group("tree-view", els)],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -1084,7 +1255,8 @@ pub fn render(
     let tv = parse(body)?;
     let (lc, colors) = config(cfg);
     let lay = layout(&tv, &lc);
-    let mut scene = draw(&lay, &lc, &colors, pal, &cfg.icon_packs);
+    let exact = layout_exact(&tv, &lc);
+    let mut scene = draw(&lay, &exact, &lc, &colors, pal, &cfg.icon_packs);
     scene.acc_title = tv.acc_title;
     scene.acc_descr = tv.acc_descr;
     Ok(scene)

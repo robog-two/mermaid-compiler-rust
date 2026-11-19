@@ -1009,6 +1009,7 @@ pub fn draw(model: &EventModel, st: &State, cfg: &MermaidConfig, pal: &Palette) 
     let elements = vec![Element::Markup {
         svg,
         children: elements,
+        svg_view_box: None,
     }];
     Scene {
         kind: DiagramKind::EventModeling,
