@@ -1,0 +1,11 @@
+
+
+    [data-look="${look}"][data-color-id="color-${i}"].node .outer-path path {
+      stroke: ${borderColor};
+      ${@1}
+    }
+
+    [data-look="${look}"][data-color-id="color-${i}"].node .divider path {
+      stroke: ${borderColor};
+    }
+    

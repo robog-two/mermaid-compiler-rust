@@ -43,6 +43,12 @@ pub(super) fn diagram(kind: DiagramKind, o: &Opts) -> Option<String> {
         DiagramKind::Journey => journey(o),
         DiagramKind::Kanban => kanban(o),
         DiagramKind::Sequence => sequence(o),
+        DiagramKind::Er => er(o),
+        DiagramKind::Requirement => requirement(o),
+        DiagramKind::Class => class(o),
+        DiagramKind::Flowchart => flowchart(o),
+        DiagramKind::State => state(o),
+        DiagramKind::Block => block(o),
         DiagramKind::Gantt => t(o, include_str!("css/gantt.css")),
         // No styles.ts: mermaid logs "No theme found" and adds nothing.
         DiagramKind::Quadrant | DiagramKind::XyChart | DiagramKind::Info => String::new(),
@@ -351,6 +357,203 @@ fn sequence(o: &Opts) -> String {
     tpl(o, include_str!("css/sequence.css"), &|e| match e {
         "@1" | "@2" | "@4" => Some(shadow.clone()),
         "@3" => Some(if neo { shadow.clone() } else { "none".into() }),
+        _ => None,
+    })
+}
+
+/// khroma `fade`.
+fn fade(c: &str, a: f64) -> String {
+    khroma::with_alpha(c, a)
+}
+
+/// `getIconStyles()`.
+fn icon_styles() -> String {
+    ICON_STYLES.to_string()
+}
+
+fn look_name(o: &Opts) -> &'static str {
+    match o.look {
+        crate::config::Look::Classic => "classic",
+        crate::config::Look::Neo => "neo",
+        crate::config::Look::HandDrawn => "handDrawn",
+    }
+}
+
+/// `options.dropShadow ? options.dropShadow.replace('url(#drop-shadow)', ...) : 'none'`.
+fn scoped_shadow(o: &Opts) -> String {
+    match o.get("dropShadow").filter(|d| !d.is_empty()) {
+        Some(d) => d.replace(
+            "url(#drop-shadow)",
+            &format!("url({}-drop-shadow)", o.svg_sel),
+        ),
+        None => "none".to_string(),
+    }
+}
+
+/// A per-palette-slot rule generator (`genColor`): `tmpl` is expanded once per
+/// slot of a colour theme's `borderColorArray`, `extra` resolving the
+/// template's own expressions; nothing for any other theme.
+fn gen_color(
+    o: &Opts,
+    tmpl: &str,
+    extra: &dyn Fn(&str, usize, &str, &str) -> Option<String>,
+) -> String {
+    let Some((border, bkg)) = o.color_arrays() else {
+        return String::new();
+    };
+    let look = look_name(o);
+    let mut out = String::new();
+    for i in 0..border.len() {
+        let b = &border[i % border.len()];
+        let fill = if bkg.is_empty() {
+            String::new()
+        } else {
+            format!("fill: {};", bkg[i % bkg.len()])
+        };
+        let slot = format!("[data-look=\"{look}\"][data-color-id=\"color-{i}\"]");
+        out += &tpl(o, tmpl, &|e| match e {
+            "look" => Some(look.to_string()),
+            "i" => Some(i.to_string()),
+            "borderColor" => Some(b.clone()),
+            "fill" | "tint" => Some(fill.clone()),
+            "slot" => Some(slot.clone()),
+            _ => extra(e, i, b, &fill),
+        });
+    }
+    out
+}
+
+fn er(o: &Opts) -> String {
+    let neo = o.look == crate::config::Look::Neo;
+    let color_theme = o.color_arrays().is_some();
+    let er_bg = o.get("erEdgeLabelBackground").map(str::to_string);
+    let sw = o.s("strokeWidth");
+    let colors = gen_color(o, include_str!("css/er_color.css"), &|e, _, _, _| match e {
+        "@1" => Some(String::new()),
+        _ => None,
+    });
+    let label_bkg = match (&er_bg, color_theme) {
+        (Some(b), true) => b.clone(),
+        _ => fade(&o.s("tertiaryColor"), 0.5),
+    };
+    let edge_bkg = match (&er_bg, color_theme) {
+        (Some(b), true) => b.clone(),
+        _ => o.s("edgeLabelBackground"),
+    };
+    let width = if neo { sw } else { "1px".to_string() };
+    tpl(o, include_str!("css/er.css"), &|e| match e {
+        "@1" => Some(colors.clone()),
+        "@2" => Some(label_bkg.clone()),
+        "@3" | "@4" => Some(edge_bkg.clone()),
+        "@5" | "@6" => Some(width.clone()),
+        "@7" => Some(fade(&o.s("tertiaryColor"), 0.5)),
+        _ => None,
+    })
+}
+
+fn requirement(o: &Opts) -> String {
+    let neo = o.look == crate::config::Look::Neo;
+    let colors = gen_color(o, include_str!("css/requirement_color.css"), &|e, _, _, fill| {
+        (e == "@1").then(|| fill.to_string())
+    });
+    let width = if neo {
+        o.s("strokeWidth")
+    } else {
+        "1px".to_string()
+    };
+    let bkg = o
+        .get("requirementEdgeLabelBackground")
+        .map_or_else(|| o.s("edgeLabelBackground"), str::to_string);
+    tpl(o, include_str!("css/requirement.css"), &|e| match e {
+        "@1" => Some(colors.clone()),
+        "@2" => Some(width.clone()),
+        "@3" => Some(bkg.clone()),
+        _ => None,
+    })
+}
+
+fn class(o: &Opts) -> String {
+    let colors = gen_color(o, include_str!("css/class_color.css"), &|e, _, _, fill| {
+        (e == "@1").then(|| fill.to_string())
+    });
+    tpl(o, include_str!("css/class.css"), &|e| match e {
+        "@1" => Some(colors.clone()),
+        "@2" => Some(icon_styles()),
+        _ => None,
+    })
+}
+
+fn flowchart(o: &Opts) -> String {
+    let bkg = o.color_arrays().map(|c| c.1).unwrap_or_default();
+    let colors = gen_color(
+        o,
+        include_str!("css/flowchart_color.css"),
+        &|e, i, _, _| {
+            let look = look_name(o);
+            let slot = format!("[data-look=\"{look}\"][data-color-id=\"color-{i}\"]");
+            let lane = |suffix: &str| {
+                format!(
+                    "{slot}.swimlane.cluster .swimlane-title{suffix}, {slot}.swimlane.cluster .swimlane-body{suffix}"
+                )
+            };
+            let collapsed =
+                |suffix: &str| format!("{slot}.node {suffix}, {slot}.rough-node {suffix}");
+            match e {
+                "@1" => Some(lane(" path:nth-of-type(2)")),
+                "@2" => Some(if bkg.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "{} {{ stroke: {}; }}",
+                        lane(" path:first-of-type"),
+                        bkg[i % bkg.len()]
+                    )
+                }),
+                "@3" => Some(collapsed(".collapsed-group")),
+                "@4" => Some(collapsed(".collapsed-group path")),
+                "@5" => Some(collapsed(".collapsed-indicator")),
+                "@6" => Some(collapsed(".collapsed-separator")),
+                _ => None,
+            }
+        },
+    );
+    tpl(o, include_str!("css/flowchart.css"), &|e| match e {
+        "@1" => Some(colors.clone()),
+        "@2" => Some(fade(&o.s("edgeLabelBackground"), 0.5)),
+        "@3" => Some(icon_styles()),
+        _ => None,
+    })
+}
+
+fn state(o: &Opts) -> String {
+    let colors = gen_color(o, include_str!("css/state_color.css"), &|_, _, _, _| None);
+    let alt = o
+        .get("altBackground")
+        .filter(|v| !v.is_empty())
+        .unwrap_or("#efefef")
+        .to_string();
+    let stroke = if o.get("useGradient") == Some("true") {
+        format!("url({}-gradient)", o.svg_sel)
+    } else {
+        o.or(&["stateBorder", "nodeBorder"])
+    };
+    tpl(o, include_str!("css/state.css"), &|e| match e {
+        "@1" => Some(colors.clone()),
+        "@2" | "@3" => Some(alt.clone()),
+        "@4" => Some(stroke.clone()),
+        "@5" => Some(scoped_shadow(o)),
+        _ => None,
+    })
+}
+
+fn block(o: &Opts) -> String {
+    let colors = gen_color(o, include_str!("css/block_color.css"), &|_, _, _, _| None);
+    tpl(o, include_str!("css/block.css"), &|e| match e {
+        "@1" => Some(colors.clone()),
+        "@2" => Some(fade(&o.s("mainBkg"), 0.5)),
+        "@3" => Some(fade(&o.s("clusterBkg"), 0.5)),
+        "@4" => Some(fade(&o.s("clusterBorder"), 0.2)),
+        "@5" => Some(icon_styles()),
         _ => None,
     })
 }

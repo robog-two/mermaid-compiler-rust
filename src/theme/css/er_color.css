@@ -1,0 +1,12 @@
+
+
+    [data-look="${look}"][data-color-id="color-${i}"].node path {
+    stroke: ${borderColor};
+    ${fill}
+    }
+
+    [data-look="${look}"][data-color-id="color-${i}"].node  rect {
+    stroke: ${borderColor};
+    ${fill}
+     }
+    

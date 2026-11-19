@@ -1,0 +1,6 @@
+
+
+    ${slot}.node rect.composite {
+      stroke: ${borderColor};
+      ${fill}
+    }

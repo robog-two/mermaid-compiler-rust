@@ -28,6 +28,8 @@ pub struct StyleSpec {
 /// The `options` object of `getStyles`.
 pub struct Opts {
     m: HashMap<String, String>,
+    /// `#svgId`, the `svgId` of `getStyles`.
+    pub svg_sel: String,
     pub theme: ThemeName,
     pub look: Look,
     pal: super::Palette,
@@ -183,7 +185,13 @@ impl Opts {
         for (k, v) in crate::diagram::gantt::style_vars(&pal, overrides) {
             m.entry(k.to_string()).or_insert(v);
         }
-        let mut o = Opts { m, theme, look, pal };
+        let mut o = Opts {
+            m,
+            svg_sel: String::new(),
+            theme,
+            look,
+            pal,
+        };
         o.materialise();
         o
     }
@@ -230,9 +238,43 @@ impl Opts {
         for (i, c) in p.pie_colors.iter().enumerate() {
             add.push((format!("pie{}", i + 1), respell(c.css())));
         }
+        let opt = |k: &str, c: &Option<crate::scene::Color>, add: &mut Vec<(String, String)>| {
+            if let Some(c) = c {
+                add.push((k.to_string(), c.css().to_string()));
+            }
+        };
+        opt("erEdgeLabelBackground", &p.er_edge_label_background, &mut add);
+        opt(
+            "requirementEdgeLabelBackground",
+            &p.requirement_edge_label_background,
+            &mut add,
+        );
+        opt("altBackground", &p.alt_background, &mut add);
+        opt("stateBorder", &p.state_border, &mut add);
+        opt("compositeBackground", &p.composite_background, &mut add);
+        opt(
+            "compositeTitleBackground",
+            &p.composite_title_background,
+            &mut add,
+        );
         for (k, v) in add {
             self.m.entry(k).or_insert(v);
         }
+    }
+
+    /// `borderColorArray` and `bkgColorArray` of a colour theme (`isColorTheme`):
+    /// `None` for every other theme.
+    pub(super) fn color_arrays(&self) -> Option<(Vec<String>, Vec<String>)> {
+        let c = self.pal.color_slots.as_ref()?;
+        if !matches!(
+            self.theme,
+            ThemeName::ReduxColor | ThemeName::ReduxDarkColor
+        ) || c.border.is_empty()
+        {
+            return None;
+        }
+        let f = |v: &Vec<crate::scene::Color>| v.iter().map(|c| c.css().to_string()).collect();
+        Some((f(&c.border), f(&c.bkg)))
     }
 
     /// `options[k]`, `None` for `undefined`.
@@ -404,7 +446,8 @@ pub fn style_text(spec: &StyleSpec, id: &str) -> Option<Sheet> {
         }
         _ => {}
     }
-    let o = Opts::new(spec.theme, spec.look, &spec.theme_variables);
+    let mut o = Opts::new(spec.theme, spec.look, &spec.theme_variables);
+    o.svg_sel = format!("#{id}");
     let diagram_css = super::diagram_styles::diagram(spec.kind, &o)?;
     let id_sel = format!("#{id}");
     let root_ff = spec

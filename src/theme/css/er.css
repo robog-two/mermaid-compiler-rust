@@ -1,1 +1,82 @@
-fill: ${@1};
+
+    ${@1}
+  .entityBox {
+    fill: ${options.mainBkg};
+    stroke: ${options.nodeBorder};
+  }
+
+  .relationshipLabelBox {
+    fill: ${options.tertiaryColor};
+    opacity: 0.7;
+    background-color: ${options.tertiaryColor};
+      rect {
+        opacity: 0.5;
+      }
+  }
+
+  .labelBkg {
+    background-color: ${@2};
+  }
+
+  .edgeLabel {
+    background-color: ${@3};
+  }
+  .edgeLabel .label rect {
+    fill: ${@4};
+  }
+  .edgeLabel .label text {
+    fill: ${options.textColor};
+  }
+
+  .edgeLabel .label {
+    fill: ${options.nodeBorder};
+    font-size: 14px;
+  }
+
+  .label {
+    font-family: ${options.fontFamily};
+    color: ${options.nodeTextColor || options.textColor};
+  }
+
+  .edge-pattern-dashed {
+    stroke-dasharray: 8,8;
+  }
+
+  .node rect,
+  .node circle,
+  .node ellipse,
+  .node polygon
+  {
+    fill: ${options.mainBkg};
+    stroke: ${options.nodeBorder};
+    stroke-width: ${@5};
+  }
+
+  .relationshipLine {
+    stroke: ${options.lineColor};
+    stroke-width: ${@6};
+    fill: none;
+  }
+
+  .marker {
+    fill: none !important;
+    stroke: ${options.lineColor} !important;
+    stroke-width: 1;
+  }
+  [data-look=neo].labelBkg {
+    background-color: ${@7};
+  }
+
+  .cluster rect {
+    fill: ${options.clusterBkg ?? options.mainBkg};
+    stroke: ${options.clusterBorder ?? options.nodeBorder};
+    stroke-width: 1px;
+  }
+
+  .cluster text {
+    fill: ${options.titleColor ?? options.textColor};
+  }
+
+  .cluster-label text {
+    fill: ${options.titleColor ?? options.textColor};
+  }

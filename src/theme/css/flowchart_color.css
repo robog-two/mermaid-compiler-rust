@@ -1,0 +1,40 @@
+
+
+    ${slot}.cluster:not(.swimlane) rect {
+      stroke: ${borderColor};
+      ${fill}
+    }
+
+    ${slot}.cluster:not(.swimlane) path {
+      stroke: ${borderColor};
+      ${fill}
+    }
+
+    /* Lane, classic and neo. */
+    ${slot}.swimlane.cluster rect.swimlane-title,
+    ${slot}.swimlane.cluster rect.swimlane-body {
+      stroke: ${borderColor};
+      ${fill}
+    }
+
+    /* Lane, handDrawn: roughjs emits the hachure fill first, then the outline. */
+    ${@1} {
+      stroke: ${borderColor};
+    }
+${@2}
+    ${@3},
+    ${@4} {
+      stroke: ${borderColor};
+      ${fill}
+    }
+
+    /* The ellipsis dots and the separator take clusterBorder further down, so without
+       these the container is palette-coloured while its own markers are not. */
+    ${@5} {
+      fill: ${borderColor};
+    }
+
+    ${@6} {
+      stroke: ${borderColor};
+    }
+    
