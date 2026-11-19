@@ -768,7 +768,7 @@ mod tests {
     fn walk(els: &[Element], f: &mut impl FnMut(&Element)) {
         for e in els {
             f(e);
-            if let Element::Group { children, .. } = e {
+            if let Element::Group { children, .. } | Element::Markup { children, .. } = e {
                 walk(children, f);
             }
         }
