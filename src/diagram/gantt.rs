@@ -1240,6 +1240,35 @@ struct Colors {
     task_text_outside: Color,
     /// `todayLineColor`: red, but `#DB5757` (dark) and `#d42` (neutral).
     today: Color,
+    /// `gridColor`.
+    grid: Color,
+}
+
+/// The gantt theme variables as mermaid names them, for the stylesheet.
+pub(crate) fn style_vars(pal: &Palette, vars: &[(String, String)]) -> Vec<(&'static str, String)> {
+    let c = Colors::new(pal, vars);
+    let s = |c: &Color| c.css().to_string();
+    vec![
+        ("taskBkgColor", s(&c.task)),
+        ("taskBorderColor", s(&c.task_border)),
+        ("activeTaskBkgColor", s(&c.active)),
+        ("activeTaskBorderColor", s(&c.active_border)),
+        ("doneTaskBkgColor", s(&c.done)),
+        ("doneTaskBorderColor", s(&c.done_border)),
+        ("critBkgColor", s(&c.crit)),
+        ("critBorderColor", s(&c.crit_border)),
+        ("sectionBkgColor", s(&c.sections[0].0)),
+        ("altSectionBkgColor", s(&c.sections[1].0)),
+        ("sectionBkgColor2", s(&c.sections[2].0)),
+        ("excludeBkgColor", s(&c.exclude)),
+        ("vertLineColor", s(&c.vert)),
+        ("taskTextColor", s(&c.task_text)),
+        ("taskTextDarkColor", s(&c.task_text_dark)),
+        ("taskTextOutsideColor", s(&c.task_text_outside)),
+        ("todayLineColor", s(&c.today)),
+        ("gridColor", s(&c.grid)),
+        ("taskTextClickableColor", "#003163".to_string()),
+    ]
 }
 
 impl Colors {
@@ -1463,6 +1492,7 @@ impl Colors {
             text: pal.text_color.clone(),
             title: pal.title_color.clone(),
             today,
+            grid: var("gridColor", 12),
         }
     }
 }

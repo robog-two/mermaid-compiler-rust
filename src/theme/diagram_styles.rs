@@ -42,6 +42,8 @@ pub(super) fn diagram(kind: DiagramKind, o: &Opts) -> Option<String> {
         DiagramKind::Cynefin => cynefin(o),
         DiagramKind::Journey => journey(o),
         DiagramKind::Kanban => kanban(o),
+        DiagramKind::Sequence => sequence(o),
+        DiagramKind::Gantt => t(o, include_str!("css/gantt.css")),
         // No styles.ts: mermaid logs "No theme found" and adds nothing.
         DiagramKind::Quadrant | DiagramKind::XyChart | DiagramKind::Info => String::new(),
         _ => return None,
@@ -341,4 +343,14 @@ fn kanban(o: &Opts) -> String {
 "#,
     );
     s + ICON_STYLES
+}
+
+fn sequence(o: &Opts) -> String {
+    let shadow = o.get("dropShadow").unwrap_or("none").to_string();
+    let neo = o.look == crate::config::Look::Neo;
+    tpl(o, include_str!("css/sequence.css"), &|e| match e {
+        "@1" | "@2" | "@4" => Some(shadow.clone()),
+        "@3" => Some(if neo { shadow.clone() } else { "none".into() }),
+        _ => None,
+    })
 }

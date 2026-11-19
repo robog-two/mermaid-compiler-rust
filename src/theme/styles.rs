@@ -180,6 +180,9 @@ impl Opts {
             }
         }
         let pal = palette(theme, overrides);
+        for (k, v) in crate::diagram::gantt::style_vars(&pal, overrides) {
+            m.entry(k.to_string()).or_insert(v);
+        }
         let mut o = Opts { m, theme, look, pal };
         o.materialise();
         o
