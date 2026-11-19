@@ -3,11 +3,14 @@
 //! the y-axis labels are rotated -90° in a `yAxisLabelPadding * 2 +
 //! yAxisLabelFontSize` side band, as in mermaid.
 
+use std::fmt::Write;
+
 use crate::color;
 use crate::config::MermaidConfig;
 use crate::diagram::xychart::{keyword, text_at, unquote};
 use crate::error::{Error, Result};
 use crate::geom::{Point, Rect};
+use crate::output::svg::{esc, esc_text, js_num};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene};
 use crate::text::{Baseline, baseline_shift};
 use crate::theme::Palette;
@@ -267,7 +270,24 @@ struct QuadColors {
     title: Color,
 }
 
-fn colors(cfg: &MermaidConfig, pal: &Palette) -> QuadColors {
+/// khroma's `lighten`/`darken` without an amount: `hsl(h, s%, NaN%)` of the colour,
+/// each channel rounded to 10 decimals.
+fn nan_lightness(c: &str, pal: &Palette) -> Color {
+    let round = |v: f64| (v * 1e10).round() / 1e10;
+    match color::parse(c) {
+        Some(k) => {
+            let (h, s, _) = k.to_hsl();
+            Color::new(format!(
+                "hsl({}, {}%, NaN%)",
+                js_num(round(h)),
+                js_num(round(s))
+            ))
+        }
+        None => pal.text_color.clone(),
+    }
+}
+
+fn colors(cfg: &MermaidConfig, pal: &Palette, raw: bool) -> QuadColors {
     // The renderer writes each colour into a `fill` attribute; one the browser cannot
     // parse is ignored and the element inherits the root's `fill: textColor`.
     let var = |k: &str| {
@@ -277,7 +297,8 @@ fn colors(cfg: &MermaidConfig, pal: &Palette) -> QuadColors {
             .find(|(n, _)| n == k)
             .map(|(_, v)| {
                 let v = v.trim();
-                if k.ends_with("Fill") && !k.contains("Border") && color::parse(v).is_none() {
+                if !raw && k.ends_with("Fill") && !k.contains("Border") && color::parse(v).is_none()
+                {
                     pal.text_color.clone()
                 } else {
                     Color::new(v)
@@ -304,6 +325,7 @@ fn colors(cfg: &MermaidConfig, pal: &Palette) -> QuadColors {
         )
     };
     let q1 = var("quadrant1Fill").unwrap_or_else(|| pal.quadrant_fill.clone());
+    let q1_css = q1.css().to_string();
     let fills = [
         q1,
         var("quadrant2Fill").unwrap_or_else(|| rgb_step(&pal.quadrant_fill, 5.0)),
@@ -316,7 +338,13 @@ fn colors(cfg: &MermaidConfig, pal: &Palette) -> QuadColors {
     // `(x || isDark(q1)) ? ...`, and khroma's lighten/darken without an amount yield
     // `hsl(.., NaN%)`: an invalid fill attribute, so the point inherits the root's
     // `fill: textColor`. A user-supplied value is copied back over it afterwards.
-    let point = var("quadrantPointFill").unwrap_or_else(|| pal.text_color.clone());
+    let point = var("quadrantPointFill").unwrap_or_else(|| {
+        if raw {
+            nan_lightness(&q1_css, pal)
+        } else {
+            pal.text_color.clone()
+        }
+    });
     let border = |k: &str| var(k).unwrap_or_else(|| pal.primary_border.clone());
     QuadColors {
         fills,
@@ -376,7 +404,7 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
         .section(s, "xAxisPosition")
         .and_then(crate::json::Json::as_str)
         == Some("bottom");
-    let qc = colors(cfg, pal);
+    let qc = colors(cfg, pal, false);
 
     let nonempty = |t: &Option<String>| t.as_ref().is_some_and(|t| !t.is_empty());
     let has_points = !chart.points.is_empty();
@@ -588,10 +616,268 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
         ));
     }
 
+    // mermaid's own DOM (`quadrantRenderer.ts`): colours as written in the
+    // theme, numbers as `quadrantBuilder.ts` computes them.
+    let rq = colors(cfg, pal, true);
+    let n = js_num;
+    let anchor_of = |mid: bool| if mid { "middle" } else { "start" };
+    let text_el = |fill: &Color,
+                   size: f64,
+                   base: &str,
+                   anchor: &str,
+                   x: f64,
+                   y: f64,
+                   rot: f64,
+                   s: &str| {
+        let body = if s.is_empty() {
+            "/>".to_string()
+        } else {
+            format!(">{}</text>", esc_text(s))
+        };
+        format!(
+            "<text x=\"0\" y=\"0\" fill=\"{}\" font-size=\"{}\" dominant-baseline=\"{base}\" text-anchor=\"{anchor}\" transform=\"translate({}, {}) rotate({})\"{body}",
+            esc(fill.css()),
+            n(size),
+            n(x),
+            n(y),
+            n(rot)
+        )
+    };
+    // `.style('stroke', c)`: the browser serialises hex, `hsl()` and `rgb()`
+    // colours as `rgb()`/`rgba()`, and keeps keywords as written.
+    let style_color = |c: &Color| {
+        let css = c.css().trim();
+        let lower = css.to_ascii_lowercase();
+        match color::parse(css) {
+            Some(k) if lower.starts_with(['#', 'h', 'r']) && k.a < 1.0 => {
+                format!("rgba({}, {}, {}, {})", k.r, k.g, k.b, js_num(k.a))
+            }
+            Some(k) if lower.starts_with(['#', 'h', 'r']) => {
+                format!("rgb({}, {}, {})", k.r, k.g, k.b)
+            }
+            _ => css.to_string(),
+        }
+    };
+    let (qleft, qtop, qw, qh) = (
+        qpad + y_left,
+        qpad + x_top + title_top,
+        width - qpad * 2.0 - y_left - y_rgt,
+        height - qpad * 2.0 - x_top - x_bot - title_top,
+    );
+    let (qhw, qhh) = (qw / 2.0, qh / 2.0);
+    let mut m = String::from("<g/><g class=\"main\"><g class=\"quadrants\">");
+    let quads = [
+        (qleft + qhw, qtop),
+        (qleft, qtop),
+        (qleft, qtop + qhh),
+        (qleft + qhw, qtop + qhh),
+    ];
+    for (i, (x, y)) in quads.into_iter().enumerate() {
+        let (ty, base) = if has_points {
+            (y + q_text_top, "hanging")
+        } else {
+            (y + qhh / 2.0, "middle")
+        };
+        let _ = write!(
+            m,
+            "<g class=\"quadrant\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"/>{}</g>",
+            n(x),
+            n(y),
+            n(qhw),
+            n(qhh),
+            esc(rq.fills[i].css()),
+            text_el(
+                &rq.texts[i],
+                q_font,
+                base,
+                "middle",
+                x + qhw / 2.0,
+                ty,
+                0.0,
+                chart.quadrants[i].as_deref().unwrap_or("")
+            )
+        );
+    }
+    m.push_str("</g><g class=\"border\">");
+    let hex = ex_w / 2.0;
+    for (c, w, a, b, c2, d) in [
+        (
+            &rq.external,
+            ex_w,
+            qleft - hex,
+            qtop,
+            qleft + qw + hex,
+            qtop,
+        ),
+        (
+            &rq.external,
+            ex_w,
+            qleft + qw,
+            qtop + hex,
+            qleft + qw,
+            qtop + qh - hex,
+        ),
+        (
+            &rq.external,
+            ex_w,
+            qleft - hex,
+            qtop + qh,
+            qleft + qw + hex,
+            qtop + qh,
+        ),
+        (
+            &rq.external,
+            ex_w,
+            qleft,
+            qtop + hex,
+            qleft,
+            qtop + qh - hex,
+        ),
+        (
+            &rq.internal,
+            in_w,
+            qleft + qhw,
+            qtop + hex,
+            qleft + qhw,
+            qtop + qh - hex,
+        ),
+        (
+            &rq.internal,
+            in_w,
+            qleft + hex,
+            qtop + qhh,
+            qleft + qw - hex,
+            qtop + qhh,
+        ),
+    ] {
+        let _ = write!(
+            m,
+            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" style=\"stroke: {}; stroke-width: {};\"/>",
+            n(a),
+            n(b),
+            n(c2),
+            n(d),
+            esc(&style_color(c)),
+            n(w)
+        );
+    }
+    m.push_str("</g><g class=\"data-points\">");
+    // `addPoints` prepends: the last point written is the first drawn.
+    for p in chart.points.iter().rev() {
+        let class_style = p
+            .class
+            .as_ref()
+            .and_then(|c| chart.classes.iter().find(|(n, _)| n == c))
+            .map(|(_, s)| s.clone())
+            .unwrap_or_default();
+        let st = p.style.over(&class_style);
+        let fill = st
+            .color
+            .as_deref()
+            .map_or_else(|| rq.point.clone(), Color::new);
+        let stroke = st
+            .stroke_color
+            .as_deref()
+            .map_or_else(|| rq.point.clone(), Color::new);
+        // `scaleLinear().domain([0, 1])`: `a * (1 - t) + b * t`.
+        let px = qleft * (1.0 - p.x) + (qw + qleft) * p.x;
+        let py = (qh + qtop) * (1.0 - p.y) + qtop * p.y;
+        let _ = write!(
+            m,
+            "<g class=\"data-point\"><circle cx=\"{}\" cy=\"{}\" r=\"{}\" fill=\"{}\" stroke=\"{}\" stroke-width=\"{}px\"/>{}</g>",
+            n(px),
+            n(py),
+            n(st.radius.unwrap_or(pt_radius)),
+            esc(fill.css()),
+            esc(stroke.css()),
+            n(st.stroke_width.unwrap_or(0.0)),
+            text_el(
+                &rq.point_text,
+                pt_font,
+                "hanging",
+                "middle",
+                px,
+                py + pt_pad,
+                0.0,
+                &p.name
+            )
+        );
+    }
+    m.push_str("</g><g class=\"labels\">");
+    if show_x {
+        let mid = nonempty(&chart.x_right);
+        let y = if x_bottom {
+            x_pad + qtop + qh + qpad
+        } else {
+            x_pad + title_top
+        };
+        let off = if mid { qhw / 2.0 } else { 0.0 };
+        for (x, label) in [
+            (qleft + off, &chart.x_left),
+            (qleft + qhw + off, &chart.x_right),
+        ] {
+            if let Some(l) = label.as_deref().filter(|t| !t.is_empty()) {
+                let t = text_el(&rq.x_text, x_font, "hanging", anchor_of(mid), x, y, 0.0, l);
+                let _ = write!(m, "<g class=\"label\">{t}</g>");
+            }
+        }
+    }
+    if show_y {
+        let mid = nonempty(&chart.y_top);
+        let x = if y_right {
+            y_pad + qleft + qw + qpad
+        } else {
+            y_pad
+        };
+        let off = if mid { qhh / 2.0 } else { 0.0 };
+        for (y, label) in [
+            (qtop + qh - off, &chart.y_bottom),
+            (qtop + qhh - off, &chart.y_top),
+        ] {
+            if let Some(l) = label.as_deref().filter(|t| !t.is_empty()) {
+                let t = text_el(
+                    &rq.y_text,
+                    y_font,
+                    "hanging",
+                    anchor_of(mid),
+                    x,
+                    y,
+                    -90.0,
+                    l,
+                );
+                let _ = write!(m, "<g class=\"label\">{t}</g>");
+            }
+        }
+    }
+    m.push_str("</g>");
+    match title {
+        Some(t) => {
+            let _ = write!(
+                m,
+                "<g class=\"title\">{}</g>",
+                text_el(
+                    &rq.title,
+                    title_font,
+                    "hanging",
+                    "middle",
+                    width / 2.0,
+                    title_pad,
+                    0.0,
+                    t
+                )
+            );
+        }
+        None => m.push_str("<g class=\"title\"/>"),
+    }
+    m.push_str("</g>");
+
     Scene {
         kind: DiagramKind::Quadrant,
         view_box: Rect::new(0.0, 0.0, width, height),
-        elements: vec![Element::group("main", els)],
+        elements: vec![Element::Markup {
+            svg: m,
+            children: vec![Element::group("main", els)],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
@@ -676,9 +962,9 @@ mod tests {
         let mut out = Vec::new();
         for e in els {
             match e {
-                Element::Group { children, .. } | Element::Rotated { children, .. } => {
-                    out.extend(texts(children))
-                }
+                Element::Group { children, .. }
+                | Element::Markup { children, .. }
+                | Element::Rotated { children, .. } => out.extend(texts(children)),
                 Element::Text { text, .. } => out.push(text.clone()),
                 _ => {}
             }
@@ -709,7 +995,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            colors(&cfg, &cfg.palette()).texts[0],
+            colors(&cfg, &cfg.palette(), false).texts[0],
             cfg.palette().text_color
         );
     }
@@ -721,7 +1007,9 @@ mod tests {
         let mut out = Vec::new();
         for e in els {
             match e {
-                Element::Group { children, .. } => out.extend(rotated(children)),
+                Element::Group { children, .. } | Element::Markup { children, .. } => {
+                    out.extend(rotated(children))
+                }
                 Element::Rotated {
                     deg,
                     about,
