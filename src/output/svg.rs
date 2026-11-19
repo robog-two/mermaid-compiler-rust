@@ -1057,8 +1057,10 @@ fn to_svg_in_face(scene: &Scene, opt: &SvgOptions) -> String {
         // in doubles: written as they are.
         _ if kind == DiagramKind::Ishikawa => crate::diagram::xychart::js_num(v),
         // A board's box is a float's plus the padding: a double, in full.
-        _ if matches!(kind, DiagramKind::Kanban | DiagramKind::Mindmap)
-            && opt.raster_scale.is_none() =>
+        _ if matches!(
+            kind,
+            DiagramKind::Kanban | DiagramKind::Mindmap | DiagramKind::Block
+        ) && opt.raster_scale.is_none() =>
         {
             crate::diagram::xychart::js_num(v)
         }
