@@ -9,11 +9,14 @@
 
 use crate::color;
 use crate::config::MermaidConfig;
+use crate::diagram::wardley::ID_MARK;
 use crate::error::{Error, Result};
 use crate::geom::{self, PathCmd, Point, Rect};
 use crate::json::Json;
+use crate::output::svg::{esc, esc_text, js_num as n};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Paint, Scene, Text};
 use crate::theme::{Palette, ThemeName};
+use std::fmt::Write;
 
 // ---------------------------------------------------------------------------
 // Model
@@ -544,7 +547,11 @@ pub fn badges(
             // Chromium lays the text out at the screen size cut to 26.6 fixed
             // point (`shaping_size`), so the measure shrinks with it.
             let size = crate::text::shaping_size(item_font * scale);
-            let w = crate::text::svg_bbox_width(&label, size) / scale + ITEM_PADDING_X * 2.0;
+            // getBBox() is single precision: a float width through the float inverse scale.
+            let measured = f64::from(
+                crate::text::svg_bbox_width(&label, size) as f32 * (1.0f32 / scale as f32),
+            );
+            let w = measured + ITEM_PADDING_X * 2.0;
             Badge {
                 domain: dom,
                 rect: Rect::new(
@@ -1029,15 +1036,269 @@ pub fn draw(d: &Cynefin, cfg: &MermaidConfig, pal: &Palette) -> Scene {
         .into_iter()
         .map(|e| translate(e, padding, padding))
         .collect();
+    let svg = markup(
+        d,
+        &Dims {
+            width,
+            height,
+            padding,
+            amplitude,
+            seed,
+            show_desc,
+            scale,
+        },
+        &t,
+    );
     Scene {
         kind: DiagramKind::Cynefin,
         view_box: Rect::new(0.0, 0.0, width + 2.0 * padding, height + 2.0 * padding),
-        elements: vec![Element::group("cynefin", els)],
+        elements: vec![Element::Markup {
+            svg,
+            svg_view_box: None,
+            children: vec![Element::group("cynefin", els)],
+        }],
         acc_title: None,
         acc_descr: None,
         font_family: pal.font_family.clone(),
         css: ".cynefinSubtitle{font-style:italic;}".to_string(),
     }
+}
+
+/// What the markup needs of the drawing's geometry.
+struct Dims {
+    width: f64,
+    height: f64,
+    padding: f64,
+    amplitude: f64,
+    seed: f64,
+    show_desc: bool,
+    scale: f64,
+}
+
+/// A path as mermaid's template literals write it: `Mx,y` then ` Ca,b c,d e,f`.
+fn path_d(cmds: &[PathCmd]) -> String {
+    let mut out = String::new();
+    for c in cmds {
+        match c {
+            PathCmd::MoveTo(p) => {
+                let _ = write!(out, "M{},{}", n(p.x), n(p.y));
+            }
+            PathCmd::CubicTo(a, b, p) => {
+                let _ = write!(
+                    out,
+                    " C{},{} {},{} {},{}",
+                    n(a.x),
+                    n(a.y),
+                    n(b.x),
+                    n(b.y),
+                    n(p.x),
+                    n(p.y)
+                );
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn text_el(out: &mut String, class: &str, x: f64, y: f64, baseline: &str, s: &str) {
+    let _ = write!(
+        out,
+        "<text class=\"{class}\" x=\"{}\" y=\"{}\" text-anchor=\"middle\" dominant-baseline=\"{baseline}\"",
+        n(x),
+        n(y)
+    );
+    if s.is_empty() {
+        out.push_str("/>");
+    } else {
+        let _ = write!(out, ">{}</text>", esc_text(s));
+    }
+}
+
+/// `cynefinRenderer.ts`'s DOM, as the serialised svg body.
+fn markup(d: &Cynefin, g: &Dims, t: &CynefinTheme) -> String {
+    let (width, height, padding) = (g.width, g.height, g.padding);
+    let mut svg = String::from("<g/>");
+    let _ = write!(
+        svg,
+        "<g transform=\"translate({}, {})\">",
+        n(padding),
+        n(padding)
+    );
+    svg.push_str("<g class=\"cynefin-backgrounds\">");
+    for dom in Domain::QUADRANTS {
+        let r = domain_layout(dom, width, height).rect;
+        let _ = write!(
+            svg,
+            "<rect class=\"cynefinDomain\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\" fill-opacity=\"0.4\" stroke=\"none\"/>",
+            n(r.x),
+            n(r.y),
+            n(r.w),
+            n(r.h),
+            esc(t.bg(dom).css())
+        );
+    }
+    svg.push_str("</g><g class=\"cynefin-boundaries\">");
+    let fold = fold_path(width, height, g.seed, g.amplitude);
+    let horiz = horizontal_path(width, height, g.seed + 100.0, g.amplitude);
+    for p in [fold, horiz] {
+        let _ = write!(
+            svg,
+            "<path class=\"cynefinBoundary\" d=\"{}\" fill=\"none\"/>",
+            path_d(&p)
+        );
+    }
+    let _ = write!(
+        svg,
+        "<path class=\"cynefinCliff\" d=\"{}\" fill=\"none\"/></g>",
+        path_d(&cliff_path(width, height))
+    );
+    let (cx, cy, rx, ry) = (width / 2.0, height / 2.0, width * 0.15, height * 0.15);
+    let _ = write!(
+        svg,
+        "<path class=\"cynefinConfusion\" d=\"M{},{} A{},{} 0 1,1 {},{} A{},{} 0 1,1 {},{} Z\" fill=\"{}\" fill-opacity=\"0.5\"/>",
+        n(cx - rx),
+        n(cy),
+        n(rx),
+        n(ry),
+        n(cx + rx),
+        n(cy),
+        n(rx),
+        n(ry),
+        n(cx - rx),
+        n(cy),
+        esc(t.confusion_bg.css())
+    );
+    svg.push_str("<g class=\"cynefin-labels\">");
+    for dom in Domain::QUADRANTS {
+        let c = domain_layout(dom, width, height).center;
+        let y = if g.show_desc { c.y - 30.0 } else { c.y };
+        text_el(
+            &mut svg,
+            "cynefinDomainLabel",
+            c.x,
+            y,
+            "middle",
+            dom.title(),
+        );
+    }
+    let ly = if g.show_desc { cy - 10.0 } else { cy };
+    text_el(
+        &mut svg,
+        "cynefinDomainLabel",
+        cx,
+        ly,
+        "middle",
+        "Confusion",
+    );
+    svg.push_str("</g>");
+    if g.show_desc {
+        svg.push_str("<g class=\"cynefin-subtitles\">");
+        for dom in Domain::QUADRANTS {
+            let c = domain_layout(dom, width, height).center;
+            let (model, practice) = dom.meta();
+            text_el(
+                &mut svg,
+                "cynefinSubtitle",
+                c.x,
+                c.y - 10.0,
+                "middle",
+                model,
+            );
+            text_el(
+                &mut svg,
+                "cynefinSubtitle",
+                c.x,
+                c.y + 5.0,
+                "middle",
+                practice,
+            );
+        }
+        text_el(
+            &mut svg,
+            "cynefinSubtitle",
+            cx,
+            cy + 8.0,
+            "middle",
+            Domain::Confusion.meta().1,
+        );
+        svg.push_str("</g>");
+    }
+    let placed = badges(d, width, height, g.show_desc, t.item_font_size, g.scale);
+    if placed.is_empty() {
+        svg.push_str("<g class=\"cynefin-items\"/>");
+    } else {
+        svg.push_str("<g class=\"cynefin-items\">");
+        for b in &placed {
+            let (class, alpha) = if b.overflow {
+                ("cynefinItemOverflow", "0.6")
+            } else {
+                ("cynefinItem", "0.95")
+            };
+            let _ = write!(
+                svg,
+                "<g transform=\"translate({}, {})\"><rect class=\"{class}\" x=\"0\" y=\"0\" width=\"{}\" height=\"26\" rx=\"4\" ry=\"4\" fill=\"{}\" fill-opacity=\"{alpha}\"/>",
+                n(b.rect.x),
+                n(b.rect.y),
+                n(b.rect.w),
+                esc(t.bg(b.domain).css())
+            );
+            text_el(
+                &mut svg,
+                "cynefinItemText",
+                b.rect.w / 2.0,
+                13.0,
+                "central",
+                &b.label,
+            );
+            svg.push_str("</g>");
+        }
+        svg.push_str("</g>");
+    }
+    let mut defs = String::new();
+    if !d.transitions.is_empty() {
+        svg.push_str("<g class=\"cynefin-arrows\">");
+        for tr in &d.transitions {
+            let a = arrow_geom(tr, width, height);
+            let _ = write!(
+                svg,
+                "<path class=\"cynefinArrowLine\" d=\"M{},{} Q{},{} {},{}\" fill=\"none\" marker-end=\"url(#cynefin-arrow-{ID_MARK})\"/>",
+                n(a.from.x),
+                n(a.from.y),
+                n(a.control.x),
+                n(a.control.y),
+                n(a.to.x),
+                n(a.to.y)
+            );
+            if let Some(l) = &tr.label {
+                text_el(
+                    &mut svg,
+                    "cynefinArrowLabel",
+                    a.control.x,
+                    a.control.y - 6.0,
+                    "auto",
+                    l,
+                );
+            }
+        }
+        svg.push_str("</g>");
+        defs = format!(
+            "<defs><marker id=\"cynefin-arrow-{ID_MARK}\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\"><path d=\"M 0 0 L 10 5 L 0 10 z\" class=\"cynefinArrowHead\"/></marker></defs>"
+        );
+    }
+    if let Some(title) = d.title.as_ref().filter(|t| !t.is_empty()) {
+        text_el(
+            &mut svg,
+            "cynefinTitle",
+            width / 2.0,
+            -padding / 2.0,
+            "middle",
+            title,
+        );
+    }
+    svg.push_str("</g>");
+    svg.push_str(&defs);
+    svg
 }
 
 fn translate(e: Element, dx: f64, dy: f64) -> Element {
