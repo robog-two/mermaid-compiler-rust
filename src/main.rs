@@ -458,8 +458,9 @@ fn render_one(
     format: Format,
     rast: Option<&Rasterizer>,
 ) -> Result<Rendered, String> {
-    // Diagram code writes some numbers into the scene as text: for the SVG file
-    // they are written as JavaScript prints them.
+    // Diagram code writes some numbers into the scene as text, and the writer
+    // the rest: for the SVG file all of them are written as JavaScript prints
+    // them. The raster and PDF paths keep the three-decimal form.
     let render = || render::render_with_env(def, config, env);
     let r = if format == Format::Svg {
         output::svg::with_js_numbers(render)
@@ -468,7 +469,7 @@ fn render_one(
     }
     .map_err(|e| format!("Error: {e}"))?;
     let bytes = match format {
-        Format::Svg => output::encode_svg(&r, enc).into_bytes(),
+        Format::Svg => output::svg::with_js_numbers(|| output::encode_svg(&r, enc)).into_bytes(),
         Format::Pdf => output::encode_pdf(&r, enc),
         #[cfg(feature = "png")]
         Format::Png => {

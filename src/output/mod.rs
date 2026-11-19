@@ -131,7 +131,9 @@ pub(crate) fn fit_meet(vw: f64, vh: f64, w: f64, h: f64) -> (f64, f64, f64) {
     (k, (w - vw * k) / 2.0, (h - vh * k) / 2.0)
 }
 
-/// SVG document text.
+/// SVG document text. Numbers are written in the compact three-decimal form
+/// unless the caller wraps rendering and encoding in [`svg::with_js_numbers`],
+/// as the CLI does for its SVG files.
 pub fn encode_svg(r: &Rendered, opt: &EncodeOptions) -> String {
     let sizing = match (opt.size, r.use_max_width) {
         (Some(s), true) => SvgSizing::Size(s),
@@ -145,19 +147,17 @@ pub fn encode_svg(r: &Rendered, opt: &EncodeOptions) -> String {
             height: r.svg_height.unwrap_or(r.scene.view_box.h),
         },
     };
-    let mut svg = svg::with_js_numbers(|| {
-        svg::to_svg(
-            &r.scene,
-            &SvgOptions {
-                id: &opt.svg_id,
-                background: &opt.background,
-                sizing,
-                theme_css: r.theme_css.as_deref(),
-                raster_scale: None,
-                style: r.style.as_ref(),
-            },
-        )
-    });
+    let mut svg = svg::to_svg(
+        &r.scene,
+        &SvgOptions {
+            id: &opt.svg_id,
+            background: &opt.background,
+            sizing,
+            theme_css: r.theme_css.as_deref(),
+            raster_scale: None,
+            style: r.style.as_ref(),
+        },
+    );
     #[cfg(feature = "font-embed")]
     if opt.font_embed {
         fontembed::embed(&r.scene, &mut svg);
