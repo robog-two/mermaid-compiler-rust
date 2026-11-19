@@ -45,6 +45,9 @@ pub struct Treemap {
     pub title: Option<String>,
     pub roots: Vec<Item>,
     pub classes: Vec<(String, StyleOverrides)>,
+    /// mermaid's `db.getStylesForClass`: the raw style pieces of each class
+    /// (`,` becomes `;`, `\,` stays a comma), appended over repeated `classDef`s.
+    pub class_styles: Vec<(String, Vec<String>)>,
 }
 
 /// Parse a treemap body.
@@ -53,6 +56,7 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Treemap> {
         title,
         roots: Vec::new(),
         classes: Vec::new(),
+        class_styles: Vec::new(),
     };
     let mut header = false;
     // (indent, item) in document order; hierarchy is built afterwards.
@@ -84,6 +88,15 @@ pub fn parse(body: &str, title: Option<String>) -> Result<Treemap> {
         if let Some(rest) = keyword(line, "classDef") {
             let (name, style) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             let st = StyleOverrides::parse(style.trim().trim_end_matches(';'));
+            let pieces = style
+                .replace("\\,", "\u{a7}\u{a7}\u{a7}")
+                .replace(',', ";")
+                .replace("\u{a7}\u{a7}\u{a7}", ",");
+            let pieces = pieces.split(';').map(str::to_string);
+            match tm.class_styles.iter_mut().find(|(n, _)| n == name) {
+                Some(c) => c.1.extend(pieces),
+                None => tm.class_styles.push((name.to_string(), pieces.collect())),
+            }
             match tm.classes.iter_mut().find(|(n, _)| n == name) {
                 Some(c) => c.1 = c.1.merged(&st),
                 None => tm.classes.push((name.to_string(), st)),
@@ -494,7 +507,7 @@ pub fn render(
     } else {
         1.0
     };
-    Ok(draw(
+    let mut scene = draw(
         &tm,
         &layout(&tm, width, height, inner),
         width,
@@ -503,7 +516,14 @@ pub fn render(
         pad,
         pal,
         scale,
-    ))
+    );
+    let svg = dom::markup(&tm, width, height, inner, show_values, &fmt, pal);
+    scene.elements = vec![Element::Markup {
+        svg,
+        children: std::mem::take(&mut scene.elements),
+        svg_view_box: None,
+    }];
+    Ok(scene)
 }
 
 /// Draw laid-out cells; `scale` is the screen pixels per unit the texts are
@@ -742,6 +762,8 @@ fn ellipsize(s: &str, font: f64, bold: bool, max: f64) -> String {
     }
     String::new()
 }
+
+mod dom;
 
 #[cfg(test)]
 mod tests {
