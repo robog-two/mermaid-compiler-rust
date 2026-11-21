@@ -18,7 +18,7 @@
 use crate::config::MermaidConfig;
 use crate::error::{Error, Result};
 use crate::geom::{self, Bounds, Point, Rect};
-use crate::output::svg::{esc, esc_text, js_num};
+use crate::output::svg::{esc_text, js_num, xml_attr};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::line_width;
 use crate::theme::Palette;
@@ -1045,8 +1045,8 @@ fn markup(
             js_num(lane.y),
             js_num(st.max_r + SWIMLANE_PADDING),
             js_num(lane.height),
-            esc(c.lane_bg.css()),
-            esc(c.lane_stroke.css()),
+            xml_attr(c.lane_bg.css()),
+            xml_attr(c.lane_stroke.css()),
             js_num(lane.y + 30.0),
             esc_text(&lane.label)
         );
@@ -1079,8 +1079,8 @@ fn markup(
             js_num(y),
             js_num(b.w),
             js_num(b.h),
-            esc(c.stroke[k].css()),
-            esc(c.fill[k].css()),
+            xml_attr(c.stroke[k].css()),
+            xml_attr(c.fill[k].css()),
             js_num(b.x + BOX_PADDING),
             js_num(y + 10.0),
             js_num(b.w - 2.0 * BOX_PADDING),
@@ -1099,7 +1099,7 @@ fn markup(
         };
         o += &format!(
             "<path class=\"em-relation\" fill=\"none\" stroke=\"{}\" stroke-width=\"1\" marker-end=\"url(#em-arrowhead-{})\" d=\"M{} {} L{} {}\"/>",
-            esc(c.relation.css()),
+            xml_attr(c.relation.css()),
             crate::diagram::wardley::ID_MARK,
             js_num(sx),
             js_num(sy),
@@ -1110,7 +1110,7 @@ fn markup(
     o += &format!(
         "<defs><marker id=\"em-arrowhead-{}\" markerWidth=\"10\" markerHeight=\"7\" refX=\"10\" refY=\"3.5\" orient=\"auto\"><polygon points=\"0 0, 10 3.5, 0 7\" fill=\"{}\"/></marker></defs>",
         crate::diagram::wardley::ID_MARK,
-        esc(c.arrowhead.css())
+        xml_attr(c.arrowhead.css())
     );
     o
 }

@@ -9,7 +9,7 @@ use crate::config::MermaidConfig;
 use crate::diagram::wardley::ID_MARK;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, PathCmd, Point, Rect};
-use crate::output::svg::{esc, esc_text, js_num as n};
+use crate::output::svg::{dompurified_text, js_num as n, xml_attr};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Paint, Scene, Text};
 use crate::text::{Baseline as TextBaseline, baseline_shift, line_width};
 use crate::theme::Palette;
@@ -999,16 +999,16 @@ fn rough_g(d: &crate::rough::Drawable, class: Option<&str>) -> String {
         match set.kind {
             SetKind::Path => s.push_str(&format!(
                 "<path d=\"{data}\" stroke=\"{}\" stroke-width=\"{}\" fill=\"none\"/>",
-                esc(&o.stroke),
+                xml_attr(&o.stroke),
                 n(o.stroke_width)
             )),
             SetKind::FillPath => s.push_str(&format!(
                 "<path d=\"{data}\" stroke=\"none\" stroke-width=\"0\" fill=\"{}\"/>",
-                esc(&fill)
+                xml_attr(&fill)
             )),
             SetKind::FillSketch => s.push_str(&format!(
                 "<path d=\"{data}\" stroke=\"{}\" stroke-width=\"{}\" fill=\"none\"/>",
-                esc(&fill),
+                xml_attr(&fill),
                 n(d.fill_weight())
             )),
         }
@@ -1035,7 +1035,7 @@ fn text_markup(l: &Label, class: &str, anchor: &str, transform: Option<(f64, f64
             "<tspan x=\"{}\" dy=\"{}\">{}</tspan>",
             n(l.x),
             n(dy),
-            esc_text(&esc_text(line))
+            dompurified_text(line)
         ));
     }
     s.push_str("</text>");

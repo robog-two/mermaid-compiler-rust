@@ -40,3 +40,13 @@ fn ishikawa_default_look_matches_mmdc() {
 fn ishikawa_hand_drawn_dark_matches_mmdc() {
     pinned("ishikawa_cls_handish_hi02_dark");
 }
+
+#[test]
+fn ishikawa_labels_are_escaped_like_dompurify_text() {
+    let svg = svg_without_font_data("ishikawa-beta\n    Eff & <b>\n    Cat \"q\"\n");
+    assert!(
+        svg.contains(">Eff &amp;amp; &amp;lt;b&amp;gt;</tspan>"),
+        "{svg}"
+    );
+    assert!(svg.contains(">Cat \"q\"</tspan>"), "{svg}");
+}

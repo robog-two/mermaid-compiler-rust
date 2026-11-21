@@ -262,6 +262,10 @@ struct QuadColors {
     fills: [Color; 4],
     texts: [Color; 4],
     point: Color,
+    /// The point colour is a valid CSS colour. When it is not (khroma's `NaN%`
+    /// lightness) the browser drops the `fill` and `stroke` attributes: the fill
+    /// is inherited from the root's `textColor`, the stroke stays at `none`.
+    point_valid: bool,
     point_text: Color,
     x_text: Color,
     y_text: Color,
@@ -338,6 +342,8 @@ fn colors(cfg: &MermaidConfig, pal: &Palette, raw: bool) -> QuadColors {
     // `(x || isDark(q1)) ? ...`, and khroma's lighten/darken without an amount yield
     // `hsl(.., NaN%)`: an invalid fill attribute, so the point inherits the root's
     // `fill: textColor`. A user-supplied value is copied back over it afterwards.
+    let point_valid =
+        raw || var("quadrantPointFill").is_some_and(|c| color::parse(c.css()).is_some());
     let point = var("quadrantPointFill").unwrap_or_else(|| {
         if raw {
             nan_lightness(&q1_css, pal)
@@ -355,6 +361,7 @@ fn colors(cfg: &MermaidConfig, pal: &Palette, raw: bool) -> QuadColors {
             t("quadrant4TextFill", -15.0),
         ],
         point,
+        point_valid,
         point_text: t("quadrantPointTextFill", 0.0),
         x_text: t("quadrantXAxisTextFill", 0.0),
         y_text: t("quadrantYAxisTextFill", 0.0),
@@ -504,15 +511,16 @@ pub fn draw(chart: &QuadrantChart, cfg: &MermaidConfig, pal: &Palette) -> Scene 
             .as_deref()
             .map_or_else(|| qc.point.clone(), Color::new);
         let sw = st.stroke_width.unwrap_or(0.0);
-        let stroke = st
-            .stroke_color
-            .as_deref()
-            .map_or_else(|| qc.point.clone(), Color::new);
+        // An unset stroke colour is the point colour; when that is invalid the
+        // browser ignores the attribute and the circle has no stroke at all.
+        let stroke = match st.stroke_color.as_deref() {
+            Some(c) => Some(Color::new(c)),
+            None => qc.point_valid.then(|| qc.point.clone()),
+        };
         let c = Point::new(quad.x + p.x * quad.w, quad.bottom() - p.y * quad.h);
-        let paint = if sw > 0.0 {
-            Paint::both(&fill, &stroke, sw)
-        } else {
-            Paint::fill(&fill)
+        let paint = match &stroke {
+            Some(stroke) if sw > 0.0 => Paint::both(&fill, stroke, sw),
+            _ => Paint::fill(&fill),
         };
         let txt = text_at(
             c.x,
@@ -1069,6 +1077,42 @@ mod tests {
             rot.iter().all(|(_, a, _)| (a.x - 479.0).abs() < 1e-9),
             "{rot:?}"
         );
+    }
+
+    /// The paints of the `quadrant-point` circles in a scene's PNG/PDF tree.
+    fn point_paints(els: &[Element], out: &mut Vec<Paint>) {
+        for e in els {
+            match e {
+                Element::Group { children, .. } | Element::Markup { children, .. } => {
+                    point_paints(children, out)
+                }
+                Element::Shape { paint, class, .. }
+                    if class.as_deref() == Some("quadrant-point") =>
+                {
+                    out.push(paint.clone())
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn default_point_paints_follow_the_browser() {
+        // The attributes hold `hsl(.., NaN%)`: invalid, so the browser inherits the
+        // root's `fill: textColor` and leaves the stroke at `none`.
+        let src = "quadrantChart\n A: [0.3, 0.6]\n B: [0.7, 0.2] stroke-width: 4px\n C: [0.5, 0.5] stroke-width: 4px, stroke-color: #ff0000\n";
+        let cfg = MermaidConfig::default();
+        let pal = cfg.palette();
+        let scene = render(src, None, &cfg, &pal).unwrap();
+        let mut paints = Vec::new();
+        point_paints(&scene.elements, &mut paints);
+        assert_eq!(paints.len(), 3);
+        for p in &paints {
+            assert_eq!(p.fill.css(), "#333");
+        }
+        assert_eq!(paints[1].stroke_width, 0.0);
+        assert_eq!(paints[2].stroke_width, 4.0);
+        assert_eq!(paints[2].stroke.css().to_ascii_lowercase(), "#ff0000");
     }
 
     #[test]
