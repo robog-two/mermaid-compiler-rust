@@ -979,8 +979,33 @@ pub fn svg_bbox_extent_styled(text: &str, font_size: f64, bold: bool, italic: bo
 pub fn html_line_width(line: &str, font_size: f64, bold: bool) -> f64 {
     styled_runs(line, bold)
         .iter()
-        .map(|r| layout_unit_ceil(run_width(r, font_size)))
+        .map(|r| html_run_width(r, font_size))
         .sum()
+}
+
+/// One run's HTML width: its text rounded up to the layout unit. A pack icon
+/// is an inline `<svg>` box instead, snapped to the nearest layout unit, and
+/// splits the text around it.
+fn html_run_width(r: &StyledRun, font_size: f64) -> f64 {
+    if !r.text.chars().any(crate::icons::is_pack_icon) {
+        return layout_unit_ceil(run_width(r, font_size));
+    }
+    let mut total = 0.0;
+    let mut text = String::new();
+    for c in r.text.chars() {
+        if crate::icons::is_pack_icon(c) {
+            let seg = StyledRun {
+                text: std::mem::take(&mut text),
+                ..r.clone()
+            };
+            total += layout_unit_ceil(run_width(&seg, font_size));
+            total += (crate::icons::advance_em(c) * font_size * 64.0).round() / 64.0;
+        } else {
+            text.push(c);
+        }
+    }
+    let seg = StyledRun { text, ..r.clone() };
+    total + layout_unit_ceil(run_width(&seg, font_size))
 }
 
 /// Width of one styled run ([`styled_runs`]) in its weight and slant.

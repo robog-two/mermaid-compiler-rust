@@ -94,6 +94,53 @@ fn pack_icon_text(name: &str, icon: &crate::iconify::IconData) -> Option<String>
     Some(out)
 }
 
+/// `line` as an HTML label's text: `esc` escapes the plain runs, and each pack
+/// icon is drawn inline as mermaid's `getIconSVG(name, undefined, { class:
+/// "label-icon" })` gives it (`1em` high, as wide as its advance in em).
+pub fn html_with_pack_icons(
+    line: &str,
+    packs: &crate::iconify::IconPacks,
+    esc: impl Fn(&str) -> String,
+) -> String {
+    let mut out = String::new();
+    let mut plain = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if is_tag(c) {
+            continue;
+        }
+        if !is_pack_icon(c) {
+            plain.push(c);
+            continue;
+        }
+        let mut name = String::new();
+        while let Some(&t) = chars.peek() {
+            if !is_tag(t) {
+                break;
+            }
+            name.push(char::from((t as u32 - TAG_BASE) as u8));
+            chars.next();
+        }
+        let Some(icon) = packs.lookup(&name, None) else {
+            continue;
+        };
+        out.push_str(&esc(&std::mem::take(&mut plain)));
+        let w = advance_em(c);
+        let svg = crate::iconify::icon_svg_sized(&icon, w, 1.0, &format!("label-icon-{name}"));
+        let markup = svg
+            .markup
+            .replacen(
+                &format!("width=\"{w}\" height=\"1\""),
+                &format!("width=\"{w}em\" height=\"1em\""),
+                1,
+            )
+            .replacen("\">", "\" class=\"label-icon\">", 1);
+        out.push_str(&markup);
+    }
+    out.push_str(&esc(&plain));
+    out
+}
+
 /// The pack icons in a display line: `(byte offset of the icon character, the
 /// character, its `prefix:name`)`.
 pub fn pack_icons(line: &str) -> Vec<(usize, char, String)> {

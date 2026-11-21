@@ -456,3 +456,28 @@ fn resvg_pixels(png: &[u8]) -> (u32, u32, Vec<u8>) {
     let p = resvg::tiny_skia::Pixmap::decode_png(png).unwrap();
     (p.width(), p.height(), p.data().to_vec())
 }
+
+/// A kanban card label's `fa:fa-name` is the pack's icon, drawn inline in the
+/// HTML label as mermaid's `label-icon` `<svg>` (`1.34em` wide: the `box` icon's
+/// 16x12 aspect, rounded up to 1/100 em), with the text around it kept.
+#[test]
+fn kanban_card_label_draws_pack_icon_inline() {
+    let cfg = MermaidConfig {
+        icon_packs: IconPacks::new(vec![("fa".into(), Ok(TST.into()))]),
+        ..MermaidConfig::default()
+    };
+    let src = "kanban\n  Todo\n    t1[Ship fa:fa-box support]\n";
+    let r = render::render(src, &cfg).expect("renders");
+    let s = output::encode_svg(&r, &EncodeOptions::default());
+    assert!(!s.contains("fa:fa-box"), "reference left in the label");
+    assert!(
+        s.contains(
+            "Ship <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1.34em\" height=\"1em\""
+        ),
+        "{s}"
+    );
+    assert!(
+        s.contains("class=\"label-icon\"") && s.contains("</svg> support</p>"),
+        "{s}"
+    );
+}
