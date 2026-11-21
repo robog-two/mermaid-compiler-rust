@@ -55,6 +55,16 @@ fn glyph(c: char) -> Option<(u16, i16, i16, i16)> {
     }
 }
 
+/// Advance of `c` in em, for the characters the table draws (ASCII).
+pub fn advance_em(c: char) -> Option<f64> {
+    glyph(c).map(|(adv, _, _, _)| f64::from(adv) / 2048.0)
+}
+
+/// Kerning between `a` and `b` in em (0 across characters the table lacks).
+pub fn kerning_em(a: char, b: char) -> f64 {
+    kerning(a, b) / 2048.0
+}
+
 fn kerning(a: char, b: char) -> f64 {
     if !a.is_ascii() || !b.is_ascii() {
         return 0.0;

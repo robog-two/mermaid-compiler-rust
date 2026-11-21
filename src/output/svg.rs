@@ -598,7 +598,7 @@ fn family_attr(t: &Text) -> String {
 /// the scene's (set around the whole drawing by [`to_svg`]).
 fn in_face<R>(t: &Text, f: impl FnOnce() -> R) -> R {
     match &t.family {
-        Some(fam) => crate::text::with_family(fam, f),
+        Some(fam) => crate::text::with_face(crate::text::Face::of_style_family(fam), f),
         None => f(),
     }
 }
