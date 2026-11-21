@@ -166,6 +166,9 @@ pub struct StyleOverrides {
     pub bold: Option<bool>,
     /// `font-style: italic` / `oblique`.
     pub italic: Option<bool>,
+    /// `font-family`, as written (its list is measured by
+    /// [`crate::text::Face::of_style_family`]).
+    pub family: Option<String>,
 }
 
 impl StyleOverrides {
@@ -194,6 +197,7 @@ impl StyleOverrides {
                         Some(v == "bold" || v.parse::<u32>().map(|w| w >= 600).unwrap_or(false))
                 }
                 "font-style" => st.italic = Some(matches!(v, "italic" | "oblique")),
+                "font-family" if !v.is_empty() => st.family = Some(v.to_string()),
                 _ => {}
             }
         }
@@ -210,6 +214,7 @@ impl StyleOverrides {
             color: other.color.clone().or_else(|| self.color.clone()),
             bold: other.bold.or(self.bold),
             italic: other.italic.or(self.italic),
+            family: other.family.clone().or_else(|| self.family.clone()),
         }
     }
 }
@@ -1167,8 +1172,57 @@ fn svg_bbox_wide(mut b: TextBlock) -> TextBlock {
     b
 }
 
+/// [`measure_node_in_face`], measured in the node's own `font-family` (a `style`
+/// or `classDef` one) where it has one: mermaid's label span carries it, so its
+/// box is the box of that face's text.
 #[allow(clippy::too_many_arguments)]
 fn measure_node(
+    node: &Node,
+    kind: DiagramKind,
+    pad: f64,
+    cell_pad: f64,
+    font: f64,
+    horizontal: bool,
+    look: ConfigLook,
+    min_label_width: f64,
+    wrap_width: f64,
+    svg: bool,
+    table_scale: f64,
+) -> Measured {
+    match node.style.family.as_deref() {
+        Some(fam) => crate::text::with_face(crate::text::Face::of_style_family(fam), || {
+            measure_node_in_face(
+                node,
+                kind,
+                pad,
+                cell_pad,
+                font,
+                horizontal,
+                look,
+                min_label_width,
+                wrap_width,
+                svg,
+                table_scale,
+            )
+        }),
+        None => measure_node_in_face(
+            node,
+            kind,
+            pad,
+            cell_pad,
+            font,
+            horizontal,
+            look,
+            min_label_width,
+            wrap_width,
+            svg,
+            table_scale,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn measure_node_in_face(
     node: &Node,
     kind: DiagramKind,
     pad: f64,
@@ -6593,6 +6647,10 @@ fn node_elements(
             t = t.anchored(Anchor::Start, left);
         }
         t.bold = m.block.bold;
+        // The label's own `font-family` (mermaid's span style) reaches its text.
+        if let Some(fam) = &n.style.family {
+            t.family = Some(fam.clone().into());
+        }
         els.push(shifted_lines(t, &m.block.shifts, "nodeLabel"));
     }
     if m.overhang.is_some() {

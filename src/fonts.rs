@@ -71,7 +71,7 @@ pub const POSTSCRIPT_NAMES: [&str; FACE_COUNT] = [
 pub fn web_face_index(face: crate::text::Face, bold: bool, italic: bool) -> Option<usize> {
     let style = usize::from(bold) + 2 * usize::from(italic);
     match face {
-        crate::text::Face::Arial => None,
+        crate::text::Face::Arial | crate::text::Face::Serif => None,
         crate::text::Face::Recursive => Some(4 + style),
         crate::text::Face::OpenSans => Some(8 + style),
     }

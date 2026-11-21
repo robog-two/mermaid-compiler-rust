@@ -249,6 +249,11 @@ pub fn char_width_em_styled(c: char, bold: bool, italic: bool) -> f64 {
     if let Some(w) = face().data(italic).and_then(|d| d.advance_em(c)) {
         return w;
     }
+    if face() == Face::Serif {
+        if let Some(w) = serif::advance_em(c) {
+            return w;
+        }
+    }
     arial_char_width_em(c, bold)
 }
 
@@ -489,6 +494,9 @@ fn kerning_em(a: char, b: char, bold: bool) -> f64 {
             _ => return 0.0,
         }
     }
+    if face() == Face::Serif && a.is_ascii() && b.is_ascii() {
+        return serif::kerning_em(a, b);
+    }
     if !a.is_ascii() || !b.is_ascii() {
         return 0.0;
     }
@@ -542,7 +550,7 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
 /// left exact, as its tables were fitted.
 fn glyph_px(em: f64, font_size: f64) -> f64 {
     let v = em * font_size;
-    if face() == Face::Arial {
+    if matches!(face(), Face::Arial | Face::Serif) {
         v
     } else {
         (v * 65536.0).round() / 65536.0

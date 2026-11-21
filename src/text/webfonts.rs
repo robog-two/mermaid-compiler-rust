@@ -130,9 +130,41 @@ pub enum Face {
     Recursive,
     /// Open Sans 400 (and its italic).
     OpenSans,
+    /// The browser's default serif font (Liberation Serif, metric-compatible
+    /// with Times New Roman): what a style's `font-family` no installed face
+    /// matches falls back to. Its advances and kerning are in [`super::serif`];
+    /// bold and italic keep the regular advances, and characters outside ASCII
+    /// count by Arial's.
+    Serif,
 }
 
 impl Face {
+    /// The face a node's or a text's own `font-family` (a `style` or `classDef`
+    /// declaration) draws in. Names a web font mmdc loads, and the families the
+    /// browser resolves to Arial (Liberation Sans) in mmdc's environment, pick
+    /// their face; `serif` and the other names of the default serif font pick
+    /// [`Face::Serif`]. A list no name of which is known falls back to the
+    /// browser's default font, which is serif. `monospace` has no metrics
+    /// bundled and measures as Arial.
+    pub fn of_style_family(css: &str) -> Face {
+        for fam in css.split(',') {
+            let name = fam.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+            match name.to_ascii_lowercase().as_str() {
+                "recursive variable" => return Face::Recursive,
+                "open sans" => return Face::OpenSans,
+                "serif" | "times new roman" | "times" | "liberation serif" => {
+                    return Face::Serif;
+                }
+                "arial" | "arialmt" | "helvetica" | "liberation sans" | "sans-serif"
+                | "trebuchet ms" | "verdana" | "monospace" | "courier" | "courier new" => {
+                    return Face::Arial;
+                }
+                _ => continue,
+            }
+        }
+        Face::Serif
+    }
+
     /// The face a CSS `font-family` list draws Latin text in: its first family
     /// that names a web font mmdc loads, else Arial's metrics (every other list
     /// mermaid uses ends in, or resolves to, Arial in mmdc's environment).
@@ -153,7 +185,7 @@ impl Face {
     /// live in [`super`]).
     pub(crate) fn data(self, italic: bool) -> Option<&'static FaceData> {
         match self {
-            Face::Arial => None,
+            Face::Arial | Face::Serif => None,
             Face::Recursive => Some(&RECURSIVE),
             Face::OpenSans if italic => Some(&OPEN_SANS_ITALIC),
             Face::OpenSans => Some(&OPEN_SANS),
@@ -164,6 +196,7 @@ impl Face {
     pub fn family_name(self) -> &'static str {
         match self {
             Face::Arial => "Arial",
+            Face::Serif => "Times New Roman",
             Face::Recursive => "Recursive Variable",
             Face::OpenSans => "Open Sans",
         }
