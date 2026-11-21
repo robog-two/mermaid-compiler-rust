@@ -137,6 +137,44 @@ pub fn esc_text(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Text as DOMPurify hands it back (`innerHTML` serialisation): `&`, `<`, `>`
+/// and the no-break space are written as entities. Mermaid then sets that
+/// string as a text node, so the document serialiser escapes it a second time:
+/// see [`dompurified_text`].
+pub fn html_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\u{a0}' => out.push_str("&nbsp;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A text node holding DOMPurify output, as the document serialiser writes it.
+pub fn dompurified_text(s: &str) -> String {
+    esc_text(&html_text(s))
+}
+
+/// An attribute value as `XMLSerializer` writes it: `&`, `<`, `>` and `"`.
+pub fn xml_attr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

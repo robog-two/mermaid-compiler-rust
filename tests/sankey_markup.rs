@@ -41,3 +41,14 @@ fn sankey_with_gradient_links_matches_mmdc() {
 fn sankey_in_neo_look_matches_mmdc() {
     pinned("neo_d03");
 }
+
+#[test]
+fn sankey_labels_are_escaped_like_dompurify_text() {
+    // DOMPurify's output escapes `&`, `<`, `>` and nbsp; `.text()` then does it again.
+    let svg = svg_without_font_data("sankey\n\n\"A & <i>b</i>\u{a0}z\",C,5\n");
+    assert!(
+        svg.contains(">A &amp;amp; &amp;lt;i&amp;gt;b&amp;lt;/i&amp;gt;&amp;nbsp;z</text>"),
+        "{svg}"
+    );
+    assert!(!svg.contains('\u{a0}'));
+}

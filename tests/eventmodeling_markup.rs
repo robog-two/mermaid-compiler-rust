@@ -42,3 +42,13 @@ fn eventmodeling_without_data_matches_mmdc() {
 fn eventmodeling_with_data_blocks_matches_mmdc() {
     pinned("d03");
 }
+
+#[test]
+fn eventmodeling_data_text_is_escaped() {
+    let svg = svg_without_font_data("eventmodeling\n\ntf 01 ui CartUI { a & <b> \"q\" }\n");
+    // Spaces in the data are no-break spaces.
+    assert!(
+        svg.contains(">a\u{a0}&amp;\u{a0}&lt;b&gt;\u{a0}\"q\"</code>"),
+        "{svg}"
+    );
+}

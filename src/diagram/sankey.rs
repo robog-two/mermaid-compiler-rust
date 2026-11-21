@@ -7,7 +7,7 @@ use crate::config::MermaidConfig;
 use crate::diagram::xychart::keyword;
 use crate::error::{Error, Result};
 use crate::geom::{Bounds, PathCmd, Point, Rect};
-use crate::output::svg::{esc, esc_text, js_num};
+use crate::output::svg::{dompurified_text, js_num, xml_attr};
 use crate::scene::{Anchor, Color, DiagramKind, Element, Geometry, Gradient, Paint, Scene, Text};
 use crate::theme::Palette;
 use std::fmt::Write as _;
@@ -707,7 +707,7 @@ pub fn render(
             js_num(nd.y0),
             js_num(nd.y1 - nd.y0),
             js_num(nd.x1 - nd.x0),
-            esc(&raw_colors[i])
+            xml_attr(&raw_colors[i])
         );
         node_els.push(Element::classed_shape(
             Geometry::Rect { rect: r, rx: 0.0 },
@@ -772,9 +772,8 @@ pub fn render(
                 family: None,
             };
             bounds.add_rect(label_box(&t));
-            // `.text()` of the DOMPurify-sanitised id: `&`, `<` and `>` are escaped
-            // twice (once by the sanitiser's HTML output, once by serialisation).
-            let once = esc_text(&raw);
+            // `.text()` of the DOMPurify-sanitised id: escaped twice (once by the
+            // sanitiser's HTML output, once by serialisation).
             let class_attr = if outlined {
                 format!(" class=\"{class}\"")
             } else {
@@ -791,7 +790,7 @@ pub fn render(
                 } else {
                     "end"
                 },
-                esc_text(&once)
+                dompurified_text(&raw)
             );
             label_els.push(if *class == "sankey-label-bg" {
                 // `.sankey-label-bg` in the CSS below; PDF output strokes it itself.
@@ -839,8 +838,8 @@ pub fn render(
                     "<linearGradient id=\"linearGradient-{uid}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" x2=\"{}\"><stop offset=\"0%\" stop-color=\"{}\"/><stop offset=\"100%\" stop-color=\"{}\"/></linearGradient>",
                     js_num(x0),
                     js_num(x1),
-                    esc(&raw_colors[l.source]),
-                    esc(&raw_colors[l.target])
+                    xml_attr(&raw_colors[l.source]),
+                    xml_attr(&raw_colors[l.target])
                 );
                 format!("url(#linearGradient-{uid})")
             }
@@ -859,7 +858,7 @@ pub fn render(
             js_num(l.y1),
             js_num(x1),
             js_num(l.y1),
-            esc(&stroke),
+            xml_attr(&stroke),
             js_num(w)
         );
         let paint = match link_color.as_str() {
