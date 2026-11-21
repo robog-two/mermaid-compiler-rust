@@ -8249,6 +8249,52 @@ mod tests {
         assert_eq!(edge_dash(&scene, "L-A-B-0"), None);
     }
 
+    /// `(shapes, shadowed)` among the shapes of the group `id`, or `None` if
+    /// there is no such group.
+    fn shadow_counts(els: &[Element], id: &str) -> Option<(usize, usize)> {
+        fn count(els: &[Element]) -> (usize, usize) {
+            els.iter().fold((0, 0), |(n, s), el| match el {
+                Element::Group { children, .. } => {
+                    let (a, b) = count(children);
+                    (n + a, s + b)
+                }
+                Element::Shape { paint, .. } => (n + 1, s + usize::from(paint.shadow.is_some())),
+                _ => (n, s),
+            })
+        }
+        els.iter().find_map(|el| match el {
+            Element::Group {
+                id: Some(i),
+                children,
+                ..
+            } if i == id => Some(count(children)),
+            Element::Group { children, .. } => shadow_counts(children, id),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn neo_icon_shapes_cast_no_drop_shadow_but_plain_rects_do() {
+        // mermaid 12.3.0 draws no neo shadow under an icon shape: its outline is
+        // in an `icon-shape` group (the `.node rect` / `.node path` rules miss it),
+        // and the icon glyph never gets the `.icon` class its rule needs.
+        let src = "---\nconfig:\n  look: neo\n---\nflowchart LR\n  \
+                   A@{ icon: \"fa:user\", form: \"square\", label: \"x\" }\n  \
+                   C@{ icon: \"fa:user\", form: \"circle\", label: \"y\" }\n  \
+                   D@{ icon: \"fa:user\", form: \"rounded\", label: \"z\" }\n  \
+                   R[plain]\n";
+        let scene = crate::render::render(src, &crate::config::MermaidConfig::default())
+            .expect("renders")
+            .scene;
+        for id in ["flowchart-A-0", "flowchart-C-1", "flowchart-D-2"] {
+            let (n, shadowed) = shadow_counts(&scene.elements, id).expect(id);
+            assert!(n > 0, "{id}");
+            assert_eq!(shadowed, 0, "{id}");
+        }
+        let (_, shadowed) = shadow_counts(&scene.elements, "flowchart-R-3").expect("R");
+        assert_eq!(shadowed, 1);
+    }
+
     #[test]
     fn neo_dash_patterns_follow_generate_dash_array() {
         assert_eq!(neo_dash(100.0, (0.0, 0.0), false), None);
