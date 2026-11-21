@@ -754,6 +754,10 @@ fn write_text_with_icons(out: &mut String, t: &Text, class: &Option<String>) {
                         esc(t.fill.css()),
                     );
                 }
+                // mermaid's own element for a Pro-style icon: no glyph, no width.
+                Piece::Raw { class, .. } => {
+                    let _ = write!(out, "<i class=\"{}\"></i>", esc(&class));
+                }
             }
         }
     }

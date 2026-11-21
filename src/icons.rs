@@ -34,6 +34,10 @@ const BASE: u32 = 0xF0000;
 const NOTDEF: u32 = 0xFF000;
 /// An empty box (a class Font Awesome does not define).
 const EMPTY: u32 = 0xFF010;
+/// mermaid's `<i class="fal fa-user">` for a Pro style (`fal`, `fak`), which no
+/// CSS styles: an empty, zero-width element. It is followed by its class as tag
+/// characters ([`Piece::Raw`]); the SVG output writes the element itself.
+const RAW: u32 = 0xFF020;
 
 /// First character of the registered-pack icon range (Supplementary Private Use
 /// Area-B): `PACK_BASE + w` is an icon `w` hundredths of an em wide.
@@ -45,7 +49,7 @@ const TAG_BASE: u32 = 0xE0000;
 
 /// Whether `c` stands for an icon (Font Awesome's or a registered pack's).
 pub fn is_icon(c: char) -> bool {
-    (BASE..=EMPTY).contains(&(c as u32)) || is_pack_icon(c)
+    (BASE..=RAW).contains(&(c as u32)) || is_pack_icon(c)
 }
 
 /// Whether `c` stands for an icon from a registered pack.
@@ -62,6 +66,8 @@ pub fn is_tag(c: char) -> bool {
 pub fn advance_em(c: char) -> f64 {
     if is_pack_icon(c) {
         f64::from(c as u32 - PACK_BASE) / 100.0
+    } else if c as u32 == RAW {
+        0.0
     } else {
         ADVANCE_EM
     }
@@ -124,24 +130,48 @@ pub fn has_icons(s: &str) -> bool {
 /// piece can be drawn alone) or one icon, with its offset from the line start.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Piece {
-    Text { x: f64, text: String },
-    Icon { x: f64, icon: char },
+    Text {
+        x: f64,
+        text: String,
+    },
+    Icon {
+        x: f64,
+        icon: char,
+    },
+    /// mermaid's `<i class="...">` with no glyph (a Pro style): its class.
+    Raw {
+        x: f64,
+        class: String,
+    },
 }
 
 /// Split a display line into text runs and icons, each at its offset (in px) from
 /// the start of the line as [`crate::text::line_width`] measures it.
 pub fn line_pieces(line: &str, font_size: f64, bold: bool) -> Vec<Piece> {
     let mut texts: Vec<(usize, usize)> = Vec::new();
-    let mut out = Vec::new();
+    // Each icon with its class: a raw element's class is its tag characters.
+    let mut out: Vec<(usize, Option<(char, String)>)> = Vec::new();
     let mut start = 0;
-    for (i, c) in line.char_indices() {
-        if is_icon(c) {
-            if i > start {
-                texts.push((start, i));
-            }
-            out.push((i, Some(c)));
-            start = i + c.len_utf8();
+    let mut i = 0;
+    while let Some(c) = line[i..].chars().next() {
+        if !is_icon(c) {
+            i += c.len_utf8();
+            continue;
         }
+        if i > start {
+            texts.push((start, i));
+        }
+        let mut end = i + c.len_utf8();
+        let mut class = String::new();
+        if c as u32 == RAW {
+            for t in line[end..].chars().take_while(|&t| is_tag(t)) {
+                class.push(char::from((t as u32 - TAG_BASE) as u8));
+                end += t.len_utf8();
+            }
+        }
+        out.push((i, Some((c, class))));
+        start = end;
+        i = end;
     }
     if start < line.len() {
         texts.push((start, line.len()));
@@ -155,7 +185,8 @@ pub fn line_pieces(line: &str, font_size: f64, bold: bool) -> Vec<Piece> {
         .map(|(i, icon)| {
             let x = crate::text::line_width(&line[..i], font_size, bold);
             match icon {
-                Some(icon) => Piece::Icon { x, icon },
+                Some((icon, class)) if icon as u32 == RAW => Piece::Raw { x, class },
+                Some((icon, _)) => Piece::Icon { x, icon },
                 None => Piece::Text {
                     x,
                     text: balanced.next().unwrap_or_default(),
@@ -223,6 +254,12 @@ pub fn replace_references_with(label: &str, packs: &crate::iconify::IconPacks) -
                 .and_then(|icon| pack_icon_text(&registered, &icon));
             if let Some(p) = pack {
                 out.push_str(&p);
+            } else if matches!(style, Some(b'l' | b'k')) {
+                // `<i class="fal fa-name">`: the class travels as tag characters.
+                out.push(char::from_u32(RAW).unwrap_or('\u{FFFD}'));
+                for b in format!("{} fa-{name}", &at[..prefix_len]).bytes() {
+                    out.push(char::from_u32(TAG_BASE + u32::from(b)).unwrap_or('\u{FFFD}'));
+                }
             } else if let Some(c) = icon_char(style, name) {
                 out.push(c);
             }
@@ -295,6 +332,10 @@ pub fn is_brand_icon(c: char) -> Option<bool> {
 fn glyph(icon: char) -> Option<(f64, Vec<PathCmd>)> {
     if is_pack_icon(icon) {
         // Drawn as its own `<svg>` ([`place_pack_icons`]).
+        return None;
+    }
+    if icon as u32 == RAW {
+        // An element with no glyph.
         return None;
     }
     let code = icon as u32;
@@ -644,10 +685,13 @@ mod tests {
         assert_eq!(replace_references("far:fa-car"), "\u{FF001}");
         assert_eq!(replace_references("fa:fa-github"), "\u{FF000}");
         assert!(glyph(replace_references("fab:fa-github").chars().next().unwrap()).is_some());
-        // Unknown classes leave an empty box; Pro styles nothing at all.
+        // Unknown classes leave an empty box; Pro styles an empty `<i>` element
+        // (`RAW`, then its class as tag characters).
         assert_eq!(replace_references("fa:fa-nonexistent x"), "\u{FF010} x");
-        assert_eq!(replace_references("fal:fa-car light"), " light");
-        assert_eq!(replace_references("fak:fa-car"), "");
+        assert_eq!(
+            replace_references("fal:fa-car light"),
+            "\u{FF020}\u{E0066}\u{E0061}\u{E006C}\u{E0020}\u{E0066}\u{E0061}\u{E002D}\u{E0063}\u{E0061}\u{E0072} light"
+        );
     }
 
     #[test]
@@ -707,6 +751,37 @@ mod tests {
         assert!(matches!(&p[2], Piece::Text { text, .. } if text == "\u{E000}b\u{E001}"));
         if let Piece::Icon { x, .. } = p[1] {
             assert!((x - crate::text::line_width("\u{E000}a", 10.0, false)).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn pro_styles_are_raw_elements_like_mermaid() {
+        // mermaid's regex is `(fa[bklrs]?):fa-([\w-]+)`: `fal` and `fak` match and
+        // become `<i class="fak fa-foo">`, which no CSS styles (no width, no glyph).
+        let label = replace_references("a fak:fa-foo y");
+        let p = line_pieces(&label, 10.0, false);
+        assert_eq!(p.len(), 3);
+        assert!(matches!(&p[0], Piece::Text { text, .. } if text == "a "));
+        assert!(matches!(&p[1], Piece::Raw { class, .. } if class == "fak fa-foo"));
+        assert!(matches!(&p[2], Piece::Text { text, .. } if text == " y"));
+        // The element takes no room: the text after it starts where it would.
+        assert!(
+            (crate::text::line_width("a ", 10.0, false)
+                - crate::text::line_width(&label[..label.find('\u{FF020}').unwrap()], 10.0, false))
+            .abs()
+                < 1e-9
+        );
+        // `fal:fa-user` is a reference too; `fal-user` (no `fa-`) is plain text.
+        let raw = replace_references("fal:fa-user");
+        assert!(
+            matches!(&line_pieces(&raw, 10.0, false)[0], Piece::Raw { class, .. } if class == "fal fa-user")
+        );
+        assert_eq!(replace_references("fa:fal-user x"), "fa:fal-user x");
+        // `fa`, `fas`, `fab` and `far` still draw their icons.
+        for prefix in ["fa", "fas", "fab", "far"] {
+            let s = replace_references(&format!("{prefix}:fa-car"));
+            assert!(s.chars().any(is_icon), "{prefix}");
+            assert!(!s.chars().any(|c| c == '\u{FF020}'), "{prefix}");
         }
     }
 }
