@@ -40,3 +40,14 @@ fn cynefin_items_without_transitions_matches_mmdc() {
 fn cynefin_with_transitions_and_arrow_marker_matches_mmdc() {
     pinned("cls_cynefin_ex_cynefin");
 }
+
+#[test]
+fn cynefin_accessibility_title_and_description() {
+    let svg = svg_without_font_data(
+        "cynefin-beta\n  accTitle: My <T>\n  accDescr: some d\n  complex\n    \"a\"\n",
+    );
+    assert!(
+        svg.contains(" aria-labelledby=\"chart-title-my-svg\" aria-describedby=\"chart-desc-my-svg\"><title id=\"chart-title-my-svg\">My &lt;T&gt;</title><desc id=\"chart-desc-my-svg\">some d</desc><style>"),
+        "{svg}"
+    );
+}
