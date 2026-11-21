@@ -11,8 +11,14 @@
 //!
 //! ```
 //! use mmdc::{config::MermaidConfig, output, render};
-//! let r = render::render("graph TD\nA-->B", &MermaidConfig::default()).unwrap();
-//! let svg = output::encode_svg(&r, &output::EncodeOptions::default());
+//! // The SVG exactly as the `mmdc` binary writes it.
+//! let svg = render::render_svg(
+//!     "graph TD\nA-->B",
+//!     &MermaidConfig::default(),
+//!     &render::RenderEnv::default(),
+//!     &output::EncodeOptions::default(),
+//! )
+//! .unwrap();
 //! assert!(svg.starts_with("<svg id=\"my-svg\""));
 //! ```
 

@@ -110,6 +110,22 @@ pub fn render(source: &str, base: &MermaidConfig) -> Result<Rendered> {
     render_with_env(source, base, &RenderEnv::default())
 }
 
+/// The SVG file `mmdc` writes for one definition: [`render_with_env`] and
+/// [`crate::output::encode_svg`] run together inside
+/// [`crate::output::svg::with_js_numbers`], so every number is printed as
+/// JavaScript (and so mermaid) prints it. Calling the two separately gives the
+/// compact three-decimal form the PNG and PDF paths are built against.
+pub fn render_svg(
+    source: &str,
+    base: &MermaidConfig,
+    env: &RenderEnv,
+    enc: &crate::output::EncodeOptions,
+) -> Result<String> {
+    crate::output::svg::with_js_numbers(|| {
+        render_with_env(source, base, env).map(|r| crate::output::encode_svg(&r, enc))
+    })
+}
+
 /// [`render`] with the inputs mermaid takes from its environment.
 pub fn render_with_env(source: &str, base: &MermaidConfig, env: &RenderEnv) -> Result<Rendered> {
     render_source(source, base, env).map_err(|e| match e {
