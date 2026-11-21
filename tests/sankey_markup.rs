@@ -47,7 +47,7 @@ fn sankey_labels_are_escaped_like_dompurify_text() {
     // DOMPurify's output escapes `&`, `<`, `>` and nbsp; `.text()` then does it again.
     let svg = svg_without_font_data("sankey\n\n\"A & <i>b</i>\u{a0}z\",C,5\n");
     assert!(
-        svg.contains(">A &amp;amp; &amp;lt;i&amp;gt;b&amp;lt;/i&amp;gt;&amp;nbsp;z</text>"),
+        svg.contains(">A &amp;amp; &amp;lt;i&amp;gt;b&amp;lt;/i&amp;gt;&amp;nbsp;z\n5</text>"),
         "{svg}"
     );
     assert!(!svg.contains('\u{a0}'));

@@ -63,8 +63,10 @@ fn icons_take_their_fixed_width() {
             "{icon}"
         );
     }
-    // Pro styles have no CSS: nothing at all.
-    assert_eq!(replace_references("fal:fa-car x"), " x");
+    // Pro styles have no CSS: mermaid's empty `<i>` element, with no width.
+    let pro = replace_references("fal:fa-car x");
+    assert_ne!(pro, " x", "kept as an element, like mermaid");
+    assert!((line_width(&pro, 14.0, false) - line_width(" x", 14.0, false)).abs() < 1e-9);
 }
 
 #[cfg(feature = "icons")]
