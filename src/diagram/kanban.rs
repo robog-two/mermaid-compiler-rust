@@ -93,7 +93,7 @@ fn parse_node(text: &str) -> Option<(String, String)> {
     let body = body[..close].trim_end_matches(closes);
     let label = normalize_label(body);
     let id = if id.is_empty() { label.clone() } else { id };
-    Some((id, crate::icons::replace_references(&label)))
+    Some((id, label))
 }
 
 fn unquote(s: &str) -> String {
@@ -340,7 +340,14 @@ struct HtmlLabel {
 
 /// `text` laid out in a div of `max-width` `width`. `section`: a cluster label
 /// (`display` first, `text-align` last) rather than a node label.
-fn html_label(text: &str, width: f64, font: f64, span_class: &str, section: bool) -> HtmlLabel {
+fn html_label(
+    text: &str,
+    packs: &crate::iconify::IconPacks,
+    width: f64,
+    font: f64,
+    span_class: &str,
+    section: bool,
+) -> HtmlLabel {
     let lh = font * 1.5;
     let raw = crate::text::label_lines(&normalize_label(text));
     let empty = raw.iter().all(|l| l.trim().is_empty());
@@ -371,7 +378,7 @@ fn html_label(text: &str, width: f64, font: f64, span_class: &str, section: bool
     } else {
         let p = raw
             .iter()
-            .map(|l| esc_text(l))
+            .map(|l| crate::icons::html_with_pack_icons(l, packs, esc_text))
             .collect::<Vec<_>>()
             .join("<br/>");
         format!("<p>{p}</p>")
@@ -436,10 +443,11 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
     let item_w = col_w - 1.5 * padding;
     let text_w = item_w - 10.0;
 
+    let packs = &cfg.icon_packs;
     let col_labels: Vec<HtmlLabel> = k
         .columns
         .iter()
-        .map(|c| html_label(&c.label, col_w, font, "nodeLabel", true))
+        .map(|c| html_label(&c.label, packs, col_w, font, "nodeLabel", true))
         .collect();
     let col_titles: Vec<Vec<String>> = col_labels.iter().map(|l| l.lines.clone()).collect();
     let max_label_h = col_labels.iter().map(|l| l.h).fold(25.0, f64::max);
@@ -470,14 +478,28 @@ pub fn draw(k: &Kanban, cfg: &MermaidConfig, pal: &Palette) -> Scene {
             let assigned_txt = item.assigned.as_deref().filter(|t| !t.is_empty());
             let title_l = html_label(
                 &item.label,
+                packs,
                 text_w,
                 font,
                 "nodeLabel markdown-node-label",
                 false,
             );
-            let ticket_l = html_label(ticket_txt.unwrap_or(""), text_w, font, "nodeLabel", false);
-            let assigned_l =
-                html_label(assigned_txt.unwrap_or(""), text_w, font, "nodeLabel", false);
+            let ticket_l = html_label(
+                ticket_txt.unwrap_or(""),
+                packs,
+                text_w,
+                font,
+                "nodeLabel",
+                false,
+            );
+            let assigned_l = html_label(
+                assigned_txt.unwrap_or(""),
+                packs,
+                text_w,
+                font,
+                "nodeLabel",
+                false,
+            );
             let bh = title_l.h;
             let adj = ticket_l.h.max(assigned_l.h) / 2.0;
             let h = bh + 2.0 * padding + adj;
@@ -769,7 +791,15 @@ pub fn render(
     cfg: &MermaidConfig,
     pal: &Palette,
 ) -> Result<Scene> {
-    let k = parse(body, title)?;
+    let mut k = parse(body, title)?;
+    // Each label's `fa:fa-name` references, a registered pack's icon first
+    // (`replaceIconSubstring`, as createText applies it to HTML labels).
+    for c in &mut k.columns {
+        c.label = crate::icons::replace_references_with(&c.label, &cfg.icon_packs);
+        for it in &mut c.items {
+            it.label = crate::icons::replace_references_with(&it.label, &cfg.icon_packs);
+        }
+    }
     Ok(draw(&k, cfg, pal))
 }
 
