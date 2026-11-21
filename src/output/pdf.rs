@@ -422,6 +422,8 @@ impl Ctx {
                         self.out.push_str("f\nQ\n");
                     }
                 }
+                // A Pro-style `<i>` has no glyph in the browser either: nothing drawn.
+                crate::icons::Piece::Raw { .. } => {}
             }
         }
     }
