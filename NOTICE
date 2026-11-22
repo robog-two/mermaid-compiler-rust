@@ -80,6 +80,45 @@ Open Sans 3.003
   here, no bold face is loaded), with the same advances.
 
 
+DejaVu Sans Mono 2.37
+---------------------
+
+  assets/fonts/dejavu-sans-mono-regular.ttf
+  assets/fonts/dejavu-sans-mono-bold.ttf
+  assets/fonts/dejavu-sans-mono-italic.ttf
+  assets/fonts/dejavu-sans-mono-bolditalic.ttf
+  (compiled in with the `fonts` cargo feature)
+
+  Copyright (c) 2003 by Bitstream, Inc.; DejaVu changes are in the public domain
+  Source: the Debian package fonts-dejavu-core 2.37 (DejaVuSansMono*.ttf)
+  License: Bitstream Vera license: LICENSES/DejaVu-Bitstream-Vera.txt
+
+  Changes (tools/gen_mono_fonts.py): subset to Basic Latin, Latin-1, Latin
+  Extended-A, general punctuation, arrows, box drawing and a few symbols;
+  hinting and layout tables dropped. The family keeps its name "DejaVu Sans
+  Mono" (the license reserves only "Bitstream" and "Vera").
+
+
+Liberation Mono 2.1.5
+---------------------
+
+  assets/fonts/liberation-mono-regular.ttf
+  assets/fonts/liberation-mono-bold.ttf
+  assets/fonts/liberation-mono-italic.ttf
+  assets/fonts/liberation-mono-bolditalic.ttf
+  (compiled in with the `fonts` cargo feature)
+
+  Digitized data copyright (c) 2010 Google Corporation with Reserved Font
+  Arimo, Tinos and Cousine. Copyright (c) 2012 Red Hat, Inc. with Reserved Font
+  Name Liberation.
+  Source: the Debian package fonts-liberation2 2.1.5 (LiberationMono-*.ttf)
+  License: SIL Open Font License 1.1: LICENSES/Liberation-OFL-1.1.txt
+
+  Changes (tools/gen_mono_fonts.py): subset as DejaVu Sans Mono above, hinting
+  and layout tables dropped, and renamed "Courier Metric Mono" (the license
+  does not let a modified version keep the Reserved Font Name).
+
+
 TeX Gyre Heros 2.004
 --------------------
 

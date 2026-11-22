@@ -329,6 +329,29 @@ mod tests {
         }
     }
 
+    /// The monospace faces carry the advance every character is measured by.
+    #[test]
+    fn mono_faces_carry_the_measured_advance() {
+        use crate::text::Face as F;
+        for face in [F::Mono, F::Courier] {
+            for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                let f = super::face(web_face_index(face, bold, italic).unwrap()).unwrap();
+                assert_eq!(f.units_per_em, 2048);
+                // (DejaVu's oblique files lack the check marks.)
+                for c in ['W', 'i', ' ', 'é', '→', '✓'] {
+                    if c == '✓' && face == F::Mono && italic {
+                        continue;
+                    }
+                    let g = f
+                        .glyph(c)
+                        .unwrap_or_else(|| panic!("{c} in {face:?} {bold} {italic}"));
+                    let adv = f64::from(f.advance(g)) / 2048.0;
+                    assert_eq!(Some(adv), face.mono_advance_em(), "{c} in {face:?}");
+                }
+            }
+        }
+    }
+
     /// The ligature glyphs [`ligature_glyph`] names have the advances the
     /// text tables measure the ligatures by.
     #[test]

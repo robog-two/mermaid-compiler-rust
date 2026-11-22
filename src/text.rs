@@ -556,7 +556,10 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
 /// left exact, as its tables were fitted.
 fn glyph_px(em: f64, font_size: f64) -> f64 {
     let v = em * font_size;
-    if matches!(face(), Face::Arial | Face::Serif | Face::Mono | Face::Courier) {
+    if matches!(
+        face(),
+        Face::Arial | Face::Serif | Face::Mono | Face::Courier
+    ) {
         v
     } else {
         (v * 65536.0).round() / 65536.0
