@@ -11,6 +11,12 @@
 //!   from the fontsource packages mmdc links ([`WEB_FILES`]). The rasteriser
 //!   finds them by family name before any system font; the PDF writer embeds
 //!   them for text in those families.
+//! * DejaVu Sans Mono (the Bitstream Vera licence) and Liberation Mono (SIL
+//!   Open Font License 1.1), subset to Latin, punctuation, arrows and box
+//!   drawing by `tools/gen_mono_fonts.py`: what Chromium draws `monospace` and
+//!   `DejaVu Sans Mono`, and `Courier New`, `courier` and `Liberation Mono`
+//!   in. The Liberation subset is named "Courier Metric Mono" (its Reserved
+//!   Font Name may not be kept by a modified version).
 //! * TeX Gyre Heros (GUST Font License; see `LICENSES/`), URW's Nimbus Sans (a
 //!   Helvetica design) extended by GUST, whose advance widths are Helvetica's,
 //!   close to Arial's: the PNG fallback when no font matches a label's
@@ -18,7 +24,7 @@
 //!   standard Helvetica fonts cannot show.
 //!
 //! Faces are indexed 0..4 for TeX Gyre Heros, `bold as usize | (italic as
-//! usize) << 1`, then [`WEB_FILES`]'s order from 4 ([`web_face_index`]).
+//! usize) << 1`, then [`WEB_FILES`]'s order from 4 (Recursive 4, Open Sans 8, DejaVu Sans Mono 12, Courier Metric Mono 16) ([`web_face_index`]).
 
 /// The four faces' OpenType (CFF) files: regular, bold, italic, bold italic.
 #[cfg(feature = "fonts")]
@@ -33,7 +39,7 @@ pub const FILES: [&[u8]; 4] = [
 /// italic (slanted); Open Sans 400, 700 (emboldened), 400 italic, 700 italic
 /// (emboldened).
 #[cfg(feature = "fonts")]
-pub const WEB_FILES: [&[u8]; 8] = [
+pub const WEB_FILES: [&[u8]; 16] = [
     include_bytes!("../assets/fonts/recursive-400.ttf"),
     include_bytes!("../assets/fonts/recursive-700.ttf"),
     include_bytes!("../assets/fonts/recursive-400-italic.ttf"),
@@ -42,13 +48,21 @@ pub const WEB_FILES: [&[u8]; 8] = [
     include_bytes!("../assets/fonts/open-sans-700.ttf"),
     include_bytes!("../assets/fonts/open-sans-400-italic.ttf"),
     include_bytes!("../assets/fonts/open-sans-700-italic.ttf"),
+    include_bytes!("../assets/fonts/dejavu-sans-mono-regular.ttf"),
+    include_bytes!("../assets/fonts/dejavu-sans-mono-bold.ttf"),
+    include_bytes!("../assets/fonts/dejavu-sans-mono-italic.ttf"),
+    include_bytes!("../assets/fonts/dejavu-sans-mono-bolditalic.ttf"),
+    include_bytes!("../assets/fonts/liberation-mono-regular.ttf"),
+    include_bytes!("../assets/fonts/liberation-mono-bold.ttf"),
+    include_bytes!("../assets/fonts/liberation-mono-italic.ttf"),
+    include_bytes!("../assets/fonts/liberation-mono-bolditalic.ttf"),
 ];
 
 /// The family name the TeX Gyre faces register under.
 pub const FAMILY: &str = "TeX Gyre Heros";
 
 /// Number of bundled faces ([`face`] indexes 0 up to this).
-pub const FACE_COUNT: usize = 12;
+pub const FACE_COUNT: usize = 20;
 
 /// The faces' PostScript names, by face index.
 pub const POSTSCRIPT_NAMES: [&str; FACE_COUNT] = [
@@ -64,6 +78,14 @@ pub const POSTSCRIPT_NAMES: [&str; FACE_COUNT] = [
     "OpenSans-Bold",
     "OpenSans-Italic",
     "OpenSans-BoldItalic",
+    "DejaVuSansMono",
+    "DejaVuSansMono-Bold",
+    "DejaVuSansMono-Oblique",
+    "DejaVuSansMono-BoldOblique",
+    "CourierMetricMono-Regular",
+    "CourierMetricMono-Bold",
+    "CourierMetricMono-Italic",
+    "CourierMetricMono-BoldItalic",
 ];
 
 /// The bundled face that draws text measured in `face`, if it is a web font,
@@ -72,6 +94,8 @@ pub fn web_face_index(face: crate::text::Face, bold: bool, italic: bool) -> Opti
     let style = usize::from(bold) + 2 * usize::from(italic);
     match face {
         crate::text::Face::Arial | crate::text::Face::Serif => None,
+        crate::text::Face::Mono => Some(12 + style),
+        crate::text::Face::Courier => Some(16 + style),
         crate::text::Face::Recursive => Some(4 + style),
         crate::text::Face::OpenSans => Some(8 + style),
     }

@@ -254,6 +254,9 @@ pub fn char_width_em_styled(c: char, bold: bool, italic: bool) -> f64 {
             return w;
         }
     }
+    if let Some(w) = face().mono_advance_em() {
+        return w;
+    }
     arial_char_width_em(c, bold)
 }
 
@@ -494,6 +497,9 @@ fn kerning_em(a: char, b: char, bold: bool) -> f64 {
             _ => return 0.0,
         }
     }
+    if face().mono_advance_em().is_some() {
+        return 0.0;
+    }
     if face() == Face::Serif && a.is_ascii() && b.is_ascii() {
         return serif::kerning_em(a, b);
     }
@@ -550,7 +556,7 @@ pub fn line_width(text: &str, font_size: f64, bold: bool) -> f64 {
 /// left exact, as its tables were fitted.
 fn glyph_px(em: f64, font_size: f64) -> f64 {
     let v = em * font_size;
-    if matches!(face(), Face::Arial | Face::Serif) {
+    if matches!(face(), Face::Arial | Face::Serif | Face::Mono | Face::Courier) {
         v
     } else {
         (v * 65536.0).round() / 65536.0
@@ -905,6 +911,9 @@ fn ink_em(c: char, bold: bool, italic: bool) -> Option<(f64, f64)> {
             // (Open Sans' synthetic bold: `Face::synthetic_ink_px`.)
             return Some((lo, hi));
         }
+    }
+    if face().mono_advance_em().is_some() {
+        return None;
     }
     let table = if bold {
         &ARIAL_BOLD_INK

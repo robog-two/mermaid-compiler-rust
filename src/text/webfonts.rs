@@ -136,6 +136,14 @@ pub enum Face {
     /// bold and italic keep the regular advances, and characters outside ASCII
     /// count by Arial's.
     Serif,
+    /// DejaVu Sans Mono, which `monospace` and `DejaVu Sans Mono` resolve to in
+    /// mmdc's environment: every character advances 1233/2048 em, in every
+    /// weight and slant.
+    Mono,
+    /// Liberation Mono (metric-compatible Courier New), which `Courier New`,
+    /// `courier` and `Liberation Mono` resolve to: every character advances
+    /// 1229/2048 em.
+    Courier,
 }
 
 impl Face {
@@ -144,8 +152,9 @@ impl Face {
     /// browser resolves to Arial (Liberation Sans) in mmdc's environment, pick
     /// their face; `serif` and the other names of the default serif font pick
     /// [`Face::Serif`]. A list no name of which is known falls back to the
-    /// browser's default font, which is serif. `monospace` has no metrics
-    /// bundled and measures as Arial.
+    /// browser's default font, which is serif. `monospace` and `DejaVu Sans Mono`
+    /// pick [`Face::Mono`]; `Courier New`, `courier` and `Liberation Mono` pick
+    /// [`Face::Courier`].
     pub fn of_style_family(css: &str) -> Face {
         for fam in css.split(',') {
             let name = fam.trim().trim_matches(|c| c == '"' || c == '\'').trim();
@@ -155,8 +164,10 @@ impl Face {
                 "serif" | "times new roman" | "times" | "liberation serif" => {
                     return Face::Serif;
                 }
+                "monospace" | "dejavu sans mono" => return Face::Mono,
+                "courier new" | "courier" | "liberation mono" => return Face::Courier,
                 "arial" | "arialmt" | "helvetica" | "liberation sans" | "sans-serif"
-                | "trebuchet ms" | "verdana" | "monospace" | "courier" | "courier new" => {
+                | "trebuchet ms" | "verdana" => {
                     return Face::Arial;
                 }
                 _ => continue,
@@ -185,10 +196,19 @@ impl Face {
     /// live in [`super`]).
     pub(crate) fn data(self, italic: bool) -> Option<&'static FaceData> {
         match self {
-            Face::Arial | Face::Serif => None,
+            Face::Arial | Face::Serif | Face::Mono | Face::Courier => None,
             Face::Recursive => Some(&RECURSIVE),
             Face::OpenSans if italic => Some(&OPEN_SANS_ITALIC),
             Face::OpenSans => Some(&OPEN_SANS),
+        }
+    }
+
+    /// The advance of every character of a monospace face, in em.
+    pub fn mono_advance_em(self) -> Option<f64> {
+        match self {
+            Face::Mono => Some(1233.0 / 2048.0),
+            Face::Courier => Some(1229.0 / 2048.0),
+            _ => None,
         }
     }
 
@@ -197,6 +217,8 @@ impl Face {
         match self {
             Face::Arial => "Arial",
             Face::Serif => "Times New Roman",
+            Face::Mono => "DejaVu Sans Mono",
+            Face::Courier => "Courier Metric Mono",
             Face::Recursive => "Recursive Variable",
             Face::OpenSans => "Open Sans",
         }
@@ -297,6 +319,10 @@ impl Face {
     /// these fonts flag `USE_TYPO_METRICS` for are the same).
     pub fn vertical_em(self) -> (f64, f64, f64) {
         match self.data(false) {
+            // hhea of DejaVuSansMono.ttf: ascent 1901, descent 483, line gap 0
+            // (2048 units per em); of LiberationMono-Regular.ttf: 1705, 615, 0.
+            None if self == Face::Mono => (1901.0 / 2048.0, 483.0 / 2048.0, 0.0),
+            None if self == Face::Courier => (1705.0 / 2048.0, 615.0 / 2048.0, 0.0),
             None => (0.905, 0.212, 67.0 / 2048.0),
             Some(d) => (
                 f64::from(d.ascent) / d.upem,
@@ -309,6 +335,9 @@ impl Face {
     /// The x-height in em at a weight (bold: `wght` 700).
     pub fn x_height_em(self, bold: bool) -> f64 {
         match self.data(false) {
+            // The `x` glyph's top: 1120 (DejaVu Sans Mono) and 1082 (Liberation
+            // Mono) units of 2048.
+            None if self == Face::Mono => 1120.0 / 2048.0,
             None => 1082.0 / 2048.0,
             Some(d) => f64::from(d.x_height[usize::from(bold)]) / d.upem,
         }

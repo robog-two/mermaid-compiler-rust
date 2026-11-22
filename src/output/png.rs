@@ -135,7 +135,15 @@ fn select_font(font: &usvg::Font, db: &mut std::sync::Arc<fontdb::Database>) -> 
             usvg::FontFamily::SansSerif => fontdb::Family::SansSerif,
             usvg::FontFamily::Cursive => fontdb::Family::Cursive,
             usvg::FontFamily::Fantasy => fontdb::Family::Fantasy,
-            usvg::FontFamily::Monospace => fontdb::Family::Monospace,
+            // The faces Chromium resolves `monospace` and the Courier names to
+            // are bundled (the second under a name of its own).
+            usvg::FontFamily::Monospace => fontdb::Family::Name("DejaVu Sans Mono"),
+            usvg::FontFamily::Named(s)
+                if ["courier new", "courier", "liberation mono"]
+                    .contains(&s.to_ascii_lowercase().as_str()) =>
+            {
+                fontdb::Family::Name("Courier Metric Mono")
+            }
             usvg::FontFamily::Named(s) => fontdb::Family::Name(s),
         })
         .collect();

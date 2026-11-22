@@ -346,7 +346,9 @@ impl Ctx {
     /// that colour with round joins, then filled over it (`paint-order: stroke`).
     fn text(&mut self, t: &Text, outline: Option<(&crate::scene::Color, f64)>) {
         match &t.family {
-            Some(f) => crate::text::with_family(f, || self.text_in_face(t, outline)),
+            Some(f) => crate::text::with_face(crate::text::Face::of_style_family(f), || {
+                self.text_in_face(t, outline)
+            }),
             None => self.text_in_face(t, outline),
         }
     }
