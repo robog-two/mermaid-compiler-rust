@@ -337,9 +337,9 @@ mod tests {
             for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
                 let f = super::face(web_face_index(face, bold, italic).unwrap()).unwrap();
                 assert_eq!(f.units_per_em, 2048);
-                // (DejaVu's oblique files lack the check marks.)
+                // (Liberation Mono and DejaVu's oblique files lack the check marks.)
                 for c in ['W', 'i', ' ', 'é', '→', '✓'] {
-                    if c == '✓' && face == F::Mono && italic {
+                    if c == '✓' && (face == F::Courier || italic) {
                         continue;
                     }
                     let g = f
